@@ -29,10 +29,33 @@ the cited line, is what the citation meant. The verdicts are then:
     SITE-ABSENT        the cited path did not exist, or the line was past its end, at that commit
     PAST-END           the cited line is past the end of the live file
     NOT-IN-REPO        the cited basename is not tracked here (the vendor sources: sdhci.c, mmc_ops.c,
-                       sdhci-msm.c ...). Passed over BY NAME, never by accident
+                       sdhci-msm.c ...) AND the citation is not one the vendor axis can read (below).
+                       Passed over BY NAME, never by accident
     AMBIGUOUS-PATH     the cited basename is tracked more than once in the live tree - `build.sh` is
                        `scripts/build.sh` and also the archived snapshot's copy. Picking the first is
                        a `one value, two definitions` defect committed by this tool, so it refuses
+
+The vendor axis - a `#define`'s trailing citation, checked against the header on disk
+-------------------------------------------------------------------------------------
+`#define ST_SDHCI_HOST_CONTROL2 0x3Eu /* sdhci.h:79 */` is a citation with **two readings of the same
+site in the same line**: the local NAME and the local VALUE, against a header that is on disk under
+`external/` and that this project never edits. So the vendor axis needs NO git - which is exactly why
+it can be run over `src/` on every check - and its verdicts are:
+
+    VENDOR-OK          the anchor is `#define`d at the cited line, OR the cited line defines a value
+                       equal to the local one (the second reading is what carries the re-spellings:
+                       `ST_SDHCI_SLOT_INT_STAT` for the vendor's `SDHCI_SLOT_INT_STATUS`, and the
+                       whole `ST_CMD_OP_*` family for the vendor's `MMC_*`)
+    VENDOR-ELSEWHERE   the anchor is `#define`d at exactly one other line -> the new line is PRINTED
+    VENDOR-MULTI       the anchor is `#define`d at two or more lines -> NOT decided here
+    VENDOR-UNRESOLVED  the anchor is `#define`d nowhere and the cited line is not a `#define` whose
+                       value agrees - nothing in this line can be checked
+    VENDOR-NOFILE      no `.h` with that basename exists under the vendor roots
+
+**The ANCHOR is the identifier the citation names**, and it is taken from both halves of the line:
+the local macro's own name, that name with its `ST_` prefix stripped, and every ALL-CAPS identifier
+written in the comment AHEAD of the citation (`old_comment /* SDHCI_MAX_DIV_SPEC_300, sdhci.h:255 */`
+anchors on the vendor's own symbol).
 
 What is refused, and what is only reported
 ------------------------------------------
@@ -53,8 +76,12 @@ What it does NOT claim
 ----------------------
 - **It is not a claim that a SAME citation is correct.** It says the cited line has not changed since
   the citation was written. A citation that was wrong the day it was written is invisible here.
-- **Nothing is said about vendor files.** ~2000 citations in `docs/experiments/**` name sources that
-  are not in this repository, and no line of them is checked or could be.
+- **About a vendor citation it says what the vendor axis can read and no more.** The axis covers a
+  citation written in a `#define`'s own line - measured on this tree, 60 of them over five headers,
+  52 carried by the NAME reading and 7 by the VALUE reading, and the one it refuses is a real one.
+  Every other vendor citation, and every one in `docs/experiments/**`, is still NOT-IN-REPO: named,
+  not checked. 813 section 7 named this gap; this axis is the part of it a mechanical property
+  actually holds over.
 
 Usage:
     tools/check_line_citations.py                 # the live arm's own prose refuses; the rest reports
@@ -82,6 +109,29 @@ ROOTS = ('', 'src/', 'src/entry/', 'src/platform/', 'src/supply/', 'src/shims/',
 
 CONFIG = 'out/stage90/xnu_arm_entry-config.txt'
 
+# The vendor checkouts, on disk but NOT tracked in this repository (`git ls-files external` is empty),
+# which is why the git baseline has no answer for a citation into one. A root that is absent is
+# SKIPPED and the axis says so; if every root is absent the axis reports itself OFF rather than
+# passing, because a check whose data is missing and a check that found nothing read the same.
+VENDOR_ROOTS = ('external/android_kernel_xiaomi_cancro',)
+
+# A citing line the vendor axis can read: a `#define` whose trailing comment carries a citation.
+SHAPE_DEFINE = re.compile(r'^\s*#\s*define\s+(ST_[A-Z0-9_]+)\s+(\S+)\s*/\*(.*)$')
+VENDOR_CITE = re.compile(r'([A-Za-z0-9_.-]+\.h):(\d+)')
+VENDOR_DEF = re.compile(r'^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.*)$')
+ALL_CAPS = re.compile(r'\b([A-Z][A-Z0-9_]{3,})\b')
+INT_LITERAL = re.compile(r'^(0[xX][0-9a-fA-F]+|\d+)[uUlL]*$')
+
+
+def int_literal(text):
+    """The integer this text is, or None when it is not a plain integer literal.
+
+    `(1 << 11) - 2` is a perfectly good `#define` and is NOT a value this tool compares: an
+    expression that happens to evaluate the same is a different reading, and comparing it would be
+    this tool inventing an agreement. None means "do not compare", never "they differ"."""
+    text = text.split('/*')[0].strip().rstrip('uUlL')
+    return int(text, 0) if INT_LITERAL.match(text) else None
+
 # The press path's own prose: what the operator reads at press time, and what the record claims
 # about the tree in front of it. THE DEFAULT IS BOUNDED ON PURPOSE, as a cost: the whole tree is
 # 3687 citations and about eighty seconds even after the dating was made a single history walk, and
@@ -95,10 +145,10 @@ RUNG_PARA = re.compile(r'^\s*rung_para\s+([0-9]+)\s')
 WST_GUARD = re.compile(r'\[\[\s*\$?wst\s*==\s*([0-9]+)\s*\]\]|wst\s*==\s*([0-9]+)')
 ELIF_GUARD = re.compile(r'^\s*(?:if|elif)\s')
 
-VERDICTS_PASS = ('SAME',)
+VERDICTS_PASS = ('SAME', 'VENDOR-OK')
 VERDICTS_REPORT = ('MOVED-AMBIGUOUS', 'RE-WRITTEN', 'UNDATED', 'SITE-ABSENT', 'PAST-END',
-                   'NOT-IN-REPO')
-VERDICTS_REFUSE_LIVE = ('MOVED', 'AMBIGUOUS-PATH')
+                   'NOT-IN-REPO', 'VENDOR-MULTI', 'VENDOR-UNRESOLVED', 'VENDOR-NOFILE')
+VERDICTS_REFUSE_LIVE = ('MOVED', 'AMBIGUOUS-PATH', 'VENDOR-ELSEWHERE')
 
 
 def repo_root():
@@ -249,10 +299,114 @@ class History:
         return self._blob[key]
 
 
-def classify(tree, hist, citing, cited, n):
+class Vendors:
+    """The headers the repository does not track, indexed by basename and read on demand.
+
+    No git is involved anywhere in this class: the baseline for a vendor citation is the file itself,
+    and the file is a stable upstream checkout that this project never writes to. The index is one
+    walk; a header is read only when a citation names its basename. `defines()` is memoised per
+    basename because all candidate files for a basename are read together."""
+
+    def __init__(self, root, roots=VENDOR_ROOTS):
+        self.root = root
+        self.present = [r for r in roots if os.path.isdir(os.path.join(root, r))]
+        self.by_base = collections.defaultdict(list)
+        for r in self.present:
+            for dirpath, _dirs, files in os.walk(os.path.join(root, r)):
+                for f in files:
+                    if f.endswith('.h'):
+                        self.by_base[f].append(os.path.relpath(os.path.join(dirpath, f), root))
+        self._lines = {}
+        self._defs = {}
+
+    def lines(self, path):
+        if path not in self._lines:
+            try:
+                with open(os.path.join(self.root, path), encoding='utf-8', errors='replace') as fh:
+                    self._lines[path] = fh.read().split('\n')
+            except OSError:
+                self._lines[path] = []
+        return self._lines[path]
+
+    def defines(self, base):
+        """[(path, lineno, name, value)] for every `#define` under this basename, on disk."""
+        if base not in self._defs:
+            out = []
+            for p in self.by_base.get(base, []):
+                for j, line in enumerate(self.lines(p), 1):
+                    d = VENDOR_DEF.match(line)
+                    if d:
+                        out.append((p, j, d.group(1), d.group(2)))
+            self._defs[base] = out
+        return self._defs[base]
+
+    @staticmethod
+    def anchors(local, comment, cite_start):
+        """The identifiers a `#define`'s own line names, in the order they are trusted.
+
+        The local macro's name, that name with its `ST_` prefix stripped, and every ALL-CAPS
+        identifier the comment writes AHEAD of the citation - which is how `SDHCI_MAX_DIV_SPEC_300`
+        is named by a line whose own macro is called `ST_SET_DIV_MAX`."""
+        out = []
+        stripped = local[3:] if local.startswith('ST_') else local
+        for a in [stripped, local] + ALL_CAPS.findall(comment[:cite_start]):
+            if a not in out and a != 'ST':
+                out.append(a)
+        return out
+
+    def classify(self, line, cited, n):
+        """The vendor verdict for one citing line, or None when the line is not one to read.
+
+        Returns (verdict, detail) with `detail` the thing a reader needs: which line the anchor is
+        at, or which name the cited line does define."""
+        m = SHAPE_DEFINE.match(line)
+        if not m:
+            return None
+        local, value, comment = m.group(1), m.group(2), m.group(3)
+        c = VENDOR_CITE.search(comment)
+        if not c or c.group(1) != cited:
+            return None
+        base, want = c.group(1), int(c.group(2))
+        if not self.by_base.get(base):
+            return 'VENDOR-NOFILE', 'no %s under the vendor roots (%s)' % (
+                base, ', '.join(self.present) or 'none present')
+        defs = self.defines(base)
+        anchors = self.anchors(local, comment, c.start())
+
+        named = [d for d in defs if d[2] in anchors]
+        if any(d[1] == want for d in named):
+            return 'VENDOR-OK', '%s is defined at %s:%d' % (
+                [d for d in named if d[1] == want][0][2], base, want)
+        # The NAME reading is decided BEFORE the value reading, and the order matters: a name is an
+        # identity and a value can coincide. So a citation whose anchor is #define'd at exactly one
+        # other line is refused even when the cited line happens to define the same number.
+        lines_named = sorted({d[1] for d in named})
+        if len(lines_named) == 1:
+            return 'VENDOR-ELSEWHERE', '%s is #define at %s:%d' % (anchors[0], base, lines_named[0])
+        if lines_named:
+            return 'VENDOR-MULTI', '%s is #define at %d lines (%s)' % (
+                anchors[0], len(lines_named),
+                ', '.join(':%d' % x for x in lines_named[:6]))
+        at_line = [d for d in defs if d[1] == want]
+        lv = int_literal(value)
+        same = [d for d in at_line if lv is not None and int_literal(d[3]) == lv]
+        if same:
+            return 'VENDOR-OK', '%s:%d is %s = %s (the local name is a re-spelling)' % (
+                base, want, same[0][2], value)
+        if at_line:
+            return 'VENDOR-UNRESOLVED', '%s:%d defines %s, a name this line does not carry' % (
+                base, want, at_line[0][2])
+        return 'VENDOR-UNRESOLVED', '%s:%d is not a #define' % (base, want)
+
+
+def classify(tree, hist, citing, cited, n, line='', vendors=None):
     """The verdict for one citation, plus the line it moved to when that is decidable."""
     path, why = tree.resolve(cited)
     if why:
+        if why == 'NOT-IN-REPO' and vendors is not None:
+            got = vendors.classify(line, cited, n)
+            if got is not None:
+                return got
         return why, None
     now = tree.lines(path)
     if now is None:
@@ -347,9 +501,11 @@ def rung_of_each_line(root, citing):
     return out
 
 
-def scan(root, citing_files, all_refusing, live_override=None):
+def scan(root, citing_files, all_refusing, live_override=None, vendors=None):
     tree = Tree(root)
     hist = History(root)
+    if vendors is None:
+        vendors = Vendors(root)
     rung, why = live_rung(root, live_override)
     tally = collections.Counter()
     refused, reported = [], []
@@ -357,13 +513,18 @@ def scan(root, citing_files, all_refusing, live_override=None):
     n_cites = 0
     for citing in citing_files:
         attributed = rung_of_each_line(root, citing)
-        for lineno, cited, n, _line in citations_in(root, citing):
-            key = (citing, cited, n)
+        for lineno, cited, n, line in citations_in(root, citing):
+            # The dedupe is per OCCURRENCE, not per site. Keyed on (citing, cited, n) it swallowed
+            # the citation this axis exists for: `sdhci.h:79` is cited twice in entry_storage.c,
+            # once in a prose comment at :253 and once in the `#define` at :266 - and the prose line
+            # comes first, so the readable copy was dropped and the defect went unreported. One site,
+            # two readings, and the check kept the one it could not read: measured, 59 sites read 49.
+            key = (citing, lineno, cited, n)
             if key in seen:
                 continue
             seen.add(key)
             n_cites += 1
-            verdict, at = classify(tree, hist, citing, cited, n)
+            verdict, at = classify(tree, hist, citing, cited, n, line, vendors)
             tally[verdict] += 1
             live_here = all_refusing or (rung is not None and attributed.get(lineno) == rung)
             row = (citing, lineno, cited, n, verdict, at)
@@ -371,13 +532,16 @@ def scan(root, citing_files, all_refusing, live_override=None):
                 refused.append(row)
             elif verdict not in VERDICTS_PASS:
                 reported.append((verdict, row))
-    return tally, refused, reported, n_cites, rung, why
+    return tally, refused, reported, n_cites, rung, why, vendors
 
 
 def describe(row):
     citing, lineno, cited, n, verdict, at = row
     if verdict == 'MOVED':
         return '%s:%d cites %s:%d - that line now reads something else and the text it named is at :%d' \
+               % (citing, lineno, cited, n, at)
+    if verdict == 'VENDOR-ELSEWHERE':
+        return '%s:%d cites %s:%d - that header is not tracked here, and %s' \
                % (citing, lineno, cited, n, at)
     if verdict == 'AMBIGUOUS-PATH':
         return '%s:%d cites %s:%d - that basename is tracked more than once in the live tree, so this' \
@@ -396,13 +560,14 @@ def selftest(root):
     repository's history, so the end-to-end fixtures build one: two commits, a citation in the first,
     and a cited line that MOVES, that is REWRITTEN, and that is DUPLICATED in the second."""
     import tempfile
-    wrong = 0
+    wrong = [0]
+    total = [0]
 
     def say(ok, why, extra=''):
-        nonlocal wrong
+        total[0] += 1
         print('  %-4s %s%s' % ('ok' if ok else 'FAIL', why, (' - ' + extra) if extra and not ok else ''))
         if not ok:
-            wrong += 1
+            wrong[0] += 1
 
     # --- the pure fixtures ---
     say(norm('    a  b\tc') == 'a b c', 'norm collapses indentation and runs of space')
@@ -519,8 +684,55 @@ def selftest(root):
             'a commented citation is attributed to NO rung, because a comment never prints',
             '%d comment lines, first at %s' % (len(cmt), cmt[:1]))
 
-    print('__SELFTEST__ %d fixture(s), %d wrong' % (15, wrong))
-    return wrong
+    # --- the vendor-axis fixtures, against a synthetic vendor root ----------------
+    # The axis is driven through `Vendors.classify` on hand-written lines, so each verdict is
+    # produced by a line built to produce it and the test says nothing about this repository. The
+    # local names carry the real `ST_` prefix, because the prefix strip is part of the anchor rule.
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, 'vendor'))
+        with open(os.path.join(tmp, 'vendor', 'site.h'), 'w') as fh:
+            fh.write('#define SITE_ALPHA\t0x10\n'
+                     '#define SITE_BETA\t0x20\n'
+                     '#define SITE_GAMMA\t0x30\n'
+                     '#define SITE_DELTA\t(1 << 6)\n')
+        v = Vendors(tmp, roots=('vendor',))
+        cases = [
+            ('#define ST_SITE_ALPHA 0x10u /* site.h:1 */', 'site.h', 1,
+             'VENDOR-OK', 'a #define cited at the line that defines it is VENDOR-OK'),
+            ('#define ST_SITE_BETA 0x20u /* site.h:2 */', 'site.h', 2,
+             'VENDOR-OK', 'likewise for the second one, so the verdict is not a constant'),
+            ('#define ST_SITE_BETA 0x20u /* site.h:5 */', 'site.h', 5,
+             'VENDOR-ELSEWHERE', 'a #define cited at a line that defines it nowhere else is refused'),
+            ('#define ST_OMEGA 0x30u /* site.h:3 */', 'site.h', 3,
+             'VENDOR-OK', 'a re-spelled local name is carried by the VALUE reading, not by the name'),
+            ('#define ST_NOPE 0x99u /* site.h:3 */', 'site.h', 3,
+             'VENDOR-UNRESOLVED', 'a name that is nowhere and a value that differs is unresolved'),
+            ('#define ST_SITE_BETA 0x20u /* absent.h:1 */', 'absent.h', 1,
+             'VENDOR-NOFILE', 'a basename no header carries is VENDOR-NOFILE, not a silent pass'),
+            ('#define ST_DELTA 0x40u /* site.h:4 */', 'site.h', 4,
+             'VENDOR-UNRESOLVED',
+             'a VALUE that is an EXPRESSION is not evaluated, so it cannot agree (0x40 == (1 << 6))'),
+        ]
+        for line, base, n, want, why in cases:
+            got = v.classify(line, base, n)
+            say(got is not None and got[0] == want, why, 'want %s, got %s' % (want, got))
+        # The one-value-two-readings fixture: the anchor is #define'd at :2 and the line cited is
+        # :1, where a DIFFERENT name carries the SAME value. The name reading must win, because a
+        # coincidence of values is not a citation that resolves.
+        with open(os.path.join(tmp, 'vendor', 'twin.h'), 'w') as fh:
+            fh.write('#define TWIN_X\t0x10\n'
+                     '#define SITE_BETA\t0x10\n')
+        v2 = Vendors(tmp, roots=('vendor',))
+        got = v2.classify('#define ST_SITE_BETA 0x10u /* twin.h:1 */', 'twin.h', 1)
+        say(got is not None and got[0] == 'VENDOR-ELSEWHERE',
+            'a value that coincides at the cited line does not carry a citation whose name is elsewhere',
+            str(got))
+
+    # The count is COUNTED, not typed: 675 section 4 measured the cost of a number written into
+    # the sentence that reports it, and this one had been typed. Counting `total` at `say` also
+    # makes a fixture that is deleted show up as a smaller total rather than as nothing.
+    print('__SELFTEST__ %d fixture(s), %d wrong' % (total[0], wrong[0]))
+    return wrong[0]
 
 
 def main():
@@ -546,14 +758,25 @@ def main():
     else:
         tracked = [t for t in git(root, 'ls-files').stdout.split('\n') if t]
         if args.all:
-            citing_files = [t for t in tracked if t.endswith(('.sh', '.py', '.md', '.txt'))]
+            citing_files = [t for t in tracked if t.endswith(('.sh', '.py', '.md', '.txt'))
+                            or (t.startswith('src/') and t.endswith(('.c', '.h')))]
         else:
-            citing_files = [t for t in PRESS_PATH if t in tracked]
+            # The press path, plus the file the ladder's own constant table lives in. That file is
+            # here for the VENDOR axis, whose baseline is a file on disk and needs no history walk -
+            # so it costs 0.4 s for 207 citations, measured - and it is where the register offsets
+            # the whole ladder is built on were read from.
+            citing_files = [t for t in list(PRESS_PATH) + ['src/entry/entry_storage.c'] if t in tracked]
 
-    tally, refused, reported, n_cites, rung, why = scan(root, citing_files, args.all_refusing,
-                                                           args.live_rung)
+    tally, refused, reported, n_cites, rung, why, vendors = scan(
+        root, citing_files, args.all_refusing, args.live_rung)
 
     print('check_line_citations: %d citation(s) over %d citing file(s)' % (n_cites, len(citing_files)))
+    if not vendors.present:
+        print('  VENDOR AXIS OFF: none of %s is present, so no vendor citation was read'
+              % (', '.join(VENDOR_ROOTS),))
+    else:
+        print('  vendor axis over %s: %d header(s) indexed by basename'
+              % (', '.join(vendors.present), len(vendors.by_base)))
     if rung is None:
         print('  the live arm\'s rung is UNKNOWN: %s' % why)
         print('  so nothing is refused on the live-prose axis; every moved citation is reported below')
