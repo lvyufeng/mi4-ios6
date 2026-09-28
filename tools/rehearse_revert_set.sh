@@ -64,6 +64,27 @@ mkrekord() {   # mkrekord DIR OUT
   done
 }
 
+# ---- one byte, in place, GUARANTEED to differ -----------------------------------------------------
+#
+# Both edits below were `printf '\xff' | dd ... seek=1000000` until 801, and on the arm in `out/` the
+# byte at offset 1000000 of BOTH `stage90.img` and `stage90-qcdt.img` is ALREADY 0xff - measured, `od -An
+# -tx1 -j 1000000 -N 1`. So both writes were no-ops: the "edited" directory was byte-identical to the good
+# one, and the two cells that exist to show this verifier REFUSING an edited member went red while the
+# verifier was right. The cause is that a filler byte was chosen without reading the file it overwrites -
+# a test whose edit edits nothing is the same shape as a check that passes because it never ran, one
+# direction over. This reads the byte it is about to replace and writes its COMPLEMENT, so the edit is an
+# edit for every input, and it verifies the file changed rather than returning a success it did not earn.
+flipbyte() {  # flipbyte FILE OFFSET
+  local f=$1 off=$2 b before after
+  [[ -f $f ]] || { echo "flipbyte: no file at $f" >&2; return 1; }
+  before=$(sha256sum "$f" | cut -d' ' -f1)
+  b=$(od -An -tx1 -j "$off" -N 1 "$f" | tr -d ' \n')
+  [[ ${#b} -eq 2 ]] || { echo "flipbyte: cannot read a byte at offset $off of $f" >&2; return 1; }
+  printf "\\x$(printf '%02x' $(( 16#$b ^ 255 )))" | dd of="$f" bs=1 seek="$off" conv=notrunc status=none
+  after=$(sha256sum "$f" | cut -d' ' -f1)
+  [[ $before != "$after" ]] || { echo "flipbyte: the edit at offset $off of $f did not change the file" >&2; return 1; }
+}
+
 # ---- the fixture ---------------------------------------------------------------------------------
 GOOD=$W/good
 mkdir -p "$GOOD"
@@ -160,7 +181,7 @@ cell "the-dirty-set-named"      1 "stage90.bin hashes to"          \
 # 3. a one-byte edit, past the header so the file still parses as an image
 BADHASH=$W/badhash
 mkdir -p "$BADHASH"; for f in $FILES; do cp "$GOOD/$f" "$BADHASH/$f"; done
-printf '\xff' | dd of="$BADHASH/stage90-qcdt.img" bs=1 seek=1000000 conv=notrunc status=none
+flipbyte "$BADHASH/stage90-qcdt.img" 1000000 || exit 1
 cell "one-byte-edited"     1 "stage90-qcdt.img hashes to"        \
   bash "$TOOL" "$BADHASH" --record="$W/fixture-record.txt"
 
@@ -174,8 +195,23 @@ cp -r "$BADHASH" "$SELFCON"
 # self-referential line records the hash of an empty file and every check against that manifest fails on
 # the manifest rather than on the bytes. That is what the first run of this cell did.
 ( cd "$SELFCON" && sha256sum $(printf '%s\n' $FILES | grep -v '^SHA256SUMS.txt$') > SHA256SUMS.txt )
+# **AND THE RECORD FOR THIS CELL IS REBUILT SO THAT THE ONLY DISAGREEMENT LEFT IS THE PAYLOAD BYTE - 801.**
+# It was pointed at the fixture record above, whose `SHA256SUMS.txt` line pins the LIVE manifest: that
+# manifest is five entries with absolute paths (560 bytes) and this cell's is ten with bare names (847), so
+# the verifier refused the MANIFEST's size and never reached the edited payload - the cell's needle, which
+# names `stage90-qcdt.img`, could not appear, and the cell went red on a correct refusal. It is the same
+# class the `live-tree-vs-the-other-set` needle above records: an assertion about WHICH check refused
+# first, when the cell is about the directory being refused at all. Rebuilding the record from the GOOD
+# fixture and then moving only its manifest line onto this directory's own manifest removes the size
+# disagreement and leaves exactly one: `stage90-qcdt.img`'s bytes. That is what the cell's name says it
+# measures, and it is now the only thing that can make it fail.
+mkrekord "$GOOD" "$W/selfcons-record.txt" || exit 1
+_ss_sha=$(sha256sum "$SELFCON/SHA256SUMS.txt" | cut -d' ' -f1)
+_ss_sz=$(stat -c%s "$SELFCON/SHA256SUMS.txt")
+sed -i "s|^set=fixture sha256=[0-9a-f]\{64\} bytes=[0-9]* file=SHA256SUMS.txt |set=fixture sha256=$_ss_sha bytes=$_ss_sz file=SHA256SUMS.txt |" "$W/selfcons-record.txt"
+grep -q "sha256=$_ss_sha bytes=$_ss_sz file=SHA256SUMS.txt" "$W/selfcons-record.txt" || { echo "the self-consistent record did not take this directory's own manifest - the cell below would then fail on the record's manifest line rather than on the payload" >&2; exit 1; }
 cell "self-consistent-manifest" 1 "stage90-qcdt.img hashes to"   \
-  bash "$TOOL" "$SELFCON" --record="$W/fixture-record.txt"
+  bash "$TOOL" "$SELFCON" --record="$W/selfcons-record.txt"
 if ( cd "$SELFCON" && sha256sum -c SHA256SUMS.txt >/dev/null 2>&1 ); then
   printf '  ok    %-22s exit=0  the directory'"'"'s own manifest passes where the record refuses\n' "manifest-disagrees"
   OK=$((OK + 1))
@@ -360,7 +396,7 @@ cell "manifest-passes"     0 ""                               \
   bash -c 'cd "$1" && sha256sum -c SHA256SUMS.txt' _ "$MAN"
 STALE=$W/manifest-stale
 cp -r "$MAN" "$STALE"
-printf '\xff' | dd of="$STALE/stage90.img" bs=1 seek=1000000 conv=notrunc status=none
+flipbyte "$STALE/stage90.img" 1000000 || exit 1
 # The cell for the defect this section exists for: the manifest still names its five members, one of them
 # is not the recorded bytes, and `sha256sum -c` says so by name. A revert that fails to restore
 # `stage90.img` leaves the gate red on exactly this line.
