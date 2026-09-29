@@ -9169,3 +9169,137 @@ set=armed-storage-47c657af sha256=8a8761a143c581fafe8a4bde8284bd6db295fa7e9f975c
 set=armed-storage-47c657af sha256=a249ea8b83581cba7a02fa89eacca3cef4841735b6b71d1ddde275c5bd92d557 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=34-and-differing-from-the-withdrawn-arm-s-in-EXACTLY-ONE-line-the-artifact-s-own-hash
 set=armed-storage-47c657af sha256=62e9d8e228702e61a9235981103a9e3384778be4e5781e41565156f4a09cceb3 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-TWO-of-its-28-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-entry_storage-c-s-content-hash
 #
+#
+# 819: **THE RUNG-35 PRESS — `armed-storage-47c657af` WAS PRESSED AND IT IS SPENT. THE CARD
+# ANSWERED CMD9 WITH A CSD, AND THIS ARM'S OWN OUTCOME TABLE WOULD HAVE CALLED IT A FAILURE.** One
+# gate exit 0 / 612 lines; one runner exit 0; `fastboot boot` only; nothing flashed; nothing written
+# to storage; no reboot commanded; `33e80afe` absent from BOTH device lists, hand-checked immediately
+# before the gate (neither log carries that check, and this record says so rather than implying it);
+# the phone returned to Android 25 s after the send (the runner's own line, `seen via: adb`).
+# Readiness resolved the arm AS THE RECORDED SET before firing: 5 of 5, exit 0. **NOTHING UNDER out/
+# THAT THE ARM OWNS MOVED**: `xnu_arm_entry.bin` is still `47c657af...` and `stage90-qcdt.img` still
+# `b703a0a5...`. The gate read the image it was asked to verify as `STAGE90_XNU_STORAGE_PROBE=34` with
+# `STAGE90_XNU_ENTRY_SHA256=47c657af...` bound to the config, so the bytes sent were the arm's.
+#
+# Capture `out/stage90/captures/rung35-csd-20260929-003809-last_kmsg.txt` **639,650 B
+# sha `ce33dd94b9ceafffe797e4d0a7943e723ef8e836aea000f122a619f66e5806e0`**, archived by hand with
+# `...-gate.log` (52,323 B, `a02b7391...`) and `...-run.log` (89,267 B, `e5b72f9b...`) beside it.
+#
+# (1) THE COMPLETION. `_csd_op = 9`, `_csd_arg = 0x00010000` (`ST_MMC_RCA_1`, the constant the DRIVER
+# assigns), `_csd_word = _csd_word_read = 0x00000909`, `_csd_flags = 7` (`ST_MMC_RSP_R2`),
+# `_csd_complete = 1` (`INT_STATUS` bit 1), **`_csd_err = 0` with the four command-error bits ENABLED
+# (`_csd_ena_wrote = 0x000f0001`)**, `_csd_timeout = 0`, `_csd_any_polls = 0xc4d` with
+# `_csd_status_any = 1` on the first poll, and **`_csd_inhibit_seen = 0`** — the block was never
+# inhibited, unlike the dead-chain CMD3 of rung 19 whose `CMD_INHIBIT` was asserted at all 1,024
+# samples. `_csd_stale = 1` is `INT_STATUS` AS FOUND - the latch's baseline - and NOT a statement about
+# the response word; `_csd_clear_wrote = 1` / `_csd_clear_after = 0` is that bit written back.
+#
+# (2) **ALL FOUR `RESPONSE` REGISTERS MOVED, AND ONE OF THEM HAS A MEASURED BEFORE-VALUE.**
+# `_csd_pre_resp = 0x00000500` is `RESPONSE + 0` read by this very body immediately before CMD9, and
+# CMD3's own post-read in the same boot publishes `_nidx_raw_post3 = 0x00000500` as well. After CMD9
+# that register reads `0xef8a4040`, and `_csd_raw0..3 = 0x00d00f00 0x320f5903 0xffffffff 0xef8a4040`
+# are none of CMD3's `0xe00bb102 0x47014a2f 0x44573136 0x00000500`. **A 48-bit response writes
+# `RESPONSE + 0` alone; all four moved, so a 136-bit frame was read into all four.** The register did
+# not hold a stale word and this is measured, not inferred.
+#
+# (3) THE READING, ON FIVE CROSS-CHECKS THAT DO NOT DEPEND ON LIKING IT. The four ASSEMBLED words
+# `_csd_resp0..3 = 0xd00f0032 0x0f5903ff 0xffffffef 0x8a404000` decode, by an independent 30-line
+# implementation of `sdhci_finish_command`'s assembler and `UNSTUFF_BITS`'s bit numbering, to every
+# field this arm publishes:
+#
+#     CSD_STRUCTURE  3     the EMMC structure - `mmc.c:159` rejects only 0, and this file's own
+#                          pre-registration said "must read 1", which is the SD family's reading
+#     SPEC_VERS      4     `mmc.h:272` CSD_SPEC_VER_4 "Implements system specification 4.0 - 4.1"
+#     CCC            0xf5  exactly the eMMC class set (0, 2, 4, 5, 6, 7)
+#     READ/WRITE_BL_LEN 9  / 9   512 bytes both ways
+#     C_SIZE 0xfff / C_SIZE_MULT 7  ->  capacity = 0x200000 = 2,097,152 = **4096 * 512**
+#
+# **`4096 * 512` IS THE VENDOR'S OWN LITERAL** - `mmc.c:241`, `if (card->csd.capacity == (4096 * 512))`,
+# under the comment at `mmc.c:238` that says high capacity cards store this "magic" size in their CSD.
+# Three cells this ladder published reproduce a constant the shipping driver compares against, on a
+# part whose CID reads `prod_name = "SDW16G"` - a 16 GB iNAND - in the same capture. And the chain
+# around it is the driver's own order, working for the first time: CMD1 (`0x40ff8080`), CMD2 (CID,
+# serial `0x4a2fe00b` = this phone's `ro.serialno`), CMD3 (R1 `0x00000500`, ILLEGAL_COMMAND clear),
+# CMD9 (the CSD). **Every one of those words is BYTE-IDENTICAL to the previous boot's** - the card's
+# answers are deterministic across presses, which is what makes a cross-check against a vendor
+# constant worth anything.
+#
+# (4) **THE ARM'S PRE-REGISTERED TABLE ROW 2 FIRES, AND ROW 2 IS WRONG.** Measured `_csd_complete = 1`
+# with `_csd_structure = 3`; the table's second row calls a structure that is neither 1 nor 2 "a
+# 136-bit register read that is NOT a response to this command". Two defects:
+#   * the table classifies against `{1, 2}` where **`mmc.c:159` rejects only `0`** - `{1,2}` is the SD
+#     family's reading of a field this card reads as an eMMC, one value with two definitions, and the
+#     ladder encoded the family it is not;
+#   * the prose one paragraph earlier (`entry_storage.c:4525`, "`_csd_structure` must read 1") reaches
+#     that conclusion from `mmc.c:110`, which is inside **`mmc_decode_cid`** and switches on
+#     `cid->mmca_vsn` - the CID's spec version - not on `structure`, which is what `mmc_decode_csd`
+#     switches on. Two switch variables in two decoders, read as one.
+# **A pre-registration is a claim in a comment with a table drawn round it, and NOTHING CHECKS IT.**
+# The arm's six field EXPRESSIONS are now checked (814's rule 4 in `check_response_word_order.py`,
+# which refuses the raw-word decode); its one CLASSIFICATION RULE is not checked by anything, and the
+# rule is what decides what the press means. The next arm's rows are written from the vendor's own
+# predicate - `structure == 0` is the only rejection - and from the fields for the card this is.
+#
+# (5) FIVE WRONG VENDOR CITATIONS IN THE BLOCK THE READING DEPENDS ON. `entry_storage.c:4645-4650`, the
+# field table a reader uses to check (3) by hand, re-measured against
+# `external/android_kernel_xiaomi_cancro/drivers/mmc/core/mmc.c`:
+#     `mmc.c:173` cmdclass        -> 174
+#     `mmc.c:185` read_blkbits    -> 180     (**:185 is WRITE_BL_LEN - A DIFFERENT FIELD**)
+#     `mmc.c:175` C_SIZE          -> 177
+#     `mmc.c:174` C_SIZE_MULT     -> 176
+#     `mmc.c:174-176` the capacity expression (`:4530`) -> 178
+# `mmc.c:147`, `:165`, `:162`, `:110`, `:201`, `:165-196` re-measure correct. **A PREVIOUS PASS HAD
+# ALREADY AUDITED THIS AREA AND CALLED IT CLEAN** - the block above states that `mmc.c:1400`,
+# `mmc.c:1409`, `mmc.c:83`, `mmc.c:120` and the `sdhci.c` ranges "were re-measured and are correct as
+# written" - and they were re-measured against a LIST SOMEONE WROTE DOWN, on which these five do not
+# appear. An audit that walks a remembered list is not a citation check: m810's shape, a clean verdict
+# about the cells that were read, published as a verdict about the file. **OWED TO THE NEXT BUILD CYCLE,
+# AND THE COST HAS CHANGED**: 813 and 816 assigned this class to "the next build cycle" for COST - any
+# edit to `entry_storage.c` moves `xnu_arm_entry-sources.txt`, a park member, and would have forced a
+# withdrawal-and-repark of an arm that was armed and unspent. **The arm is spent and rung 36 edits that
+# file regardless, so the repair is now free and lands with the next build.**
+#
+# (6) CONTAINMENT, MEASURED CELL BY CELL AGAINST THE SPENT RUNG-34 CAPTURE:
+#     storage cells        497 -> 555
+#     keys lost            **0**
+#     keys added           **58**, the entire `_csd_*` family and nothing else
+#     values identical     **475**
+#     values moved         **22**, every one a free-running quantity - poll counts, tick counts and the
+#                          two absolute power-IRQ timestamps - the largest by 5 ticks and most by 1 or 2
+# **Not one decision cell moved**: `_cmd1_resp = 0x40ff8080`, `_cid_resp0..3`, `_cid_raw0..3`,
+# `_nidx_resp = 0x00000500`, `_cid_gate_word = 0xc0ff8080` and every `_csd_pre_*` cell are identical
+# across the two boots. 200 of the 912 non-storage cells moved, which is the entry image's own text
+# having grown under 814's repair: the OS's pointers are read out of the image under test and move
+# with it.
+#
+# (7) WHAT THE PRESS DOES NOT SETTLE. Where the card is: `_csd_pre_state = 2` comes from CMD3's R1
+# status word read BEFORE CMD9, and a card moves to STBY when CMD3 COMPLETES - so the field may be
+# reporting the state the card was in INSIDE CMD3. The press cannot separate "sampled before the
+# transition" from "still in IDENT and answered CMD9 anyway", and the pre-registered row 3 rests on the
+# second. The vendor's own init runs CMD3 then CMD9 back to back (`mmc.c:1409` -> `:1420`) on this
+# device, so the sequence is the shipping driver's - but EXPECTED IS NOT MEASURED. It also does not
+# settle whether CMD3's response is CMD3's (the ladder's CMD3 sends `0x030A`, `INDEX` clear - 817): a
+# card that had refused CMD3 would be in IDENT, so the CSD is evidence CMD3 was accepted, of the same
+# shape and no stronger. And it reaches no block: no CMD8, CMD16, CMD17/18, no filesystem, no mount.
+#
+# (8) THE FRONTIER IS NOW THE DRIVER'S OWN NEXT COMMAND - **CMD7 `SELECT_CARD`**, `mmc.c:1436`'s
+# `mmc_select_card`, whose words are `mmc_ops.c:36-37`: `cmd.arg = card->rca << 16` and
+# `cmd.flags = MMC_RSP_R1 | MMC_CMD_AC`. **`MMC_RSP_R1` = `0x031A` IS THE WORD 817 SHOWED THE LADDER
+# REMOVED FROM CMD3 AND HAS NOT SENT SINCE RUNG 21**, and it is the SAME FLAGS VALUE `mmc_ops.c:204`
+# gives CMD3 - so the next arm is one new command carrying the driver's own word and needs NO NEW
+# MECHANISM: a 48-bit response, the arithmetic `st_cmd3_noidx` already runs, and the R1 decode
+# (`R1_CURRENT_STATE` `mmc.h:141`, `R1_READY_FOR_DATA` `mmc.h:142`, ILLEGAL_COMMAND bit 22) the CSD body
+# already publishes. **It is R1 and NOT R1B** - the vendor does not use the busy bit here, so there is
+# no DAT0 busy window to handle. Its three readings: completes with `_err = 0` and state 4 (TRAN) says
+# the card was in STBY, CMD7 selected it, AND the INDEX bit is safe on this controller on a live chain;
+# completes with ILLEGAL_COMMAND set and state 2 says the card is in IDENT and the CMD3 chain is not
+# what it looks like; hangs with `CMD_INHIBIT` asserted and no interrupt says the removal was right and
+# is now measured on a live chain. **AND NOTHING IS ARMED**: no build has been made since the press,
+# `out/` holds the SPENT rung-35 park, `frozen/` is a record and not a queue, **no arm is armed and no
+# press is owed or authorized.**
+#
+# **THE GOAL IS NOT MET.** 「把基础驱动跑起来」 moved - the storage controller's chain now answers at
+# CMD9 and the card's own CSD is in the record - but no transfer completes, no filesystem is reached
+# and no mount is made, so 「让os可以正常启动并且挂载存储」 is not reached and **TWRP-TO-STORAGE STAYS
+# WITHHELD**: the storage it would be written to is the one thing this ladder has not got working. The
+# first clause, 「起码要能进入操作系统」, remains met and is unchanged by this press.
