@@ -9303,3 +9303,116 @@ set=armed-storage-47c657af sha256=62e9d8e228702e61a9235981103a9e3384778be4e5781e
 # and no mount is made, so 「让os可以正常启动并且挂载存储」 is not reached and **TWRP-TO-STORAGE STAYS
 # WITHHELD**: the storage it would be written to is the one thing this ladder has not got working. The
 # first clause, 「起码要能进入操作系统」, remains met and is unchanged by this press.
+
+####################################################################################################
+# 819, 2026-09-29 - THE RUNG-36 ARM: `armed-storage-18b0ccf3`, PARKED AND NOT PRESSED.
+#
+# **AND THIS BLOCK CORRECTS ONE SENTENCE OF THE BLOCK ABOVE IT, BECAUSE THAT SENTENCE IS THE DEFECT
+# THIS RUNG'S OWN BUILD CAUGHT.** The 819 block above ends its "what follows" paragraph with
+# `**MMC_RSP_R1 = 0x031A IS THE WORD 817 SHOWED THE LADDER REMOVED FROM CMD3...**`. **`MMC_RSP_R1` is
+# NOT `0x031A`.** `MMC_RSP_R1` is the FLAG WORD `0x15` - `ST_MMC_RSP_PRESENT | ST_MMC_RSP_CRC |
+# ST_MMC_RSP_OPCODE` = `0x01 | 0x04 | 0x10` - and `0x031A` is **CMD3's COMMAND WORD**: opcode 3 in
+# bits 15:8 (`0x0300`) with `ST_SDHCI_CMD_FLAGS(MMC_RSP_R1)` = `0x1A` in bits 7:0. Two values, and the
+# sentence used one where it meant the other. CMD7 is opcode 7, so **CMD7's command word is `0x071A`**
+# - and the FLAG BYTE `0x1A` is the byte rung 21 took the INDEX bit out of, leaving `0x0A`
+# (`ST_MMC_RSP_R1_NOIDX`, live CMD3 word `0x030A`). **What 817 measured the ladder removing is a BIT
+# FROM A FLAG BYTE, not a word.** The compiler refused the first draft of rung 36's own
+# `_Static_assert`, which had copied `0x031A` from the CMD3 assert three blocks up - so this instance
+# was caught by the artifact and not by review, and it is `one value, two definitions` (`m819`, and
+# `m814`'s sibling) committed in the very paragraph that corrects that class.
+#
+# **WHAT THIS ARM IS.** Switch VALUE 35 = ordinal rung 36 = **CMD7 `SELECT_CARD`**, the driver's own
+# statement at `mmc.c:1436` (`err = mmc_select_card(card);`) immediately after `mmc.c:1420`'s CMD9.
+# Its body is `st_select_card` (`mmc_ops.c:26`'s `_mmc_select_card`, non-NULL card): opcode 7
+# (`mmc.h:36`, `ac [31:16] RCA R1`), argument `card->rca << 16` (`mmc_ops.c:36`) = the same
+# `ST_MMC_RCA_1 0x00010000` CMD3 and CMD9 carry, and flags `MMC_RSP_R1 | MMC_CMD_AC` (`mmc_ops.c:37`)
+# = **21**, i.e. `PRESENT | CRC | OPCODE`. It is **R1, not R1b** - no DAT0 busy window.
+#
+# **THE FLAG VALUE 21 IS THE ARM, and the INDEX bit in it is the second reading.** `sdhci.c:1140-1143`
+# maps `MMC_RSP_OPCODE` onto `SDHCI_CMD_INDEX` `0x10`, which has the block compare the response's
+# index field against 7 and raise `SDHCI_INT_INDEX` `0x00080000` when it differs. With the bit SET, a
+# completion with no error means the frame that arrived IS CMD7's response; with it CLEAR - the live
+# CMD3, rung 21 up - a completion means only that a CRC-valid 48-bit frame arrived, which is exactly
+# what 813 section 5 could say and no more. **The bit is on THIS rung and not put back on CMD3
+# (one rung moves one thing), so CMD3's word stays `0x030A` in the same boot and `_nidx_*` beside
+# `_sel_*` is a comparison of the two on one bus.** If this body hangs, the rung has bought 817's
+# answer and not CMD7's; the successor drops the bit.
+#
+# **IT IS THE LADDER'S FIRST UNGATED COMMAND, deliberately.** Every gate below it is a statement about
+# the command BELOW (`cid_sent`, CMD2's arrival). CMD7's precondition is the card's state after CMD3 -
+# and this file has no cell that measures it: the register read before CMD7 holds the last 32 bits of
+# the CSD (`_csd_resp_short = 0xef8a4040`), which is not an R1 and carries no `R1_CURRENT_STATE`. A
+# gate on that would be `m812`/`m819` installed as a control-flow decision, so the command goes out
+# unconditionally, `_sel_pre_cid_sent` publishes what a gate WOULD have read, and the reading is the
+# command's own R1. **Safe because of what CMD7 is**: `ac [31:16] RCA R1`, no data phase, no storage
+# write, no register this image can reach - one 48-bit frame on CMD, the same shape as the CMD3 four
+# lines up that this ladder sends on every press. Not a brick path.
+#
+# **THE FOUR OUTCOMES THE PRESS DECIDES, each naming the next act:**
+#   `_sel_complete = 1`, `_sel_err = 0`, `_sel_state = 4` (TRAN) -> THE CARD IS SELECTED, the data path
+#     opens, CMD8 (`SEND_EXT_CSD`) is next.
+#   `_sel_complete = 1`, `_sel_err` carrying `SDHCI_INT_INDEX` `0x00080000` -> a 48-bit frame whose
+#     opcode field is NOT 7: the first direct statement this ladder can make about the CMD line, and
+#     817's hypothesis answered against it.
+#   `_sel_complete = 1`, `_sel_illegal = 1` (bit 22) -> THE CARD ITSELF REFUSED: it is in IDENT and
+#     CMD3 was not accepted, whatever its `_nidx_*` cells say.
+#   `_sel_complete = 0` with `CMD_INHIBIT` asserted -> the word `0x071A` hangs a live block, which is
+#     rung 21's reason MEASURED on a chain that works; the successor drops the bit.
+#
+# **WHAT THIS ARM'S OWN BUILD PROVED, so the park is not just bytes.** Four measured refusals and one
+# declaration, all in `src/entry/build_entry.sh`'s `xnu_entry_819`: `st_select_card` is in the linked
+# image at `0x8000ebcc` and loads `r0=#7`, `r1=#65536`, `r2=#21` immediately before its one `bl` to
+# `st_send_command` (line 76); its device accesses in program order, distinct, are
+# `f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824930:ldr f9824934:ldr
+# f9824938:ldr f982492e:ldrb f9824924:ldr` - the four RESPONSE words DESCENDING as the freshness
+# baseline, the INT_ENABLE window opened after them and closed after the command, and **NO byte below
+# any word and NO second word**, because this response is 48 bits and not 136; counts include
+# `f9824910:ldr=2` (the four words read on both sides of the command, so `_sel_resp_moved` is a
+# comparison of two readings and not of a value with itself) and `f9824934:str=2` (the window closed);
+# the image side is EMPTY; `st_cmd_path` calls it once, UNGATED; and the four cell strings
+# `_sel_state`, `_sel_illegal`, `_sel_err`, `_sel_resp_moved` are in the linked image.
+# `tools/check_response_word_order.py` reads 8 response-reading function(s) and 0 divergences, with
+# `st_select_card` the eighth.
+#
+# **AND FIVE OWED CITATIONS LANDED IN THIS CYCLE, because the COST reason expired** (rung 36 edits the
+# file regardless): `entry_storage.c:266` and the prose at `:253` now cite `sdhci.h:162` (measured:
+# `#define SDHCI_HOST_CONTROL2 0x3E` is defined exactly once in `external/`, at that line); the five
+# wrong `mmc.c` lines in the CSD field table are corrected to `:158` structure, `:174` cmdclass,
+# `:180` read_blkbits, `:177` C_SIZE, `:176` C_SIZE_MULT, `:178` the capacity expression; and 813's
+# four `sdhci.c:1169-1175` sites (`rsp_present`'s comment and three prose sites) now cite
+# `sdhci.c:1162-1175` and `:1162`, the vendor's own `MMC_RSP_PRESENT` guard. **All of them are
+# comment-only and it is MEASURED, not assumed**: the entry bin rebuilt after them is BYTE-IDENTICAL
+# (`cmp` clean, `18b0ccf3...`), which is this project's linker-fill rule applied as a proof.
+#
+# **AND THE RUNG-35 ARM'S FALSE OUTCOME TABLE IS REPAIRED IN PLACE.** Rung 35's pre-registration
+# classified `CSD_STRUCTURE` against `{1, 2}` and called anything else "a 136-bit register read that is
+# NOT a response"; the press answered `3`, a genuine eMMC CSD. The vendor's predicate is `mmc.c:159`'s
+# `if (csd->structure == 0)` and nothing else, and it is now `ST_CSD_STRUCTURE_IS_CSD` - **a build
+# refusal over 0/1/2/3, not a sentence** - guarded `#if >= 35`. The prose at `:4525` that reached
+# "must read 1" through `mmc.c:110` (which is inside `mmc_decode_cid` and switches on `cid->mmca_vsn`,
+# a DIFFERENT variable in a DIFFERENT decoder) is corrected, and the two sentences in `build_entry.sh`
+# that repeated "must read 1 and 4" now say 3 and 4 with the press as the authority.
+#
+# **THE MEMBERS, ELEVEN, hashed here by hand and never by the build.** The name's suffix `18b0ccf3` is
+# the first eight hex of `xnu_arm_entry.bin`, which is what `check_set_name_rule` requires of every
+# `armed-storage-*` set.
+set=armed-storage-18b0ccf3 sha256=35ad5fffb41dc213e79327c3573dd3e277c6c82db291fc49870f0bdb5f84852a bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-35-entry-rung-36-CMD7
+set=armed-storage-18b0ccf3 sha256=fd15c02f5cda8142455f1d7a50aec8bf044da2316040242c4100a64a6aa1033f bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-35-entry
+set=armed-storage-18b0ccf3 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-35-s-MEASURED-no-payload-switch-moved
+set=armed-storage-18b0ccf3 sha256=8646787402186804791bc004b0008a309374b73aa8b99a7d5a15c3ccf77a1b0b bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-18b0ccf3 sha256=a66ae2681d8a5db04cf87fcb6833ad5fd0647a2bbbd3d22dd5b7f910ce83317c bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-18b0ccf3 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-18b0ccf3 sha256=d5a774fe5596451f8e45420dce1884219873f310446357d79b0e26452f541c07 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-18b0ccf3 sha256=18b0ccf370e3fe3b660b783bba38c25f0c26dbee17de772ce53b085d9aef71e2 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-18b0ccf3-IS-THE-SETS-NAME-size-UNCHANGED-from-the-rung-35-arm-5552764-in-both
+set=armed-storage-18b0ccf3 sha256=20dcb2f7cd02680b11e2a7f380dd9f38eccb6870f67a230a8688def2e15f4f08 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=35-and-differing-from-the-spent-rung-35-arm-s-in-EXACTLY-ONE-line-the-artifact-s-own-hash
+set=armed-storage-18b0ccf3 sha256=8cd0309cd036331a4e865ad69390cc0a726ae95ddec3aa8fd91229d15287e177 bytes=6732588 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-its-size-MOVED-from-the-rung-35-arm-s-6732556-by-32-bytes-which-is-the-CMD7-body-and-its-publishes
+set=armed-storage-18b0ccf3 sha256=a273bacebc947883f71594ec367ed7d768aec8eefd1b74289f94c226f50a0e72 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-THREE-of-its-28-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-the-content-hashes-of-entry_storage-c-and-build_entry-sh
+#
+# **NOTHING IS PRESSED. THE ARM IS PARKED AND NOT ARMED-FOR-PRESS, NO PRESS IS OWED AND NONE IS
+# AUTHORIZED, and the press is the operator's.**
+#
+# **THE GOAL IS NOT MET.** 「把基础驱动跑起来」 is one command further along - CMD9 answered with a real
+# eMMC v4 CSD and CMD7 is the driver's own next statement - but **no transfer completes, no filesystem
+# is reached and no mount is made**, so 「让os可以正常启动并且挂载存储」 is not reached and
+# **TWRP-TO-STORAGE STAYS WITHHELD**: the storage it would be written to is the one thing this ladder
+# has not got working. The first clause, 「起码要能进入操作系统」, remains met (818 section 1).
