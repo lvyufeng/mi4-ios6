@@ -326,7 +326,21 @@ unset _self _bad
 # move happened even though `xnu_arm_entry.bin` came out at 5552764 bytes, BYTE-IDENTICAL in size
 # to the arm before it: the growth fitted the padding while the page boundary inside it was still
 # crossed, so a size comparison would have said "did not move" and been wrong.
-EXIT_POP_LR_LITERAL=0x8004a2dc
+#
+# **822, 2026-09-29: it moved a FIFTH time, by the same page, and the disassembly decided it a fifth
+# time.** Rung 37's block (`entry_storage.c`'s `st_send_status`, CMD13) is the first rung whose body did
+# NOT fit inside the entry group's remaining alignment slack: `entry_storage.o` grew past it and
+# `xnu_arm_entry.bin` went 5552764 -> **5569148 bytes, exactly `+0x4000`** - four pages, against 770's
+# move, which crossed a page boundary at a byte-identical size. The entry build's own clause refused
+# with the sentence it has used since 696 (`the exit's call to FlushPoU_Dcache is at 2147791576 and
+# returns to 2147791580, while entry_trace.c's STAGE90_XNU_SEAM_LR is 0x8004a2dc`), the constant was
+# re-derived there first, and then **readiness row 3 refused this literal** with
+# `run_and_capture.sh's fallback address for the idle exit's pop is 0x8004a2dc and
+# out/stage90/xnu_arm_entry.elf has platform_cache_idle_exit returning from that bl at 0x8004b2dc`.
+# **Both copies are `0x8004b2dc` from 822 on.** Five moves, five pages, and every one caught by the
+# same pair of clauses rather than by a run - which is the point of the pair and the reason this
+# literal is still worth its cost.
+EXIT_POP_LR_LITERAL=0x8004b2dc
 exit_pop_lr_addr() {
   local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
   local start size body ret

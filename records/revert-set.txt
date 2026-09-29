@@ -9536,3 +9536,115 @@ set=armed-storage-18b0ccf3 sha256=a273bacebc947883f71594ec367ed7d768aec8eefd1b74
 # 「让os可以正常启动并且挂载存储」 is not reached and **TWRP-TO-STORAGE STAYS WITHHELD**: the storage it
 # would be written to is the one thing this ladder has not got working. The first clause,
 # 「起码要能进入操作系统」, remains met and is unchanged by this press.
+
+####################################################################################################
+# 822, 2026-09-29 - THE RUNG-37 ARM: CMD13 `SEND_STATUS`, BUILT AND PARKED. NOT PRESSED.
+#
+# **A BUILD STEP. SOMETHING WAS BUILT AND NOTHING WAS SENT.** No `fastboot`, no gate, no runner, no
+# press, no device action of any kind; `33e80afe` was never checked for because no press was prepared.
+# The rung-37 entry image and its payload were built, the arm was parked with eleven members, readiness
+# is 5 of 5 exit 0 and `make check` is exit 0. **The press is the operator's and no press is owed or
+# authorized.**
+#
+# (1) WHAT CHANGED, AND IT IS ONE COMMAND. `src/entry/entry_storage.c` gains `st_send_status` - guarded
+# `#if STAGE90_XNU_STORAGE_PROBE >= 36`, carrying the switch-value/ordinal pair `36 = 37` - and
+# `st_cmd_path` calls it ONCE, UNGATED, immediately after `st_select_card`. The ladder's bound at
+# `entry_storage.c:130` is raised to `> 36`. **It needs no new mechanism**: a 48-bit response through
+# `st_send_command`, the same result struct `st_select_card` uses, and the same R1 decode the body four
+# hundred lines below it publishes. `mmc.h:42`'s `MMC_SEND_STATUS 13 /* ac [31:16] RCA R1 */`; the
+# vendor's own body is `mmc_ops.c:470-485`, whose only caller in the driver is `mmc_alive` at
+# `mmc.c:1724-1727`.
+#
+# (2) **THE FLAG WORD IS THE ARM, AND IT IS NOT RUNG 36's.** `mmc_ops.c:479` does not send
+# `MMC_RSP_R1`. It sends `MMC_RSP_SPI_R2 | MMC_RSP_R1 | MMC_CMD_AC` = `0x80 | 0x100 | 0x15` =
+# **`0x195` = 405**. `sdhci.c:1140-1143` reads exactly five bits out of a flag word, and `MMC_RSP_SPI_S1
+# 0x80` and `MMC_RSP_SPI_S2 0x100` (measured in `core.h:40`, `:41`, `:70`) are read by NONE of them - so
+# 405 and 21 are **two numbers that produce ONE command word, `0x0D1A`**, and the source carries that as
+# a `_Static_assert` rather than as a sentence (`ST_SDHCI_CMD_FLAGS(ST_MMC_RSP_R1_SPI) ==
+# ST_SDHCI_CMD_FLAGS(ST_MMC_RSP_R1)`). This is `one value, two definitions` met from the SAFE side: the
+# two definitions are asserted equal at compile time, and the rung below's clause asserts 21 on CMD7's
+# body while this rung's asserts 405 on CMD13's - so neither clause can be satisfied by the other's body.
+#
+# (3) **THE ENTRY GROUP CROSSED A PAGE BOUNDARY FOR THE FIRST TIME, AND THE BUILD REFUSED UNTIL THE ONE
+# PINNED ADDRESS MOVED.** Rung 37's body does not fit inside rung 36's alignment: `xnu_arm_entry.bin`
+# went 5,552,764 -> **5,569,148 B (exactly `+0x4000`)** and the exit's `bl __wrap_FlushPoU_Dcache`
+# went 2147787480 -> **2147791576 (`+0x1000` exactly)**. The seam-identification clause refused:
+# `returns to 2147791580, while entry_trace.c's STAGE90_XNU_SEAM_LR is 0x8004a2dc`. **The constant is
+# re-derived from that measurement - `0x8004a2dc` -> `0x8004b2dc` - and it is a re-derivation and not a
+# patch**: the wrapper identifies the one call site it must hook by comparing `lr` with that address,
+# and the build compares the constant against the linked image's own disassembly, two independent
+# readings of the same quantity. **A wrong constant would be a silent mis-identification at run time**
+# (the hook would either let the site through or wrap a different `bl`), which is why the clause refuses
+# instead. The class - a kernel address pinned in an entry source - stays owed; this is its first
+# measured instance, and it is written into `entry_trace.c`'s own comment rather than into the
+# era-stamped paragraphs above it, which still name their own arms' values by design.
+#
+# (4) **AND THE SEAM CONSTANT WAS NOT THE ONLY PIN THAT BROKE, BECAUSE A SCAN KEYED ON A MNEMONIC IS NOT
+# KEYED ON AN INSTRUCTION.** `xnu_entry_819`'s argument-setup scan reads `mov[ \t]+rN, #` - and
+# CMD13's flag word 405 DOES NOT FIT IN A `mov`: the compiler emitted `movw r2, #405`, which that
+# pattern does not match. The clause refused with `r2 line []` (the SAFE direction: it refused rather
+# than reading a stale `mov` from earlier in the body), and all three patterns in the new clause are
+# `movw?[ \t]+rN, #`. **The two are one instruction to a reader and different strings to the scanner**,
+# and the value that exposed it is the one this rung exists for.
+#
+# (5) WHAT THE BUILD PROVED, so the park is not just bytes. `build_entry.sh` gained `xnu_entry_822`,
+# modelled on `819` and reading the LINKED image: `st_send_status` at **`0x8000efc4`**, one
+# `bl <st_send_command>` (disassembly line 98), `r0=#13` (`SEND_STATUS`), `r1=#65536` (`ST_MMC_RCA_1`),
+# **`r2=#405`** (`mmc_ops.c:479`'s own word); device accesses in program order, distinct,
+# `f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824930:ldr f9824934:ldr
+# f9824938:ldr f982492e:ldrb f9824924:ldr` - **byte-for-byte the surface rung 36's clause asserts for
+# CMD7's body**, which is the point: CMD13 spends no register CMD7 did not; counts include
+# `f9824910:ldr=2` and `f9824934:str=2`; **NO byte below any word and NO second word** (48 bits, not
+# 136); the image side is EMPTY; `st_cmd_path` calls it once, ungated, **and the clause reads UNGATED
+# rather than saying it** - it requires the two instructions above the call to be `mov r0, r5` and
+# `bl <st_select_card>`, so a conditional branch between the two commands would be refused; and the five
+# cell strings `_sta_state`, `_sta_pre_state`, `_sta_state_held`, `_sta_illegal`, `_sta_err` are in the
+# image. `tools/check_response_word_order.py` reads 9 response-reading functions, 0 divergences, with
+# `st_send_status` the ninth. All 11 ladder values (0, 11, 12, 18, 20, 21, 30, 33, 34, 35, 36) compile
+# `-fsyntax-only` exit 0.
+#
+# (6) THE FOUR PRE-REGISTERED OUTCOMES, each naming the next act, and the middle two are the pair this
+# press is for. `_sta_complete = 1`, `_sta_err = 0`, **`_sta_state = 4` (TRAN)** is CMD7 LANDED - the
+# card is in the transfer state and the frontier is the DATA PATH (CMD8's 512-byte read) and nothing
+# else. `_sta_complete = 1`, `_sta_err = 0`, **`_sta_state = 3` (STBY)** is CMD7 DID NOT LAND - the card
+# answered the command addressed to it and did not move, which makes CMD7's own `3` the state the card
+# was in and not the state CMD7 produced, and the next arm is CMD7 again with SOMETHING ELSE moved (the
+# measured candidate is `TIMEOUT_CONTROL 0x2E`, still `0x00` on every press this ladder has made).
+# `_sta_illegal = 1` (bit 22) is THE CARD REFUSING CMD13, which puts the wall below CMD13 entirely and
+# says the RCA this ladder sends is not the address the card answers to. `_sta_complete = 0` with
+# `CMD_INHIBIT` asserted is a hang. **AND `_sta_state_held` is the cell that makes the reading a STATE
+# rather than a snapshot**: CMD13 changes nothing, so `_sta_state` equalling `_sta_pre_state` (the same
+# field of the same format read a few microseconds earlier, from CMD7's own R1) is the EXPECTED
+# reading, and a difference is what would need explaining.
+#
+# (7) **NOTHING IS PRESSED. THE ARM IS PARKED AND NOT ARMED-FOR-PRESS, NO PRESS IS OWED AND NONE IS
+# AUTHORIZED, and the press is the operator's.** Its park is in `out/stage90/frozen/armed-storage-
+# 054f8269/`; `frozen/` is a RECORD and not a queue, and every other park in it is superseded.
+#
+# (8) **THE MEMBERS, ELEVEN, hashed here by hand and never by the build.** The name's suffix `054f8269`
+# is the first eight hex of `xnu_arm_entry.bin`, which is what `check_set_name_rule` requires of every
+# `armed-storage-*` set. The payload switch set is **BYTE-IDENTICAL to rungs 23 through 36**
+# (`6c2b6038...`, `stage90-build-config.txt`, 682 B) - **no payload switch moved** - and the entry
+# config `xnu_arm_entry-config.txt` is the rung-36 arm's with the artifact's own hash line changed.
+set=armed-storage-054f8269 sha256=f94e7c4e5fa11a5a416e33ea19bfc4cf8f41c4c8d2914835a3643e03db2ff9e3 bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-36-entry-rung-37-CMD13
+set=armed-storage-054f8269 sha256=1aa6c9e20bd33ed6700c8a14dcca8b64de2125c584a714f7579726f38c925a12 bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-36-entry-size-MOVED-from-the-rung-36-arm-s-6048260-by-16384-exactly-0x4000
+set=armed-storage-054f8269 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-36-s-MEASURED-no-payload-switch-moved
+set=armed-storage-054f8269 sha256=6fbda83b998c090966ebe8e61823edc04d31d52c7a3af895e0d643c7b8b6f745 bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-054f8269 sha256=e4aa54f8717eabd0e0ab22707fb4ee7afce47d9f09e9dcd710b998bf4e0a8510 bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-054f8269 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-054f8269 sha256=a758d56a0bd0eec24b21a5f2fd1e50a3f7d4239f95d6975205cae4d749445bb2 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-054f8269 sha256=054f8269525bb1257baa60ac5204ce800153303bae0f722a9e8d5fae6467c836 bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-054f8269-IS-THE-SETS-NAME-size-MOVED-from-the-rung-36-arm-s-5552764-by-16384-exactly-0x4000-the-first-rung-whose-body-did-not-fit-inside-the-entry-group-s-alignment
+set=armed-storage-054f8269 sha256=1784af66b6b67f56cc4d336cc682965468edcd29d4b917f927b5d6627356e479 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=36-and-differing-from-the-spent-rung-36-arm-s-in-EXACTLY-ONE-line-the-artifact-s-own-hash
+set=armed-storage-054f8269 sha256=3171ad1ec4f1807bdef5136bdd2310e795c8e28ef59fc1e46f01bddae8cea00c bytes=6749004 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-its-size-MOVED-from-the-rung-36-arm-s-6732588-by-16416-which-is-the-CMD13-body-its-publishes-and-the-page-the-group-crossed
+set=armed-storage-054f8269 sha256=d57be98c61c5469dafe94ef2e6a57e5f38e0987f56c0ceb77d31eba0d8b956bb bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FOUR-of-its-28-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-the-content-hashes-of-entry_storage-c-entry_trace-c-and-build_entry-sh
+#
+# **AND ONE THING THIS ARM DOES NOT DO, WHICH THE RUNG BELOW IT DID.** Rung 36 put the INDEX bit back on
+# the bus for the first time since rung 21 and measured it safe; 821 section 8 named putting it back on
+# **CMD3** as a rung of its own. This rung does not: one rung moves one thing, and CMD13 is the
+# measurement the frontier actually needs.
+#
+# **THE GOAL IS NOT MET.** 「把基础驱动跑起来」 is one command further along - CMD7 completed with an
+# attributable frame and the card reported STBY - but **no transfer completes, no filesystem is reached
+# and no mount is made**, so 「让os可以正常启动并且挂载存储」 is not reached and **TWRP-TO-STORAGE STAYS
+# WITHHELD**: the storage it would be written to is the one thing this ladder has not got working. The
+# first clause, 「起码要能进入操作系统」, remains met (818 section 1).

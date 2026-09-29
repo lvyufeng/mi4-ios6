@@ -2697,8 +2697,18 @@ void __wrap_platform_cache_idle_exit(void)
  * boundary moves every kernel-text address in the image at once, and the clause above is what makes
  * that a refused build rather than a silent mis-identification at run time. The *class* - a kernel
  * address pinned in an entry source - stays recorded as owed, because the repair is still a link order
- * and not this step's question. */
-#define STAGE90_XNU_SEAM_LR       0x8004a2dcu
+ * and not this step's question.
+ *
+ * **THE MOVE HAS NOW HAPPENED ONCE, AND IT IS NAMED HERE RATHER THAN EDITED INTO THE PARAGRAPHS
+ * ABOVE.** Rung 37 (`STAGE90_XNU_STORAGE_PROBE=36`, CMD13) is the first rung whose body pushed the
+ * entry group past a page boundary: the build refused with
+ * `returns to 2147791580, while entry_trace.c's STAGE90_XNU_SEAM_LR is 0x8004a2dc`, and the constant
+ * below was re-derived from that measurement, **`0x8004a2dc` -> `0x8004b2dc`, +0x1000 exactly**. The
+ * move is one page and it is the whole of the difference: rung 36's own body fitted inside the
+ * existing alignment (`xnu_arm_entry.bin` unchanged at 5,552,764 B) and rung 37's did not
+ * (5,569,148 B, **+0x4000**). Every kernel-text address in the image moved with it - the era-stamped
+ * paragraphs above still name their own arms' values, by design. */
+#define STAGE90_XNU_SEAM_LR       0x8004b2dcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);
