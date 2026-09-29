@@ -9759,3 +9759,101 @@ set=armed-storage-054f8269 sha256=d57be98c61c5469dafe94ef2e6a57e5f38e0987f56c0ce
 # mount is made**, so 「让os可以正常启动并且挂载存储」 is not reached and **TWRP-TO-STORAGE STAYS
 # WITHHELD**: the storage it would be written to is the one thing this ladder has not got working. The
 # first clause, 「起码要能进入操作系统」, remains met and is unchanged by this press.
+
+####################################################################################################
+# 824, 2026-09-29 - THE RUNG-38 ARM. `armed-storage-92b6c552`. PARKED, NOT PRESSED, NOT ARMED.
+#
+# **A BUILD AND A PARK, AND NOTHING ELSE.** No press has been made, none is owed and none is
+# authorized; `frozen/` is a RECORD and not a queue, and this arm carries an untested DATA PATH -
+# the first such a press in this ladder would make - so it is the LAST park in this file that should
+# be pressed without the operator asking for it by name.
+#
+# (1) THE ACT. Rung 38's body is `st_send_ext_csd`, guarded `#if STAGE90_XNU_STORAGE_PROBE >= 37`,
+# called exactly once from `st_cmd_path` on the line below rung 37's CMD13. It is the driver's own
+# next statement after `mmc.c:1436`'s `mmc_select_card`: `mmc.c:1447`'s
+# `err = mmc_get_ext_csd(card, &ext_csd)` - CMD8 `SEND_EXT_CSD`, a 512-byte READ.
+#
+# (2) **THE CENTRAL NUMBER IS A DATA-PHASE BIT AND NOT A FLAG.** `mmc_ops.c:263` passes CMD8
+# `MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_ADTC` = 181 = 0xB5. The five-bit `sdhci_cmd_to_flags`
+# mapping (`sdhci.c:1140-1143`) makes of it byte 0x1A, word 0x081A - and `sdhci.c:1146-1149` ORs
+# `SDHCI_CMD_DATA 0x20` when `cmd->data != NULL` (`core.c:338`), so the register word is **0x083A =
+# 2106**. Both numbers are asserted by the build, on two different clauses of the same body: one
+# requires 2106 to be the word STORED, the other requires 0x081A never to be. That is 714's class
+# refused in both directions and not a sentence in a comment.
+#
+# (3) **AND THE CHANGE REQUIRED A REPAIR TO `st_send_command` ITSELF.** Until this rung the ladder's
+# command-word helper took only (opcode, flags) and never ORed `SDHCI_CMD_DATA`, so a data command
+# would have gone out with BLOCK_COUNT armed and no DATA bit - the silent failure the file's own
+# header predicts. The OR is added under `#if STAGE90_XNU_STORAGE_PROBE >= 37`, because
+# `ST_MMC_CMD_ADTC` and `ST_SDHCI_CMD_DATA` are declared only at this rung and above; below it the
+# body compiles to exactly the byte sequence it did before. **MEASURED**: the value-36 build after
+# the guard is byte-identical to the spent rung-37 park (`054f8269...`), and the value-37 build is
+# byte-identical before and after the guard - so every park below this rung is still reproducible
+# from this tree, which is the property a spent park's recheck rests on.
+#
+# (4) **THE GATE, AND IT IS THE FIRST GATED COMMAND IN FOUR RUNGS.** The body re-reads
+# `RESPONSE 0x10` at decision time and refuses with `_ext_gated=1`/`_ext_done=0` unless
+# `R1_CURRENT_STATE` (`_ext_gate_state`) is 4 = TRAN - the state the rung-37 press MEASURED. The
+# sequence the three gates below use (gate, argument, word) is repeated against a value a press
+# produced rather than one this ladder assumed.
+#
+# (5) **THE TIMEOUT COMES FROM RUNG 35's CARRIED CSD, NOT FROM `RESPONSE`.** m814 rule 4 refuses a
+# right shift of a RAW response word, because the four registers and the four words the driver
+# assembles from them are different values; so the assembled CSD is CARRIED - `st_csd_words[4]` plus
+# `st_csd_words_valid`, bound to rung 35's body by a coverage assertion the build makes (four words
+# by coverage, one validity byte) - and the arithmetic is `sdhci_calc_timeout` over TAAC/NSAC,
+# doubled to the first count that covers it and capped at `_ext_tout_max`.
+#
+# (6) THE PIO PATH, IN THE VENDOR'S OWN ORDER: the `RESPONSE` gate read first; `HOST_CONTROL 0x28`;
+# the `INT_ENABLE 0x34` window opened and closed; `TIMEOUT_CONTROL 0x2E` written BEFORE `BLOCK_SIZE`
+# (`sdhci.c:827-828` above `sdhci.c:831`); `BLOCK_SIZE 0x04 <- 0x7200`, `BLOCK_COUNT 0x06 <- 1`,
+# `TRANSFER_MODE 0x0C <- 0x0012`, each written as a halfword and read back; ARGUMENT and COMMAND; 128
+# 32-bit reads of `BUFFER 0x20`; then `INT_STATUS 0x30` and `PRESENT_STATE 0x24`. **It adds no
+# megabyte and no device**: every register is the controller's own, mapped since rung 14.
+#
+# (7) **NOTHING IS PRESSED.** The arm is parked and not armed-for-press, no press is owed and none is
+# authorized, and **the press is the operator's.** No build has been made since the park.
+#
+# (8) **THE MEMBERS, ELEVEN, hashed here by hand and never by the build.** The name's suffix
+# `92b6c552` is the first eight hex of `xnu_arm_entry.bin`, which is what `check_set_name_rule`
+# requires of every `armed-storage-*` set. **The payload switch set is BYTE-IDENTICAL to rungs 23
+# through 37** (`6c2b6038...`, `stage90-build-config.txt`, 682 B) - no payload switch moved. The
+# entry config `xnu_arm_entry-config.txt` differs from the spent rung-37 arm's in EXACTLY TWO lines:
+# the artifact's own hash and `STAGE90_XNU_STORAGE_PROBE` 36 -> 37. `xnu_arm_entry-sources.txt` moves
+# THREE of its 23 content lines - the `STAGE90_XNU_ENTRY_SHA256` line and the hashes of
+# `build_entry.sh` and `entry_storage.c`, the two files this rung edits. The entry `.bin` is 5,569,148
+# B, the SAME SIZE as the spent arm's despite a larger `.text` (+2,432) and `.bss` (+512): the
+# alignment padding the rung-37 body's page move introduced absorbs the growth, and the `.elf` grew
+# by 244. **A size comparison is not a value comparison** - the two entry images differ in 685,691 of
+# their 5,569,148 bytes - which is why the identity here is the hash and never the size.
+set=armed-storage-92b6c552 sha256=0756bab79933231d8ab07384d361180d42cf6b5a2d3a999f2a6ab116550a76a6 bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-37-entry-rung-38-CMD8-SEND_EXT_CSD-NOT-PRESSED
+set=armed-storage-92b6c552 sha256=83d4630a646e3b7f4e37679c88d40b94bf7e4942351d3d44c714710970e5aff3 bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-37-entry-same-size-as-the-spent-rung-37-arm-s-despite-the-larger-entry-because-the-rung-37-page-move-s-alignment-padding-absorbs-it
+set=armed-storage-92b6c552 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-37-s-MEASURED-no-payload-switch-moved
+set=armed-storage-92b6c552 sha256=8127f02b365481c7839dbf0f614349233742d00c494429a152c2d28ddd4e03ef bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-92b6c552 sha256=177d807aac8931fa4cc875e3eefa4c5a01e5883df6fcaa6411d110f8f4e445f5 bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-92b6c552 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-92b6c552 sha256=a9bcac2ff957efd12794a8e118ed04483fc6521c15788c3b86bf206c5414fa21 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-92b6c552 sha256=92b6c552829c2039187d482292762e3f2f89f95e8124636b2dfe476ed57e48b6 bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-92b6c552-IS-THE-SETS-NAME-same-5569148-bytes-as-the-spent-rung-37-arm-and-685691-of-those-bytes-differ
+set=armed-storage-92b6c552 sha256=91138384f5308c6d8adcbc788d8d27d2bc76ccbf3584036788e8022e62d12480 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=37-and-differing-from-the-spent-rung-37-arm-s-in-EXACTLY-TWO-lines-the-artifact-s-own-hash-and-the-ladder-value-36-37
+set=armed-storage-92b6c552 sha256=640cd3b8a3d9f667aa3ef59b8c0fe0527fcd4ad99184b0ebc9e4467a8bc6b100 bytes=6749248 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-MOVED-from-the-spent-rung-37-arm-s-6749004-by-244-the-CMD8-body-s-net-growth-after-alignment-the-entry-bin-s-OWN-size-three-way-unchanged
+set=armed-storage-92b6c552 sha256=9b92a0ea556254c0ddcb2011b3bed93ab61fcaba9c431044505ce7fd3e512f15 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-THREE-of-its-23-content-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-the-hashes-of-build_entry-sh-and-entry_storage-c
+
+# **AND WHAT THIS ARM DOES NOT SETTLE.** It asserts the WORD the block receives and the ORDER of the
+# registers it touches, read out of the linked image. It does NOT assert that a 512-byte read
+# completes, because no press has been made: `_ext_words_read` (0 or 128), `_ext_w0`/`_ext_w127`
+# (the first and last words) and `_ext_sec_count` (the card's own capacity word out of the ext-CSD)
+# are the cells the first press of this arm would read, and the timeout cells
+# (`_ext_tout_count`, `_ext_timeout_us`, `_ext_timeout_step0`) are the second question - whether the
+# driver's own arithmetic, run off a CARRIED CSD rather than a re-read one, produces a count the
+# block accepts.
+#
+# **AND ONE THING THIS ARM DOES NOT DO, WHICH IT COULD HAVE.** It does not put the INDEX bit back on
+# CMD3 (821 section 8), it does not move `TIMEOUT_CONTROL` on any command that is not a data command,
+# and it does not repair the runner's owed `EXIT_POP_LR_LITERAL` fallback - one rung moves one thing,
+# and the data path is the frontier the last press named.
+#
+# **THE GOAL IS NOT MET.** 「把基础驱动跑起来」 is one command further along in the SOURCE - the first
+# rung whose command transfers bytes rather than only frames - but **no transfer has completed, no
+# filesystem is reached and no mount is made**, so 「让os可以正常启动并且挂载存储」 is not reached and
+# **TWRP-TO-STORAGE STAYS WITHHELD**: the storage it would be written to is the one thing this ladder
+# has not got working. The first clause, 「起码要能进入操作系统」, remains met (818 section 1).
