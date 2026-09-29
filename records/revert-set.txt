@@ -9648,3 +9648,114 @@ set=armed-storage-054f8269 sha256=d57be98c61c5469dafe94ef2e6a57e5f38e0987f56c0ce
 # and no mount is made**, so 「让os可以正常启动并且挂载存储」 is not reached and **TWRP-TO-STORAGE STAYS
 # WITHHELD**: the storage it would be written to is the one thing this ladder has not got working. The
 # first clause, 「起码要能进入操作系统」, remains met (818 section 1).
+
+####################################################################################################
+# 823, 2026-09-29 - THE RUNG-37 PRESS. `armed-storage-054f8269` IS SPENT. THE CARD IS IN TRAN.
+#
+# **A PRESS, under the operator's authorization asked for and given in this session** (asked with the
+# arm parked and verified; the answer was "Press rung 37 now"). ONE gate exit 0 / 614 lines, 0 FAIL;
+# ONE runner exit 0. `fastboot boot` only, nothing flashed, nothing written to storage, no reboot
+# commanded, `33e80afe` absent from BOTH device lists hand-checked immediately before the gate
+# (neither log carries that check - this session's own reading, named rather than implied). The phone
+# returned to Android 29 s after the send (`seen via: adb`).
+#
+# CAPTURE `out/stage90/captures/rung37-cmd13-20260929-164239-last_kmsg.txt` 658,021 B
+# sha `9bbb36951538274b3deae64c988b63a33ef26d4537f5a477f3e55ab8ac601768`; `-gate.log` 52,771 B
+# `94dab03adad52d733080ecdcc22c89e38467449018cbc42daa3cc7b86631c9be`; `-run.log` 89,438 B
+# `5b0bca3ccfd3f14f4f08732b21c01baa64e8c2ae6e066e945db89c760399ceb2`. **The name's timestamp is the
+# moment the capture was WRITTEN**; earlier archives in this directory name the press sequence's start,
+# a gate plus a runner earlier - the convention drifted and the doc says which moment its name means.
+#
+# (1) THE HEADLINE, AND IT IS ROW 1 OF THE ARM'S FOUR. **`_sta_state = 4` = `R1_STATE_TRAN`.** The card
+# is in the TRANSFER state - the state from which every data command is legal - and the frontier is no
+# longer a state question.
+#
+# (2) **AND CMD7 LANDED, BY AN ARGUMENT 821 SECTION 5's OBJECTION DOES NOT REACH.** `_sta_pre_state =
+# 3` (STBY, from `_sta_resp_pre = 0x00000700`, CMD7's own R1 still in `RESPONSE + 0`) and `_sta_state =
+# 4` (TRAN, from `_sta_resp_post = 0x00000900`). 821 section 5 said `R1_STATE_STBY` is ALSO what a CMD7
+# that took no effect leaves, so CMD7's own answer cannot separate the two. **CMD13's `4` can**:
+# between the sampling that produced the `3` and the one that produced the `4` **exactly one command
+# went on the bus** - CMD13 itself, which cannot move a card - and STBY -> TRAN has exactly one
+# producer in the JEDEC state machine, a completed `SELECT_CARD`. **Across two independent boots the
+# ladder's own cells walk IDENT (2, `_nidx_state`) -> STBY (3, `_sel_state`) -> TRAN (4, `_sta_state`),
+# one step per command, with every intermediate reading byte-identical between the boots.**
+#
+# (3) **AND THE PRESS FALSIFIES ITS OWN PRE-REGISTRATION, WHICH IS THE FINDING.** Rung 37's source
+# called `_sta_state_held = 1` the EXPECTED reading - CMD13 cannot move the card, so the two samples
+# must agree. Measured: **`_sta_state_held = 0x00000000`.** The premise is right and the conclusion does
+# not follow from it: `_sta_pre_state` is the field of CMD7's RESPONSE - the state the card was in
+# **when it answered CMD7**, before CMD7's effect - and `_sta_state` is the field of CMD13's response,
+# taken after it. **A command that cannot move the card can still read a different value, because the
+# field is sampled at response time and something else moved the card in between**; here that something
+# is CMD7 itself. It is `one value, two definitions` one level down: "the state field" read as "the
+# card's state now" when it is "the card's state when this response was formed" - the same error 819's
+# table made about `CSD_STRUCTURE` and the same one 821 section 5 caught CMD3 with. **A `0` in
+# `_sta_state_held` is a TRANSITION and not a defect**, and a later `1` would be the thing needing
+# explanation.
+#
+# (4) THE COMMAND, AS IT WENT OUT. `_sta_word = _sta_word_read = 0x00000d1a` (opcode 13 << 8 | the flag
+# byte `0x1A`), `_sta_op = 13`, `_sta_arg = _sta_arg_wrote = 0x00010000` (`ST_MMC_RCA_1`),
+# `_sta_sent = _sta_calls = _sta_done = 1`. `_sta_complete = 1`, **`_sta_err = 0x00000000` with
+# `SDHCI_INT_INDEX` enabled** (`_sta_ena_wrote = 0x000f0001`, `_sta_ena_held = 0x000f8001`), so the
+# block's own comparator ran and matched 13; `_sta_timeout = 0`, `_sta_any_polls = _sta_polls =
+# 0x000004ed` (1,261) with `_sta_status_any = 1` - the interrupt latched on the FIRST poll;
+# `_sta_inhibit_seen = _sta_inhibit_after = _sta_inhibit_timeout = 0`, so the word `0x0D1A` does not hang
+# the block. **`_sta_tout_ctl = 0x00`**: `TIMEOUT_CONTROL` is read and has still never been WRITTEN on
+# any rung of this ladder.
+#
+# (5) **THE SPI FLAG WORD, NOW MEASURED ON THE WIRE.** `_sta_flags_driver = 0x00000195` = 405
+# (`mmc_ops.c:479`'s `MMC_RSP_SPI_R2 | MMC_RSP_R1 | MMC_CMD_AC`), `_sta_flags_mapped = 0x0000001a` (what
+# `sdhci_cmd_to_flags` makes of it - the two SPI bits read by nothing), and `_sta_flags = 0x00000015` =
+# 21, the ladder's own `ST_MMC_RSP_R1`. **Three different numbers, one command word `0x0D1A`** - which is
+# exactly why the two build clauses assert different immediates on two otherwise identical bodies.
+# `_sta_illegal = 0` (the card did not refuse CMD13), `_sta_ready = 1`, `_sta_switch_err = 0`,
+# `_sta_exception = 0`, `_sta_resp_moved = 1`, `_sta_resp_is_arg = 0`.
+#
+# (6) **AND THE THREE UPPER `RESPONSE` REGISTERS DID NOT MOVE THIS TIME - which narrows 821 section 6.**
+# `_sta_raw_pre0/1/2 = _sta_raw_post0/1/2` = `0x8a40401e`, `0xffffffef`, `0x0f5903ff` - the CSD's
+# ASSEMBLED words, `0x1e` and all - while `RESPONSE + 0` went `0x00000700` -> `0x00000900`. So CMD7's
+# four-register movement (821 section 6's unexplained reading) is **a per-boot settling and not a
+# per-command behaviour**: at some point in each boot the three upper registers take the CSD's assembled
+# values and then stop, and only `RESPONSE + 0` moves per command. **A 48-bit response moves
+# `RESPONSE + 0` ALONE, measured twice in two boots** - so "the registers moved, so the frame was read
+# into all of them" is a sentence about a 136-bit format and a non-sequitur about this one. The `0x1e`
+# is still in no cell in this tree, and this arm still cannot tell a block behaviour from an artifact.
+#
+# (7) RUNG 36 -> RUNG 37, CELL BY CELL. Storage cells **611 -> 673**; **0 lost, 62 added (all `_sta_`),
+# 585 identical, 26 moved**; whole-log cells 1,525 -> 1,587. Every one of the 26 is free-running (poll
+# counts, tick counts, the two absolute power-IRQ timestamps, `_pwr_wait_ticks`, and the clock-stability
+# counts `_clk_set_cc_polls` 6 -> 19 / `_clk_set_cc_ticks` 92 -> 193 ticks). **Not one decision cell
+# moved**: `_cmd1_resp = 0x40ff8080`, `_cid_gate_word = 0xc0ff8080`, `_nidx_resp = 0x00000500`,
+# `_nidx_state = 2`, `_csd_structure = 3`, `_csd_mmca_vsn = 4`, `_csd_capacity_blocks = 0x00200000`,
+# `_sel_state = 3`, `_sel_word = 0x071A`, `_sel_illegal = 0`, `_sel_err = 0`, `_sel_complete = 1` and
+# the CID's four assembled words are identical across both boots. The OS came up exactly as 818
+# measured: `BSD root: md0, major 2, minor 0`, the init load returned, pid 1's AST put it in user mode.
+# The run ended on the ladder's own deadline: `_post_end_calls = 8`, `_seam_post_end_ticks =
+# 0x06ddd000` = 115,200,000, `_post_cntfrq = 0x0124f800` = 19,200,000 -> **6.0000 s**, with
+# `fault_addr=0xfa0065c` the known forced ending (`mi4-the-run-ends-at-entry-epilogue`). **Nothing on the
+# device changed**: `fastboot boot` only, and CMD13's whole surface is the registers CMD7's body already
+# touches.
+#
+# (8) **WHAT FOLLOWS: THE DATA PATH, AND WHERE THE COMMAND LADDER STOPS.** `mmc.c:1436`'s
+# `mmc_select_card` has landed; the driver's own next statement is `mmc.c:1447`'s
+# `err = mmc_get_ext_csd(card, &ext_csd)` - **CMD8 `SEND_EXT_CSD`, a 512-byte DATA read**. This image
+# has no `sdhci_prepare_data`, no block-size register write, no DMA or PIO path, and `TIMEOUT_CONTROL`
+# has never been written; those are MECHANISMS, and the next rung is the first that needs one.
+# **CMD16 `SET_BLOCKLEN` is the recommended next rung**: one 48-bit command, no data phase, the driver's
+# own prerequisite for the one that transfers, and a shape this ladder has now proved four times.
+# Alternatives and their costs: CMD8 itself (the transfer mechanism first); putting the INDEX bit back
+# on CMD3 (821 section 8 - one bit, now with a measured precedent); and the runner's own owed
+# structural repair (`EXIT_POP_LR_LITERAL` is a fallback that must be edited per arm - a step, not an
+# edit, because the gate's clause must accept a labelled absence).
+#
+# **THE ARM IS SPENT AND NOTHING IS ARMED.** Its park stays in
+# `out/stage90/frozen/armed-storage-054f8269/` because a park is the record of what was built -
+# `frozen/` is a RECORD and NOT a queue, and re-pressing this arm buys nothing that is not above. No
+# build has been made since the press.
+#
+# **THE GOAL IS NOT MET.** 「把基础驱动跑起来」 took its largest single step so far - **the card is in
+# TRAN**, its state machine walked command by command with attributable responses, and the frontier is
+# now a MECHANISM rather than a QUESTION - but **no transfer completes, no filesystem is reached and no
+# mount is made**, so 「让os可以正常启动并且挂载存储」 is not reached and **TWRP-TO-STORAGE STAYS
+# WITHHELD**: the storage it would be written to is the one thing this ladder has not got working. The
+# first clause, 「起码要能进入操作系统」, remains met and is unchanged by this press.
