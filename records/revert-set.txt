@@ -9416,3 +9416,123 @@ set=armed-storage-18b0ccf3 sha256=a273bacebc947883f71594ec367ed7d768aec8eefd1b74
 # is reached and no mount is made**, so 「让os可以正常启动并且挂载存储」 is not reached and
 # **TWRP-TO-STORAGE STAYS WITHHELD**: the storage it would be written to is the one thing this ladder
 # has not got working. The first clause, 「起码要能进入操作系统」, remains met (818 section 1).
+
+####################################################################################################
+# 821, 2026-09-29 - THE RUNG-36 PRESS. `armed-storage-18b0ccf3` IS SPENT.
+#
+# **A PRESS, under the operator's authorization asked for and given in this session** (asked with the
+# arm parked and verified; the answer was "Press rung 36 now"). ONE gate exit 0 / 613 lines, 0 FAIL;
+# ONE runner exit 0. `fastboot boot` only, nothing flashed, nothing written to storage, no reboot
+# commanded, `33e80afe` absent from BOTH device lists hand-checked immediately before the gate
+# (neither log carries that check - this session's own reading, named rather than implied). The phone
+# returned to Android 29 s after the send (`seen via: adb`).
+#
+# CAPTURE `out/stage90/captures/rung36-cmd7-20260929-012553-last_kmsg.txt` 641,956 B
+# sha256 2d0a463d19233f2d6e32b36adf5b27d4333dea8bff11c5f23a935d26f7c6c8ac, beside it `-gate.log`
+# 52,547 B 4bd751c0d3327f710c4c96cd106ea37b6d53890a2f21606152e58393f7b24df9 and `-run.log` 89,491 B
+# d6ce6086f5d6daf659ed9753f88c768365ec3e8d25d675e81afcbba4e822adb8. Readiness resolved the arm as
+# the recorded set before the gate: 5 of 5, exit 0.
+#
+# **THE PRESS ANSWERED TWO QUESTIONS, AND THE FIRST IS 817's.**
+#
+#   1. **`SDHCI_INT_INDEX` WAS ENABLED AND DID NOT FIRE.** The window is ST_SDHCI_INT_ENABLE_CMD
+#      0x000F0001 - bit 0 (RESPONSE) and bits 16, 17, 18, 19, and BIT 19 IS SDHCI_INT_INDEX
+#      (`sdhci.h:133`, `SDHCI_INT_CMD_MASK` at `sdhci.h:144-146`) - measured as `_sel_ena_wrote =
+#      0x000f0001` and `_sel_ena_held = 0x000f8001` (bit 15 is SDHCI_INT_ERROR, the summary bit the
+#      driver's own int_enable already carried). `_sel_err = status_after & ST_SDHCI_INT_CMD_ERR =
+#      0x00000000`. **So the block compared the response's Index field against 7 and it MATCHED: THE
+#      FRAME THAT ARRIVED IS CMD7's RESPONSE.** That is the attribution 813 section 5 recorded as
+#      unreachable ("the block reports that a frame arrived; it does not report who sent it") and the
+#      FIRST time this ladder has been able to make it about any command.
+#      **AND IT RETIRES RUNG 21's DEVIATION, MEASURED ON A LIVE CHAIN.** 817 read the rung-19 press
+#      and the whole archive and argued that the hang which justified removing the INDEX bit was a
+#      block still inhibited by a CMD2 that never finished - CMD1 completed on no arm before rung 30 -
+#      and that the removal was inherited from an artifact. This press is the positive control that
+#      argument never had: same controller, same five-bit window, same chain, the bit ON, and
+#      `_sel_complete = 1`, `_sel_inhibit_seen = 0`, `_sel_timeout = 0`, `_sel_err = 0`.
+#      **817's hypothesis is refuted and rung 21's reason is gone.** What remains is whether CMD3
+#      should carry the bit too - a rung of its own, and NOT the next one.
+#
+#   2. **THE CARD REPORTS STBY, SO CMD3 WAS ACCEPTED** - which is 819 section 5's first open question.
+#      Three cells in ONE boot: CMD3's own response `_nidx_state = 2` = R1_STATE_IDENT (mmc.h:149);
+#      the read between CMD3 and CMD9 `_csd_pre_state = 2` = IDENT; and CMD7's own response
+#      `_sel_state = 3` = R1_STATE_STBY (mmc.h:150), with `_sel_ready = 1` (R1_READY_FOR_DATA, bit 8)
+#      and `_sel_illegal = 0` (bit 22 clear - the card did NOT refuse). The card advanced IDENT -> STBY
+#      between the two responses and the only command between them that can do that is CMD3. **So CMD3
+#      was accepted, stated as a FIELD rather than as the absence of a refusal** - which 819 section 5
+#      said the CSD's arrival could not be.
+#      **AND THE CELL DOES NOT SETTLE WHETHER CMD7 LANDED.** R1_STATE_STBY is also what a CMD7 that took
+#      no effect would leave, and the field is sampled at response time, before the command's own
+#      effect on the JEDEC convention - which is exactly what makes CMD3's 2 and CMD7's 3 read as a
+#      TRANSITION rather than as a failure. One reading of one field cannot separate "the card is in
+#      STBY because CMD7 has not landed yet" from "the card is in STBY because CMD7 did not land". The
+#      row the arm pre-registered for the refusal (`_sel_illegal = 1`) did NOT fire.
+#
+# **THE COMMAND AS IT WENT OUT, all three values measured:** `_sel_op = 7`, `_sel_flags = 0x00000015` =
+# 21, `_sel_arg = 0x00010000`, `_sel_word = _sel_word_read = 0x0000071a`. **And `0x031A` - the value 820
+# removed from this record - appears nowhere on this boot's wire**: CMD3 sent `_nidx_word = 0x0000030a`
+# with `_nidx_flags = 0x00000005`. The two words are one bit apart in the flag byte (`0x1A` against
+# `0x0A`) and an opcode apart, which is what 820's second `_Static_assert` asserts and the press now
+# shows.
+#
+# **`RESPONSE + 0` moved** from the CSD's last word to the R1: `_sel_resp_pre = 0xef8a4040` (the same
+# value `_csd_raw3` published in this boot), `_sel_resp_post = 0x00000700`, `_sel_resp_moved = 1`,
+# `_sel_resp_is_arg = 0`. That is the direct evidence the frame was read, and it is stated for
+# `RESPONSE + 0` and for nothing else.
+#
+# **RECORDED AND UNEXPLAINED: the other three registers also moved, and what they moved to is not
+# anything this image writes.** Before (`_sel_raw_pre*`, which reproduce this boot's `_csd_raw*` cell for
+# cell - the CSD's RAW words): +0x0C 0x00d00f00, +0x08 0x320f5903, +0x04 0xffffffff, +0x00 0xef8a4040.
+# After (`_sel_raw_post*`): +0x0C 0x8a40401e, +0x08 0xffffffef, +0x04 0x0f5903ff, +0x00 0x00000700. The
+# three that moved hold **the CSD's ASSEMBLED words** - `_csd_resp1 = 0x0f5903ff` at +0x04,
+# `_csd_resp2 = 0xffffffef` at +0x08, and `_csd_resp3 = 0x8a404000` at +0x0C except for its LOW BYTE,
+# which reads 0x1e where the assembled word has 0x00. **No store to `RESPONSE` exists anywhere in this
+# image** (the build clause asserts the body's device surface is four reads and the window, and the
+# access census refuses an unlisted access), so this is either something the BLOCK does to its own
+# response registers when a 48-bit response arrives or an artifact of how those registers behave after a
+# 136-bit read. **This arm cannot tell those apart and does not claim to.** It is written down because it
+# is 814's shape one rung up - an assembled value and a raw value in the same register file - and
+# because a reader comparing `_csd_resp*` against a later `_sel_raw_post*` would otherwise read a
+# coincidence as a law. **The 0x1e is in no cell and no comment in this tree.**
+#
+# **CONTAINMENT.** Storage cells 555 -> 611: **0 keys lost, 56 added (the entire `_sel_` family and
+# nothing else - checked, no added key lacks the prefix), 534 identical, 21 moved**, and every one of the
+# 21 is a free-running quantity (poll counts, tick counts, the two absolute power-IRQ timestamps, the
+# three `_*_cmdlow_seen` poll indices) or an address inside the entry image (`_pwr_irq_reg_handler`
+# 0x8000d314 -> 0x8000d320, which grew). **Not one decision cell moved**: `_cmd1_resp = 0x40ff8080`,
+# `_cid_gate_word = 0xc0ff8080`, `_nidx_resp = 0x00000500`, `_nidx_state = 2`, `_csd_structure = 3`,
+# `_csd_mmca_vsn = 4` and `_csd_capacity_blocks = 0x00200000` are identical across both boots. Whole-log
+# cells 1,467 -> 1,525. The OS came up exactly as 818 measured: `BSD root: md0, major 2, minor 0`, the
+# init load returned, pid 1's AST put it in user mode, and the kernel's idle path entered 63,333 times
+# (818's count was 62,283 - a free-running number). The run ended on the ladder's own deadline:
+# `_post_end_calls = 8`, `_seam_post_end_ticks = 0x06ddd000 = 115,200,000`, `_post_cntfrq = 0x0124f800`
+# = 19,200,000 -> **6.0000 s**, and `fault_addr=0xfa0065c` is the known forced ending
+# (`mi4-the-run-ends-at-entry-epilogue`). **Nothing on the device changed**: `fastboot boot` only, and
+# CMD7 added no store to any device - its whole surface is four reads of `RESPONSE`, the `INT_ENABLE`
+# window read-written twice, `SIGNAL_ENABLE`, `INT_STATUS`, the `TIMEOUT_CONTROL` byte (still 0x00, which
+# no rung has ever written) and `PRESENT_STATE`, all registers the arms below it already touch.
+#
+# **WHAT FOLLOWS: CMD13 `SEND_STATUS` IS THE RECOMMENDED NEXT RUNG, AND NOT CMD8.** The frontier is no
+# longer CMD7's mechanism or the INDEX bit - it is ONE FIELD'S SAMPLING CONVENTION, and it has a direct
+# measurement: a command whose own answer is `R1_CURRENT_STATE`, with no data phase and no state change.
+# CMD13 is `mmc_ops.c`'s own `mmc_send_status`, it returns R1 through the same 48-bit path CMD7 just
+# proved works, and it needs NO NEW MECHANISM. CMD8 (`SEND_EXT_CSD`, the driver's own next statement at
+# `mmc.c:1446`) needs a 512-byte DATA read - no `sdhci_prepare_data`, no block size, no DMA or PIO path,
+# and `TIMEOUT_CONTROL` never raised - so **CMD8 is where this ladder stops being a command ladder**, and
+# this press does not change that.
+#
+# **AND A RUNG-21 QUESTION NOW WORTH A RUNG OF ITS OWN**: with `_sel_err = 0` beside the INDEX bit
+# enabled, the bit is measured SAFE on a live chain, so putting it back on **CMD3** would give this
+# ladder an attributable CMD3 as well - a change with a measured precedent rather than one inherited from
+# a dead chain. It is NOT what rung 37 should do: one rung moves one thing.
+#
+# **THE ARM IS SPENT AND NOTHING IS ARMED.** Its park stays in `out/stage90/frozen/armed-storage-18b0ccf3/`
+# because a park is the record of what was built - `frozen/` is a record and NOT a queue, and
+# re-pressing this arm buys nothing that is not above. No build has been made since the press.
+#
+# **THE GOAL IS NOT MET.** 「把基础驱动跑起来」 moved again - the storage chain now has an ATTRIBUTABLE
+# completion (the block's own opcode check passed), the card is out of IDENT, and `R1_READY_FOR_DATA`
+# is set - but **no transfer completes, no filesystem is reached and no mount is made**, so
+# 「让os可以正常启动并且挂载存储」 is not reached and **TWRP-TO-STORAGE STAYS WITHHELD**: the storage it
+# would be written to is the one thing this ladder has not got working. The first clause,
+# 「起码要能进入操作系统」, remains met and is unchanged by this press.
