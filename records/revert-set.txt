@@ -10012,3 +10012,66 @@ set=armed-storage-6a2e94ae sha256=3d8af54e66172dc2ddf7c8551aab889fb2b4908612dca0
 #
 # **THE GOAL IS NOT MET.** No block read, no filesystem, no mount; TWRP-to-storage stays withheld.
 set=armed-storage-6a2e94ae sha256=bd5bb0a2bdecfe1f398547b3f706f4b5332f53aea82f16287b768fd7d4150e9a bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-PRESSED-2026-09-30-022901
+#
+# 828, 2026-09-30 - THE RUNG-40 ARM. `armed-storage-f34cf0fb`. PARKED, NOT PRESSED, NOT ARMED.
+#
+# **A BUILD AND A PARK, AND NOTHING ELSE.** No press has been made and none is owed by this file;
+# `frozen/` is a RECORD and not a queue. **THIS ARM ADDS THE WAIT THE RUNG-39 PRESS PROVED WAS
+# MISSING** - it adds no new command, no new register, no new megabyte and no new device; it re-reads
+# the SAME registers rung 38 already reached.
+#
+# (1) THE ACT. The rung-39 press measured `_ext_complete = 1` (its one-OR repair worked) AND
+# `_ext_words_gated = 0` with 128 zero words: with `SDHCI_INT_RESPONSE` enabled the command poll
+# returns in MICROSECONDS, so rung 38's read loop - which reads `BUFFER` unconditionally - runs BEFORE
+# the card's data arrives. rung 38's missing enable was the only reason its read worked: the 1.2 s
+# timeout WAS the wait. **The defect that made `_ext_complete = 0` hid this one.** The repair is the
+# vendor's own shape (`sdhci_transfer_pio` reads only inside `while (PRESENT_STATE & DATA_AVAILABLE)`):
+# a SECOND pass over the same 128 words, each word gated on `PRESENT_STATE`'s `DATA_AVAILABLE`
+# (`0x800`), bounded by `ST_EXT_DATA_TICK_BUDGET` = 384000 ticks (20 ms at 19.2 MHz) so a card that
+# never delivers is a READING (`_ext_data_wait_timeout = 1`) and not a hang. The first pass stays
+# exactly as rung 38 left it, so `_ext_words_gated` is still that pass's reading and the four new cells
+# (`_ext_data_waited`, `_ext_data_wait_timeout`, `_ext_data_gated`, `_ext_data_ticks`) are the second
+# pass's.
+#
+# (2) **THE CLASSIFIER DEFECT THIS ARM FOUND AND FIXED, WHICH IS THE LARGER FINDING.** rung 38's
+# build clause asserted `st_send_ext_csd`'s device surface as an EXACT SET that included
+# `f9824904:str` - a WORD store to `BLOCK_SIZE 0x04`, which the clause's own text says would clear the
+# sibling `BLOCK_COUNT`. It was not a device store at all: it is the 128-word loop's `str r3, [r2, #4]!`
+# writing `.bss` (`st_ext_csd`), and the classifier resolved `r2` - loaded by `ldr r2, [pc, #784]` from
+# the literal pool - through a STALE `movt rX, #0xf982` left by a DIFFERENT register. **The value-38
+# record's `f9824904:str` was a FALSE PASS by coincidence: the high half `0xf982` came from the stale
+# `movt` and the low half `0x4904` happened to be in the register's low set.** This arm's rung-40
+# second pass allocates registers differently, so the same artifact surfaced as `NODECL-f982-0:str` -
+# a false refusal - and the two together exposed the class. **The fix is CLASSIFIER-WIDE** (it is
+# `classify_body`, used by every device clause in the file): `[pc, #N]` bases are resolved EXACTLY out
+# of the literal pool; a register loaded from the pool carries its value; `mov rD, rS` and
+# `add/sub rD, rS, #imm` propagate it; and any other load clears the destination. It changed the
+# value-38 body's own resolution to the corrected one, so this arm's clause was reconciled to the
+# fixed classifier (the two bodies, old and new, now classify IDENTICALLY - the second pass changed the
+# allocator, not the surface). It also proved rung 38's image-side EXACT-SET assertion was allocator-
+# dependent, and that assertion is retired here to two sound forms: NO foreign symbol, and `st_ext_csd`
+# (the 512-byte buffer the transfer fills) among them.
+#
+# (3) WHAT THE PRESS WOULD READ. The SAME `_ext_*` cells as the rung-39 press, with the one expected
+# change: `_ext_words_gated` non-zero AND `_ext_data_gated` non-zero (the second pass read every word
+# the first pass could not) beside `_ext_complete = 1` AT THE SAME TIME - the goal the rung-38 and
+# rung-39 presses each got exactly half of. `_ext_data_wait_timeout` should be 0 and `_ext_data_ticks`
+# should be the small count the wait actually took. If `_ext_data_gated = 0x80` (128 of 128) the data
+# path is working end to end and the frontier moves to CMD16 `SET_BLOCKLEN`.
+#
+# **AND WHAT THIS ARM DOES NOT SETTLE.** It asserts the WAIT EXISTS and is BOUNDED. It does NOT assert
+# that a press will complete the transfer: a card that delivers no data is `_ext_data_wait_timeout = 1`
+# with whatever arrived, which is a reading and not a success.
+#
+# **THE GOAL IS NOT MET.** No block read, no filesystem, no mount; TWRP-to-storage stays withheld.
+set=armed-storage-f34cf0fb sha256=98756a6a24df7de187b6f5862b7d0378ba9ce250d53ddf8660318f8f2f92d700 bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-39-entry-rung-40-ADDS-THE-BOUNDED-DATA-WAIT-TO-RUNG-38-S-CMD8-NOT-PRESSED
+set=armed-storage-f34cf0fb sha256=93ea81462ccb62ae8ece04f1e3a008d7af7e927de8b387ed3f205eba29108f83 bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-39-entry-same-size-as-the-rung-39-arm-s-because-the-entry-group-did-not-cross-a-page
+set=armed-storage-f34cf0fb sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-39-s-MEASURED-no-payload-switch-moved
+set=armed-storage-f34cf0fb sha256=e3a0f0987b19a2f62b724e9c418084cb21f21de05c46517e42e886ec1b40a046 bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-size-UNCHANGED-from-the-rung-39-arm-s-6126716-the-entry-blob-grew-but-the-page-padding-absorbed-it
+set=armed-storage-f34cf0fb sha256=09bc13fe0414577064c9f2fd541223553173626df336868fa29de799cb1fe58b bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-f34cf0fb sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-f34cf0fb sha256=229f8f6a80a7895d47cdf2b967c17dfce625d5524cf62b364fe7fbe446b51d72 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-f34cf0fb sha256=f34cf0fbbeb63e49a8c800c6fff5f866420ef3a5bc4c7ca7900835e3d7a47d17 bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-f34cf0fb-IS-THE-SETS-NAME-same-5569148-bytes-as-the-rung-39-arm-and-578368-of-those-bytes-differ-because-the-entry-group-moved-the-rung-40-wait-into-a-function-that-moved-nothing-of-its-device-surface
+set=armed-storage-f34cf0fb sha256=d7827623fae2e4ed2c7a748ecb495406d3e6e78c27b3dd1efc2c56c9e627362a bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=39-and-differing-from-the-rung-39-arm-s-in-EXACTLY-TWO-lines-the-artifact-s-own-hash-and-the-ladder-value-38-39
+set=armed-storage-f34cf0fb sha256=4e2719893e2e646705a62e341a43140a17d1ce8012349e550aec0ebd8bcb3e30 bytes=6749248 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-UNCHANGED-from-the-rung-39-arm-s-6749248-because-the-new-loop-moved-into-expansion-the-body-already-had
+set=armed-storage-f34cf0fb sha256=681f86b0cc430dc9d707557ce5b2648e4b8db265adfea57ac9bb8da0d01d764f bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FOUR-of-its-content-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-the-hashes-of-build_entry-sh-and-entry_storage-c-and-this-record-s-own-two-role-lines

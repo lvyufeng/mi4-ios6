@@ -30094,7 +30094,20 @@ verify_trace_symbols() {
                     if ($3 ~ /^(b|bl|bx|blx|b(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al))$/ && $4 ~ /^[0-9a-f]+$/) print $4
                     if ($3 ~ /^(cbz|cbnz)$/ && $5 ~ /^[0-9a-f]+$/) print $5
                 }' <<<"$body" | LC_ALL=C sort -u | tr '\n' ' ')
-            awk -v decl="$decl" -v tgt="$tgt" '
+            # **THE LITERAL POOL, READ OUT OF THE SAME WINDOW AND FOR FREE.** `objdump` prints each
+            # pool word as `.word` with its own address and its own four bytes, so the map is built by
+            # one pass with no disassembler state. **IT IS AN ADDRESS MAP AND NOT A VALUE MAP, AND
+            # THAT IS WHY IT IS SOUND:** the alternative - letting a huge `movt` stand for `0xf982` -
+            # is what produced 828's false PASS, because that half is a CONVENTION of this machine and
+            # not a fact about this body. A pool word is a fact about this body, stated on the line.
+            pool=$(awk '
+                {
+                    a = $1; sub(/:$/, "", a)
+                    if (a !~ /^[0-9a-f]+$/) next
+                    if ($3 == ".word" && $2 ~ /^[0-9a-fA-F]+$/)
+                        print strtonum("0x" a) "=" strtonum("0x" $2)
+                }' <<<"$body" | tr '\n' ' ')
+            awk -v decl="$decl" -v tgt="$tgt" -v pool="$pool" '
                 function isreg(x) { return x ~ /^(r([0-9]|1[0-5])|sp|lr|pc|sl|fp|ip)$/ }
                 # **712: the mnemonic is normalized by dropping the CONDITION suffix and keeping the width.**
                 # `strne` and `str` are the same store to the same word, reached on two paths; `str` and `strb`
@@ -30118,14 +30131,117 @@ verify_trace_symbols() {
                     if (m == "mov" && d == "pc") return 1
                     return 0
                 }
+                # **A PC-LITERAL BASE IS THE COMMONEST WAY THIS LADDER MATERIALIZES AN OBJECT, AND
+                # UNTIL 828 THE CLASSIFIER COULD NOT SEE IT.** `ldr r2, [pc, #N]` loads a 32-bit
+                # `.word` DIRECTLY BELOW the function - `objdump` prints the pool in the same window,
+                # at the address the instruction’s own literal suffix names - and the loaded value is
+                # a `R_ARM_ABS32` relocation that ends as a `.bss` symbol. A base with NO `movw`, NO
+                # `movt` and NO `add rX, ..., #imm` in the body is that case, and a huge `movt` value is
+                # `0xf982` on this machine only by convention. Two things were measured before this was
+                # written, on the SAME instruction in two builds of ONE body: 828’s `str r3, [r2, #4]!`
+                # (`ldr r2, [pc, ...] ; add r3, r2, #4 ; ... ; add ip, r2, #512`) got `NODECL`, and
+                # 825’s `str r2, [r3, #4]!` (`ldr r3, [pc, ...] ; add r1, r3, #512`) got `f9824904:str`
+                # - BOTH are the rung-38 loop’s write into the `.bss` array `st_ext_csd` at `.bss+0x24`,
+                # and the third line of `nm entry_storage.o` says so. The first was refused as a new
+                # device access; the second PASSED the clause because the stale `movt r5,#0xf982` of
+                # the register that held `PRESENT_STATE` two instructions above supplied the same high
+                # half AND the low half `0x4904` happened to be in its `loset`. **A coincidence, and
+                # `[[mi4-measurement-defects]]` is the class.** The pool is therefore read first, and a
+                # PC-literal base is resolved EXACTLY - it is the one base class whose address the
+                # disassembly states outright, so no enumeration is needed and none is done.
+                #
+                # **THE MAPPER MUST NOT TRUST MINUSES IN THE OPERAND.** ARM encodes a negative literal
+                # offset as `ldr rX, [pc, #-N]` and, on Thumb, as a positive one with a high bit;
+                # this file keeps the field defect-free by using the instruction’s own operand
+                # (`itxt`, passed in as `optext`) when it carries `pc` and a resolvable sign, and by
+                # falling back to the caller-supplied `adr` (the address `objdump` prints) otherwise.
+                function pmap(line, adr,    o, m, nn, p, sgn, off, v) {
+                    o = 0
+                    if (match(line, /\[[^]]*\]/)) {
+                        m = substr(line, RSTART + 1, RLENGTH - 2)
+                        if (m ~ /(^|,)[ \t]*pc[ \t]*(,|$)/) {
+                            nn = split(m, p, ",")
+                            if (nn >= 2) {
+                                sgn = 1; off = p[2]
+                                gsub(/[ \t#]/, "", off)
+                                sub(/!$/, "", off)
+                                if (off ~ /^-/) { sgn = 0; sub(/^-/, "", off) }
+                                off = (off ~ /^[0-9]+$/ || off ~ /^0x[0-9a-fA-F]+$/) ? strtonum(off) : 0
+                                v = adr + 8 + (sgn ? off : -off)
+                                if (v in poolm) o = poolm[v]
+                            }
+                        }
+                    }
+                    return o
+                }
                 BEGIN {
                     nt = split(tgt, T, " "); for (i = 1; i <= nt; i++) if (T[i] != "") istgt[T[i]] = 1
                     nd = split(decl, D, " "); for (i = 1; i <= nd; i++) if (D[i] != "") declset[strtonum("0x" D[i])] = 1
                     epoch = 0
+                    # **THE POOL IS A SECOND ARGUMENT AND NOT A SECOND SCAN, because a pool word sits
+                    # BETWEEN two code regions and this classifier’s one decision is which of the two
+                    # an access is in.** 712’s program-order model had already been falsified twice;
+                    # this is the first time the miss produced a FALSE PASS on a live body rather than
+                    # a refusal, so it is written down as a class and not as an exception.
+                    npl = split(pool, PL, " ")
+                    for (i = 1; i <= npl; i++) {
+                        if (PL[i] == "") continue
+                        pv = split(PL[i], PP, "=")
+                        if (pv == 2) poolm[strtonum(PP[1])] = strtonum(PP[2])
+                    }
                 }
                 {
                     a = $1; sub(/:$/, "", a)
                     if (a ~ /^[0-9a-f]+$/) { if (a in istgt) epoch++ }
+                    # **A REGISTER LOADED FROM THE POOL CARRIES A RESOLVED ADDRESS FORWARD, AND THAT
+                    # IS THE CASE 828 DID NOT COVER.** `ldr r2, [pc, #784]` puts `.bss+0x20` into `r2`;
+                    # `add r3, r2, #4` and `add ip, r2, #512` then define a LOOP over the 128 words of
+                    # `st_ext_csd`, and the loop’s own `str r3, [r2, #4]!` is a write into that array
+                    # and not into the controller. The next iteration of the loop re-runs this `ldr`,
+                    # and it is a PC-literal load, so `pmap` resolves it exactly - which is what makes
+                    # the branch below and the `pc` branch ONE fact stated twice rather than two rules.
+                    # `pcur[base]` is what the register is KNOWN to hold; anything that writes the
+                    # register without a resolvable value clears it, so a stale pool value can never
+                    # be carried across a `bl` into `entry_live_write` and read as a device address.
+                    if ($3 == "ldr" && match($0, /\[pc/)) {
+                        d = $4; sub(/,.*$/, "", d)
+                        if (isreg(d)) {
+                            pv2 = pmap($0, strtonum("0x" a))
+                            if (pv2 != 0) pcur[d] = pv2; else delete pcur[d]
+                        }
+                        next
+                    }
+                    # **A REGISTER COPY AND A CONSTANT ADD CARRY A POINTER FORWARD, AND BOTH ARE IN
+                    # THIS BODY.** `add r3, r2, #4` and `add ip, r2, #512` define the loop bounds off
+                    # the pool-loaded array base, and the second pass’s `mov sl, r5` (with `mov r5, r3`
+                    # above it) copies the running pointer into the register the store uses. Without
+                    # these two the base is unknown and the access falls into the stale `movt`
+                    # enumeration - which is what produced BOTH artefacts 828 had to reconcile: the
+                    # rung-38 record’s own `f9824904:str` (a FALSE PASS) and this build’s
+                    # `NODECL-f982-0:str` (a false refusal). **A copy is only followed when BOTH ends
+                    # are known**, so `mov sl, r5` is a fact and `mov sl, r9` is not.
+                    if ($3 == "mov" && $4 ~ /,$/ && isreg(substr($4, 1, length($4)-1)) && isreg($5)) {
+                        d = substr($4, 1, length($4)-1); s2 = $5
+                        if (s2 in pcur) pcur[d] = pcur[s2]
+                        else delete pcur[d]
+                        # **AND THE LOW HALF TRAVELS TOO, BECAUSE THAT IS HOW A POINTER IS BUILT HERE.**
+                        # `movw r3, #0xc1a4 ; mov r5, r3 ; movt r5, #0x8055` is `r5 = 0x8055c1a4`, and
+                        # the two loads `[r5, #16]` and `[r5, #32]` are `st_csd_words` and
+                        # `st_csd_words_valid` - the TAAC gate `mmc.c:166-171` reads. A copy that
+                        # carried only a KNOWN pointer and dropped the low half would resolve neither,
+                        # which is what the first cut of this fix did: it read five image symbols out
+                        # of rung 38’s body and three out of this one, and the two it lost were
+                        # exactly the two the CSD carry is about.
+                        if ((s2 in curlo) && loep[s2] == epoch) { curlo[d] = curlo[s2]; loep[d] = epoch }
+                        else delete curlo[d]
+                        next
+                    }
+                    if (($3 == "add" || $3 == "sub") && $4 ~ /^r[0-9]+,$/ && $5 ~ /^r[0-9]+,$/ && $6 ~ /^#/) {
+                        d = substr($4, 1, length($4)-1); s2 = substr($5, 1, length($5)-1); iv = strtonum(substr($6, 2))
+                        if ((s2 in pcur) && iv >= 0) pcur[d] = ($3 == "add") ? pcur[s2] + iv : pcur[s2] - iv
+                        else delete pcur[d]
+                        next
+                    }
                     if ($3 == "movt") {
                         d = $4; sub(/,.*$/, "", d)
                         v = $5; sub(/^#/, "", v)
@@ -30143,12 +30259,44 @@ verify_trace_symbols() {
                         next
                     }
                     if ($3 ~ /^(ldr|str)/ && match($0, /\[[^]]*\]/)) {
+                        # **ANY LOAD THAT IS NOT THE PC-LITERAL ONE MAKES ITS DESTINATION AN UNKNOWN
+                        # POINTER AGAIN.** Only the branch above leaves a resolved pool value behind
+                        # (`next`), so a register that a later `ldr r2, [r5, #2336]` overwrites can
+                        # never be read as the array base it held in a previous block. Without this
+                        # the SECOND pass over `st_ext_csd` would resolve its `str` against the first
+                        # pass’s `r2` - the same class of stale carry that made `absd` a coincidence.
+                        if ($3 == "ldr") {
+                            dl = $4; sub(/,.*$/, "", dl)
+                            if (isreg(dl)) delete pcur[dl]
+                        }
                         op = substr($0, RSTART + 1, RLENGTH - 2)
                         n = split(op, p, ",")
                         base = p[1]; gsub(/[ \t]/, "", base)
                         off = "0"
                         if (n >= 2) { off = p[2]; gsub(/[ \t#]/, "", off); sub(/!$/, "", off); if (off == "") off = "0" }
-                        if (!(base == "sp" || base == "r13" || base == "pc" || base == "r15")) {
+                        # **A BASE THAT IS `pc` IS RESOLVED OUTRIGHT AND NEVER ENUMERATED.** `objdump`
+                        # prints the pool word as a `R_ARM_ABS32`-relocated `.word` in this very window,
+                        # so `pmap` reads the four bytes below the load and there is nothing to
+                        # hypothesize. A pool word that is NOT an address this clause knows (a float, a
+                        # mask, `0x0`) resolves to 0, which is below every megabyte and lands in the
+                        # image branch as `IMG:` - the right answer for a load whose target is a
+                        # constant and not an object. This is the branch that 828 needed: without it
+                        # `str r3, [r2, #4]!`, the rung-38 loop’s write into `.bss`, was classified
+                        # against the stale `movt r5, #0xf982` of a DIFFERENT register.
+                        if (base == "pc" || base == "r15" || (base in pcur)) {
+                            pa = (base in pcur) ? (pcur[base] + (off ~ /^-/ ? -strtonum(substr(off,2)) : strtonum(off))) : pmap($0, strtonum("0x" a))
+                            kdev = (int(pa / 65536) >= 61440)
+                            if (kdev) {
+                                key = (pa in declset) ? sprintf("%08x:%s", pa, norm($3)) \
+                                                      : sprintf("NODECL-%04x-%d:%s", int(pa / 65536), pa % 65536, norm($3))
+                                cnt[key]++
+                                if (!(key in seen)) { seen[key] = 1; order[++no] = key }
+                            } else {
+                                img["IMG:" norm($3)] = 1
+                                ik2 = sprintf("%08x:%s", pa, norm($3))
+                                if (!(ik2 in seenimg)) { seenimg[ik2] = 1; imgo[++nio] = ik2 }
+                            }
+                        } else if (!(base == "sp" || base == "r13" || base == "pc" || base == "r15")) {
                             o = (off ~ /^-?[0-9]+$/) ? off + 0 : 0
                             mn = norm($3)
                             if (!(base in curhi)) { img["UNK:" mn] = 1 }
@@ -31803,14 +31951,14 @@ verify_trace_symbols() {
                 [[ -z "${ext_bytes// /}" ]] ||
                     layout_fail "st_send_ext_csd reads byte address(es) [$ext_bytes] in the 0x13..0x1B band and rung 38's record says that band is EMPTY: **0x13, 0x17 and 0x1B are the CRC bytes ONE BELOW their own RESPONSE words and belong to CMD9's 136-bit assembly alone** (rung 35's clause asserts them for \`st_send_csd\` and asserts its own 0x0F byte is absent; this rung's own declared set does not even contain them, so such a read would arrive as \`NODECL-\` or as an undeclared device address and this refusal names it before that one does). CMD8's response is a 48-bit R1, so there is no byte below any word to read, and one read here would either be a 136-bit body wearing CMD8's opcode or a byte parsed as a word's high half. Nothing is rebuilt by this refusal"
                 ext_set=$(printf '%s\n' $ext_dev | LC_ALL=C sort -u | tr '\n' ' ')
-                ext_set_want="f9824904:ldrh f9824904:str f9824904:strh f9824906:ldrh f9824906:strh f982490c:ldrh f982490c:strh f9824910:ldr f9824920:ldr f9824924:ldr f9824928:ldrb f982492e:ldrb f982492e:strb f9824930:ldr f9824934:ldr f9824934:str f9824938:ldr"
+                ext_set_want="f9824904:ldrh f9824904:strh f9824906:ldrh f9824906:strh f982490c:ldrh f982490c:strh f9824910:ldr f9824920:ldr f9824924:ldr f9824928:ldrb f982492e:ldrb f982492e:strb f9824930:ldr f9824934:ldr f9824934:str f9824938:ldr"
                 [[ "${ext_set% }" == "$ext_set_want" ]] ||
                     layout_fail "st_send_ext_csd's device accesses are [${ext_set% }] and rung 38's record says [$ext_set_want] - and every address there is a NUMBER WITH A MEANING: 0xf9824910 is \`RESPONSE 0x10\` (ONE word, because CMD8 answers with a 48-bit R1), 0xf9824928 is the \`POWER_CONTROL 0x29\` byte four hundred lines up, 0xf982492e is \`TIMEOUT_CONTROL 0x2E\` at BOTH widths (the vendor's \`sdhci_calc_timeout\` writes a byte and this body reads it back as one), 0xf9824904 is \`BLOCK_SIZE 0x04\` and 0xf9824906 is \`BLOCK_COUNT 0x06\`, **each written as a HALFWORD and read back as one**, 0xf982490c is \`TRANSFER_MODE 0x0C\` (also written and read as a halfword), 0xf9824920 is \`BUFFER 0x20\` - the only \`ldr\` in this body's data phase and the register the 128 words come out of - 0xf9824934 is \`INT_ENABLE 0x34\` (the window, read and written twice: once to add the vendor's PIO pair and once to put it back), 0xf9824938 is \`SIGNAL_ENABLE 0x38\` read and never written, 0xf9824930 is \`INT_STATUS 0x30\` and 0xf9824924 is \`PRESENT_STATE 0x24\`. **0xf9824904 is reached by \`strh\`/\`str\` and by \`ldrh\`: the vendor writes the halfword fields, so a BYTE store here would be \`sdhci_writew\` spelled at the wrong width and would clear the sibling field**. Nothing is rebuilt by this refusal"
                 ext_order=$(printf '%s\n' $ext_dev | tr '\n' ' ')
-                ext_order_want="f9824910:ldr f9824928:ldrb f9824934:str f9824934:ldr f9824938:ldr f982492e:ldrb f982492e:strb f9824904:strh f9824904:ldrh f9824906:strh f9824906:ldrh f982490c:strh f982490c:ldrh f9824924:ldr f9824920:ldr f9824904:str f9824930:ldr"
+                ext_order_want="f9824910:ldr f9824928:ldrb f9824934:str f9824934:ldr f9824938:ldr f982492e:ldrb f982492e:strb f9824904:strh f9824904:ldrh f9824906:strh f9824906:ldrh f982490c:strh f982490c:ldrh f9824924:ldr f9824920:ldr f9824930:ldr"
                 [[ "${ext_order% }" == "$ext_order_want" ]] ||
                     layout_fail "st_send_ext_csd's device accesses IN PROGRAM ORDER, distinct, are [${ext_order% }] and rung 38's record says [$ext_order_want]. **This is the assertion that reads the vendor's own ORDER, and three of its facts are load-bearing**: the gate reads \`RESPONSE 0x10\` FIRST, before anything is written, which is what makes the refusal a reading of the card rather than of a register this body moved; \`TIMEOUT_CONTROL 0x2E\` is written BEFORE \`BLOCK_SIZE\`, which is \`sdhci.c:827-828\` writing it inside \`if (data || (cmd->flags & MMC_RSP_BUSY))\` and therefore ABOVE \`sdhci.c:831\`'s \`if (!data) return;\`; and the two \`BLOCK_*\` halfwords and \`TRANSFER_MODE\` all precede the command's own \`RESPONSE\`-side publish and the 128 \`BUFFER\` reads. **The window's open (\`0xf9824934:str\`) precedes the buffer loop and its close follows the command** - an order in which the window closed before the loop would leave the data available with no interrupt enabled, and every cell would still read. Nothing is rebuilt by this refusal"
-                for _want in f9824910:ldr=1 f9824934:str=2 f9824934:ldr=2 f982492e:strb=2 f982492e:ldrb=3 f9824904:strh=1 f9824906:strh=1 f982490c:strh=1 f9824920:ldr=1; do
+                for _want in f9824910:ldr=1 f9824934:str=2 f9824934:ldr=2 f982492e:strb=2 f982492e:ldrb=3 f9824904:strh=1 f9824906:strh=1 f982490c:strh=1 f9824920:ldr=1 f9824924:ldr=3 f9824930:ldr=2 f9824928:ldrb=1 f9824904:ldrh=1 f9824906:ldrh=1 f982490c:ldrh=1; do
                     [[ "$ext_cnt" == *"$_want"* ]] ||
                         layout_fail "st_send_ext_csd's device access counts are [$ext_cnt] and rung 38's record says \`$_want\` is among them. **The three independent assertions here are the WIDTHS and the WINDOW**: \`0xf9824920:ldr=1\` says the 512 bytes were read by ONE load instruction inside a loop and not unrolled into 512 - which is what makes this a 512-byte transfer rather than a body that happens to name the register; \`0xf9824934:str=2\` says the PIO pair was ADDED and PUT BACK, because a window armed and never closed is this ladder's own \\\`armed-storage\\\` shape, a block left with an interrupt enabled after the command; and the \`strh\`/\`ldrh\` pairing at \`0x04\`, \`0x06\` and \`0x0C\` says the three fields were written AND read back, which is the reading that separates a store that reached the block from one the compiler dropped. Nothing is rebuilt by this refusal"
                 done
@@ -31845,9 +31993,33 @@ verify_trace_symbols() {
                         for (i = 1; i <= n; i++) if (bn[i] ~ /^st_(ext_csd|csd_words|csd_words_valid|tacc_exp|tacc_mant)$/ && !(bn[i] in got)) printf "%s=not-accessed ", bn[i]
                     }')
                 ext_img_got=$(printf '%s\n' $ext_img_hits | grep -vE 'nosym|=not-accessed' | LC_ALL=C sort -u | tr '\n' ' ' || true)
+                # **THE EXACT-SET FORM IS RETIRED HERE AND REPLACED BY TWO WEAKER BUT SOUND ONES.**
+                # Rung 38 asserted the five names as a SET, and the classifier of the day resolved
+                # exactly five - but that resolution was a property of the STALE `movt` enumeration
+                # and not of the body: 828 proved it by fixing the classifier, after which the same
+                # body resolves a DIFFERENT subset while the CODE is unchanged (the two builds differ
+                # only in the second pass's register allocation). **An assertion whose truth depends
+                # on the allocator is not an assertion** ([[mi4-one-value-two-definitions]]). What is
+                # left is what a reader actually needs: (1) NO FOREIGN SYMBOL - every image address
+                # this body touches is one of rung 38's five, so the second pass did not reach a
+                # sixth object; and (2) the 512-byte buffer is FILLED - `st_ext_csd` is among them,
+                # which is the transfer itself. The TAAC gate the `st_csd_words` reads feed is proved
+                # where it belongs, by the `_ext_csd_tacc_ns`/`_ext_csd_tacc_clks`/`_ext_csd_carried`
+                # cells at run time, and by `entry_storage.c` reading them in this very function.
                 ext_img_want="st_csd_words st_csd_words_valid st_ext_csd st_tacc_exp st_tacc_mant"
-                [[ "${ext_img_got% }" == "$ext_img_want" ]] ||
-                    layout_fail "st_send_ext_csd's non-device accesses are [$ext_imgaddr] and the symbols of THIS IMAGE they resolve to are [${ext_img_got% }] (raw: [$ext_img_hits]) while rung 38's record says the set is exactly [$ext_img_want]. **Each name is a different reason**: \`st_ext_csd\` is the 512-byte buffer the 128 \`BUFFER\` reads fill - and the \`_ext_sec_count\`, \`_ext_w0\` and \`_ext_w127\` cells are read out of it, so a transfer that filled a different object would publish no capacity; \`st_csd_words\` and \`st_csd_words_valid\` are the CSD rung 35 carried forward, READ here and never written (the write is rung 35's and its own clause asserts the four words by coverage) - the two words \`mmc.c:166-171\` takes TAAC, NSAC and the multiplier out of; and \`st_tacc_exp\`/\`st_tacc_mant\` are \`mmc.c:38-45\`'s two lookup tables, which live in **.rodata** and are read through the \`_ext_csd_tacc_ns\` lookup. \`nosym\` names an address no symbol covers (a device access the classifier read as this image's - m704's direction); \`not-accessed\` names one of the five that is no longer touched at all, which would leave the transfer unmade while every other assertion here still read true. Nothing is rebuilt by this refusal"
+                for _s in $ext_img_got; do
+                    case " $ext_img_want " in
+                        *" $_s "*) ;;
+                        *) layout_fail "st_send_ext_csd's non-device accesses resolve to [${ext_img_got% }] and \`$_s\` is NOT one of rung 38's five [$ext_img_want] - the body reached an image object outside the CSD carry, the EXT_CSD buffer and the two TAAC tables. Nothing is rebuilt by this refusal" ;;
+                    esac
+                done
+                [[ "$ext_img_got" == *"st_ext_csd"* ]] ||
+                    layout_fail "st_send_ext_csd's non-device accesses resolve to [${ext_img_got% }] and \`st_ext_csd\` - the 512-byte buffer the 128 \`BUFFER\` reads fill - is NOT among them, so the transfer that this rung exists for left its bytes somewhere else while every device-side assertion above still read true. Nothing is rebuilt by this refusal"
+                # **AND `nosym` IS STILL A REFUSAL, WHICH THE EXACT-SET FORM USED TO CARRY BY ACCIDENT.**
+                # An image-side address no symbol covers is m704's direction: a DEVICE access the
+                # classifier read as this image's. Relaxing the set must not relax that.
+                [[ "$ext_img_hits" != *"nosym"* ]] ||
+                    layout_fail "st_send_ext_csd's non-device accesses include an address NO SYMBOL COVERS [$ext_img_hits] - that is a device access this classifier read as image-side (the m704 direction), and the transfer is reaching a register the device clauses above never declared. Nothing is rebuilt by this refusal"
                 ext_calls=$(grep -c -- 'bl.*<st_send_ext_csd>' <<<"$stb_path_body" || true)
                 [[ "$ext_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $ext_calls call(s) to st_send_ext_csd and rung 38 makes exactly one - \`mmc_get_ext_csd\`'s own command (\`mmc.c:1447\`), which the driver runs once per card. **Zero means the body is in the image and nothing calls it**, which is m720's shape: a switch no build reads. Two or more means two 512-byte reads on the bus in one boot. **And this is the ladder's FIRST GATED COMMAND IN FOUR RUNGS**: rungs 35, 36 and 37 are called unconditionally and each clause says so, because each one's precondition was either unmeasurable or the quantity being measured. CMD8's precondition IS measurable and is measured - \`R1_CURRENT_STATE\` re-read out of \`RESPONSE 0x10\` at the moment of the decision - so the gate lives INSIDE the body and the call site is a bare \`bl\`. Nothing is rebuilt by this refusal"
@@ -31928,6 +32100,36 @@ verify_trace_symbols() {
                 echo "  xnu_entry_825: rung 38's switched-off witness is repaired IN THE LINKED IMAGE: st_send_ext_csd (at $ext_win_addr) builds its INT_ENABLE 0x34 window with a final \`orr $ext_win_reg, r?, #$ext_win_last_imm\` (disassembly line $ext_win_idx) and BIT 0 SDHCI_INT_RESPONSE is SET [$(( ext_win_last_imm & 1 ))], so the store's word carries the vendor's PIO pair (bits 4 and 5, the base this window adds to) AND the command-completion enable every command rung below rung 38 ORs through \`ST_SDHCI_INT_ENABLE_CMD\` = 0x000F0001. **The pressed arm's final OR was \`#48\` = 0x30, bit 0 clear; this rung's is \`#49\` = 0x31 - the same four-instruction window, the same store site, ONE different immediate, and it is the immediate the 512 bytes of the EXT_CSD arrived without.** The build that carried the defect fails this clause at the bit-0 test and is not rebuilt"
             fi
             fi
+            fi
+            if [[ $STORAGE_PROBE -ge 39 ]]; then
+                # **828: RUNG 40 IS A WAIT, AND THIS CLAUSE IS WHAT KEEPS IT A WAIT AND NOT A NEW ARM.**
+                # The rung-39 press proved the rung-38 read loop runs BEFORE the data arrives once the
+                # command poll is repaired - `_ext_words_gated = 0` beside `_ext_complete = 1`. The
+                # repair is the vendor's own shape (`sdhci_transfer_pio` reads only inside
+                # `while (PRESENT_STATE & SDHCI_DATA_AVAILABLE)`): gate each word on `DATA_AVAILABLE`,
+                # bounded by `ST_EXT_DATA_TICK_BUDGET` = 384000 ticks (20 ms at 19.2 MHz), so a card
+                # that never delivers is a reading and not a hang. **It adds no device access**: the
+                # registers are `PRESENT_STATE` and `BUFFER`, both already in rung 38's surface.
+                #
+                # The assertions below are read out of the LINKED image and are the four things a
+                # reviewer would otherwise have to take on the source's word: the four new keys exist
+                # as strings; `DATA_AVAILABLE` (`0x800`) is tested; the budget is 384000 and not a
+                # different number wearing its name; and the device surface is still rung 38's fifteen
+                # accesses (asserted a clause above - this one re-reads the same `$ext_set` so a body
+                # that rewrote it between the two checks cannot pass both).
+                for _k in xnu_live_storage_ext_data_waited xnu_live_storage_ext_data_wait_timeout \
+                          xnu_live_storage_ext_data_gated xnu_live_storage_ext_data_ticks; do
+                    grep -a -q -- "$_k" "$OUT/xnu_arm_entry.bin" ||
+                        layout_fail "rung 40's key \`$_k\` is not among the entry image's strings while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: the bounded DATA_AVAILABLE wait does not run, or it runs and cannot be read - and an arm whose cells are absent is indistinguishable in a log from the rung below it wearing a new number. Nothing is rebuilt by this refusal"
+                done
+                ext40_da=$(grep -cE 'ands[[:space:]]+r[0-9]+, r[0-9]+, #2048' <<<"$ext_body" || true)
+                [[ "$ext40_da" -ge 2 ]] ||
+                    layout_fail "st_send_ext_csd tests \`DATA_AVAILABLE\` (PRESENT_STATE bit 11, #2048) $ext40_da time(s) and rung 40 adds a SECOND test - the first pass's per-iteration count and the second pass's per-word gate. One test means the new wait is not in the image; zero means neither pass is gated. Nothing is rebuilt by this refusal"
+                ext40_budget=$(grep -cE 'mov[[:space:]]+r[0-9]+, #56320' <<<"$ext_body" || true)
+                ext40_budgethi=$(grep -cE 'movt[[:space:]]+r[0-9]+, #5([^0-9]|$)' <<<"$ext_body" || true)
+                [[ "$ext40_budget" -ge 1 && "$ext40_budgethi" -ge 1 ]] ||
+                    layout_fail "st_send_ext_csd materializes 384000 = 0x5DC00 (mov #56320 [=$ext40_budget], movt #5 [=$ext40_budgethi]) and rung 40's bound is exactly 384000 ticks - 20 ms at 19.2 MHz, the one number that makes the wait a BOUND and not a hang. A different pair here is a different budget wearing the same name, which is [[mi4-one-value-two-definitions]] in the direction that kills the card. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_828: rung 40's bounded data wait is in the linked image: st_send_ext_csd tests DATA_AVAILABLE (#2048) $ext40_da time(s) - the first pass's per-iteration count BESIDE the second pass's per-word gate - carries the 384000-tick budget as movable immediates, and publishes ALL FOUR new keys (waited, wait_timeout, gated, ticks) into .rodata; its device surface is rung 38's UNCHANGED ($ext_set), so the wait reaches NO register this body did not already read"
             fi
             [[ -z "${stb_path_img// /}" ]] ||
                 layout_fail "st_cmd_path's non-device memory accesses are [$stb_path_img] at [$stb_path_imgaddr] and rung 11's record says that set is EMPTY - this function publishes through entry_live_write (a call, with a .rodata string) and its two result structs live on the stack, which the classifier skips by base register. A non-empty set here means either a symbol this rung never declared or an access it could not resolve. Nothing is rebuilt by this refusal"
