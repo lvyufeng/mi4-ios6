@@ -10827,3 +10827,75 @@ set=armed-storage-6deb8308 sha256=679b4f80b938900501027ccc4dcd8d1715638a8be2b98e
 # **THE FRONTIER IS THE MEDIUM'S OWN LAYOUT**: no partition table at LBA 1, no
 # filesystem, no mount. **NO FIRER IS ARMED AND NO PRESS IS OWED. THE GOAL IS NOT
 # MET** - TWRP-to-storage stays withheld.
+
+# ---------------------------------------------------------------------------
+# 843: THE RUNG-48 ARM - THE PROTECTIVE MBR, READ AT LBA 0. ONE CONSTANT
+# CHANGED, NO NEW BODY. STAGE90_XNU_STORAGE_PROBE=47, VALUE 47 = ORDINAL RUNG 48.
+# **PARKED, NOT PRESSED, NOT ARMED.**
+#
+# WHAT IT IS: the rung-47 press (842) OPENED THE DATA PATH - the whole chain
+# CMD0..CMD17 completes on hardware, the transfer clean end to end (response
+# 0x900, the full 512 bytes moved, no data error, no timeout) - and measured that
+# LBA 1 is NOT a GPT header (`_rd_gpt = 0`, `_rd_w0 = 0xe8f9decb`,
+# `_rd_w1 = 0xdee55679`, `_rd_w127 = 0xcb686a68`). So reading LBA 1 was the
+# image's self-verifying GUESS, and on this card it is not a GPT header. **The
+# frontier is the medium's own layout.**
+#
+# **RUNG 48 IS `ST_MMC_READ_LBA` 1 -> 0 AND NOTHING ELSE.** The command, the flags,
+# the block length CMD16 set, the reset-before-read order and the whole cell set
+# are rung 47's byte for byte; only the sector moves, so the byte address becomes
+# `0 << 9 = 0`. A GPT disk keeps a PROTECTIVE MBR at LBA 0, and an MBR's own
+# signature is `0x55 0xAA` at bytes 510-511 - so LBA 0 turns "not a GPT" into a
+# measurement.
+#
+# THE BUILD CLAUSES ARE THE RUNG, IN THREE PLACES. `xnu_entry_832`'s argument
+# clause is SPLIT BY VALUE: the body must load 512 at values <= 46 (LBA 1 << 9)
+# and `0` at value 47 (LBA 0 << 9), because a body that forgot the shift would
+# produce a complete, error-free transfer of the WRONG sector whose every cell read
+# as success (measured on this build: r1 = #0). The new `xnu_entry_843` requires
+# the derived cell `_rd_mbr` to be a real comparison - the `#43605` (0xAA55, a
+# `movw`) paired with the one `cmp r?, r?, lsr #16` (its high-half extraction), and
+# EXACTLY ONE such shift in the body. The `832` narration and the published-key
+# list now name `_rd_mbr`/`_rd_sig`.
+#
+# **AND THE FIRST DRAFT OF 843 WAS REFUSED BY ITS OWN BUILD**: it looked for the
+# literal `#127` and an index of 127 on a `uint32_t[128]` is NOT a `movw #127` -
+# GCC folds it into a frame-relative `ldr [r?, #1056]`, so the index never appears
+# as a literal. The repair asserts THE SHIFT and THE PAIRING, never the index or
+# its frame offset (which is a property of the whole function's stack layout and
+# would move with any unrelated local).
+#
+# THE ENTRY-GROUP PAGE MOVE DID NOT FIRE: `STAGE90_XNU_SEAM_LR` stays 0x8004c2dc,
+# printed by `xnu_entry_535` in this build. The arm's bin is 5,569,148 bytes - the
+# same size as the rung-47 arm's - and its elf is 6,749,440 (the same size: one
+# constant changed, no function added).
+#
+# READ THE ROWS: `_rd_sent = 1` with `_rd_complete = 1`, `_rd_err = 0`,
+# `_rd_state = 4` and `_rd_words_gated = 0x80` is THE MBR READ COMPLETED.
+# **`_rd_mbr = 1` with `_rd_sig = 0xAA55` is THE MEDIUM IS MBR-PARTITIONED**; and
+# `_rd_mbr = 0` with `_rd_sig` anything else is a sector that is neither an MBR
+# nor a GPT header (the layout is something this ladder has not yet named).
+# `_rd_gpt` is still published and now reads LBA 0's first two words (expected 0 -
+# an MBR's boot code is not `EFI PART`), so one log carries BOTH layouts'
+# signatures from the same 512 bytes. The negative cell is exact: `_rd_lba = 1`
+# with `_rd_arg = 0x200` would be rung 46's arm wearing rung 48's name - a clean
+# read of the wrong sector whose `_rd_mbr` came from LBA 1 - which is exactly what
+# `832`'s value-47 half refuses.
+#
+# NOTHING IS ARMED AND NO PRESS IS OWED: this arm is PARKED and the park is a
+# RECORD and not a queue. `fastboot boot` only; nothing flashed; CMD17 reads, so
+# the card stays in TRAN with its block length and its CSD/EXT_CSD exactly as rungs
+# 42-47 left them. **THE GOAL IS NOT MET** - no partition table walked, no
+# filesystem, no mount; TWRP-to-storage stays withheld.
+#
+set=armed-storage-8f0d41fd sha256=33ffb22e29bf6c48ac333841818ca06f9074b3c454dfab2a62adf28cfc161b67 bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-47-entry-rung-48-READS-THE-PROTECTIVE-MBR-AT-LBA-0-NOT-PRESSED
+set=armed-storage-8f0d41fd sha256=4611837a30937a3cfd7c892be1cdc38a8c3484b2038d7847f5b27768c7ea537d bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-47-entry-no-payload-switch-moved
+set=armed-storage-8f0d41fd sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-47-s-MEASURED-no-payload-switch-moved
+set=armed-storage-8f0d41fd sha256=2614421c7cd633bacd667598deb9989a5533338cacba550a593698f6200bf2b4 bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-two-bytes-different-from-the-rung-47-arm-s-size-UNCHANGED-from-the-rung-47-arm-s-6126716
+set=armed-storage-8f0d41fd sha256=4a55b56de1b3ea01988803b37995b640743d364e53e3d35c7d740b16793f3ddd bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-8f0d41fd sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-8f0d41fd sha256=884ee8b22338eccedfbac932bd5574d001684c56a39b68510d94496383b38bd4 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-8f0d41fd sha256=8f0d41fd10fa24d692b09ea562128aa06ce79e7d22a8134485a42b5c4dcd3e16 bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-8f0d41fd-IS-THE-SETS-NAME-same-5569148-bytes-as-the-rung-47-arm-and-the-difference-is-ONE-CONSTANT-ST_MMC_READ_LBA-1-to-0
+set=armed-storage-8f0d41fd sha256=5c12f5e34c9a6b54af7198057ac5d0606d9560011f585e7da987f5c97bac3c03 bytes=6749440 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-UNCHANGED-from-the-rung-47-arm-s-6749440-because-one-constant-moved-and-no-function-was-added
+set=armed-storage-8f0d41fd sha256=c440fc0d1db435d1797e32dedbab98bf9c748e6266514a6d3567e0023ccddc09 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=47-and-differing-from-the-rung-47-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
+set=armed-storage-8f0d41fd sha256=923a75fad5131647f2978582ee1e37094afce46a59f783feeed24b2a2dd1ee0b bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-this-arm-including-verify_press_ready-sh-which-carries-the-value-47-narration-arm
