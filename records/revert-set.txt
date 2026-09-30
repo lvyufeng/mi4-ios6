@@ -11490,3 +11490,74 @@ set=armed-storage-e8597e3e sha256=0c6e643e363286163a3df0492224a57eefa24beb62689b
 # **NO FIRER IS ARMED AND NO PRESS IS OWED.** The arm is SPENT and the park is a RECORD, not a queue.
 # **THE GOAL IS NOT MET** - the partition entry itself is still not decoded, no filesystem, no mount;
 # TWRP-to-storage stays withheld.
+#
+# 855 - THE RUNG-54 ARM (STAGE90_XNU_STORAGE_PROBE=53, VALUE 53 = ORDINAL RUNG 54):
+#
+# **TWO READS IN ONE BOOT: THE GPT HEADER CAPTURED AT SECTOR 1, THE PARTITION ENTRY ARRAY READ AT
+# SECTOR 2 AND THE FIRST ENTRY DECODED.** The rung-53 press (854) landed sector 2 cleanly
+# (`_rd_lba = _rd_arg = 2`, `_rd_complete = 1`, `_rd_err = 0`, `_rd_state = 4`) but `st_gpt_parse`
+# then decoded the ENTRY ARRAY as if it were a header and filled its carries from sector 2's (zero)
+# words 18/20/21 - `_gp_sig_ok = 0`, `_gp_nentries = 0`, `_gp_entry_size = 0`, `_gp_entry_lba = 0` -
+# so the entry decode consumed a shape the header decode had just zeroed and walked nothing
+# (`_ge_nentries_used = 0`, `_ge_found = 0`, `_ge_arg_is_arr = 0`). **The frontier was the ORDER,
+# not a new device act: rung 53 read ONE sector, so the buffer could never hold the header AND the
+# array.** Rung 54 reads BOTH, in the order that makes each decode see the right bytes.
+#
+# **THE ORDER IS THE RUNG.** `st_cmd_path` calls, in sequence: `st_read_single_block` (the FIRST
+# CMD17, sector 1) -> `st_mbr_parse` -> `st_gpt_parse` (the header is decoded NOW, while the buffer
+# is KNOWN to hold sector 1) -> `st_data_reset` -> `st_read_single_block` (the SECOND CMD17, sector
+# 2) -> `st_gpt_entry_parse` (the entry array is walked out of the buffer the second read filled).
+# The sector comes from `st_sector_for_read(st_read_count)`, a `noinline` helper whose two immediates
+# are 1 (`ST_GPT_HEADER_SECTOR`) and 2 (`ST_GPT_ENTRY_ARRAY_SECTOR`); the ordinal is the
+# pre-increment counter bumped just before each command, so the FIRST read sends the header's sector
+# and the SECOND the array's. **It is the same one-number discipline applied to a second CMD17.**
+#
+# **THE HEADER DECODE IS NOW BOUND TO ITS SECTOR AS A READING.** `st_gpt_parse` publishes
+# `_gp_hdr_sig_ok` (it re-tests `EFI PART` on the buffer it decodes) AND `_gp_hdr_sector`
+# (`st_read_lba`, the sector that buffer was read from). A header decode that ran on sector 2 would
+# read `_gp_hdr_sig_ok = 0` with `_gp_hdr_sector = 2` - the rung-53 defect named as a cell rather
+# than a sentence.
+#
+# **THE WALK IS BOUNDED BY THE SMALLER OF THE HEADER'S COUNT AND THE ONE SECTOR'S CAPACITY, AND
+# THAT BOUND IS THE WHOLE SAFETY OF THE RUN.** The header declares `_ge_nentries_decl = 28` entries
+# of `_ge_stride_words = 32` words (128 bytes) - a 3,584-byte array spanning SEVEN sectors - but the
+# read lands ONE 512-byte sector (128 words), so `_ge_entries_in_sector = 128/32 = 4` and
+# `_ge_nentries_used = min(28, 4) = 4`. **A reader who walked all 28 would index
+# `st_read_block[874]` of a 128-word array and decode a partition out of adjacent statics**; the
+# build clause `xnu_entry_852` refuses such a body by requiring the sector-capacity divide.
+#
+# **THE BUILD REFUSALS, NOT SENTENCES.** `xnu_entry_849`'s value-53 half resolves `st_sector_for_read`
+# via `sym_addr`/`sym_size`, dumps its linked body, greps for the immediates `#1` and `#2`, and
+# refuses unless BOTH are present; it requires `st_read_single_block` to call the helper exactly ONCE.
+# The same clause requires `st_read_single_block` to be called TWICE by `st_cmd_path`
+# (`blk43_calls = 2`; ONE is rung 53 again) and `st_data_reset` to be called TWICE (`dr47_calls = 2`;
+# ONE reset cannot precede two reads), and requires `st_read_count` to be in the image.
+# `xnu_entry_852` still requires `st_gpt_entry_parse`'s body to call nothing but `entry_live_write`,
+# to touch no controller window, to hold the capacity divide, and to be called ONCE AFTER
+# `bl <st_gpt_parse>`.
+#
+# **IT MOVES NO BYTE OF THE MEDIUM AND TOUCHES NO DEVICE REGISTER IT DID NOT TOUCH BEFORE**: CMD17
+# reads, so the card stays in TRAN with its block length and its CSD/EXT_CSD exactly as rungs 42-53
+# left them; the command, the flags and the whole rung-51 cell set are byte for byte - only a SECOND
+# read is added, at the header's own sector first. The entry bin is 5,585,532 bytes (size-neutral
+# against rung 53's, content different - `d301bcb5...`) and **the entry-group page move did NOT fire
+# this rung**: `STAGE90_XNU_SEAM_LR` stays `0x8004d2dc` (rung 53's value), so the seam pair in
+# `entry_trace.c` and `run_and_capture.sh` is unchanged. `STAGE90_XNU_PWR_WAIT_TICKS=384000` is
+# inherited from rung 9 unchanged - 20 ms at this device's own 19,200,000 Hz. `fastboot boot` only;
+# nothing flashed; nothing written to storage.
+#
+# **NO PRESS HAS BEEN MADE AND NONE IS OWED: this arm is PARKED and the park is a RECORD and not a
+# queue. THE PRESS IS THE OPERATOR'S. THE GOAL IS NOT MET** - the partition entry's own bytes are
+# still not walked into a filesystem, no filesystem, no mount; TWRP-to-storage stays withheld.
+#
+set=armed-storage-d301bcb5 sha256=77e3607466685dbf7138cdd9e10fc6a5d74ae2d1107cf96bcb10d21e4bf11a26 bytes=8605696 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-53-entry-rung-54-READS-THE-GPT-HEADER-AT-SECTOR-1-THEN-THE-PARTITION-ENTRY-ARRAY-AT-SECTOR-2-NOT-PRESSED
+set=armed-storage-d301bcb5 sha256=c613dec57af930cef4e743b37ac3038771889491a3b1c7e60c2ba7cbebc75dd9 bytes=6081028 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-53-entry-no-payload-switch-moved
+set=armed-storage-d301bcb5 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-53-s-MEASURED-no-payload-switch-moved
+set=armed-storage-d301bcb5 sha256=5b5441de2ff27d9c42f4b4493a0dcc1c043bf36dd60132fb78e49fc84ddc7dc0 bytes=6143100 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-d301bcb5 sha256=db736eaebe1790d066b19421c5d56b57d9bb1f30ffa515b3ccc789e43eaee5a5 bytes=6084608 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-d301bcb5 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-d301bcb5 sha256=7042a4032bc02cbe1b7b00dac2cbd33c586ee00ed08d946e09695eb82bfb089b bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-d301bcb5 sha256=d301bcb56f9e8bfb77b8ad8a6b5fe934b0eeb9b7f103ea97d63ab821adb8e207 bytes=5585532 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-d301bcb5-IS-THE-SETS-NAME-SIZE-NEUTRAL-against-the-rung-53-arm-s-5585532-bytes-content-different-because-st_sector_for_read-st_read_count-and-the-second-read-were-added
+set=armed-storage-d301bcb5 sha256=3c816aa3f0d448cbd2995da79d926df74fc0681adafcc332fe9ee7bc1d90a62c bytes=6766240 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-STAGE90_XNU_SEAM_LR-0x8004d2dc-UNCHANGED-from-rung-53
+set=armed-storage-d301bcb5 sha256=e10d98f635cf3f819003a41b351bbf46f93351b411e46e3a95b4cd5336f4a225 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=53-and-differing-from-the-rung-53-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
+set=armed-storage-d301bcb5 sha256=5d492dd3aa3337be62d1f8e9f75db9bee2f5312cc94fd94474a4af61e6825f12 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-source-list-a-member-of-the-manifest-and-not-of-the-gate-s-own-list

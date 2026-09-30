@@ -32277,6 +32277,12 @@ verify_trace_symbols() {
                         blk43_lba_store=$(grep -E "str[[:space:]]+r[0-9]+, \[$blk43_r1_reg, #$blk43_r1_off\]" <<<"$blk43_body" | tail -1)
                         [[ -n "$blk43_lba_store" ]] ||
                             layout_fail "st_read_single_block loads its CMD17 argument from \`[$blk43_r1_reg, #$blk43_r1_off]\` (resolved to \`st_read_lba\`) and its disassembly holds NO \`str rN, [$blk43_r1_reg, #$blk43_r1_off]\` writing that same slot - so the variable this body reads was filled somewhere this clause cannot see. **Rung 51 IS the number stored there** (1, the protective MBR's own target), and a body that only read the slot would carry whatever the previous boot's code left, with every cell still reading as success. Nothing is rebuilt by this refusal"
+                        # **THE SINGLE-STORE CHECKS ARE FOR VALUES BELOW 53 AND ONLY THOSE.** At value 53
+                        # the body stores `st_read_lba` TWICE (rung 54's header read and array read), so
+                        # `tail -1` names the SECOND store and these checks - built for the one-store rungs
+                        # 51/52 - would compare the single send's load line against the WRONG store. The
+                        # two-store clause below replaces them at value 53.
+                        if [[ $STORAGE_PROBE -lt 53 ]]; then
                         blk43_lba_sreg=$(grep -oE 'r[0-9]+' <<<"$blk43_lba_store" | head -1)
                         blk43_lba_sln=$(grep -n -F "$blk43_lba_store" <<<"$blk43_body" | tail -1 | cut -d: -f1)
                         blk43_r1_ln=$(grep -n -F "$blk43_r1" <<<"$blk43_body" | tail -1 | cut -d: -f1)
@@ -32290,22 +32296,57 @@ verify_trace_symbols() {
                         blk43_lba_imm=$(grep -oE '#[0-9]+' <<<"$blk43_lba_w" | head -1 | tr -d '#')
                         [[ -n "$blk43_lba_imm" ]] ||
                             layout_fail "st_read_single_block stores \`$blk43_lba_sreg\` into the sector variable at line $blk43_lba_sln and NO \`mov\`/\`movw\` immediate fills that register above it - the value reaching \`st_read_lba\` comes from a computation this clause cannot read, so it could not tell rung 51's 1 from rung 50's 0. Nothing is rebuilt by this refusal"
+                        fi
                         # **RUNG 53: THE SAME SCAN, A DIFFERENT NUMBER.** Rung 51 stored 1 (the sector
                         # the protective MBR names); rung 53 stores 2 (the sector the rung-52 header's
                         # `PartitionEntryLBA` names - the partition ENTRY ARRAY). The difference between
                         # those two arms is **one immediate on one instruction and NO cell distinguishes
                         # them by shape** - both read a whole sector, both complete, both sit in TRAN - so
                         # the number is made structural against the VALUE THE RUNG EXPECTS.
-                        if [[ $STORAGE_PROBE -ge 52 ]]; then
+                        if [[ $STORAGE_PROBE -ge 53 ]]; then
+                            # **RUNG 54's TWO SECTORS, READ OUT OF THE SELECTOR BODY'S OWN IMMEDIATES.**
+                            #
+                            # Rung 54 reads the medium TWICE: the FIRST read lands the GPT HEADER (sector 1,
+                            # so the header decode runs on header bytes) and the SECOND lands the partition
+                            # ENTRY ARRAY (sector 2, so the entry decode walks the array). The two numbers
+                            # live as immediates in `st_sector_for_read`, a `noinline` body of its own, and
+                            # `st_read_single_block` stores its return into `st_read_lba` - ONE store, so
+                            # the rung-51/52 single-store clauses below still hold.
+                            #
+                            # **WHY A SEPARATE BODY AND NOT A TWO-ARM `if` OR A `const` ARRAY.** The
+                            # two-arm form was defeated twice by the compiler (tail-merged into one
+                            # conditional store, then out-of-line so disassembly order inverted the
+                            # execution order); the `const`-array form made the codegen load a literal-pool
+                            # base the device-access classifier could not resolve, breaking an unrelated
+                            # order assertion. `noinline` fixes the selector as its own symbol, so BOTH
+                            # numbers are plain immediates in a body this clause can read directly - and the
+                            # ONE number that matters most, the header sector, is asserted FIRST because a
+                            # build whose first read did not land the header is rung 53 again.
+                            blk43_sel_addr=$(sym_addr st_sector_for_read) ||
+                                layout_fail "\`st_sector_for_read\` - rung 54's sector selector - is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: the bodies then send a sector this clause cannot read, and rung 54's whole content is the two sectors (1 then 2). Nothing is rebuilt by this refusal"
+                            blk43_sel_size=$(sym_size st_sector_for_read) ||
+                                layout_fail "st_sector_for_read has no size in the symbol table (nm -S), so this clause's window has no end. Nothing is rebuilt by this refusal"
+                            blk43_sel_body=$(arm-none-eabi-objdump -d --start-address="$blk43_sel_addr" --stop-address="$(printf '0x%x' $(( blk43_sel_addr + blk43_sel_size )))" "$OUT/xnu_arm_entry.elf")
+                            blk43_sel_imm1=$(grep -oE '#1([^0-9]|$)' <<<"$blk43_sel_body" | head -1 | tr -d '#')
+                            blk43_sel_imm2=$(grep -oE '#2([^0-9]|$)' <<<"$blk43_sel_body" | head -1 | tr -d '#')
+                            [[ "$blk43_sel_imm1" == "1" && "$blk43_sel_imm2" == "2" ]] ||
+                                layout_fail "rung 54's sector selector \`st_sector_for_read\` (at $blk43_sel_addr) does not materialize BOTH sector immediates 1 and 2 (found [$blk43_sel_imm1] and [$blk43_sel_imm2]). Rung 54's pair must be **1 = \`ST_GPT_HEADER_SECTOR\`** (the FIRST read - the GPT HEADER, whose bytes the header decode parses) and **2 = \`ST_GPT_ENTRY_ARRAY_SECTOR\`** (the SECOND read - the partition ENTRY ARRAY the rung-52/53 presses measured at \`_gp_entry_lba = 2\`). **A selector that returns only one number is a single-read rung**: if it is 2 the header decode runs on the ARRAY and every header field is zero, exactly as the rung-53 press (854) measured; if it is 1 the entry decode walks the HEADER (\`_ge_hdr_ok = 1\`). Nothing is rebuilt by this refusal"
+                            blk43_sel_bl=$(grep -c -- 'bl.*<st_sector_for_read>' <<<"$blk43_body" || true)
+                            [[ "$blk43_sel_bl" == "1" ]] ||
+                                layout_fail "st_read_single_block calls \`st_sector_for_read\` $blk43_sel_bl time(s) and rung 54 calls it exactly once - the ONE store to \`st_read_lba\` this body makes takes the selector's return, and two calls would mean a second store the single-store clauses below read as the only one. Nothing is rebuilt by this refusal"
+                            echo "  xnu_entry_849: rung 54's TWO sectors are read out of the selector body: st_sector_for_read (at $blk43_sel_addr, called once by st_read_single_block) materializes **the header sector \`ST_GPT_HEADER_SECTOR\` = 1 and the array sector \`ST_GPT_ENTRY_ARRAY_SECTOR\` = 2**, and its condition is the read ordinal (the counter bumped just before each command), so **the FIRST read sends sector 1 - the GPT HEADER, whose bytes the header decode parses out of the buffer - and the SECOND sends sector 2, whose bytes the entry decode walks**. The order, and the fact that the header read comes first, are read out of the linked image's own immediates and not from a sentence in a comment"
+                        elif [[ $STORAGE_PROBE -ge 52 ]]; then
                             blk43_lba_exp=2
                             blk43_lba_note="**SECTOR 2 - the partition ENTRY ARRAY's own sector**, which the rung-52 press published as \`_gp_entry_lba = _gp_next_sector = 2\` beside its own \`_gp_arg_sector = 1\`. **1 here is rung 51's GPT HEADER wearing rung 53's name**: the read would land sector 1 again, the entry decode would run on a HEADER, \`_ge_hdr_ok\` would read 1 (the buffer IS \`EFI PART\`) and \`_ge_arr_sector = 2\` beside \`_ge_arg_is_arr = 0\` would name the inversion - the rung would be a re-run of value 51 with a different label"
                         else
                             blk43_lba_exp=1
                             blk43_lba_note="**SECTOR 1 - the sector the protective MBR's single entry names** (the \`_pm_next_sector = 1\` the rung-50 press published beside its own \`_pm_arg_sector = 0\`). **0 here is rung 50's protective MBR wearing rung 51's name**: the transfer would complete, \`_rd_state\` would read 4, \`_rd_mbr\` would read 1, and \`_rd_gpt\` would be a comparison against the MBR's boot code rather than against a GPT header - the rung would be a re-run of value 49 with a different label"
                         fi
+                        if [[ $STORAGE_PROBE -lt 53 ]]; then
                         [[ "$blk43_lba_imm" == "$blk43_lba_exp" ]] ||
                             layout_fail "st_read_single_block stores **$blk43_lba_imm** into the sector variable \`st_read_lba\` at line $blk43_lba_sln, and at STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE the rung reads $blk43_lba_note. **The sector and the number are the whole of this rung.** Nothing is rebuilt by this refusal"
-                        echo "  xnu_entry_849: rung 51/53's sector is read out of the linked image: st_read_single_block stores **#$blk43_lba_imm** into \`st_read_lba\` (disassembly line $blk43_lba_sln) BEFORE it loads that same slot as CMD17's argument (line $blk43_r1_ln), so **the read addresses the sector the previous rung's decode named** - 1 at value 50 (the protective MBR's \`_pm_next_sector = 1\`), **2 at value 52 (the GPT header's \`_gp_entry_lba = _gp_next_sector = 2\`)**. Under this card's sector addressing the argument IS the sector (\`_rd_shift = 0\`), so the number on the bus is the LBA and not byte*512. **This clause asserts the VALUE and the ORDER; the mode and the symbol were asserted by the value-49 half above**, so the two halves together hold \"a variable, at the right address, holding the previous table's own sector, stored before it is read\". No byte of the medium moves and no register changes"
+                        echo "  xnu_entry_849: rung 51/52's sector is read out of the linked image: st_read_single_block stores **#$blk43_lba_imm** into \`st_read_lba\` (disassembly line $blk43_lba_sln) BEFORE it loads that same slot as CMD17's argument (line $blk43_r1_ln), so **the read addresses the sector the previous rung's decode named** - 1 at value 50 (the protective MBR's \`_pm_next_sector = 1\`), **2 at value 52 (the GPT header's \`_gp_entry_lba = _gp_next_sector = 2\`)**. Under this card's sector addressing the argument IS the sector (\`_rd_shift = 0\`), so the number on the bus is the LBA and not byte*512. **This clause asserts the VALUE and the ORDER; the mode and the symbol were asserted by the value-49 half above**, so the two halves together hold \"a variable, at the right address, holding the previous table's own sector, stored before it is read\". No byte of the medium moves and no register changes"
+                        fi
                     fi
                 elif [[ $STORAGE_PROBE -le 46 ]]; then
                     [[ "$blk43_r1_imm" == "512" ]] ||
@@ -32382,6 +32423,12 @@ verify_trace_symbols() {
                 if [[ $STORAGE_PROBE -ge 49 ]]; then
                     blk43_img_want="$blk43_img_want st_ext_sec_count st_read_lba"
                 fi
+                if [[ $STORAGE_PROBE -ge 53 ]]; then
+                    # rung 54's ordinal counter: the body reads it to pick the read's sector (via
+                    # `st_sector_for_read`) and bumps it just before the command. It is the body's own
+                    # addition and no rung below 54 has it, so it enters the allow-list only here.
+                    blk43_img_want="$blk43_img_want st_read_count"
+                fi
                 for _s in $blk43_img_got; do
                     case " $blk43_img_want " in
                         *" $_s "*) ;;
@@ -32408,8 +32455,22 @@ verify_trace_symbols() {
                 [[ "$blk43_gpt" == "4" ]] ||
                     layout_fail "st_read_single_block's disassembly holds $blk43_gpt of the four halves of the two GPT signature words - \`EFI \` = 0x20494645 is movw #17989 + movt #8265 and \`PART\` = 0x54524150 is movw #16720 + movt #21586. **All four must appear**, because the derived cell \`_rd_gpt\` is the comparison \`(w[0] == 0x20494645) && (w[1] == 0x54524150)\` and a body that published the first four words without comparing them would leave the press to decide by eye. Nothing is rebuilt by this refusal"
                 blk43_calls=$(grep -c -- 'bl.*<st_read_single_block>' <<<"$stb_path_body" || true)
+                if [[ $STORAGE_PROBE -ge 53 ]]; then
+                    # **RUNG 54 READS THE MEDIUM TWICE, AND RUN 53's `.rodata`-PAIR FORM PROVED THE TWO
+                    # CALLS ARE THE RUNG.** The rung-53 press falsified the single-read form: the ONE read
+                    # landed the ENTRY ARRAY, so the header decode ran on it and zeroed the carries. Rung
+                    # 54 reads the HEADER first (its bytes parsed by `st_gpt_parse`) and the ARRAY second
+                    # (walked by `st_gpt_entry_parse`), so TWO calls are not a defect here - they ARE the
+                    # rung. What makes the pair safe, and what the clauses above assert, is that the two
+                    # reads land DIFFERENT sectors by the read ORDINAL (`st_sector_for_read`), so the
+                    # second read fills the buffer the FIRST parse has already consumed. **A count of 1
+                    # at value 53 is rung 53 spelling the defect a second time.**
+                    [[ "$blk43_calls" == "2" ]] ||
+                        layout_fail "st_cmd_path makes $blk43_calls call(s) to st_read_single_block and rung 54 makes exactly **TWO** - the FIRST read lands the GPT HEADER (its bytes parsed out of the buffer by \`st_gpt_parse\`, the sector the rung-52/51 presses measured at 1) and the SECOND lands the partition ENTRY ARRAY (walked by \`st_gpt_entry_parse\`, the sector the header names). **ONE is rung 53 again**: the single read lands the array, \`st_gpt_parse\` decodes it as a header and zeroes \`st_gpt_nentries\`/\`st_gpt_entry_size\`/\`st_gpt_entry_lba\`, so \`_ge_nentries_used = min(0,128) = 0\` and the walk never runs - exactly what the rung-53 press (854) measured. Zero means the body is in the image and nothing calls it. Three or more means a read the rung does not name. Nothing is rebuilt by this refusal"
+                else
                 [[ "$blk43_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $blk43_calls call(s) to st_read_single_block and rung 43 makes exactly one - \`block.c:1770-1829\`'s own request, the driver's first act on the medium after the block length is fixed. **Zero means the body is in the image and nothing calls it**, which is m720's shape: a switch no build reads. Two or more means two sector reads on the bus in one boot, and the second would overwrite the first's cells before the log was taken"
+                fi
                 blk43_ctx=$(awk '/bl.*<st_read_single_block>/{ printf "%s|", prev2; printf "%s|", prev1; exit } { prev2=prev1; prev1=$0 }' <<<"$stb_path_body")
                 # **841: THIS ADJACENCY IS TRUE OF VALUES 43, 44 AND 45 AND IS DELIBERATELY SUPERSEDED AT 46.**
                 # The assertion below reads the two instructions ABOVE the sector read and requires one of
@@ -32583,8 +32644,20 @@ verify_trace_symbols() {
                 # ordering 840 measured as too late - and two calls to one body is an arm whose answer
                 # cannot be read.
                 dr47_calls=$(grep -c -- 'bl.*<st_data_reset>' <<<"$stb_path_body")
+                if [[ $STORAGE_PROBE -ge 53 ]]; then
+                    # **RUNG 54 ISSUES THE RESET TWICE ON PURPOSE.** rung 47 moved the ONE reset to sit
+                    # before the sector read; rung 54 has TWO sector reads, and a second CMD17 in the
+                    # same boot runs against the state the first transfer left (rung 44's press measured
+                    # DATA_INHIBIT refusing CMD17 in the boot it was set). So a reset precedes EACH read:
+                    # one `bl` before the header read, one before the array read and between the two
+                    # parses. The rung-53 `.rodata` exercise confirmed the count is 2. **A count of 1 is
+                    # the second read running unreleased; a count below 1 is rung 46's too-late order.**
+                    [[ "$dr47_calls" == "2" ]] ||
+                        layout_fail "st_cmd_path makes $dr47_calls call(s) to st_data_reset and rung 54 makes exactly **TWO** - ONE before each of its two sector reads (the header read and the array read), because a second CMD17 runs against the state the first transfer left. **ONE** means the second read runs on a line the first transfer may have left inhibited (rung 44's press measured \`DATA_INHIBIT\` refusing CMD17). **Zero** is rung 46's too-late site. Three or more is a reset the rung does not name. Nothing is rebuilt by this refusal"
+                else
                 [[ "$dr47_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $dr47_calls call(s) to st_data_reset and rung 47 makes exactly ONE - the reset MOVED to sit before the sector read. Zero means the arm at this value is rung 46's site or below and CMD17 runs on the stuck line the rung-46 press proved too late; two or more means the rung-46 after-read site is STILL LIVE beside the new before-read one, so the reset is issued on both sides of the read and the ordering this rung exists to make is gone. Nothing is rebuilt by this refusal"
+                fi
                 dr47_ln=$(awk '/bl.*<st_data_reset>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
                 dr47_rd_ln=$(awk '/bl.*<st_read_single_block>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
                 dr47_blk_ln=$(awk '/bl.*<st_set_blocklen>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
