@@ -10504,3 +10504,74 @@ set=armed-storage-65824de4 sha256=a8b7dfdec1bb8e2d68bb92824ae00db752f3ff5ee14785
 #
 # **THE GOAL IS NOT MET.** No sector read, no partition table walked, no filesystem, no mount;
 # TWRP-to-storage stays withheld.
+
+# 837, 2026-09-30 - THE RUNG-45 ARM. `armed-storage-f8d91170`. PARKED, NOT PRESSED, NOT ARMED.
+#
+# **A BUILD AND A PARK, AND NOTHING ELSE** - and it is THE RUNG-44 PRESS'S OWN CANDIDATE (a), the
+# DIAGNOSIS rather than the workaround. **IT ADDS NO COMMAND, NO CARD REGISTER, NO MEGABYTE AND NO NEW
+# DEVICE: ONE body that makes exactly ONE store, to a register this ladder has written on every command
+# rung since 23 - one `INT_ENABLE` bit.**
+#
+# (1) WHAT THE RUNG-44 PRESS LEFT, AND THE HYPOTHESIS IT NAMED. 836's press measured `PRESENT_STATE`
+# STUCK across THREE samplings in ONE boot - `_ext_ps_end = _rd_ps_before = _rd_ps_end = 0x01f80206` -
+# with **bit 1 (`DATA_INHIBIT`) AND bit 2 (`DAT_LINE_ACTIVE`) both set**, CMD8's `_ext_int_data_end = 0`
+# (no `DATA_END` ever latched), and the transfer window's own enable `_ext_ena_wrote = 0x000f0031` =
+# `INT_CMD_MASK 0x000f0001 | PIO_IRQS 0x30`, in which **bit 1 (`SDHCI_INT_DATA_END`) is NOT set**. The
+# press named the missing enable as a HYPOTHESIS and not a conclusion - a masked-off completion bit
+# cannot latch, and `sdhci.c:806-815` (`sdhci_set_transfer_irqs`) enables `DATA_END` and waits on it -
+# and the project does not promote a mechanism to a conclusion on consistency.
+#
+# (2) WHAT THIS RUNG IS. `st_data_end_probe` reads `INT_ENABLE 0x34` (`_de_ena_before`), ORs in
+# `SDHCI_INT_DATA_END` (the `orr rN, rN, #2` the clause asserts), writes it back and READS IT
+# (`_de_ena_held`), then reads `INT_STATUS` (`_de_int_status`, `_de_data_end`, `_de_data_avail`) and
+# `PRESENT_STATE` (`_de_ps`, `_de_dat_line`, `_de_data_inhibit`, `_de_doing_read`), and restores the
+# window (`_de_ena_restore` / `_de_ena_readback`, with `_de_ps_end` the state after). **IT SENDS NO
+# COMMAND AND RE-ARMS NO TRANSFER**: `DATA_END` is latched by the block at a transfer's own end, so if
+# the enable is the reason it never latched then the latch is a LEVEL the block is still asserting, and
+# the reading is taken on the state rung 44 left behind. **IT IS THE PRESS'S CANDIDATE (a) AND NOT (b)**:
+# a boot that ran both the enable AND the data-state reset could not say which repair cleared the path,
+# so THIS arm is the enable ALONE and the reset is the NEXT arm (rung 46), NOT built. **VALUE 44 =
+# ORDINAL RUNG 45**, one rung per value.
+#
+# (3) WHAT THE PRESS WOULD READ. **READ THE ROWS AS THE ARM'S OWN TABLE.** `_de_ena_held = _de_ena_wrote
+# = _de_ena_before | 0x2` is THE ENABLE ACCEPTED and bit 1 the bit added - the precondition for either
+# verdict; a `_de_ena_held` unequal to it is the store being DROPPED, a block-side reading. `_de_data_end
+# = 1` is **THE HYPOTHESIS CONFIRMED** - the completion had latched and was invisible only because its
+# enable was off, the same shape rung 38's `INT_RESPONSE` repair measured on the COMMAND side one command
+# up. `_de_data_end = 0` with `_de_dat_line = 1` is **THE HYPOTHESIS REFUTED AND THE LINE STILL HELD** -
+# the enable was not the explanation - and the NEXT arm is the DATA state machine's own reset (rung 46,
+# value 45, NOT built). `_de_data_end = 0` with `_de_dat_line = 0` is the block having released the line
+# since the rung-44 press - a reading about the medium and not about the enable. **`_de_dat_line` IS THE
+# READING NO ENABLE CAN GATE**: `DATA_END` is a LATCH that can be set and cleared, so a clear bit is
+# ambiguous, whereas `DAT_LINE_ACTIVE` is the line's own LEVEL - the same kind of quantity
+# `CMD_LINE_LEVEL` (bit 24) is.
+#
+# (4) THE BUILD CLAUSE, `xnu_entry_837`. It refuses the build unless `st_data_end_probe`'s linked body
+# holds (a) the `orr rN, rN, #2` that adds `SDHCI_INT_DATA_END` (bit 1), (b) at least two stores and one
+# load of `INT_ENABLE 0x34` (base `0xf9824000`, `[rN, #2356]`) - the write AND the read-back - and (c)
+# the six `xnu_live_storage_de_*` keys as strings in the linked image - so an enable written without
+# being READ BACK, or an enable of the wrong bit, is REFUSED at build time. The clause `xnu_entry_838`
+# (the rung-46 reset, `-ge 45`) is present but INERT at this value: rung 46 is not built.
+#
+# (5) SAFETY. `fastboot boot` only, nothing flashed; **the only store in the body is an `INT_ENABLE` bit,
+# in a register the ladder has written on every command rung since 23, restored to `_de_ena_before` at
+# the exit**; it adds no device and no megabyte; it sends no command, so **no byte of the medium can
+# move**, and the card stays in TRAN with its block length and its CSD/EXT_CSD exactly as rungs 42-44
+# left them. **NO PRESS HAS BEEN MADE AND NONE IS OWED: this arm is PARKED and NOT ARMED-FOR-PRESS, and
+# the park is a RECORD and not a queue.**
+#
+# **THE GOAL IS NOT MET.** No sector read, no partition table walked, no filesystem, no mount;
+# TWRP-to-storage stays withheld.
+#
+# 837's set members (11), by content:
+set=armed-storage-f8d91170 sha256=bd43c0520c63ddf6f8416f9e8627008a16c399d28e6bf03963245158059af312 bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-44-entry-rung-45-ENABLES-DATA_END-AND-RE-READS-THE-LATCH-ON-THE-STATE-RUNG-44-LEFT-STUCK-NOT-PRESSED
+set=armed-storage-f8d91170 sha256=a7797d16831f5f10966687864300ecb25761a9cb9c325dde4ef70e94dc595481 bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-44-entry-same-6064644-bytes-as-the-rung-44-arm-s
+set=armed-storage-f8d91170 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-44-s-MEASURED-no-payload-switch-moved
+set=armed-storage-f8d91170 sha256=61e651a0d317f275f00b4b2a13e215912a588634a6eabebf37f8c0bc5b390e13 bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-size-UNCHANGED-from-the-rung-44-arm-s-6126716-the-new-body-absorbed-by-page-padding
+set=armed-storage-f8d91170 sha256=424c5962775c29b7ebfb8f2fd17843468289d6f8a0d6bbe6feacbe941973534e bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-f8d91170 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-f8d91170 sha256=d053c0297d5658335117d5506e2399d7faa53b724f5aeecf045bbf53ee0f4c0e bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-f8d91170 sha256=f8d911704556b4b934aee13684902df1f88e99376a534004668cdc3673fce09f bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-f8d91170-IS-THE-SETS-NAME-same-5569148-bytes-as-the-rung-44-arm-and-the-difference-is-one-new-probe-body-st_data_end_probe-one-call-to-it-and-four-new-constants
+set=armed-storage-f8d91170 sha256=5a262a944bf69d514079660e9832ce7bcbed368e7245da533b0687f92b2b6fbe bytes=6749412 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-GREW-by-36-bytes-from-the-rung-44-arm-s-6749376-because-the-new-probe-body-is-a-new-function
+set=armed-storage-f8d91170 sha256=76ef75f5ed897d2ba7fea0deb1c689c14673330a904b0dcc5b706523f463f8cb bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=44-and-differing-from-the-rung-44-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value-43-44
+set=armed-storage-f8d91170 sha256=86326168012a384217825ae87d56b799c1e10ee1f070eaced80495f1b7f429ab bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-THIS-ONE-including-entry_storage-c-which-carries-the-new-probe-body-and-build_entry-sh-which-carries-the-rung-s-own-clause-837-REFRESHED-after-make-check-found-four-unescaped-backticks-in-that-clause-s-echoes-which-were-fixed-while-the-bin-stayed-BYTE-IDENTICAL-f8d91170

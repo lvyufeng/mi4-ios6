@@ -32351,6 +32351,71 @@ verify_trace_symbols() {
                     layout_fail "st_send_command's body makes $stb_c44_str store(s) into the result struct's low slots and rung 44 needs at least THREE: the selected mask, the extracted DATA_INHIBIT bit and the CMD_INHIBIT bit are all PUBLISHED, so a build whose mask is computed and never stored is a local variable rather than the cell this rung reads. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_835: rung 44's inhibit mask is read out of the linked image: st_send_command (at $stb_c44_addr) tests the data-phase bit with \`ands rN, rN, #32\` (MMC_CMD_ADTC 0x20, the ladder's own stand-in for the vendor's \`cmd->data\`) and selects the mask with \`moveq #1\` / \`movne #3\` - **SDHCI_CMD_INHIBIT alone for a non-data command and SDHCI_CMD_INHIBIT | SDHCI_DATA_INHIBIT (0x1 | 0x2) for an \`adtc\` one**, which is \`sdhci.c:1087-1094\` transcribed: \`mask = SDHCI_CMD_INHIBIT; if (cmd->data || (cmd->flags & MMC_RSP_BUSY)) mask |= SDHCI_DATA_INHIBIT; ... else mask &= ~SDHCI_DATA_INHIBIT\`. **The rung-43 press is why**: CMD8 left PRESENT_STATE's DATA_INHIBIT (bit 1) set - \`_rd_ps_end = 0x01f80206\`, no DATA_END - and CMD17's bit-0-only guard issued anyway, so BLOCK_COUNT 0x06 was still write-protected, the duplicate write of 1 was SILENTLY DROPPED (\`_rd_blkcnt_held = 0\` against CMD8's \`_ext_blkcnt_held = 1\`), the block ran a one-block read with a count of ZERO, no DATA_AVAILABLE fired and the 1.25 s bound expired. The wait is now bound-gated on BOTH bits for a data command and BIT-0-ONLY for every rung below (\`mask &= ~SDHCI_DATA_INHIBIT\`), so no pressed arm's evidence moves; \`_rd_inhibit_mask\` (0x3 here, 0x1 below), \`_rd_inhibit_dat\` (DATA_INHIBIT as found at entry), \`_rd_inhibit_before\` and \`_rd_inhibit_polls\` are published beside the command, and the four keys are asserted as strings in this artifact"
             fi
+            if [[ $STORAGE_PROBE -ge 44 ]]; then
+                # **836: RUNG 45'S OWN CLAUSE - THE DATA-PHASE COMPLETION ENABLE, AND THE TWO BODIES
+                # THE DATA PATH'S STATE IS READ AND RELEASED WITH.**
+                #
+                # The rung-44 press left `PRESENT_STATE = 0x01f80206` - `DATA_INHIBIT` (bit 1) AND
+                # `DAT_LINE_ACTIVE` (bit 2) BOTH SET and unmoving across three samplings in one boot -
+                # with CMD8's `_ext_int_data_end = 0` (no `DATA_END` ever latched) under a transfer
+                # window whose `INT_ENABLE` was `0x000f0031`. **Bit 1 of `INT_ENABLE` was NOT set in
+                # that window**, and the press named that as a HYPOTHESIS. This clause refuses the
+                # build unless the two bodies that test it - and the reset that answers the other
+                # half of the question - are present and hold the constants they claim.
+                #
+                # It asserts the ADDRESSES the two new bodies touch, the two immediates that are the
+                # whole repair (`| #2` on the enable, `#4` on the reset byte), and the keystrings the
+                # press reads. **It does not assert the call sites**: those are `st_cmd_path`'s, and
+                # the calls are counted below against the same `bl` scan the rungs above use.
+                de_addr=$(sym_addr st_data_end_probe) ||
+                    layout_fail "rung 45's own body st_data_end_probe is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE. Nothing is rebuilt by this refusal"
+                de_next=$(sym_next "$de_addr") ||
+                    layout_fail "nothing follows st_data_end_probe in the linked image, so this clause's window has no end. Nothing is rebuilt by this refusal"
+                de_body=$(arm-none-eabi-objdump -d --start-address="$de_addr" --stop-address="$de_next" "$OUT/xnu_arm_entry.elf")
+                # (1) the ONLY store in this body is an INT_ENABLE write, and the OR's operand is #2.
+                #     `orr rN, rM, #2` is what `before | SDHCI_INT_DATA_END` compiles to.
+                de_orr2=$(grep -cE '\borr[[:space:]]+r[0-9]+, r[0-9]+, #2\b' <<<"$de_body" || true)
+                [[ "$de_orr2" -ge 1 ]] ||
+                    layout_fail "st_data_end_probe's body holds no \`orr rN, rN, #2\` [$de_orr2] and rung 45's whole repair IS that OR: \`SDHCI_INT_DATA_END\` is \`INT_STATUS\` bit 1 (\`sdhci.h:122\`) and ORing it into the window's enable is the ONE edit. **Zero means the body published a reading without making the change** - the enable was written unchanged and the press's \`_de_data_end\` would be a reading about the OLD window wearing this rung's name. Nothing is rebuilt by this refusal"
+                # (2) the window is READ BACK (an `ldr` of the same address after the `str`), which is
+                #     what makes `_de_ena_held == _de_ena_wrote` a measurement and not a claim.
+                de_ena_str=$(grep -cE 'str[[:space:]]+r[0-9]+, \[r[0-9]+, #2356\]' <<<"$de_body" || true)
+                de_ena_ldr=$(grep -cE 'ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #2356\]' <<<"$de_body" || true)
+                [[ "$de_ena_str" -ge 2 && "$de_ena_ldr" -ge 1 ]] ||
+                    layout_fail "st_data_end_probe makes $de_ena_str store(s) and $de_ena_ldr load(s) of INT_ENABLE 0x34 and rung 45's record says TWO STORES AND AT LEAST ONE LOAD: the window is read before the edit, written with the OR, read back (\`_de_ena_held\`, the reading that the enable was ACCEPTED rather than dropped), and RESTORED. **A body with one store leaves the block with an enable it did not have** - and a body with no readback cannot separate \"the register took the bit\" from \"the store vanished\", which is [[mi4-the-block-refuses-block-count-while-data-inhibit-is-set]]'s own lesson one register over. Nothing is rebuilt by this refusal"
+                # (3) and the eleven keystrings the press reads are STRINGS in the image.
+                for _k in xnu_live_storage_de_ena_before xnu_live_storage_de_ena_wrote \
+                          xnu_live_storage_de_ena_held xnu_live_storage_de_data_end \
+                          xnu_live_storage_de_dat_line xnu_live_storage_de_int_status; do
+                    grep -qa "$_k" "$OUT/xnu_arm_entry.elf" ||
+                        layout_fail "rung 45 publishes no \`$_k\` string in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE. **These are the arm's own reading and each names a different verdict**: \`_de_ena_wrote\` must be \`_de_ena_before | 0x2\`; \`_de_data_end\` is the HYPOTHESIS (1 = the completion had latched and was masked, 0 = it had not); and \`_de_dat_line\` is the reading no enable can gate, because \`DAT_LINE_ACTIVE\` is the line's own LEVEL - the same kind of quantity \`CMD_LINE_LEVEL\` is - whereas \`DATA_END\` is a LATCH that can be cleared and is therefore ambiguous on its own. Nothing is rebuilt by this refusal"
+                done
+                echo "  xnu_entry_837: rung 45's completion enable is read out of the linked image: st_data_end_probe (at $de_addr) ORs INT_STATUS bit 1 into the window (\`orr rN, rN, #2\`), writes INT_ENABLE 0x34 and READS IT BACK, and publishes the six cells the arm's pre-registration names. **The rung-44 press is why**: it measured PRESENT_STATE stuck at 0x01f80206 (DATA_INHIBIT bit 1 AND DAT_LINE_ACTIVE bit 2) with CMD8's \`_ext_int_data_end = 0\` under a window whose enable was \`0x000f0031\` - **bit 1 clear** - and named the missing enable as a HYPOTHESIS. A press that reads \`_de_data_end = 1\` CONFIRMS it (the same shape rung 38's INT_RESPONSE repair measured on the command side); \`_de_data_end = 0\` with \`_de_dat_line = 1\` REFUTES it and moves the frontier to the data state machine's own reset (rung 46); and \`_de_ena_held\` unequal to \`_de_ena_wrote\` is the enable being DROPPED, which is a block-side reading and not a card-side one"
+            fi
+            if [[ $STORAGE_PROBE -ge 45 ]]; then
+                dr_addr=$(sym_addr st_data_reset) ||
+                    layout_fail "rung 46's own body st_data_reset is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE. Nothing is rebuilt by this refusal"
+                dr_next=$(sym_next "$dr_addr") ||
+                    layout_fail "nothing follows st_data_reset in the linked image, so this clause's window has no end. Nothing is rebuilt by this refusal"
+                dr_body=$(arm-none-eabi-objdump -d --start-address="$dr_addr" --stop-address="$dr_next" "$OUT/xnu_arm_entry.elf")
+                # (1) the ONE store is the reset byte, and the immediate is #4 - SDHCI_RESET_DATA and
+                #     NOT 0x01 (RESET_ALL, rung 4's) and NOT 0x02 alone (RESET_CMD).
+                dr_strb4=$(grep -cE 'strb[[:space:]]+r[0-9]+, \[r[0-9]+, #47\]' <<<"$dr_body" || true)
+                dr_mov4=$(grep -cE '\bmov[[:space:]]+r[0-9]+, #4\b' <<<"$dr_body" || true)
+                [[ "$dr_strb4" -ge 1 && "$dr_mov4" -ge 1 ]] ||
+                    layout_fail "st_data_reset makes $dr_strb4 store(s) to SOFTWARE_RESET 0x2f with $dr_mov4 \`mov rN, #4\` in its body, and rung 46 writes \`SDHCI_RESET_DATA\` = 4 - the block's DATA state machine alone. **1 here would be \`SDHCI_RESET_ALL\`, which rung 4 already writes and which resets the whole host including the clock**: the later rungs' cells all assume the clock rung 6 set is still in force, so a whole-host reset at rung 46 would invalidate every reading above it in the same log. Nothing is rebuilt by this refusal"
+                # (2) the byte is POLLED for self-clear - an `ldrb` of the same address inside a loop.
+                dr_ldrb=$(grep -cE 'ldrb[[:space:]]+r[0-9]+, \[r[0-9]+, #47\]' <<<"$dr_body" || true)
+                [[ "$dr_ldrb" -ge 1 ]] ||
+                    layout_fail "st_data_reset never reads SOFTWARE_RESET back ($dr_ldrb reads) and rung 46's record says the byte is POLLED for self-clear within 100 ms (\`sdhci.c:250-260\`). **A body that wrote the byte and never read it could not tell a reset that ran from one the block refused** - an absent cell standing in for a verdict, which is exactly what \`_dr_held_after\`/\`_dr_polls\`/\`_dr_timeout\` exist to prevent. Nothing is rebuilt by this refusal"
+                for _k in xnu_live_storage_dr_was xnu_live_storage_dr_wrote \
+                          xnu_live_storage_dr_held_after xnu_live_storage_dr_timeout \
+                          xnu_live_storage_dr_dat_line xnu_live_storage_dr_data_inhibit; do
+                    grep -qa "$_k" "$OUT/xnu_arm_entry.elf" ||
+                        layout_fail "rung 46 publishes no \`$_k\` string in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE. **The pair is the whole rung**: \`_dr_dat_line = 0\` with \`_dr_data_inhibit = 0\` after a self-cleared byte is THE HOST WAS THE HOLDER and the data path is released; \`_dr_dat_line = 1\` after it is THE LINE IS HELD BY SOMETHING THE HOST DOES NOT OWN - a card-side or pad-side reading, and a different defect. Nothing is rebuilt by this refusal"
+                done
+                echo "  xnu_entry_838: rung 46's data-state reset is read out of the linked image: st_data_reset (at $dr_addr) stores \`#4\` (= SDHCI_RESET_DATA, NOT 1 = RESET_ALL and NOT 2 = RESET_CMD) into SOFTWARE_RESET 0x2f and POLLS the byte for self-clear, publishing \`_dr_dat_line\` and \`_dr_data_inhibit\` after it. **It is the driver's own move** (\`sdhci_init\`'s soft arm, \`sdhci.c:284-285\`, and \`sdhci_finish_data\`'s error arm, \`sdhci.c:1058\`, both write RESET_CMD|RESET_DATA) and it moves NO byte of the medium: the card is in TRAN and a host byte does not re-initialize it"
+            fi
             if [[ $STORAGE_PROBE -ge 41 ]]; then
                 # **831: RUNG 42'S OWN CLAUSE - THE FIRST CLAUSE HERE THAT ASSERTS A COMMAND WHOSE
                 # ARGUMENT IS A VALUE THE MEDIUM LATER MOVES BY.** Rungs 11 through 38 assert what a
