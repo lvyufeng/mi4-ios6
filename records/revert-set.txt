@@ -11272,3 +11272,56 @@ set=armed-storage-960c57c4 sha256=fbe31b4b76a6cff1f3a2eba5aecba79c3958c44d0eb797
 # in, and the 128-byte entries carry each partition's first and last LBA.
 # **NO FIRER IS ARMED AND NO PRESS IS OWED.** **THE GOAL IS NOT MET** - no partition
 # entry read, no filesystem, no mount; TWRP-to-storage withheld.
+#
+# 851 - the rung-52 arm (STAGE90_XNU_STORAGE_PROBE=51, VALUE 51 = ORDINAL RUNG 52):
+#
+# **THE GPT HEADER, DECODED OUT OF THE SECTOR THE SECTOR-1 READ ALREADY LANDED.** The rung-51
+# press (850) measured `_rd_w0 = 0x20494645` = "EFI " and `_rd_w1 = 0x54524150` = "PART" with
+# `_rd_gpt = 1`, so **LBA 1 IS A GPT HEADER** and the read already moved its 512 bytes into
+# `st_read_block`. Rung 52 sends NO command, opens NO window and touches NO register - it
+# DECODES that buffer, exactly as rung 49 decoded the MBR out of sector 0.
+#
+# **THE ONE FIELD THE FRONTIER NAMES IS `PartitionEntryLBA`** - the GPT header's byte offset 72,
+# word 18 (`72/4`), the SECTOR the 128-byte partition ENTRY ARRAY lives in. That number is the
+# NEXT arm's CMD17 argument, so rung 52 has the shape of 50 -> 51: only the sector moves again.
+# `_gp_next_sector` = that number and `_gp_next_is_arg` = whether the sector this rung READ
+# equals it (0 here, on purpose - the entry array is normally at LBA 2 - so the tension is
+# stated in the log and the next arm makes the cell 1).
+#
+# The header's own fields are published BESIDE it: `_gp_my_lba` (word 6) is the header's
+# SELF-CHECK against the sector this rung read (`_gp_self_ok` - a second producer agreeing with
+# the decode, from a field the HEADER carries); `_gp_first_usable`/`_gp_last_usable` (words
+# 10/12) bound the region partitions may live in and both must be inside the card
+# (`_gp_first_in_range`/`_gp_last_in_range`); `_gp_nentries` (word 20) and `_gp_entry_size`
+# (word 21, normally 128) are the array's OWN SHAPE - a reader who walked without them would
+# walk a fixed four (as the MBR has) and be right by luck on this disk and wrong on the next.
+#
+# **THE SIGNATURE IS RE-CHECKED, AND THE CLAIM IS A NEGATIVE MADE STRUCTURAL.** New clause
+# `xnu_entry_851` reads `st_gpt_parse`'s linked body and refuses unless every `bl` in it is to
+# `entry_live_write` (19 of 19, so it sends no command, opens no window, touches no register -
+# and the body names the controller window ZERO times), all four halves of the two signature
+# words are present, and it is called by `st_cmd_path` ONCE AFTER `bl <st_read_single_block>`
+# - so a body that quietly issued a command, that skipped the signature, or that ran on a stale
+# buffer, cannot build.
+#
+# **IT MOVES NO BYTE OF THE MEDIUM AND TOUCHES NO DEVICE REGISTER**: the medium is not touched
+# at all. The entry bin grew to 5,585,532 bytes (the new body is compiled in); the entry-group
+# page move did NOT fire (`STAGE90_XNU_SEAM_LR` stays `0x8004c2dc`).
+# `STAGE90_XNU_PWR_WAIT_TICKS=384000` is inherited from rung 9 unchanged - 20 ms at this
+# device's own 19,200,000 Hz. `fastboot boot` only; nothing flashed.
+#
+# **NO PRESS HAS BEEN MADE AND NONE IS OWED: this arm is PARKED and the park is a RECORD and not
+# a queue. THE PRESS IS THE OPERATOR'S. THE GOAL IS NOT MET** - no partition ENTRY read yet, no
+# filesystem, no mount; TWRP-to-storage stays withheld.
+#
+set=armed-storage-2dbf8098 sha256=82e69b3a170ed04d773011eca379bd236a742f16070b50c6e06afc64a72d9443 bytes=8605696 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-51-entry-rung-52-DECODES-THE-GPT-HEADER-OUT-OF-THE-SECTOR-1-READ-NOT-PRESSED
+set=armed-storage-2dbf8098 sha256=75a811363e7fdec106e2a2a759883fabcbbdc549cf3ff6cec2d87b5a7a3c7089 bytes=6081028 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-51-entry-no-payload-switch-moved
+set=armed-storage-2dbf8098 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-51-s-MEASURED-no-payload-switch-moved
+set=armed-storage-2dbf8098 sha256=440bab2eed77fb7553035cb9573d4d202e6e5fd7adea497d5db3e0011674827e bytes=6143100 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-2dbf8098 sha256=3ec0025c8fa4c5338e208ac37b6ef40aa35266dc01945730f4a496c23e049f50 bytes=6084608 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-2dbf8098 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-2dbf8098 sha256=22c77445a1ff06beea1c90d2bab15c75b3f01f76be746d8b75ef37c507045906 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-2dbf8098 sha256=2dbf809839c95df80c290ca0b4b61c872d56fbfc87550a91544486f559f20477 bytes=5585532 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-2dbf8098-IS-THE-SETS-NAME-LARGER-than-the-rung-51-arm-s-5569148-bytes-because-st_gpt_parse-is-compiled-in
+set=armed-storage-2dbf8098 sha256=36bfac0ad006c34f89621dec0f2959f3b23b4095016d6fe7efcd35029a9d0ed8 bytes=6765976 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-LARGER-than-the-rung-51-arm-s-6749560-because-st_gpt_parse-and-its-_gp_-cells-were-added-and-none-makes-a-device-access
+set=armed-storage-2dbf8098 sha256=2954b680034879a17e2235ba7dec4d3f76a776834129de594411135508825dfa bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=51-and-differing-from-the-rung-51-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
+set=armed-storage-2dbf8098 sha256=660ee985b70eb926e07201ad10f39b5f55ea2a4aed5761464992ffa7a7fe3f7d bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-source-list-a-member-of-the-manifest-and-not-of-the-gate-s-own-list

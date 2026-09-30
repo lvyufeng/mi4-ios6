@@ -32737,6 +32737,59 @@ verify_trace_symbols() {
                     layout_fail "st_mbr_parse issues only $mp_strideld load(s) and rung 50's two straddled 32-bit fields need at least THREE words (113, 114 and 115) plus the flag and type bytes. A body this thin is not decoding four 16-byte records at all. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_845: rung 50's MBR decode is read out of the linked image: st_mbr_parse (at $mp_addr) builds its two 32-bit fields from the WORD PAIRS THEY STRADDLE - $mp_hiext high-half extraction(s) (\`lsr #16\`) and $mp_loput low-half placement(s) (\`lsl #16\`) across $mp_strideld load(s) - **which is THREE words for TWO fields, w113/w114 and w114/w115, because \`446 = 4*111 + 2\` puts each field at byte 2 of its word.** The rung-49 press (846) published \`_pm_p0_first = 0x0001FFFF\` and \`_pm_p0_len = 0xFFFF0000\` from the SAME sector because the arm read one whole word per field; this clause refuses any body whose load count does not exceed its extraction count, which is the arithmetic of \"two fields over three words\". The values themselves are asserted at the SOURCE (ST_MBR_ENTRY_STRADDLE == 1, ST_MBR_F_D0 % 4 == 2, ST_MBR_F_L0 % 4 == 2), so the offset and the instruction stream are held to each other, and no byte of the medium moves"
             fi
+            if [[ $STORAGE_PROBE -ge 51 ]]; then
+                # **RUNG 52'S OWN CLAUSE - `st_gpt_parse`: THE GPT HEADER IS A READER, AND ITS SAFETY
+                # CLAIM IS A NEGATIVE, SO THE NEGATIVE IS A COUNT.** This is `xnu_entry_844`'s exact
+                # shape one rung up: a body that decodes bytes ALREADY in `st_read_block` must call
+                # NOTHING but the live-writer. The rung-51 press (850) measured `_rd_w0`/`_rd_w1` =
+                # `EFI `/`PART` with `_rd_gpt = 1`, so the sector-1 read's own 512 bytes ARE a GPT
+                # header - and a `bl <st_send_command>` hiding in this body would issue a SECOND sector
+                # read the arm's record never describes, with every cell still reading as success. The
+                # count is keyed on NAMES, not on register addresses, so it survives any change to how
+                # the block is addressed.
+                gp_addr=$(sym_addr st_gpt_parse) ||
+                    layout_fail "st_gpt_parse is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: rung 52's GPT header decode is that body, and \`noinline\` with \`noclone\` is what keeps it one body rather than a block of the probe or a clone beside it. Nothing is rebuilt by this refusal"
+                gp_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$gp_addr" '
+                    { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bn[n] = $4; bb[n] = ($2 != "") ? 1 : 0 }
+                    BEGIN { t = strtonum(a) }
+                    END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+                [[ -n "$gp_next" ]] ||
+                    layout_fail "st_gpt_parse (at $gp_addr) has no size in the linked image, so this clause cannot bound its body. This refusal is about the SCAN and not about the arm. Nothing is rebuilt by this refusal"
+                gp_body=$(arm-none-eabi-objdump -d --start-address="$gp_addr" --stop-address="$gp_next" "$OUT/xnu_arm_entry.elf")
+                gp_allbl=$(grep -cE 'bl[[:space:]].*<[^>]+>' <<<"$gp_body" || true)
+                gp_livebl=$(grep -cE 'bl.*<entry_live_write>' <<<"$gp_body" || true)
+                [[ "$gp_allbl" == "$gp_livebl" && "$gp_livebl" -ge 1 ]] ||
+                    layout_fail "st_gpt_parse makes $gp_allbl call(s) of which $gp_livebl are to entry_live_write, and rung 52's GPT header decode must call **NOTHING BUT the live-writer that publishes its cells**. Any other callee means the rung's own safety claim is false: this body exists to decode bytes ALREADY in \`st_read_block\` (the sector the rung-51 read landed), so a \`bl <st_send_command>\` here would issue a SECOND sector read the arm's record never describes - the transfer would complete, every cell would read as success, and the partition-entry sector would be decoded from a sector fetched by a step no part of this document names. **The claim is a NEGATIVE and a negative is only as strong as the check that refuses its violation** ([[mi4-a-claim-in-a-comment-is-not-a-check]]). Nothing is rebuilt by this refusal"
+                # THE TWO GPT SIGNATURE WORDS, AS THE FOUR HALVES GCC ACTUALLY EMITS - and the check
+                # reads the SAME two constants rung 43's clause reads, because they are the same two
+                # words: `EFI ` = 0x20494645 and `PART` = 0x54524150. A body that decoded the header
+                # WITHOUT re-testing the signature would publish a partition-entry sector off any 512
+                # bytes that happened to sit in the buffer (a read that was gated, a read that timed
+                # out), and every cell would still read as a plausible header.
+                gp_sig=0
+                for _h in '#17989' '#8265' '#16720' '#21586'; do
+                    grep -qE -- "${_h}([^0-9]|$)" <<<"$gp_body" && gp_sig=$((gp_sig + 1))
+                done
+                [[ "$gp_sig" == "4" ]] ||
+                    layout_fail "st_gpt_parse's disassembly holds $gp_sig of the four halves of the two GPT signature words - \`EFI \` = 0x20494645 is movw #17989 + movt #8265 and \`PART\` = 0x54524150 is movw #16720 + movt #21586. **All four must appear**, because \`_gp_sig_ok\` is the {\`st_read_block[0] == 0x20494645\`, \`st_read_block[1] == 0x54524150\`} test and a body that published the header's numbers without re-checking the signature would take a gated or errored read's stale buffer for a GPT header. Nothing is rebuilt by this refusal"
+                # THE CALL SITE IS AFTER THE READ, AND EXACTLY ONCE - the same order rung 49's clause
+                # asserts for the MBR walk. A `bl <st_gpt_parse>` BEFORE the read would decode the
+                # buffer's PREVIOUS contents and every cell would still publish, one boot stale.
+                gp_calls=$(grep -c -- 'bl.*<st_gpt_parse>' <<<"$stb_path_body" || true)
+                [[ "$gp_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $gp_calls call(s) to st_gpt_parse and rung 52 makes exactly one. **Zero means the body is in the image and nothing calls it**, the shape of a switch no build reads; two or more means two decodes of the same buffer and the cells cannot be attributed to one read. Nothing is rebuilt by this refusal"
+                gp_call_ln=$(grep -n -- 'bl.*<st_gpt_parse>' <<<"$stb_path_body" | head -1 | cut -d: -f1)
+                gp_rd_ln=$(grep -n -- 'bl.*<st_read_single_block>' <<<"$stb_path_body" | head -1 | cut -d: -f1)
+                (( gp_call_ln > gp_rd_ln )) ||
+                    layout_fail "st_cmd_path calls st_gpt_parse on line $gp_call_ln and st_read_single_block on line $gp_rd_ln - **the decode is ABOVE the read**, so it decodes the buffer's PREVIOUS contents and the header is one boot stale, with no cell changing ([[mi4-the-step-after-the-point-of-no-return]] in its cheapest form). Rung 52 is exactly \"the decode runs on the sector rung 51 read\", and a build whose order is inverted must not pass. Nothing is rebuilt by this refusal"
+                # THE DECODE IS NOT DEVICE CODE: no load or store may target the controller window.
+                # The GPT header lives in the buffer; a body that touched MMIO here would be a step
+                # the arm's own safety claim denies. The window is the one every clause above uses.
+                gp_dev=$(grep -cE '0xf9824[0-9a-f]{3}' <<<"$gp_body" || true)
+                [[ "$gp_dev" == "0" ]] ||
+                    layout_fail "st_gpt_parse's disassembly names the controller window ($gp_dev match(es) for 0xf9824xxx) and rung 52's decode touches NO device register: the header is in \`st_read_block\`. A window address here is a device access this rung's record does not describe. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_851: rung 52's GPT header decode is read out of the linked image: st_gpt_parse (at $gp_addr) makes $gp_allbl call(s), ALL of them to entry_live_write ($gp_livebl) - **so it sends NO command, opens NO window, and touches NO device register** (0 controller-window references) - it decodes the GPT header out of the SAME \`st_read_block\` the rung-51 sector-1 read filled, re-checks the \`EFI PART\` signature ITSELF (all four halves of 0x20494645 / 0x54524150 present), and is called by st_cmd_path ONCE on line $gp_call_ln, AFTER st_read_single_block (line $gp_rd_ln). **THE ONE FIELD THE FRONTIER NAMES IS \`PartitionEntryLBA\`** - header byte 72, word 18 (\`72/4\`), the sector the 128-byte partition ENTRY ARRAY lives in - and that number is the NEXT arm's CMD17 argument, so 52 has the shape of 50 -> 51: only the sector moves again. \`_gp_my_lba\` (word 6) is the header's SELF-CHECK against the sector this rung read (\`_gp_self_ok\`), \`_gp_first_usable\`/\`_gp_last_usable\` (words 10/12) bound the partition region, and \`_gp_nentries\`/\`_gp_entry_size\` (words 20/21) are the array's own shape. No byte of the medium moves, no register is written, and the medium is not touched at all"
+            fi
             if [[ $STORAGE_PROBE -ge 41 ]]; then
                 # **831: RUNG 42'S OWN CLAUSE - THE FIRST CLAUSE HERE THAT ASSERTS A COMMAND WHOSE
                 # ARGUMENT IS A VALUE THE MEDIUM LATER MOVES BY.** Rungs 11 through 38 assert what a
