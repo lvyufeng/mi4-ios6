@@ -11229,3 +11229,46 @@ set=armed-storage-960c57c4 sha256=960c57c444559b4a874276ad752aaf18b996d36c096027
 set=armed-storage-960c57c4 sha256=176bbe5812db3d38aac8c3ae0d540c1b05784ac1fbf8153f6296679b162c6c9d bytes=6749560 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-byte-identical-in-SIZE-to-the-rung-50-arm-s-6749560-because-no-body-was-added-only-the-sector-number-in-the-existing-store
 set=armed-storage-960c57c4 sha256=d653064326444430ee1980cca9db168be9d11a600aee503cbff2150de446e0c3 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=50-and-differing-from-the-rung-50-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
 set=armed-storage-960c57c4 sha256=fbe31b4b76a6cff1f3a2eba5aecba79c3958c44d0eb797d72ec4039fe5b1f1ee bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-source-list-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+#
+# 850: THE RUNG-51 PRESS - **LBA 1 BEGINS `EFI PART` - THE MEDIUM IS A GPT DISK.**
+# Arm `armed-storage-960c57c4` (STAGE90_XNU_STORAGE_PROBE=50, rung 51) is SPENT.
+# One gate exit 0, one runner exit 0; `fastboot boot` only, nothing flashed,
+# nothing written to storage; `33e80afe` absent from BOTH device lists hand-checked
+# immediately before the gate; **the phone returned**. Capture
+# `out/stage90/captures/rung51-lba1gpt-20260930-120713-last_kmsg.txt` 655,146 B 364105d7...
+#
+# **THE ANSWER.** _rd_w0 = 0x20494645 = "EFI " and _rd_w1 = 0x54524150 = "PART",
+# with the arm's own derived cell _rd_gpt = 1: **LBA 1 BEGINS `EFI PART` - THE
+# MEDIUM IS A GPT DISK.** The rung-50 protective MBR was telling the truth: its
+# single 0xEE entry pointed at LBA 1, and LBA 1 is a real GPT header. Corroborated
+# by what the sector is NOT: _rd_w127 = 0, _rd_sig = 0, _rd_mbr = 0 - a GPT header
+# does not carry the MBR signature (that lives only at LBA 0) - and the re-run
+# partition walk on this sector found no non-empty record (_pm_p0_type = 0 across
+# all four entries, _pm_next_sector = 0, _pm_next_is_arg = 0).
+#
+# **THE READ THAT GOT THERE.** _rd_lba = _rd_arg = 1, _rd_arg_lba_agree = 1 - the
+# CMD17 argument is SECTOR 1, unshifted; _rd_shift = 0, _rd_blockaddr =
+# _pm_sector_addressed = 1, _rd_cap = _pm_cap = 0x01d5a000, _rd_cap_over = 1. **THIS
+# IS WHY RUNGS 43-49 NEVER ANSWERED IT**: they sent LBA << 9 - _rd_arg = 0x200 at
+# value 46 was SECTOR 512, not LBA 1 - and under this card's sector addressing that
+# is the wrong sector. Rung 47's read of "LBA 1" found no EFI PART (_rd_w0 =
+# 0xe8f9decb) because it read sector 512; only now does the read land on the GPT
+# header.
+#
+# The transfer is clean: _rd_complete = 1, _rd_err = 0, _rd_state = 4 (TRAN),
+# _rd_words_gated = 0x80, _rd_word_read = 0x113A - so the two words are the CARD's
+# bytes and not the FIFO's. The card stays in TRANSFER across the press.
+#
+# **THE HONEST NEGATIVE, UNCHANGED**: _rd_cap_csd_valid = 0, so _rd_cap_agree is
+# ABSENT and the EXT_CSD count is the single producer.
+#
+# The standing readings are UNCHANGED: seam_lr = 0x8004c2dc did NOT move,
+# xnu_live_seam_sctlr = 0x30c57879, xnu_entry_failures = 0, abort_entries = 0, the
+# goal's own floor is met as in 504/520/533 (pid 1's syscalls, the fixture's
+# 0xfeedface read back).
+#
+# **THE FRONTIER IS THE GPT PARTITION ENTRY ARRAY**: the header's own
+# PartitionEntryLBA field (header byte offset 72) names the sector the entries live
+# in, and the 128-byte entries carry each partition's first and last LBA.
+# **NO FIRER IS ARMED AND NO PRESS IS OWED.** **THE GOAL IS NOT MET** - no partition
+# entry read, no filesystem, no mount; TWRP-to-storage withheld.
