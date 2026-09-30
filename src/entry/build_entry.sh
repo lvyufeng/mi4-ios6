@@ -31859,6 +31859,74 @@ verify_trace_symbols() {
                         layout_fail "rung 38 publishes no \`$_k\` string in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE. **These are what the press reads, and they fall into four groups that each answer a different question.** The CONDITION: \`_ext_gate_resp\` and \`_ext_gate_state\` are the card's own R1 re-read at the moment of the decision, and \`_ext_gated\`/\`_ext_done\` are the two-valued answer - \`_ext_gated = 1\` with \`_ext_done = 0\` is a phase that was REFUSED, which no absent key can express, and \`_ext_gated = 0\` with \`_ext_done = 1\` is a transfer that ran. The COMMAND: \`_ext_word\` (the arm's copy, 0x083A) beside \`_ext_word_read\` (the block's own copy) - the pair that says the data-present bit reached the register - and \`_ext_complete\`, \`_ext_err\` and \`_ext_timeout\`, the block's own three answers. The INPUT: \`_ext_csd_carried\` (whether rung 35's carry holds a CSD at all), \`_ext_tout_count\` and \`_ext_tout_max\` (the computed timeout, and 0xF is the uncapped value \`SDHCI_QUIRK2_USE_RESERVED_MAX_TIMEOUT\` makes reachable on this host). The DATA: \`_ext_words_read\`, \`_ext_w0\`, \`_ext_w127\` and \`_ext_sec_count\` - the 512 bytes, the vendor's own first and last word of them, and \`mmc.c:333-336\`'s little-endian assembly of \`SEC_COUNT\`, which is the capacity this whole ladder is denied without. An arm without any of them answers the same question the rung below it answered. Nothing is rebuilt by this refusal"
                 done
                 echo "  xnu_entry_824: rung 38's command body, read out of the linked image: st_send_ext_csd (at $ext_addr) loads [r0=#$ext_r0_imm (SEND_EXT_CSD), r1=#$ext_r1_imm (no argument at all - mmc_ops.c:263's \`struct mmc_command cmd = {}\`), r2=#$ext_r2_imm (mmc_ops.c:263's MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_ADTC = 0xB5)] immediately before its bl to st_send_command (disassembly line $ext_bl_ln), and the word it STORES is 0x083A (2106, asserted) - opcode 8 with RESP_SHORT, CRC, INDEX and **DATA** - so this is the ladder's first arm whose number is a DATA-PHASE bit and not a flag, and 0x081A is the same five bits without it; its device accesses in program order, distinct, are [${ext_order% }] - the RESPONSE gate read first, the PIO window opened, TIMEOUT_CONTROL written BEFORE BLOCK_SIZE (sdhci.c:827-828 above sdhci.c:831), BLOCK_SIZE 0x7200, BLOCK_COUNT 1 and TRANSFER_MODE 0x0012 each written as a halfword and read back, then the command, then the 128 BUFFER reads, the window's close, INT_STATUS and PRESENT_STATE - with NO byte in the 0x13..0x1B band, because CMD8 answers with a 48-bit R1 and not CMD9's 136 bits; counts [$(printf '%s' $ext_cnt | tr ' ' ';')]; its image side is the FIVE SYMBOLS [st_ext_csd st_csd_words st_csd_words_valid st_tacc_exp st_tacc_mant]; st_cmd_path calls it $ext_calls time, GATED, immediately after st_send_status, and the cells the press reads are _ext_gate_state (4 = TRAN, or the phase is refused), _ext_word and _ext_word_read (0x083A, the data-present bit), _ext_words_read/_ext_w0/_ext_w127/_ext_sec_count (the 512 bytes and the capacity) and _ext_tout_count (the timeout computed from rung 35's carried CSD)"
+
+            if [[ $STORAGE_PROBE -ge 38 ]]; then
+                # **825: THE RUNG-38 PRESS'S OWN REPAIR, AND IT IS AN ASSERTION ABOUT ONE VALUE A WINDOW
+                # STORES.** The press measured `_ext_complete = 0` beside a 512-byte transfer that plainly
+                # arrived, and the cause was THIS RUNG'S OWN WINDOW: it wrote `0x30` (the vendor's PIO pair
+                # `DATA_AVAIL | SPACE_AVAIL`) and never `SDHCI_INT_RESPONSE` (bit 0), so `INT_STATUS`'s
+                # latch - which honours `INT_ENABLE` - never set the bit `st_send_command`'s poll waits on
+                # (`ST_SDHCI_INT_CMD_MASK`), and the poll ran its full 1.2 s while the data came anyway.
+                # **A WITNESS THAT WAS SWITCHED OFF READS EXACTLY LIKE A COMMAND THAT DID NOT COMPLETE**
+                # (`[[mi4-silence-is-a-reading-only-if-success-is-silent]]`), which is why the fix must be
+                # asserted and not described: the arm that repairs it is one `|=` from the arm that broke
+                # it, and a body that dropped the OR again would answer every cell below identically.
+                #
+                # **THE ASSERTION IS THE FINAL OR'S IMMEDIATE, AND IT IS THE ONE THING THAT DIFFERS.** The
+                # window word is built in ONE register across interleaved `entry_live_write` cells (the
+                # arm's own `_ext_*` readings), so gcc FOLDS the pair of ORs into a single
+                # `orr r?, r?, #imm` - in the pressed arm `#48` = 0x30, in this repair `#49` = 0x31. A
+                # "does 0xF0031 appear anywhere" grep is therefore not a check (the immediate is never
+                # materialized whole, and the base it ORs onto is a runtime register), and a
+                # "two ORs, the second with bit 4 clear" check is WRONG - it would refuse the very
+                # image this repair builds. What IS checkable, and what differs between the broken and
+                # the repaired window by exactly one bit, is the LAST OR onto the register the store
+                # publishes: **bit 0 SDHCI_INT_RESPONSE must be SET in it.** The pressed arm fails
+                # precisely there and nowhere else - same function, same four-instruction window, same
+                # store site, one different immediate.
+                ext_win_addr=$(sym_addr st_send_ext_csd) ||
+                    layout_fail "rung 39's command body is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - the same body rung 38 asserts is absent, so this repair has nothing to repair. Nothing is rebuilt by this refusal"
+                ext_win_next=$(sym_next "$ext_win_addr") ||
+                    layout_fail "nothing follows st_send_ext_csd in the linked image, so the window this clause reads has no end. Nothing is rebuilt by this refusal"
+                ext_win_body=$(arm-none-eabi-objdump -d --start-address="$ext_win_addr" --stop-address="$ext_win_next" "$OUT/xnu_arm_entry.elf")
+                # The window's write is the FIRST store to the offset the 824 clause already names:
+                # 2356 = 0x934 = ST_HC_MEM_BASE + INT_ENABLE 0x34, i.e. the byte-address pair
+                # INT_ENABLE (0x34) re-expressed as a word-addressed `str ..., #2356`. The window is
+                # the first `str` to it (the body reads INT_ENABLE, stores the window, reads it back,
+                # restores it), so this site is the one the press's `_ext_ena_wrote` was read from.
+                # **NO `| head -1`.** This file runs under `set -o pipefail`, and a reader that exits
+                # after one line sends the writer SIGPIPE (141), which pipefail reports as the pipeline's
+                # status and `set -e` turns into a BUILD ABORT WITH NO MESSAGE - the exact trap this file
+                # records at its own line 28127. So every window below captures the full reader output
+                # and selects from it with a HERE-STRING (no pipe, no early exit).
+                # **ONE awk, NO PIPE AND NO `head`.** The reader must not exit early (SIGPIPE +
+                # pipefail, above), and the separator is a real TAB because this is an `objdump` line:
+                # the mnemonic and its operands are TAB-separated, which is why a `[ \t]` character
+                # class that silently failed to match here would leave the whole clause dead. The awk
+                # walks the body once, and at the FIRST `str r?, [r?, #2356]` (the window write) it
+                # emits the register, the line number and the LAST `orr` seen before it.
+                ext_win=$(awk '
+                    $3 == "str" && $4 ~ /^r[0-9]+,$/ && $5 == "[r4," && $6 == "#2356]" {
+                        print "REG=" substr($4, 1, length($4)-1) "\nLINE=" NR "\nLASTOR=" lastor; exit
+                    }
+                    $3 == "orr" { lastor = $0 }
+                ' <<<"$ext_win_body")
+                ext_win_line=$(sed -n 's/^LINE=//p' <<<"$ext_win")
+                [[ -n "$ext_win_line" ]] ||
+                    layout_fail "st_send_ext_csd's disassembly holds no store to INT_ENABLE 0x34 (\`str r?, [r?, #2356]\`) in the linked image, so the window the press measured at \`_ext_ena_wrote\` = 0x30 is not in this body at all - either the register is reached by another base (the offset 2356 = 0x934 is the one the 824 clause names) or the window moved. Nothing is rebuilt by this refusal"
+                ext_win_idx=$ext_win_line
+                ext_win_reg=$(sed -n 's/^REG=//p' <<<"$ext_win")
+                ext_win_last_or=$(sed -n 's/^LASTOR=//p' <<<"$ext_win")
+                # The immediate is the LAST field of `orr r5, r5, #49` - read off the captured line,
+                # not grepped, for the same no-pipe reason.
+                ext_win_last_imm=$(awk '{ print $NF }' <<<"$ext_win_last_or")
+                ext_win_last_imm=${ext_win_last_imm##*#}
+                [[ -n "$ext_win_last_imm" ]] ||
+                    layout_fail "st_send_ext_csd's INT_ENABLE window builds no \`orr\` on the register it stores ($ext_win_reg) before the store at line $ext_win_idx - the last orr seen was [$ext_win_last_or], so this clause cannot read the value the window writes and the press would be handed a word whose construction the build never checked. Nothing is rebuilt by this refusal"
+                (( ext_win_last_imm & 1 )) ||
+                    layout_fail "st_send_ext_csd's window's final OR is \`orr $ext_win_reg, r?, #$ext_win_last_imm\` and **bit 0 - SDHCI_INT_RESPONSE - is CLEAR**. This is exactly the rung-38 press's defect: the window writes 0x30 (or 0x18 / 0x10 / 0x48 - every value that is the vendor's PIO pair alone) and never 0x1, so \`st_send_command\`'s poll, which breaks on \`ST_SDHCI_INT_CMD_MASK\` and sets \`complete = (status & SDHCI_INT_RESPONSE)\`, waits on a bit \`INT_ENABLE\` has forbidden \`INT_STATUS\` to latch - the command completes, 512 bytes arrive, and the arm's OWN completion witness reads 0. **The missing bit costs the whole rung and produces nothing but the poll's full 1.2 s budget.** This is the assertion the pressed arm fails and the ONLY instruction this repair changes. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_825: rung 38's switched-off witness is repaired IN THE LINKED IMAGE: st_send_ext_csd (at $ext_win_addr) builds its INT_ENABLE 0x34 window with a final \`orr $ext_win_reg, r?, #$ext_win_last_imm\` (disassembly line $ext_win_idx) and BIT 0 SDHCI_INT_RESPONSE is SET [$(( ext_win_last_imm & 1 ))], so the store's word carries the vendor's PIO pair (bits 4 and 5, the base this window adds to) AND the command-completion enable every command rung below rung 38 ORs through \`ST_SDHCI_INT_ENABLE_CMD\` = 0x000F0001. **The pressed arm's final OR was \`#48\` = 0x30, bit 0 clear; this rung's is \`#49\` = 0x31 - the same four-instruction window, the same store site, ONE different immediate, and it is the immediate the 512 bytes of the EXT_CSD arrived without.** The build that carried the defect fails this clause at the bit-0 test and is not rebuilt"
+            fi
             fi
             fi
             [[ -z "${stb_path_img// /}" ]] ||

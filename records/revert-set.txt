@@ -9922,3 +9922,93 @@ set=armed-storage-92b6c552 sha256=9b92a0ea556254c0ddcb2011b3bed93ab61fcaba9c4310
 # been made, no filesystem is reached and no mount is made**, so 「让os可以正常启动并且挂载存储」 is not
 # reached and **TWRP-TO-STORAGE STAYS WITHHELD**. The first clause, 「起码要能进入操作系统」, remains met
 # (818 section 1).
+
+# 826, 2026-09-30 - THE RUNG-39 ARM. `armed-storage-6a2e94ae`. PARKED, NOT PRESSED, NOT ARMED.
+#
+# **A BUILD AND A PARK, AND NOTHING ELSE.** No press has been made and none is owed by this file;
+# `frozen/` is a RECORD and not a queue. **THIS ARM REPAIRS THE RUNG-38 PRESS'S OWN DEFECT AND RE-RUNS
+# THE SAME CMD8** - it adds no new command, no new register, no new megabyte and no new device; it
+# moves ONE IMMEDIATE in an OR.
+#
+# (1) THE ACT. `st_send_ext_csd`'s `INT_ENABLE 0x34` window (guarded `#if STAGE90_XNU_STORAGE_PROBE >=
+# 38`) now ORs `ST_SDHCI_INT_ENABLE_CMD` (`0x000F0001`, bit 0 = `SDHCI_INT_RESPONSE`) into the word
+# beside the vendor's PIO pair, and clears `ST_SDHCI_INT_DMA_END | ST_SDHCI_INT_ADMA_ERROR` exactly as
+# the vendor's own PIO arm does (`sdhci_set_transfer_irqs`, `sdhci.c:806-815`). The press measured the
+# window writing `0x30` (`_ext_ena_wrote`) with bit 0 CLEAR, so `INT_STATUS` was forbidden to latch the
+# bit `st_send_command`'s poll waits on (`ST_SDHCI_INT_CMD_MASK`) and the poll ran its full 1.2 s
+# (`_ext_complete = 0`, `_ext_timeout = 1`) while the 512 bytes arrived regardless.
+#
+# (2) THE MEASURED DIFFERENCE FROM THE PRESSED ARM, READ OUT OF THE LINKED IMAGE, NOT ARGUED. The arm
+# the press ran (`armed-storage-92b6c552`) builds the window in one register across interleaved
+# `entry_live_write` calls, so gcc folds it to a single `orr r5, r5, #48` (= 0x30). This arm folds the
+# SAME window to `orr r5, r5, #49` (= 0x31) at the SAME store site, the same four-instruction window,
+# and nothing else in the body differs. That single immediate is the whole repair, and the build
+# asserts it: `xnu_entry_825` refuses unless the last `orr` on the register the `str ..., #2356`
+# (INT_ENABLE 0x34) publishes has BIT 0 SET. **The assertion is DOUBLE-SIDED, tested before it was
+# trusted**: it PASSES on this image and REFUSES `armed-storage-92b6c552` at the bit-0 test (measured
+# this step against the parked ELF).
+#
+# (3) WHAT THE PRESS WOULD READ. The SAME `_ext_*` cells as the rung-38 press, with the one expected
+# change: `_ext_complete = 1` (the witness restored) beside the unchanged data
+# (`_ext_words_read = 0x80`, `_ext_sec_count = 0x01d5a000`, `_ext_resp = 0x00000900`), and
+# `_ext_ena_wrote` carrying bit 0. `_ext_timeout` should fall to 0. If `_ext_complete` reads 1 and the
+# data is unchanged, the rung-38 press is confirmed and the frontier moves to CMD16 `SET_BLOCKLEN`.
+#
+# **AND WHAT THIS ARM DOES NOT SETTLE.** It asserts the WINDOW WORD. It does NOT assert that a press
+# will complete - the enable is now correct but the block's own completion still has to be measured, so
+# `_ext_complete` is the one cell that answers the arm and its absence (a refused gate) is
+# `_ext_gated = 1` / `_ext_done = 0`.
+set=armed-storage-6a2e94ae sha256=bd5bb0a2bdecfe1f398547b3f706f4b5332f53aea82f16287b768fd7d4150e9a bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-38-entry-rung-39-RE-RUNS-CMD8-WITH-THE-COMPLETION-ENABLE-RESTORED-NOT-PRESSED
+set=armed-storage-6a2e94ae sha256=f263b81bb40887c14a7002f834444840200007d12e10360f505e6d57c7bbcc0b bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-38-entry-same-size-as-the-pressed-rung-38-arm-s-despite-the-larger-entry-because-the-page-move-s-alignment-padding-absorbs-it
+set=armed-storage-6a2e94ae sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-38-s-MEASURED-no-payload-switch-moved
+set=armed-storage-6a2e94ae sha256=4eab374a4552fc8c393fc7bc85bf8f6f937d59c45e917f0cc19e3220c67735df bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-6a2e94ae sha256=398410d71bce674fe2207306859b32a3356d16d4ef777bafb70ca771abb3ca0d bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-6a2e94ae sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-6a2e94ae sha256=65cfaef4ae9ebe94edb46f4d19b11ae65a26dbcd1ea48c035b36c6b9dff29daf bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-6a2e94ae sha256=6a2e94ae8e2b3cfc52aa41b94852b72ff815f89f649a2397372a0641a25891c7 bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-6a2e94ae-IS-THE-SETS-NAME-same-5569148-bytes-as-the-pressed-rung-38-arm-and-565819-of-those-bytes-differ-because-the-entry-group-moved-one-immediate-inside-a-function-that-moved-nothing-else
+set=armed-storage-6a2e94ae sha256=7f73ff54b51a229209510568e77f2c5255eb1307ae7ce471448700fd008ce273 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=38-and-differing-from-the-pressed-rung-38-arm-s-in-EXACTLY-TWO-lines-the-artifact-s-own-hash-and-the-ladder-value-37-38
+set=armed-storage-6a2e94ae sha256=b667093ddd357d83f24a24d7633b458f3ab37a0fd8b3cb3b56d8bd7044932114 bytes=6749248 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-UNCHANGED-from-the-pressed-rung-38-arm-s-6749248-because-the-one-immediate-moved-and-the-body-s-net-size-did-not
+set=armed-storage-6a2e94ae sha256=3d8af54e66172dc2ddf7c8551aab889fb2b4908612dca05b73e56bcf4b4273d0 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-THREE-of-its-content-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-the-hashes-of-build_entry-sh-and-entry_storage-c
+
+# 827, 2026-09-30 - THE RUNG-39 PRESS. `armed-storage-6a2e94ae` IS SPENT. THE REPAIR WORKED.
+#
+# **A PRESS, made autonomously under the standing instruction to continue until the OS boots.** ONE
+# gate exit 0 / 0 FAIL, ONE runner exit 0; `fastboot boot` only; nothing flashed; nothing written;
+# `33e80afe` absent from BOTH device lists hand-checked immediately before the gate (adb listed only
+# `4a2fe00b`, `fastboot devices` empty). Capture
+# `out/stage90/captures/rung39-cmd8-complete-20260930-022901-last_kmsg.txt` 656,290 B sha
+# `0e797ec1...`, beside it the gate log 52,449 B and the run log 89,391 B. The phone returned.
+#
+# (1) **THE ONE-OR REPAIR IS CONFIRMED FROM ITS OTHER SIDE.** `_ext_ena_wrote = 0x000f0031` (bit 0 now
+# set), **`_ext_complete = 1`, `_ext_timeout = 0`**, `_ext_status_after = 0x00000001` =
+# `SDHCI_INT_RESPONSE` - so with the enable added the poll breaks on bit 0 instead of running its 1.2 s
+# and the body's own green light is met. `_ext_command_enable = 0x000f0001` and `_ext_dma_cleared = 0`
+# are the two new cells.
+#
+# (2) **AND IT EXPOSED THE DEFECT THE OLD DEFECT WAS HIDING - THE DATA IS GONE.** Every card field the
+# rung-38 press read non-zero now reads 0: `_ext_words_gated = 0` (was `0x80`),
+# `_ext_data_avail_seen = 0` (was `0x80`), `_ext_ps_first = 0x01f80206` (DOING_READ set, NO
+# `DATA_AVAILABLE 0x800`; was `0x01f80a06`), `_ext_sec_count = 0` (was `0x01d5a000`),
+# `_ext_rev`/`_ext_structure` = 0/0 (was 7/2), `_ext_int_status_end = 0x1` (was `0x20`).
+# `_ext_doing_read_seen = 0x80` still - the block entered DOING_READ, but the FIFO is empty and the
+# loop reads BUFFER UNCONDITIONALLY, so it returns 128 zero words.
+#
+# (3) **THE MECHANISM IS ONE WAIT WHERE THERE SHOULD BE TWO.** `st_send_command`'s poll returns on the
+# CMD_IRQ; the DATA IRQ comes later. rung 38's missing enable made the poll wait its full 1.2 s, and BY
+# THE TIME IT RETURNED THE DATA HAD ARRIVED - the read succeeded BY the timeout. rung 39's correct
+# enable makes the poll return in microseconds, so the loop runs BEFORE the data arrives and reads 128
+# zeros. **The defect that made `_ext_complete = 0` is the only reason rung 38's read worked**; removing
+# it (correctly) unmasked a poll-on-the-command-interrupt used as a signal that data is present, where
+# the vendor's own `sdhci_transfer_pio` waits inside `while (PRESENT_STATE & SDHCI_DATA_AVAILABLE)`.
+#
+# (4) **THE NEXT ARM IS A BOUNDED DATA WAIT** between the command's completion and the read loop: poll
+# `PRESENT_STATE`'s `DATA_AVAILABLE` (or `INT_STATUS`'s `SDHCI_INT_DATA_AVAIL`) until it sets, bounded
+# so a card that never delivers does not hang. A TIME change - no new command, no new register.
+#
+# (5) **CONTAINMENT.** Storage cells 746 -> 748 (2 added, both `_ext_command_enable`/`_ext_dma_cleared`),
+# 0 lost. Every decision cell identical across the two boots (`_cmd1_resp = 0x40ff8080`,
+# `_nidx_state = 2`, `_csd_structure = 3`, `_csd_mmca_vsn = 4`, `_sel_state = 3`, `_sel_complete = 1`,
+# `_sta_state = 4`, `_sta_complete = 1`); `BSD root: md0` unchanged. Nothing on the device changed.
+#
+# **THE GOAL IS NOT MET.** No block read, no filesystem, no mount; TWRP-to-storage stays withheld.
+set=armed-storage-6a2e94ae sha256=bd5bb0a2bdecfe1f398547b3f706f4b5332f53aea82f16287b768fd7d4150e9a bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-PRESSED-2026-09-30-022901
