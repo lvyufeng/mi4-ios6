@@ -2720,8 +2720,21 @@ void __wrap_platform_cache_idle_exit(void)
  * loop is big enough to push the group over. This is the same class as the five moves before it and
  * the same one-clause cause: the address is pinned in two entry-side files and moves whenever the
  * entry group's own size crosses a page, which is a property of the rung and not of the rung's
- * meaning. */
-#define STAGE90_XNU_SEAM_LR       0x8004c2dcu
+ * meaning.
+ *
+ * **AND IT HAS HAPPENED A SEVENTH TIME, ON RUNG 53 (`STAGE90_XNU_STORAGE_PROBE=52`, the GPT partition
+ * entry array at LBA 2).** The build refused with `the exit's call to FlushPoU_Dcache is at
+ * 2147799768 and returns to 2147799772, while entry_trace.c's STAGE90_XNU_SEAM_LR is 0x8004c2dc` - so
+ * the constant below is re-derived from the measurement, **`0x8004c2dc` -> `0x8004d2dc`, +0x1000
+ * exactly**, and `scripts/run_and_capture.sh`'s `EXIT_POP_LR_LITERAL` moves with it (both copies, one
+ * edit each - the hazard `tools/check_stage_paths.sh` cannot see and only the build's own clause
+ * catches). **Rung 52's body (a header decode with no new loop) fitted inside the existing
+ * alignment** (`xnu_arm_entry.bin` unchanged at 5,585,532 B across rung 52's arm and its press) and
+ * **rung 53's did not** - the partition-entry walk is a loop, and a loop is big enough to push the
+ * group over. This is the same class as the six moves before it and the same one-clause cause: the
+ * address is pinned in two entry-side files and moves whenever the entry group's own size crosses a
+ * page, which is a property of the rung and not of the rung's meaning. */
+#define STAGE90_XNU_SEAM_LR       0x8004d2dcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);

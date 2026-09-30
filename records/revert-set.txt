@@ -11381,3 +11381,66 @@ set=armed-storage-2dbf8098 sha256=660ee985b70eb926e07201ad10f39b5f55ea2a4aed5761
 # partition's TYPE GUID, FIRST LBA and LAST LBA; the next arm moves the read's sector 1 -> 2 and
 # `_gp_next_is_arg` becomes 1. **NO PRESS IS OWED.** **THE GOAL IS NOT MET** - no partition entry read
 # yet, no filesystem, no mount; TWRP-to-storage stays withheld.
+#
+# 853 - the rung-53 arm (STAGE90_XNU_STORAGE_PROBE=52, VALUE 52 = ORDINAL RUNG 53):
+#
+# **THE GPT PARTITION ENTRY ARRAY, READ AT THE SECTOR THE RUNG-52 HEADER NAMED, AND THE FIRST
+# ENTRY DECODED.** The rung-52 press (852) decoded the GPT header and measured
+# `_gp_entry_lba = _gp_next_sector = 2` - the 128-byte partition ENTRY ARRAY lives at SECTOR 2 -
+# so rung 53 is ONE NUMBER: the sector variable `st_read_lba` moves 1 -> 2 and the parse that
+# follows reads the array out of the SAME `st_read_block` the read fills. **It is the same shape
+# as 50 -> 51: only the sector variable moves, and the number is the whole rung.**
+#
+# **THE WALK IS BOUNDED BY THE ONE SECTOR READ, AND THAT BOUND IS THE WHOLE SAFETY OF THE RUN.**
+# The header declares `NumberOfPartitionEntries = 28` entries of 128 bytes - a 3,584-byte array
+# spanning SEVEN sectors - but this rung reads ONE 512-byte sector (`st_read_block`, 128 words),
+# so `_ge_entries_in_sector = 128/32 = 4` and the loop is bounded by
+# `_ge_nentries_used = min(28, 4) = 4`. **A reader who walked all 28 would index
+# `st_read_block[874]` of a 128-word array and decode a partition extent out of adjacent statics**,
+# with every cell still reading as a plausible partition; the build clause refuses such a body by
+# requiring the divide that computes the sector's capacity. A reader who walked a fixed four (as
+# the MBR has) is right by luck on this disk and wrong on the next, which is why the header's
+# DECLARED count is carried and published beside the CAPACITY.
+#
+# **THE TWO NUMBERS A MOUNT NEEDS ARE `StartingLBA`/`EndingLBA`** - entry words 8/10 - and the
+# first NON-EMPTY entry's first LBA is carried in `st_gpt_part_sector` as the NEXT arm's CMD17
+# argument, the same one-number step 50 -> 51 and 51 -> 53 were. The 16-byte type GUID is entry
+# words 0-3; all-zero names an unused slot (`_ge_blank`), so a disk whose entry 0 is empty
+# (`_ge_found = 0`) is told apart from a walk that never ran.
+#
+# **THE CLAIM IS A NEGATIVE MADE STRUCTURAL.** New clause `xnu_entry_852` reads
+# `st_gpt_entry_parse`'s linked body and refuses unless every `bl` in it is to `entry_live_write`
+# (32 of 32, so it sends no command, opens no window, touches no register - and the body names the
+# controller window ZERO times), the sector-capacity divide is present, and it is called by
+# `st_cmd_path` ONCE AFTER `bl <st_gpt_parse>` - so a body that quietly issued a command, that
+# over-walked the 128-word buffer, or that ran before the header carried its shape, cannot build.
+# `xnu_entry_849`'s value-52 half reads the store that fills `st_read_lba` and refuses unless its
+# immediate is **2**.
+#
+# `_ge_hdr_ok` re-checks that the buffer is NOT the header (it reads 0 on a well-formed entry
+# array, the correct direction); `_ge_arr_in_range` and `_ge_part_in_range` bound the array's
+# sector and the partition's first LBA inside the card.
+#
+# **IT MOVES NO BYTE OF THE MEDIUM AND TOUCHES NO DEVICE REGISTER IT DID NOT TOUCH BEFORE**: CMD17
+# reads, so the card stays in TRAN with its block length and its CSD/EXT_CSD exactly as rungs 42-52
+# left them; only the sector NUMBER moves 1 -> 2. The entry bin grew to 5,585,532 bytes and the
+# entry-group page move fired this time (`STAGE90_XNU_SEAM_LR` `0x8004c2dc` -> `0x8004d2dc`, +0x1000
+# exactly - rung 52's header decode was a straight line and did NOT move it; rung 53's entry walk is
+# a LOOP and did). `STAGE90_XNU_PWR_WAIT_TICKS=384000` is inherited from rung 9 unchanged - 20 ms at
+# this device's own 19,200,000 Hz. `fastboot boot` only; nothing flashed.
+#
+# **NO PRESS HAS BEEN MADE AND NONE IS OWED: this arm is PARKED and the park is a RECORD and not a
+# queue. THE PRESS IS THE OPERATOR'S. THE GOAL IS NOT MET** - no filesystem superblock read yet, no
+# filesystem, no mount; TWRP-to-storage stays withheld.
+#
+set=armed-storage-e8597e3e sha256=d70ea17d261bc342c2e0427a27a642e3edf0914400bcab3436f93443463f9a91 bytes=8605696 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-52-entry-rung-53-READS-THE-GPT-PARTITION-ENTRY-ARRAY-AT-LBA-2-NOT-PRESSED
+set=armed-storage-e8597e3e sha256=f8943d0f58cf517b6f6cf679d57a507479b369a05a3b3b76308e8029c5a6eca3 bytes=6081028 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-52-entry-no-payload-switch-moved
+set=armed-storage-e8597e3e sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-52-s-MEASURED-no-payload-switch-moved
+set=armed-storage-e8597e3e sha256=7ef323ff38b984ca019b771cec4c99134ecdbf5d28a747abcb55c1efc2f7148d bytes=6143100 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-e8597e3e sha256=2cfd07aa0b2a50101afaebbb255af4939f6801dcaf6ebf293460fcfcacd8916b bytes=6084608 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-e8597e3e sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-e8597e3e sha256=50307da6057b1b85d3da867caec50e618ad2abb781e2132facf50edcebccfeb6 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-e8597e3e sha256=e8597e3e5aceda8f538ad272027c3d4267f01b070a18e6ad23338e77f536c240 bytes=5585532 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-e8597e3e-IS-THE-SETS-NAME-LARGER-than-the-rung-52-arm-s-5585532-bytes-because-st_gpt_entry_parse-is-compiled-in
+set=armed-storage-e8597e3e sha256=878a5e2cda963d35bca9794fb8610bce4b415770c0aa858e02c5838b8ff2f644 bytes=6766176 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-LARGER-than-the-rung-52-arm-s-6765976-because-st_gpt_entry_parse-and-its-_ge_-cells-were-added-and-none-makes-a-device-access-and-the-group-moved-one-page-STAGE90_XNU_SEAM_LR-0x8004d2dc
+set=armed-storage-e8597e3e sha256=65b6629bdc4d24793bbdb085908f6f83f49fff119a483280cd593d4dab46960c bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=52-and-differing-from-the-rung-52-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
+set=armed-storage-e8597e3e sha256=0c6e643e363286163a3df0492224a57eefa24beb62689b9afc9ada4522ec4954 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-source-list-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
