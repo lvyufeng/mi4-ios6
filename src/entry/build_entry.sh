@@ -32334,7 +32334,51 @@ verify_trace_symbols() {
                             blk43_sel_bl=$(grep -c -- 'bl.*<st_sector_for_read>' <<<"$blk43_body" || true)
                             [[ "$blk43_sel_bl" == "1" ]] ||
                                 layout_fail "st_read_single_block calls \`st_sector_for_read\` $blk43_sel_bl time(s) and rung 54 calls it exactly once - the ONE store to \`st_read_lba\` this body makes takes the selector's return, and two calls would mean a second store the single-store clauses below read as the only one. Nothing is rebuilt by this refusal"
+                            if [[ $STORAGE_PROBE -ge 54 ]]; then
+                                # **RUNG 55's THIRD ARM: THE SELECTOR LOADS THE PARTITION'S OWN SECTOR.**
+                                # Rung 55 adds a third read at the partition's own superblock sector, and the
+                                # selector's third arm computes `st_gpt_part_sector + ST_FS_SB_SECTOR_OFF` from a
+                                # LIVING carry. So the selector body must contain a reference to the symbol
+                                # `st_gpt_part_sector` - the one thing the two-immediate check above cannot state,
+                                # because the third arm's numbers (the carry and the + 2 offset) are not both
+                                # plain immediates. **A selector that returns only 1 and 2 is rung 54**, whose
+                                # third read re-reads the header (the carry still 0) - a defect no cell would
+                                # show except `_pt_arg_sector = 1`.
+                                # **THE CARRY IS READ AS AN ADDRESS, NOT AS A SYMBOL NAME.**
+                                # The first draft of this clause grepped the selector body for the TEXT
+                                # `<st_gpt_part_sector>` and refused only when the count was zero - which is
+                                # the shape a relocatable reference takes in an *unlinked* object, not in
+                                # this linked image: here the carry is reached by a `movw`/`movt` pair naming
+                                # the absolute address `0x805601a4`, so the text `<st_gpt_part_sector>` is
+                                # **present in no disassembly at all** and the grep read 0 on a CORRECT body
+                                # and refused the build (m810's shape: an assertion whose subject is text
+                                # the artifact never contains). The repair decodes the pair the compiler
+                                # actually emitted and holds it against the address `nm` gives the symbol -
+                                # so the clause proves the selector loads *this* carry and not a stale one,
+                                # and a `movw`/`movt` pair for any other address is refused by VALUE.
+                                #
+                                # **WHY BY VALUE AND NOT BECAUSE THE SYMBOL IS IN A RELOCATION TABLE.** The
+                                # claim rung 55 has to make is that the third arm addresses the carry the
+                                # entry decode fills in THIS image, at THIS link. Reading the symbol out of
+                                # the linked address does exactly that; a name match would only say the
+                                # compiler mentioned a symbol.
+                                blk43_sel_ps_addr=$(sym_addr st_gpt_part_sector) ||
+                                    layout_fail "\`st_gpt_part_sector\` - the carry rung 55's third read addresses - is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: the third read then addresses a sector nothing in this image ever wrote, and the filesystem decode runs on whatever the second read left. Nothing is rebuilt by this refusal"
+                                blk43_sel_lo=$(grep -oE 'movw.*#[0-9]+' <<<"$blk43_sel_body" | grep -oE '[0-9]+$' | head -1 || true)
+                                blk43_sel_hi=$(grep -oE 'movt.*#[0-9]+' <<<"$blk43_sel_body" | grep -oE '[0-9]+$' | head -1 || true)
+                                blk43_sel_lo_exp=$(( blk43_sel_ps_addr & 0xFFFF ))
+                                blk43_sel_hi_exp=$(( ( blk43_sel_ps_addr >> 16 ) & 0xFFFF ))
+                                [[ -n "$blk43_sel_lo" && -n "$blk43_sel_hi" ]] ||
+                                    layout_fail "rung 55's sector selector \`st_sector_for_read\` (at $blk43_sel_addr) materializes no \`movw\`/\`movt\` pair (lo [$blk43_sel_lo], hi [$blk43_sel_hi]), so its third arm computes no carry at all. Rung 55's THIRD read lands the partition's own superblock, whose sector is \`st_gpt_part_sector + ST_FS_SB_SECTOR_OFF\`. Nothing is rebuilt by this refusal"
+                                [[ "$blk43_sel_lo" -eq "$blk43_sel_lo_exp" && "$blk43_sel_hi" -eq "$blk43_sel_hi_exp" ]] ||
+                                    layout_fail "rung 55's sector selector \`st_sector_for_read\` (at $blk43_sel_addr) materializes the pair [$blk43_sel_lo, $blk43_sel_hi] = $(printf '0x%04x%04x' "$blk43_sel_hi" "$blk43_sel_lo") but \`st_gpt_part_sector\` lives at $blk43_sel_ps_addr, i.e. [$blk43_sel_lo_exp, $blk43_sel_hi_exp]. Rung 55's THIRD read lands the partition's own superblock, and its sector comes from the carry \`st_gpt_part_sector + ST_FS_SB_SECTOR_OFF\` that \`st_gpt_entry_parse\` fills from the entry's \`StartingLBA\`. **A selector that loads the WRONG address is rung 54 wearing rung 55's name** - the third read would address whatever that address holds (0 on a fresh boot) plus 2, i.e. sector 2, re-reading the ENTRY ARRAY, and \`_pt_arg_sector = 2\` would be the cell that names it. Nothing is rebuilt by this refusal"
+                                blk43_sel_add=$(grep -oE 'add[[:space:]]+r[0-9]+, r[0-9]+, #2([^0-9]|$)' <<<"$blk43_sel_body" | head -1 || true)
+                                [[ -n "$blk43_sel_add" ]] ||
+                                    layout_fail "rung 55's sector selector \`st_sector_for_read\` (at $blk43_sel_addr) never adds the superblock offset \`ST_FS_SB_SECTOR_OFF\` = 2 to the carry. Rung 55's THIRD read lands the partition's own SUPERBLOCK, which ext2/3/4 and f2fs both put at partition byte 1024 = sector 2 (verified in the vendor tree: \`ext4.h:1009\`'s \`struct ext4_super_block\` at byte 1024, \`f2fs_fs.h:59\`'s \`struct f2fs_super_block\` at byte 1024) - so a selector that returns \`st_gpt_part_sector\` alone addresses the partition's FIRST sector, which holds the boot record and no superblock magic, and \`_pt_fs_found\` would read 0 for a filesystem that is there. Nothing is rebuilt by this refusal"
+                                echo "  xnu_entry_849: rung 55's THREE sectors are read out of the selector body: st_sector_for_read (at $blk43_sel_addr, called once by st_read_single_block) materializes **the header sector \`ST_GPT_HEADER_SECTOR\` = 1, the array sector \`ST_GPT_ENTRY_ARRAY_SECTOR\` = 2, AND the partition's own superblock sector \`st_gpt_part_sector + ST_FS_SB_SECTOR_OFF\`** - the carry is loaded as a **\`movw\`/\`movt\` pair [$blk43_sel_lo, $blk43_sel_hi] asserting the address $blk43_sel_ps_addr \`nm\` gives \`st_gpt_part_sector\`**, and the \`+2\` superblock offset is asserted on its own instruction (the carry the entry decode fills, two sectors into the partition where ext2/3/4 and f2fs both put their superblock), and its condition is the read ordinal, so **the FIRST read sends sector 1 - the GPT HEADER - the SECOND sends sector 2 - the ENTRY ARRAY - and the THIRD sends the first partition's superblock sector, whose bytes the filesystem decode walks**. The three sectors, the carry's own address and the offset are read out of the linked image's own immediates and address, not from a sentence in a comment"
+                            else
                             echo "  xnu_entry_849: rung 54's TWO sectors are read out of the selector body: st_sector_for_read (at $blk43_sel_addr, called once by st_read_single_block) materializes **the header sector \`ST_GPT_HEADER_SECTOR\` = 1 and the array sector \`ST_GPT_ENTRY_ARRAY_SECTOR\` = 2**, and its condition is the read ordinal (the counter bumped just before each command), so **the FIRST read sends sector 1 - the GPT HEADER, whose bytes the header decode parses out of the buffer - and the SECOND sends sector 2, whose bytes the entry decode walks**. The order, and the fact that the header read comes first, are read out of the linked image's own immediates and not from a sentence in a comment"
+                            fi
                         elif [[ $STORAGE_PROBE -ge 52 ]]; then
                             blk43_lba_exp=2
                             blk43_lba_note="**SECTOR 2 - the partition ENTRY ARRAY's own sector**, which the rung-52 press published as \`_gp_entry_lba = _gp_next_sector = 2\` beside its own \`_gp_arg_sector = 1\`. **1 here is rung 51's GPT HEADER wearing rung 53's name**: the read would land sector 1 again, the entry decode would run on a HEADER, \`_ge_hdr_ok\` would read 1 (the buffer IS \`EFI PART\`) and \`_ge_arr_sector = 2\` beside \`_ge_arg_is_arr = 0\` would name the inversion - the rung would be a re-run of value 51 with a different label"
@@ -32455,7 +32499,20 @@ verify_trace_symbols() {
                 [[ "$blk43_gpt" == "4" ]] ||
                     layout_fail "st_read_single_block's disassembly holds $blk43_gpt of the four halves of the two GPT signature words - \`EFI \` = 0x20494645 is movw #17989 + movt #8265 and \`PART\` = 0x54524150 is movw #16720 + movt #21586. **All four must appear**, because the derived cell \`_rd_gpt\` is the comparison \`(w[0] == 0x20494645) && (w[1] == 0x54524150)\` and a body that published the first four words without comparing them would leave the press to decide by eye. Nothing is rebuilt by this refusal"
                 blk43_calls=$(grep -c -- 'bl.*<st_read_single_block>' <<<"$stb_path_body" || true)
-                if [[ $STORAGE_PROBE -ge 53 ]]; then
+                if [[ $STORAGE_PROBE -ge 54 ]]; then
+                    # **RUNG 55 READS THE MEDIUM THREE TIMES, AND THE THIRD IS THE PARTITION'S OWN
+                    # SUPERBLOCK.** Rung 54 read the HEADER (its bytes parsed by `st_gpt_parse`) and the
+                    # ARRAY (walked by `st_gpt_entry_parse`); rung 55 adds a THIRD read at the first
+                    # partition's superblock sector (`st_gpt_part_sector + ST_FS_SB_SECTOR_OFF`, the carry
+                    # the entry decode fills), so `st_part_parse` decodes a filesystem magic out of the
+                    # buffer it fills. **Three calls are the rung**: two is rung 54 (no partition read, no
+                    # filesystem magic); one is rung 53 again (the single read lands the array and the header
+                    # decode zeroes the carries); zero means the body is uncalled. The three reads land
+                    # DIFFERENT sectors by the read ORDINAL, so each decode sees the bytes the step below it
+                    # did not overwrite - the property rung 54's ordering established and rung 55 extends.
+                    [[ "$blk43_calls" == "3" ]] ||
+                        layout_fail "st_cmd_path makes $blk43_calls call(s) to st_read_single_block and rung 55 makes exactly **THREE** - the FIRST read lands the GPT HEADER (parsed by \`st_gpt_parse\`), the SECOND the ENTRY ARRAY (walked by \`st_gpt_entry_parse\`, whose first non-empty entry's \`StartingLBA\` it carries), and the THIRD the FIRST PARTITION'S SUPERBLOCK (decoded by \`st_part_parse\`, the sector \`st_gpt_part_sector + ST_FS_SB_SECTOR_OFF\` where ext2/3/4 and f2fs both put their magic). **TWO is rung 54**: the arm reads the header and the array and never asks the filesystem question. **ONE is rung 53 again** (the single read lands the array, the header decode zeroes the carries). Zero means the body is in the image and nothing calls it. Four or more means a read the rung does not name. Nothing is rebuilt by this refusal"
+                elif [[ $STORAGE_PROBE -ge 53 ]]; then
                     # **RUNG 54 READS THE MEDIUM TWICE, AND RUN 53's `.rodata`-PAIR FORM PROVED THE TWO
                     # CALLS ARE THE RUNG.** The rung-53 press falsified the single-read form: the ONE read
                     # landed the ENTRY ARRAY, so the header decode ran on it and zeroed the carries. Rung
@@ -32644,7 +32701,18 @@ verify_trace_symbols() {
                 # ordering 840 measured as too late - and two calls to one body is an arm whose answer
                 # cannot be read.
                 dr47_calls=$(grep -c -- 'bl.*<st_data_reset>' <<<"$stb_path_body")
-                if [[ $STORAGE_PROBE -ge 53 ]]; then
+                if [[ $STORAGE_PROBE -ge 54 ]]; then
+                    # **RUNG 55 ISSUES THE RESET THREE TIMES - ONE BEFORE EACH OF ITS THREE READS.** Rung
+                    # 54 needed two (a second CMD17 runs against the state the first transfer left); rung 55
+                    # adds a THIRD read at the partition's superblock, so a third reset precedes it. The
+                    # reset between the SECOND read and the entry decode is untouched; the new one sits
+                    # between the entry decode and the THIRD read, exactly as the second sits between the
+                    # header decode and the second read. **A count of 2 is rung 54** (the third read runs on
+                    # a line the second transfer may have left inhibited); a count below 2 is rung 47's
+                    # single-reset site, where the SECOND and THIRD reads run unreleased.
+                    [[ "$dr47_calls" == "3" ]] ||
+                        layout_fail "st_cmd_path makes $dr47_calls call(s) to st_data_reset and rung 55 makes exactly **THREE** - ONE before each of its three sector reads (the header read, the array read, and the partition's own superblock read), because a CMD17 that follows a transfer runs against the state that transfer left (rung 44's press measured \`DATA_INHIBIT\` refusing CMD17). **TWO is rung 54**: the third (partition) read runs unreleased. **ONE** is rung 47's single-reset site, where the second and third reads both run unreleased. **Zero** is rung 46's too-late site. Four or more is a reset the rung does not name. Nothing is rebuilt by this refusal"
+                elif [[ $STORAGE_PROBE -ge 53 ]]; then
                     # **RUNG 54 ISSUES THE RESET TWICE ON PURPOSE.** rung 47 moved the ONE reset to sit
                     # before the sector read; rung 54 has TWO sector reads, and a second CMD17 in the
                     # same boot runs against the state the first transfer left (rung 44's press measured
@@ -32921,6 +32989,57 @@ verify_trace_symbols() {
                 (( ge_call_ln > gp_call_ln )) ||
                     layout_fail "st_cmd_path calls st_gpt_entry_parse on line $ge_call_ln and st_gpt_parse on line $gp_call_ln - **the entry decode is ABOVE the header decode**, so it consumes \`st_gp_entry_lba\`/\`st_gp_nentries\`/\`st_gp_entry_size\` BEFORE the header carries them (they would be 0) and the array's sector would never reach sector 2's read. The header's own shape is captured while the buffer still holds the HEADER; the entry decode MUST run after that capture. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_852: rung 53's partition-entry decode is read out of the linked image: st_gpt_entry_parse (at $ge_addr) makes $ge_allbl call(s), ALL of them to entry_live_write ($ge_livebl) - **so it sends NO command, opens NO window, and touches NO device register** (0 controller-window references) - it decodes the first non-empty 128-byte GPT partition entry out of the SAME \`st_read_block\` the sector-2 read filled, and is called by st_cmd_path ONCE on line $ge_call_ln, AFTER \`st_gpt_parse\` (line $gp_call_ln) so it consumes the header's carried shape (\`_gp_nentries\`, \`_gp_entry_size\`, \`_gp_entry_lba\`) rather than reading a buffer the header no longer occupies. **THE WALK IS BOUNDED BY THE ONE SECTOR ($ge_divides divide/shift(es) present)** - \`min(NumberOfPartitionEntries, 128/stride_w)\` = \`min(28, 4)\` = 4 - because the header declares a SEVEN-sector array and this rung reads ONE sector: a walk bounded only by the header would index word 874 of a 128-word buffer. **THE TWO NUMBERS A MOUNT NEEDS ARE \`StartingLBA\`/\`EndingLBA\`** - entry words 8/10, the partition's own extent - and the first non-empty entry's first LBA is carried in \`st_gpt_part_sector\` as the NEXT arm's CMD17 argument, the same one-number step 50 -> 51 and 51 -> 53 were. \`_ge_type_w0..w3\` are the entry's 16-byte type GUID, all-zero naming an unused slot (\`_ge_blank\`), and \`_ge_arg_is_arr\` holds the read's sector against the header's own \`_gp_entry_lba\` - two independent derivations that must agree. No byte of the medium moves, no register is written, and the medium is not touched at all"
+            fi
+            if [[ $STORAGE_PROBE -ge 54 ]]; then
+                # **RUNG 55'S OWN CLAUSE - `st_part_parse`: THE THIRD READER, AND ITS SAFETY CLAIM IS A
+                # NEGATIVE, SO THE NEGATIVE IS A COUNT (the shape of xnu_entry_844/851/852).** The ONE
+                # device access rung 55 adds is the THIRD `st_read_single_block` CMD17 for the partition's
+                # superblock - asserted above by the `blk43_calls = 3` / `dr47_calls = 3` counts. This clause
+                # is about the BODY that follows it: it decodes a filesystem superblock out of bytes ALREADY
+                # in `st_read_block` and must call NOTHING but the live-writer.
+                pt_addr=$(sym_addr st_part_parse) ||
+                    layout_fail "st_part_parse is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: rung 55's filesystem decode is that body, and \`noinline\` with \`noclone\` is what keeps it one body rather than a block of the probe or a clone beside it. Nothing is rebuilt by this refusal"
+                pt_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$pt_addr" '
+                    { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bn[n] = $4; bb[n] = ($2 != "") ? 1 : 0 }
+                    BEGIN { t = strtonum(a) }
+                    END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+                [[ -n "$pt_next" ]] ||
+                    layout_fail "st_part_parse (at $pt_addr) has no size in the linked image, so this clause cannot bound its body. This refusal is about the SCAN and not about the arm. Nothing is rebuilt by this refusal"
+                pt_body=$(arm-none-eabi-objdump -d --start-address="$pt_addr" --stop-address="$pt_next" "$OUT/xnu_arm_entry.elf")
+                pt_allbl=$(grep -cE 'bl[[:space:]].*<[^>]+>' <<<"$pt_body" || true)
+                pt_livebl=$(grep -cE 'bl.*<entry_live_write>' <<<"$pt_body" || true)
+                [[ "$pt_allbl" == "$pt_livebl" && "$pt_livebl" -ge 1 ]] ||
+                    layout_fail "st_part_parse makes $pt_allbl call(s) of which $pt_livebl are to entry_live_write, and rung 55's filesystem decode must call **NOTHING BUT the live-writer that publishes its cells**. Any other callee means the rung's own safety claim is false: this body exists to decode bytes ALREADY in \`st_read_block\` (the bytes rung 55's THIRD CMD17 landed), so a \`bl <st_send_command>\` here would issue a FOURTH sector read the arm's record never describes - the transfer would complete, every cell would read as success, and the filesystem magic would be decoded from a sector fetched by a step no part of the document names. **The claim is a NEGATIVE and a negative is only as strong as the check that refuses its violation** ([[mi4-a-claim-in-a-comment-is-not-a-check]]). Nothing is rebuilt by this refusal"
+                pt_dev=$(grep -cE '0xf9824[0-9a-f]{3}' <<<"$pt_body" || true)
+                [[ "$pt_dev" == "0" ]] ||
+                    layout_fail "st_part_parse's disassembly names the controller window ($pt_dev match(es) for 0xf9824xxx) and rung 55's decode touches NO device register: the partition's superblock is in \`st_read_block\`. A window address here is a device access this rung's record does not describe. Nothing is rebuilt by this refusal"
+                # **THE BODY MUST HOLD BOTH FILESYSTEM MAGICS AS IMMEDIATES.** ext2/3/4's `s_magic` =
+                # 0xEF53 is a movw (#61267); f2fs's `magic` = 0xF2F52010 is a movw/movt pair (#8208 + #62197).
+                # Without these the decode would publish a `_pt_fs_found` that is a number nothing computed -
+                # the rung-49 shape, where the signature comparison had to be present or the derived cell is
+                # a reading a human takes. The clause accepts the halves the assembler emits for each.
+                pt_magic=0
+                for _h in '#61267' '#8208' '#62197'; do
+                    grep -qE -- "${_h}([^0-9]|$)" <<<"$pt_body" && pt_magic=$((pt_magic + 1))
+                done
+                [[ "$pt_magic" -ge 2 ]] ||
+                    layout_fail "st_part_parse's disassembly holds $pt_magic of the halves of the two filesystem magics - ext2/3/4's \`s_magic\` = 0xEF53 is movw #61267 and f2fs's \`magic\` = 0xF2F52010 is movw #8208 + movt #62197. **The EXT4 half (#61267) must appear, and at least one F2FS half**: the two filesystem magics are the whole content of this rung's answer, and a body that published \`_pt_fs_found\` without comparing both is a number nothing computed. Nothing is rebuilt by this refusal"
+                grep -qE -- '#61267([^0-9]|$)' <<<"$pt_body" ||
+                    layout_fail "st_part_parse does not materialize ext2/3/4's \`s_magic\` = 0xEF53 (movw #61267) and rung 55's filesystem decode is ABOUT that magic - one of the two filesystems this medium could carry. A body without it publishes \`_pt_ext_ok\` as a comparison against a value it cannot have. Nothing is rebuilt by this refusal"
+                # THE THIRD READ FED THIS BODY - the parse must be called ONCE, after the third read.
+                pt_calls=$(grep -c -- 'bl.*<st_part_parse>' <<<"$stb_path_body" || true)
+                [[ "$pt_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $pt_calls call(s) to st_part_parse and rung 55 makes exactly one. **Zero means the body is in the image and nothing calls it**, the shape of a switch no build reads; two or more means two decodes of the same buffer. Nothing is rebuilt by this refusal"
+                pt_call_ln=$(grep -n -- 'bl.*<st_part_parse>' <<<"$stb_path_body" | head -1 | cut -d: -f1)
+                (( pt_call_ln > ge_call_ln )) ||
+                    layout_fail "st_cmd_path calls st_part_parse on line $pt_call_ln and st_gpt_entry_parse on line $ge_call_ln - **the filesystem decode is ABOVE the entry decode**, so it consumes \`st_gpt_part_sector\` BEFORE the entry decode carries the partition's first LBA (it would be 0) and the third read would land sector 0. The partition's sector is captured while the buffer still holds the ENTRY ARRAY; the filesystem decode MUST run after that capture. Nothing is rebuilt by this refusal"
+                # **THE THIRD READ MUST SIT BETWEEN THE ENTRY DECODE AND THE FILESYSTEM DECODE** - the
+                # carry is what the third read addresses, so the read is BELOW the entry decode and the
+                # filesystem decode is BELOW the read.
+                pt_rd3_ln=$(grep -n -- 'bl.*<st_read_single_block>' <<<"$stb_path_body" | tail -1 | cut -d: -f1)
+                (( pt_rd3_ln > ge_call_ln && pt_call_ln > pt_rd3_ln )) ||
+                    layout_fail "st_cmd_path's calls are out of order: st_gpt_entry_parse on line $ge_call_ln, the last st_read_single_block on line $pt_rd3_ln, st_part_parse on line $pt_call_ln. Rung 55's third read addresses \`st_gpt_part_sector\` + 2, which the ENTRY decode fills, so the order must be entry-decode < third-read < filesystem-decode - a read ABOVE the entry decode would address the carry still 0 (sector 0, the MBR the first read already left) and the decode below a read the parse never saw. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_855: rung 55's filesystem decode is read out of the linked image: st_part_parse (at $pt_addr) makes $pt_allbl call(s), ALL of them to entry_live_write ($pt_livebl) - **so it sends NO command, opens NO window, and touches NO device register** (0 controller-window references) - it decodes a filesystem superblock out of the SAME \`st_read_block\` the sector-\`st_gpt_part_sector + 2\` read filled, and is called by st_cmd_path ONCE on line $pt_call_ln, AFTER the third \`st_read_single_block\` (line $pt_rd3_ln) which is itself AFTER \`st_gpt_entry_parse\` (line $ge_call_ln) whose carry \`st_gpt_part_sector\` the third read addresses. **THE TWO FILESYSTEM MAGICS ARE BOTH MATERIALIZED ($pt_magic of 3 halves present, EXT4's #61267 required)** - ext2/3/4's \`s_magic\` = 0xEF53 at superblock byte 56 (word 14) and f2fs's \`magic\` = 0xF2F52010 at superblock byte 0 (word 0) - so \`_pt_fs_found\` is a comparison and not a reading a human takes. \`_pt_hdr_ok\` and \`_pt_mbr_ok\` re-test the two signatures the buffer must NOT hold (a superblock sector is neither the GPT header nor the MBR), so a third read that landed sector 1 or 0 is named by a cell. No byte of the medium moves, no register is written, and the medium is not touched at all"
             fi
             if [[ $STORAGE_PROBE -ge 41 ]]; then
                 # **831: RUNG 42'S OWN CLAUSE - THE FIRST CLAUSE HERE THAT ASSERTS A COMMAND WHOSE

@@ -11561,3 +11561,91 @@ set=armed-storage-d301bcb5 sha256=d301bcb56f9e8bfb77b8ad8a6b5fe934b0eeb9b7f103ea
 set=armed-storage-d301bcb5 sha256=3c816aa3f0d448cbd2995da79d926df74fc0681adafcc332fe9ee7bc1d90a62c bytes=6766240 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-STAGE90_XNU_SEAM_LR-0x8004d2dc-UNCHANGED-from-rung-53
 set=armed-storage-d301bcb5 sha256=e10d98f635cf3f819003a41b351bbf46f93351b411e46e3a95b4cd5336f4a225 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=53-and-differing-from-the-rung-53-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
 set=armed-storage-d301bcb5 sha256=5d492dd3aa3337be62d1f8e9f75db9bee2f5312cc94fd94474a4af61e6825f12 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-source-list-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+#
+# 856 - THE RUNG-55 ARM (STAGE90_XNU_STORAGE_PROBE=54, VALUE 54 = ORDINAL RUNG 55):
+#
+# **THREE READS IN ONE BOOT: THE GPT HEADER AT SECTOR 1, THE PARTITION ENTRY ARRAY AT SECTOR 2, AND
+# THE FIRST PARTITION'S OWN SUPERBLOCK - THE READ THAT ASKS *IS THERE A FILESYSTEM HERE*.** The
+# rung-54 frontier is `_ge_part_sector` (the first partition's `StartingLBA`, entry words 8/10), and
+# a filesystem's superblock hangs off exactly that address. Both ext2/3/4 and f2fs put it at
+# **partition byte 1024 = sector 2** - `struct ext4_super_block` at `ext4.h:1009` with `__le16
+# s_magic = 0xEF53` at superblock byte 56 (`ext4.h:1025`, `magic.h:23`), and `struct f2fs_super_block`
+# at `f2fs_fs.h:59` with `magic = 0xF2F52010` as its FIRST field (`f2fs.h:43`) - so the third read
+# addresses `st_gpt_part_sector + ST_FS_SB_SECTOR_OFF` (`+ 2`, `_Static_assert`ed to 2) and the magic
+# lands IN BOUNDS at the buffer's own word 0 (f2fs) or word 14 (ext). **A read at
+# `st_gpt_part_sector` alone would land partition byte 0, where no filesystem puts a magic**, and
+# `_pt_fs_found` would read 0 for a filesystem that is there.
+#
+# **THE SUPERSET IS DELIBERATE, AND IT IS THE COST OF AN UNMEASURED RUNG.** Rung 54 is PARKED and
+# NOT pressed, so `_ge_part_sector` has never been read on hardware. A rung-55 arm cannot pin its
+# third read to a constant no press has produced - that would be a build clause asserting a value
+# nothing measured ([[mi4-a-claim-in-a-comment-is-not-a-check]]). So the third read consumes the
+# LIVING carry `st_gpt_part_sector` that `st_gpt_entry_parse` fills in THIS SAME BOOT, and the arm
+# is a strict superset of rung 54's three-step shape rather than a one-constant step from it.
+#
+# **THE ORDER IS THE RUNG.** `st_cmd_path` calls, in sequence: `st_data_reset` + `st_read_single_block`
+# (the FIRST CMD17, sector 1) -> `st_mbr_parse` -> `st_gpt_parse` (the header is decoded NOW, while
+# the buffer is KNOWN to hold sector 1, and its three shape fields are CARRIED out of that buffer
+# before the next read overwrites it) -> `st_data_reset` + `st_read_single_block` (the SECOND CMD17,
+# sector 2) -> `st_gpt_entry_parse` (the entry array is walked, and the first non-empty entry's
+# `StartingLBA` is carried in `st_gpt_part_sector`) -> `st_data_reset` + `st_read_single_block` (the
+# THIRD CMD17, sector `st_gpt_part_sector + 2`) -> `st_part_parse` (the filesystem decode). **The
+# third read MUST sit between the entry decode (which fills the carry) and the filesystem decode
+# (which consumes it), and `xnu_entry_855` refuses any other order.** Every read re-issues
+# `st_data_reset` first: rung 44's press measured `DATA_INHIBIT` refusing CMD17 in the same boot it
+# was set, and the transfer above sets it again.
+#
+# **THE SECTOR SELECTOR LOADS THE CARRY BY ADDRESS.** `st_sector_for_read(st_read_count)` is a
+# `noinline` helper (the two-arm `if` was tail-merged and the `const` array made the device-access
+# classifier read a literal-pool base - experiment 855) whose three arms are 1, 2, and
+# `st_gpt_part_sector + ST_FS_SB_SECTOR_OFF`. `xnu_entry_849`'s value-54 half now decodes the
+# `movw`/`movt` pair the compiler emitted and holds it against the address `nm` gives
+# `st_gpt_part_sector` **by value**, and requires the `+2` offset on its own instruction. **A grep of
+# the selector body for the TEXT `<st_gpt_part_sector>` reads 0 on a CORRECT body**, because a
+# linked `movw`/`movt` pair names the absolute address and contains no symbol name - the first draft
+# of that clause refused the build on that reading, which is the shape the build clause's own comment
+# now names.
+#
+# **THE FILESYSTEM ANSWER IS TWO COMPARISONS AND TWO NEGATIVE SIGNATURE CHECKS.** `_pt_f2fs_magic`
+# / `_pt_f2fs_ok` test word 0 against `F2FS_SUPER_MAGIC` = `0xF2F52010`; `_pt_ext_magic` (the low
+# half of word 14, masked because `s_magic` is a `__le16` and not a whole word) / `_pt_ext_ok` test
+# it against `0xEF53`; `_pt_fs_found` is 1 iff either fires - **the cell the goal asks for**. The
+# negative checks are `_pt_hdr_ok` and `_pt_mbr_ok`, which must BOTH read 0: a superblock sector
+# holds neither `EFI PART` nor the MBR signature, so a third read that landed sector 1 or 0 names
+# itself there. `_pt_w0` publishes the buffer's raw word 0 so the comparison is checkable from
+# outside, and `_pt_arg_sector`/`_pt_part_sector`/`_pt_sb_sector`/`_pt_arr_sector` publish the three
+# sectors the decode is about. **`_pt_next_is_arg` is the one cell neither the build nor the decode
+# can settle before a press**: 1 says the third read addressed exactly the sector the entry table
+# named, and it is the first reading this project will have of a partition's own extent.
+#
+# **THE BUILD REFUSALS, NOT SENTENCES.** `xnu_entry_849`'s value-54 half asserts the selector's carry
+# address and offset. The same clause requires `st_read_single_block` AND `st_data_reset` each to be
+# called **THREE** times by `st_cmd_path` (ONE is rung 53, TWO is rung 54, and one reset cannot
+# precede three reads). `xnu_entry_855` binds `st_part_parse`: only `entry_live_write` calls, 0
+# controller-window references, explicit-WIDTH device accesses none, both magics present in the
+# linked image, exactly ONE call, AFTER `st_gpt_entry_parse`, with the LAST `st_read_single_block`
+# between them.
+#
+# **IT MOVES NO BYTE OF THE MEDIUM AND TOUCHES NO DEVICE REGISTER IT DID NOT TOUCH BEFORE**: CMD17
+# reads, so the card stays in TRAN with its block length and its CSD/EXT_CSD exactly as rungs 42-54
+# left them. The entry bin is 5,585,532 bytes (size-neutral against rung 54's, content different -
+# `afbb4849...`) and **the entry-group page move did NOT fire this rung**: `STAGE90_XNU_SEAM_LR`
+# stays `0x8004d2dc` (rung 53's value), so the seam pair in `entry_trace.c` and `run_and_capture.sh`
+# is unchanged. `STAGE90_XNU_PWR_WAIT_TICKS=384000` is inherited from rung 9 unchanged - 20 ms at this
+# device's own 19,200,000 Hz. `fastboot boot` only; nothing flashed; nothing written to storage.
+#
+# **NO PRESS HAS BEEN MADE AND NONE IS OWED: this arm is PARKED and the park is a RECORD and not a
+# queue. THE PRESS IS THE OPERATOR'S. THE GOAL IS NOT MET** - a superblock magic is not a mount and
+# not a filesystem read; TWRP-to-storage stays withheld.
+#
+set=armed-storage-afbb4849 sha256=a54ef49948fe90a342ae5da0d1fce369c8340a5410b1b1f622001d708145006c bytes=8605696 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-54-entry-rung-55-READS-THE-GPT-HEADER-AT-SECTOR-1-THE-PARTITION-ENTRY-ARRAY-AT-SECTOR-2-AND-THE-FIRST-PARTITION-S-OWN-SUPERBLOCK-NOT-PRESSED
+set=armed-storage-afbb4849 sha256=18bbcc43f2f303fbfbb9838011977a61687577df753954b2002046f495f0f71e bytes=6081028 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-54-entry-no-payload-switch-moved
+set=armed-storage-afbb4849 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-54-s-MEASURED-no-payload-switch-moved
+set=armed-storage-afbb4849 sha256=45499be9499e337fbce639340dd0669b0c59501a95fbcc4acaaa28eab77ff194 bytes=6143100 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-afbb4849 sha256=63b1a478947ba0f59cb6ee11716d03f6c1efc83d488771f7a5112168ed75b4b7 bytes=6084608 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-afbb4849 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-afbb4849 sha256=a6f378322aa269eeb5c00a0934dce76d730ab90b23b7580d1e32e591e2c07075 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-afbb4849 sha256=afbb48497eecf2f87bc97bcce5f0f2a37ecd1e76a81b81d9dd81fe053587ce7d bytes=5585532 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-afbb4849-IS-THE-SETS-NAME-SIZE-NEUTRAL-against-the-rung-54-arm-s-5585532-bytes-content-different-because-st_part_parse-the-third-read-and-the-selector-s-third-arm-were-added
+set=armed-storage-afbb4849 sha256=b89aac22d4442be73f418d6761ad4a77109f83a6937c695a4ab30b56ce3a920c bytes=6766272 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-STAGE90_XNU_SEAM_LR-0x8004d2dc-UNCHANGED-from-rung-53
+set=armed-storage-afbb4849 sha256=baff170ce9264b144175224346c6d16cad367808e327de1e1054fcbf46f089ed bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=54-and-differing-from-the-rung-54-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
+set=armed-storage-afbb4849 sha256=21c2b07b5cd64ada98400197f014842718aca6b3d55c6c39d46f922029295d7e bytes=2335 file=xnu_arm_entry-sources.txt
