@@ -10621,3 +10621,62 @@ set=armed-storage-f8d91170 sha256=86326168012a384217825ae87d56b799c1e10ee1f070ea
 #
 # **THE GOAL IS NOT MET.** No sector read, no partition table walked, no filesystem, no mount;
 # TWRP-to-storage stays withheld.
+
+# 839, 2026-09-30 - THE RUNG-46 ARM. `armed-storage-cd3d63bf`. PARKED, NOT PRESSED, NOT ARMED.
+#
+# **A BUILD AND A PARK, AND NOTHING ELSE** - and it is THE RUNG-44 PRESS'S OWN CANDIDATE (b), now the
+# ONE LEFT BY ELIMINATION. **IT ADDS NO COMMAND, NO CARD REGISTER AND NO NEW DEVICE**: ONE body
+# `st_data_reset` that makes ONE byte store to a register rung 4 already writes.
+#
+# (1) WHY IT IS THIS AND NOT THE ENABLE. The rung-45 press (838) REFUTED candidate (a): the store to
+# `INT_ENABLE` took and read back (`_de_ena_wrote = _de_ena_held = 0x00008002`) and the completion still
+# did not latch (`_de_data_end = 0`), with the line still held (`_de_dat_line = 1`). So the block's data
+# state machine is GENUINELY STUCK, and the only repair left is the one the standard defines for that
+# state: RESET IT.
+#
+# (2) WHAT THIS RUNG IS. `st_data_reset` (gated `#if STAGE90_XNU_STORAGE_PROBE >= 45`) reads
+# `SOFTWARE_RESET 0x2F` (`_dr_was`), writes **`SDHCI_RESET_DATA` 0x04** (`_dr_wrote`) and polls the byte
+# for self-clear within `ST_RESET_DATA_TICK_BUDGET` = 1,920,000 CNTVCT ticks = 100 ms at 19,200,000 Hz
+# (the vendor's own bound, `sdhci.c:250-260`), publishing `_dr_held_after`, `_dr_polls`, `_dr_ticks` and
+# `_dr_timeout` (1 = the byte never self-cleared); then reads `PRESENT_STATE 0x24` (`_dr_ps_before`,
+# `_dr_ps_after`, `_dr_dat_line`, `_dr_data_inhibit`), `INT_STATUS 0x30` (`_dr_status_after`) and
+# `INT_ENABLE 0x34` (`_dr_ena_after`), and `_dr_done`. **`0x04` IS `RESET_DATA` ALONE** - NOT
+# `RESET_ALL` (0x01, which rung 4 writes and which resets the whole host including the clock) and NOT
+# `RESET_CMD` (0x02); two `_Static_assert`s pin that distinction. **IT MOVES NO BYTE OF THE MEDIUM**:
+# `RESET_DATA` has no effect on the card, so the card stays in TRAN with its block length and its
+# CSD/EXT_CSD exactly as rungs 42-45 left them.
+#
+# (3) THE ROWS. **READ THEM AS THE ARM'S OWN TABLE.** `_dr_timeout = 0` with `_dr_dat_line = 0` and
+# `_dr_data_inhibit = 0` is **THE HOST WAS THE HOLDER** - the block was stuck on state it owns, the reset
+# released it, and the data path is usable, so the NEXT rung is CMD17 again and the sector read.
+# `_dr_timeout = 0` with `_dr_dat_line = 1` is **THE LINE IS HELD BY SOMETHING THE HOST DOES NOT OWN** -
+# the card, the pad or the pin; a host-controller reset that does not clear `DAT_LINE_ACTIVE` is a reading
+# about the CARD, and it moves the frontier off the block entirely. `_dr_timeout = 1` is **THE BLOCK
+# REFUSING THE RESET** (`_dr_held_after` is the byte that would not clear) - a block state, not a card
+# state.
+#
+# (4) THE BUILD CLAUSE, `xnu_entry_838` (present but INERT at value 44; THIS build makes it live). It
+# refuses the build unless `st_data_reset`'s linked body holds the `mov rN, #4` (`SDHCI_RESET_DATA`), the
+# `strb [rN, #47]` store to `SOFTWARE_RESET 0x2F` (base `0xf9824000`) and the six `xnu_live_storage_dr_*`
+# keys - so a reset of the wrong bit, or to the wrong register, cannot be built.
+#
+# (5) SAFETY. `fastboot boot` only, nothing flashed; the only store is one host-controller byte in a
+# register rung 4 already writes, and it moves no byte of the medium - the card stays in TRAN. **NO PRESS
+# HAS BEEN MADE AND NONE IS OWED: this arm is PARKED and NOT ARMED-FOR-PRESS, and the park is a RECORD
+# and not a queue. THE PRESS IS THE OPERATOR'S.**
+#
+# **THE GOAL IS NOT MET.** No sector read, no partition table walked, no filesystem, no mount;
+# TWRP-to-storage stays withheld.
+#
+# 839's set members (11), by content:
+set=armed-storage-cd3d63bf sha256=800ad99bd642a6bc81cb5eb39e9db76c08bd9e753805acbf92adf1eb44d5d765 bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-45-entry-rung-46-RESETS-THE-BLOCKS-DATA-STATE-MACHINE-SOFTWARE_RESET-0x2F-RESET_DATA-0x04-NOT-PRESSED
+set=armed-storage-cd3d63bf sha256=29600db57adedc48e3d58bb8360896b67edccfddec3747fbc974a5e95e62118c bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-45-entry-same-6064644-bytes-as-the-rung-45-arm-s
+set=armed-storage-cd3d63bf sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-45-s-MEASURED-no-payload-switch-moved
+set=armed-storage-cd3d63bf sha256=05d25fa7d05e60482cb5ce042f8c428d5474b455c9fad4bf68a8133c50ab00c8 bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-size-UNCHANGED-from-the-rung-45-arm-s-6126716
+set=armed-storage-cd3d63bf sha256=53b3820fe10541d455190e7a3194246c5bb4380b520949e3af7b5b281a9dd526 bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-cd3d63bf sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-cd3d63bf sha256=96474dfc7ec32d7178416ab3699ef4c30bec73c451c911c7d775355a7866d0ac bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-cd3d63bf sha256=cd3d63bf40ffccaf0826d4c31a78b70fd77f372227004708962fede80aca253a bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-cd3d63bf-IS-THE-SETS-NAME-same-5569148-bytes-as-the-rung-45-arm-and-the-difference-is-one-new-probe-body-st_data_reset-and-one-call-to-it
+set=armed-storage-cd3d63bf sha256=2148c60a10c832d3caff058a02ea59cbefe61567152296a5e96d9b650960a7a8 bytes=6749440 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-GREW-by-28-bytes-from-the-rung-45-arm-s-6749412-because-the-new-probe-body-is-a-new-function
+set=armed-storage-cd3d63bf sha256=b8028d0f65e2f4aee09b91a1413474f225c6cf59ed7f00b0945385277d6079e2 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=45-and-differing-from-the-rung-45-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
+set=armed-storage-cd3d63bf sha256=6d2047dbbaa847bf043544ba7955f4d8b6cabab70a5fe43ff40fdbb7579095d6 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-this-arm-including-verify_press_ready-sh-which-carries-the-value-45-narration-arm
