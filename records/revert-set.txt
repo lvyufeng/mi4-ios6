@@ -10899,3 +10899,46 @@ set=armed-storage-8f0d41fd sha256=8f0d41fd10fa24d692b09ea562128aa06ce79e7d22a813
 set=armed-storage-8f0d41fd sha256=5c12f5e34c9a6b54af7198057ac5d0606d9560011f585e7da987f5c97bac3c03 bytes=6749440 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-UNCHANGED-from-the-rung-47-arm-s-6749440-because-one-constant-moved-and-no-function-was-added
 set=armed-storage-8f0d41fd sha256=c440fc0d1db435d1797e32dedbab98bf9c748e6266514a6d3567e0023ccddc09 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=47-and-differing-from-the-rung-47-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
 set=armed-storage-8f0d41fd sha256=923a75fad5131647f2978582ee1e37094afce46a59f783feeed24b2a2dd1ee0b bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-this-arm-including-verify_press_ready-sh-which-carries-the-value-47-narration-arm
+
+# ---------------------------------------------------------------------------
+# 844: THE RUNG-48 PRESS - **THE MEDIUM IS MBR-PARTITIONED**. Arm
+# `armed-storage-8f0d41fd` (STAGE90_XNU_STORAGE_PROBE=47, rung 48) is SPENT.
+#
+# One gate exit 0, one runner exit 0; `fastboot boot` only, nothing flashed,
+# nothing written to storage; `33e80afe` absent from BOTH device lists
+# hand-checked immediately before the gate; the phone RETURNED 82 s after the
+# send. Capture out/stage90/captures/rung48-mbr-20260930-101755-last_kmsg.txt
+# 661,493 B sha256 f06b01dcdbe809f787fb4a7726d1b1ed9d7d084a9ca07abd69ac649ef0082049.
+#
+# THE CONSTANT MOVED AND THE TRANSFER IS CLEAN. Against the rung-47 press (842),
+# in the read's own cells:
+#   _rd_lba       1 -> 0        _rd_arg   0x200 -> 0        _rd_arg_wrote 0x200 -> 0
+#   _rd_sent = 1     _rd_complete = 1     _rd_err = 0     _rd_state = 4 (TRAN)
+#   _rd_words_gated = 0x80 (the whole 512 bytes)     _rd_word_read = 0x113A
+#   _rd_data_wait_timeout = 0     _rd_int_data_err = 0     response 0x900
+# The command, the flags, the reset-before-read order and the whole cell set are
+# rung 47's byte for byte; ONLY THE SECTOR MOVED.
+#
+# **THE MEDIUM ANSWERED WITH THE MBR SIGNATURE**: _rd_mbr = 1, _rd_sig = 0xAA55,
+# _rd_w127 = 0xaa550000 (the sector's own last word - its high half is 0xAA55,
+# bytes 510-511 hold 0x55 / 0xAA), _rd_w0.._rd_w3 = 0 (zeroed boot code),
+# _rd_gpt = 0 (LBA 0's first two words are not `EFI PART` - expected, an MBR's
+# boot code is not a GPT header). So rung 47's "LBA 1 is not a GPT header" is now
+# the POSITIVE statement it was reaching for: **THE MEDIUM IS MBR-PARTITIONED**,
+# not GPT.
+#
+# THE FRONTIER IS THE MBR'S OWN PARTITION TABLE: the 4-entry array at bytes
+# 446-509 of this same sector (16-byte records - boot flag byte 0, LBA start
+# bytes 8-11, length bytes 12-15). The bytes are ALREADY in the image's
+# st_read_block, so the next rung parses the partition entries (or reads the
+# first partition's own sector); reading LBA 0 again is not needed.
+#
+# THE STANDING SEAM READING IS UNCHANGED: seam_lr = 0x8004c2dc did NOT move (the
+# entry-group page move did not fire), slot_cwe_win / seam_sctlr = 0x30c57879 with
+# SCTLR.C clear, slot_post_calls = 0x8, b1 = 0x80482b04. The one FAIL
+# (seam_sp not sleh_sp-8) is the reading on EVERY recent arm and not a regression:
+# rung 48 changed nothing in the seam path. xnu_entry_abort_entries = 0,
+# xnu_entry_failures = 0, xnu_entry_checks = 5.
+#
+# **THE GOAL IS NOT MET**: no partition entry decoded, no filesystem, no mount.
+# NO FIRER IS ARMED AND NO PRESS IS OWED; TWRP-to-storage stays withheld.
