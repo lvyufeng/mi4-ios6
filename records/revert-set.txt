@@ -10779,3 +10779,51 @@ set=armed-storage-6deb8308 sha256=6deb830869cc4762b9eed39c6873af47d3f414496795f2
 set=armed-storage-6deb8308 sha256=40159a156296b43726ed958d61c757f14763e8ca418e8dc16b4791861974160a bytes=6749440 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-UNCHANGED-from-the-rung-46-arm-s-6749440-because-the-move-adds-no-function
 set=armed-storage-6deb8308 sha256=cdf39e7be859166b28cfa60d14cdc84919742f25b5fc841eb719888932f37b28 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=46-and-differing-from-the-rung-46-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
 set=armed-storage-6deb8308 sha256=679b4f80b938900501027ccc4dcd8d1715638a8be2b98e5c1efa8d10e500cfea bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-this-arm-including-verify_press_ready-sh-which-carries-the-value-46-narration-arm
+
+# ---------------------------------------------------------------------------
+# 842: THE RUNG-47 PRESS - **THE SECTOR READ LANDED**. Arm
+# `armed-storage-6deb8308` (STAGE90_XNU_STORAGE_PROBE=46, rung 47) is SPENT.
+#
+# One gate exit 0 (624 lines), one runner exit 0; `fastboot boot` only, nothing
+# flashed, nothing written to storage; `33e80afe` absent from BOTH device lists
+# hand-checked immediately before the gate; the phone RETURNED 26 s after the
+# send. Capture out/stage90/captures/rung47-readmoved-20260930-094924-last_kmsg.txt
+# 653,974 B sha256 35d9a979cb94fbcd2ad13c63c2d64859c0032cb7bfe809f7ac26d8ed80b6771b.
+#
+# THE MOVE WORKED, and the difference is in the READ's own cells against 840's:
+#   _rd_inhibit_dat     0x2 -> 0x0        _rd_inhibit_polls  0xa700 -> 0x1
+#   _rd_inhibit_timeout 1   -> 0          _rd_sent           0   -> 1
+#   _rd_complete        0   -> 1          _rd_err            0   (unchanged)
+#   _rd_state           0   -> 4 (TRAN)   _rd_words_gated    0   -> 0x80
+#   _rd_data_wait_timeout 1 -> 0          _rd_int_data_err   0   (unchanged)
+# **THE NEGATIVE CELL DID NOT FIRE**: _rd_inhibit_dat = 0 is the arm's own exact
+# falsifier - the inhibit re-asserting between the reset and the read - and it did
+# not.
+#
+# THE MEDIUM ANSWERED AND LBA 1 IS NOT A GPT: _rd_word_read = 0x113A (the block's
+# COMMAND register held the five-bit 0x111A opcode-17 word plus the DATA bit),
+# _rd_arg = 0x200 (LBA 1 << 9), _rd_lba = 1, 128 words arrived, _rd_gpt = 0, and
+# the sector's words are _rd_w0 = 0xe8f9decb, _rd_w1 = 0xdee55679,
+# _rd_w2 = 0x4147cf37, _rd_w3 = 0x17b14f89, _rd_w127 = 0xcb686a68 - the arm's own
+# **A SECTOR READ THAT IS NOT A GPT**, a reading about the MEDIUM and not about
+# the transfer, which is clean end to end (response 0x900 = READY_FOR_DATA | TRAN,
+# no data error, no timeout).
+#
+# THE RESET AT ITS NEW POSITION REPRODUCES 840's ANSWER EXACTLY: _dr_was = 0,
+# _dr_wrote = 0x04, _dr_held_after = 0 (self-cleared, _dr_polls = 0x101,
+# _dr_ticks = 0x831 = 109.4 us, _dr_timeout = 0), _dr_dat_line = 0,
+# _dr_data_inhibit = 0, _dr_ps_after = 0x01f80000 vs _dr_ps_before = 0x01f80206.
+#
+# **THE WHOLE CHAIN NOW COMPLETES ON HARDWARE**: IDENT -> STBY -> TRAN -> an
+# EXT_CSD read -> SET_BLOCKLEN -> **a 512-byte sector read**.
+#
+# THE STANDING SEAM READING IS UNCHANGED: seam_lr = 0x8004c2dc did NOT move (the
+# entry-group page move did not fire), slot_cwe_win / seam_sctlr = 0x30c57879 with
+# SCTLR.C clear, slot_post_calls = 0x8, the line pair CLEAN. The one FAIL
+# (seam_sp not sleh_sp-8) is the reading on EVERY recent arm and not a regression:
+# rung 47 changed nothing in the seam path. xnu_entry_abort_entries = 0,
+# xnu_entry_failures = 0, xnu_entry_checks = 5.
+#
+# **THE FRONTIER IS THE MEDIUM'S OWN LAYOUT**: no partition table at LBA 1, no
+# filesystem, no mount. **NO FIRER IS ARMED AND NO PRESS IS OWED. THE GOAL IS NOT
+# MET** - TWRP-to-storage stays withheld.
