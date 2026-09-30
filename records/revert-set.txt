@@ -11444,3 +11444,49 @@ set=armed-storage-e8597e3e sha256=e8597e3e5aceda8f538ad272027c3d4267f01b070a18e6
 set=armed-storage-e8597e3e sha256=878a5e2cda963d35bca9794fb8610bce4b415770c0aa858e02c5838b8ff2f644 bytes=6766176 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-LARGER-than-the-rung-52-arm-s-6765976-because-st_gpt_entry_parse-and-its-_ge_-cells-were-added-and-none-makes-a-device-access-and-the-group-moved-one-page-STAGE90_XNU_SEAM_LR-0x8004d2dc
 set=armed-storage-e8597e3e sha256=65b6629bdc4d24793bbdb085908f6f83f49fff119a483280cd593d4dab46960c bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=52-and-differing-from-the-rung-52-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
 set=armed-storage-e8597e3e sha256=0c6e643e363286163a3df0492224a57eefa24beb62689b9afc9ada4522ec4954 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-source-list-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+#
+# 854 - THE RUNG-53 PRESS (STAGE90_XNU_STORAGE_PROBE=52, value 52 -> arm armed-storage-e8597e3e):
+#
+# **THE PRESS WAS TAKEN AND THE ARM IS SPENT.** One gate exit 0, one runner exit 0; `fastboot boot`
+# only, nothing flashed, nothing written to storage; `33e80afe` absent from BOTH device lists
+# hand-checked immediately before the gate; the phone returned. Capture
+# out/stage90/captures/rung53-gptentries-20260930-125548-last_kmsg.txt 654,954 bytes `2edc5584...`.
+#
+# **THE MECHANISM WORKS AND THE ARM FALSIFIES ITS OWN PRE-REGISTRATION, INFORMATIVELY.**
+# `_rd_lba = _rd_arg = 2` with `_rd_arg_lba_agree = 1` - the sector variable moved 1 -> 2 and the
+# command sent it, a clean 512-byte read out of TRANSFER state (`_rd_complete = 1`, `_rd_err = 0`,
+# `_rd_state = 4`, `_rd_words_gated = 0x80`, `_rd_shift = 0`, `_rd_blockaddr = 1`). Sector 2 is NOT a
+# header: `_ge_hdr_ok = 0` (the module re-tested `EFI PART` and it is absent) and `_rd_w0 = 0xdea0ba2c`
+# is a partition entry's type-GUID word.
+#
+# **BUT `_gp_sig_ok = 0`, `_gp_w0 = 0xdea0ba2c`, `_gp_nentries = 0`, `_gp_entry_size = 0`,
+# `_gp_entry_lba = 0`** - rung 52's header decode (`st_gpt_parse`) still runs AFTER the read, and rung
+# 53 moved the read's sector to 2, so the header decode now decodes the ENTRY ARRAY as if it were a
+# header and fills the carries from sector 2's (zero) words 18/20/21. The entry decode then consumes a
+# shape the header decode had just zeroed: `_ge_nentries_decl = 0`, `_ge_stride_words = 0`,
+# `_ge_arr_sector = 0`, `_ge_entries_in_sector = 0x80` (the degenerate-stride guard fell through to
+# stride 1), `_ge_nentries_used = min(0, 128) = 0` (**the walk never ran**), `_ge_ok = _ge_found = 0`,
+# `_ge_blank = 1`, and **`_ge_arg_is_arr = 0`** (`_rd_lba = 2` vs `_ge_arr_sector = 0`) - the cell that
+# names the tension the rung was built to make read 1.
+#
+# **THE PRE-REGISTRATION WAS FALSE AND FALSIFIABLY SO**: the sentence "it consumes the header's own
+# shape, carried while the buffer still held the header" assumed a carry that the arm's own sector move
+# destroyed, because in rung 53 the buffer NEVER held the header - the one CMD17 lands sector 2
+# ([[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]], input-side form: a BUFFER the step above
+# overwrote, not a durable device side effect).
+#
+# **NO BYTE OF THE MEDIUM MOVED AND NO DEVICE REGISTER WAS WRITTEN BEYOND RUNG 51's**; the card is in
+# TRANSFER state; no panic (`runner: no 'panic ... sleh_abort'`); **the seam `0x8004d2dc` was confirmed
+# on hardware** - the entry-group page move's pin caught the move before the press, and the press
+# confirms both copies. Standing readings unchanged: `xnu_entry_failures = 0`, `abort_entries = 0`; the
+# goal's own floor is met as in 504/520/533.
+#
+# **THE FRONTIER IS THE ORDER, NOT A NEW DEVICE ACT**: the header's shape must be captured from the
+# header sector without the read overwriting it. The natural next step is **two reads in one rung** -
+# sector 1 to capture the shape, then sector 2 to decode the array - plus a build clause that binds
+# `st_gpt_parse`'s expected sector to the read's sector, so a body whose header decode runs on a buffer
+# the read did not fill with sector 1 is refused rather than silently zeroing the carries.
+#
+# **NO FIRER IS ARMED AND NO PRESS IS OWED.** The arm is SPENT and the park is a RECORD, not a queue.
+# **THE GOAL IS NOT MET** - the partition entry itself is still not decoded, no filesystem, no mount;
+# TWRP-to-storage stays withheld.
