@@ -10680,3 +10680,40 @@ set=armed-storage-cd3d63bf sha256=cd3d63bf40ffccaf0826d4c31a78b70fd77f3722270047
 set=armed-storage-cd3d63bf sha256=2148c60a10c832d3caff058a02ea59cbefe61567152296a5e96d9b650960a7a8 bytes=6749440 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-GREW-by-28-bytes-from-the-rung-45-arm-s-6749412-because-the-new-probe-body-is-a-new-function
 set=armed-storage-cd3d63bf sha256=b8028d0f65e2f4aee09b91a1413474f225c6cf59ed7f00b0945385277d6079e2 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=45-and-differing-from-the-rung-45-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
 set=armed-storage-cd3d63bf sha256=6d2047dbbaa847bf043544ba7955f4d8b6cabab70a5fe43ff40fdbb7579095d6 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-this-arm-including-verify_press_ready-sh-which-carries-the-value-45-narration-arm
+
+# 840, 2026-09-30 - THE RUNG-46 PRESS. `armed-storage-cd3d63bf` IS SPENT. THE HOST WAS THE HOLDER.
+#
+# (1) A PRESS, made under the standing instruction. One gate exit 0 / 623 lines, one runner exit 0;
+# `fastboot boot` only, nothing flashed, nothing written to storage; `33e80afe` absent from BOTH device
+# lists hand-checked immediately before the gate; **the phone returned** (adb up afterwards). Capture
+# `out/stage90/captures/rung46-reset-20260930-092219-last_kmsg.txt` 650,939 B `872a4d01...`.
+#
+# (2) THE RESET IS PROVEN. `_dr_was = 0`, `_dr_wrote = 0x04`, **`_dr_held_after = 0`** - the byte
+# SELF-CLEARED on the first poll inside the bound (`_dr_polls = 0x100` = 256 polls, `_dr_ticks = 0x827`
+# = 2,087 ticks = 108.7 us), so **`_dr_timeout = 0`** and the block ACCEPTED the reset - and the two bits
+# stuck across four boot-samples in rungs 44-45 BOTH CLEARED: **`_dr_dat_line = 0`**,
+# **`_dr_data_inhibit = 0`**, with `_dr_ps_after = 0x01f80000` against `_dr_ps_before = 0x01f80206`.
+# `_dr_status_after = 0`, `_dr_ena_after = 0x00008000`.
+#
+# (3) THE VERDICT IS THE ARM'S OWN ROW 1: **THE HOST WAS THE HOLDER.** `_dr_timeout = 0` with
+# `_dr_dat_line = 0` and `_dr_data_inhibit = 0` - the block's data state machine was stuck on STATE THE
+# HOST OWNS, a host-controller reset released it, and the holder was NOT the card, the pad or the pin.
+# `PRESENT_STATE` moved `0x01f80206 -> 0x01f80000` in one store, its first movement since rung 43.
+#
+# (4) THE COMMAND PATH IN THE SAME BOOT IS THE CONTROL, AND THE COUNTER-INTUITIVE READING IS THE
+# ORDERING: the widened guard still refused CMD17 (`_rd_inhibit_mask = 0x3`, `_rd_inhibit_dat = 0x2`,
+# `_rd_inhibit_timeout = 1`, `_rd_inhibit_polls = 0xa700`, **`_rd_sent = 0`**, `_rd_ps_end = 0x01f80206`)
+# **because the reset runs AFTER `st_read_single_block`.** So the same boot released the line and withheld
+# the command - one statement of the sequence, not a contradiction.
+#
+# (5) THE FRONTIER. **THE RESET IS PROVEN AND IT IS PROVEN TOO LATE**: the next rung moves the same
+# `st_data_reset` call BEFORE `st_read_single_block` (after the CMD8/SET_BLOCKLEN chain, before CMD17), so
+# the sector read runs against the released line. All the repair's safety properties are unchanged - one
+# host-controller byte, no command, no byte of the medium - and the card stays in TRAN. **It is NOT yet
+# built.**
+#
+# **NO FIRER IS ARMED AND NO PRESS IS OWED: the next rung is not yet built, and the press is the
+# operator's.**
+#
+# **THE GOAL IS NOT MET.** No sector read, no partition table walked, no filesystem, no mount;
+# TWRP-to-storage stays withheld.
