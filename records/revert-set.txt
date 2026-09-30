@@ -10438,3 +10438,69 @@ set=armed-storage-65824de4 sha256=65824de454a1bd5c6e586f109cf39114e125612185845f
 set=armed-storage-65824de4 sha256=bca21c2fec4cf4874611418b2ee73240754b46d27065d77e1238318286d482d6 bytes=6749376 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-UNCHANGED-from-the-rung-43-arm-s-6749376-because-the-fix-adds-only-a-conditional-and-two-stores-absorbed-by-padding
 set=armed-storage-65824de4 sha256=d283d082735a35fcc7ce7d8c8303b770c03c87629a2d9a10f5a72854a3caa8e6 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=43-and-differing-from-the-rung-43-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value-42-43
 set=armed-storage-65824de4 sha256=a8b7dfdec1bb8e2d68bb92824ae00db752f3ff5ee147856b8dc81e030c0e4b34 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-THIS-ONE-including-entry_storage-c-which-carries-the-widened-guard-and-build_entry-sh-which-carries-the-rung-s-own-clause-835
+#
+# 836, 2026-09-30 - THE RUNG-44 PRESS. `armed-storage-65824de4` IS SPENT. THE REPAIR IS IN THE PRESS
+# (`_rd_inhibit_mask = 0x3`) AND IT WORKED - AND IT FOUND THE DEFECT ONE COMMAND DOWN.
+#
+# (1) A PRESS, made under the standing instruction. One gate exit 0 / 613 lines, one runner exit 0;
+# `fastboot boot` only, nothing flashed, nothing written to storage; `33e80afe` absent from BOTH device
+# lists hand-checked immediately before the gate; **the phone returned** (adb up, uptime 2 min).
+# Capture `out/stage90/captures/rung44-inhibit-20260930-074538-last_kmsg.txt` 649,975 B `7bab8faa...`;
+# gate `...-gate.txt` 53,586 B `835a875a...` (613 lines), run `...-run.txt` 90,529 B `b123f6f0...`
+# (1121 lines).
+#
+# (2) THE REPAIR IS IN THE PRESS, AND IT IS THE ARM'S OWN PRE-REGISTERED ROW 2. **`_rd_inhibit_mask =
+# 0x3`** - the wait tested `CMD_INHIBIT | DATA_INHIBIT`, so the fix landed (a `0x1` here would have been
+# the rung-43 image wearing this arm's name). **`_rd_inhibit_dat = 0x2`** - `DATA_INHIBIT` WAS still set
+# at CMD17's entry. **`_rd_inhibit_timeout = 1`**, `_rd_inhibit_polls = 0xa700` (42,752, the full
+# budget). **`_rd_inhibit_before = 0`** - `CMD_INHIBIT` (bit 0) was clear and ONLY the data-phase bit was
+# set, which is exactly why a bit-0-only guard issued where the vendor would have waited. **`_rd_sent =
+# 0`** - CMD17 was NOT issued: `st_send_command` returns with `sent` still 0 on an inhibit timeout, so
+# the command that would have hung instead never went out. **The fix did what it was built to do: it
+# turned a silent data-phase failure into a named precondition refusal.** And the non-data control is in
+# the same log: `_cmd0_inhibit_timeout = _cid_inhibit_timeout = _blk_inhibit_timeout = 0`, so
+# `ST_MMC_CMD_ADTC` did NOT leak into the mask for a command with no data phase (the arm's third row).
+#
+# (3) THE COMMAND CELLS CONFIRM CMD17 WAS ARMED AND THEN WITHHELD. `_rd_op = 0x11` (17),
+# `_rd_arg = 0x200` (512), `_rd_flags = 0xB5` (181), `_rd_word_bits = 0x111A`, `_rd_word = 0x113A`,
+# `_rd_lba = 1`, `_rd_blksz = 0x7200`, `_rd_trns = 0x12`, `_rd_readback = 0x8000` - and then
+# `_rd_word_read = _rd_complete = _rd_state = _rd_resp = 0` (the block's COMMAND register was never
+# written and no response came), `_rd_blkcnt_held = 0`. `_rd_gated = 0` with `_rd_done = 1`,
+# `_rd_gate_state = 4`, `_rd_gate_resp = 0x900` - **the precondition PASSED (card in TRAN) and the guard
+# refused**, the opposite of row 5.
+#
+# (4) THE DEFECT ONE COMMAND DOWN: CMD8 LEFT THE DATA PATH STUCK. `PRESENT_STATE` is now measured at
+# THREE points in one boot and does not move: `_ext_ps_end = _rd_ps_before = _rd_ps_end = 0x01f80206` -
+# **bit 1 (DATA_INHIBIT) AND bit 2 (DAT_LINE_ACTIVE) both set**. So this is not merely a stale flag: the
+# block's data state machine believes a transfer is in progress and the DAT line is active. CMD8's own
+# end cells agree: `_ext_int_status_end = 0x21` (RESPONSE | DATA_AVAILABLE - the data arrived),
+# `_ext_int_data_end = 0` (**DATA_END never latched**), `_ext_data_gated = 0x80` (all 128 words read).
+# **The two presses are one story and neither is wrong**: 834 measured CMD17's command landing with no
+# data and named the guard because the widened mask had not been tried; 836 tried it and it REFUSED,
+# which proves the guard correct AND moves the defect one command down. The guard is the instrument that
+# finally read it. `mi4-silence-is-a-reading-only-if-success-is-silent` in its cleanest form.
+#
+# (5) MEASURED VS HYPOTHESIS, NAMED AS SUCH. MEASURED: the two bits set across three samplings, no
+# DATA_END latched, and **the window the transfer ran under had DATA_END (bit 1) NOT enabled** -
+# `_ext_ena_wrote = 0x000f0031` = `INT_CMD_MASK 0x000f0001 | PIO_IRQS 0x30` (DATA_AVAIL | SPACE_AVAIL),
+# bits 1 and 3 clear (`_ext_ena_held = 0x000f8031` differs by bit 15, a chip-ID bit). **HYPOTHESIS, and
+# named as one**: that the missing enable IS the cause. It is consistent - a masked-off completion bit
+# cannot latch, and `sdhci.c:806-815` enables DATA_END and waits on it - but this press did not test it,
+# and the project does not promote a mechanism to a conclusion on consistency. **The class is the one
+# rung 38's repair (825) already fixed once on the COMMAND side**: a witness switched off reads exactly
+# like a condition that never happened (`INT_RESPONSE` off there, `DATA_END` off here).
+#
+# (6) THE NEXT RUNG HAS TWO CANDIDATE REPAIRS AND A MEASUREMENT THAT TELLS THEM APART. **(a) ENABLE
+# DATA_END in the window** and re-read `INT_STATUS` after CMD8's transfer - if the bits clear, the
+# hypothesis is confirmed AND CMD17 can proceed the same boot; **(b) RESET THE DATA LINE**
+# (`SOFTWARE_RESET` byte, `SDHCI_RESET_DAT` 0x04, distinct from rung 4's `RESET_ALL` 0x01) before CMD17,
+# the driver's own `sdhci_do_reset(host, SDHCI_RESET_DATA)` - if `DATA_INHIBIT` clears, the HOST was the
+# holder; if it clears but `DAT_LINE_ACTIVE` stays, the CARD is holding the line, a different defect.
+# **(a) is preferred: it is the diagnosis and not the workaround.** Both are safe (`fastboot boot` only,
+# nothing flashed, no byte of the medium moves, the card stays in TRAN).
+#
+# **NO FIRER IS ARMED AND NO PRESS IS OWED: the next rung is not yet built, and the press is the
+# operator's.**
+#
+# **THE GOAL IS NOT MET.** No sector read, no partition table walked, no filesystem, no mount;
+# TWRP-to-storage stays withheld.
