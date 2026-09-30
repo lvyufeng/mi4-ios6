@@ -32286,8 +32286,25 @@ verify_trace_symbols() {
                 [[ "$blk43_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $blk43_calls call(s) to st_read_single_block and rung 43 makes exactly one - \`block.c:1770-1829\`'s own request, the driver's first act on the medium after the block length is fixed. **Zero means the body is in the image and nothing calls it**, which is m720's shape: a switch no build reads. Two or more means two sector reads on the bus in one boot, and the second would overwrite the first's cells before the log was taken"
                 blk43_ctx=$(awk '/bl.*<st_read_single_block>/{ printf "%s|", prev2; printf "%s|", prev1; exit } { prev2=prev1; prev1=$0 }' <<<"$stb_path_body")
-                grep -q 'bl.*<st_set_blocklen>' <<<"$blk43_ctx" ||
-                    layout_fail "the two instructions above st_cmd_path's call to st_read_single_block are [$blk43_ctx] and rung 43's record says one of them is the call to st_set_blocklen - CMD16 then CMD17, adjacent, which is the driver's own order (\`core.c:2588\`'s \`mmc_set_blocklen\` before any request can be issued). **The order is load-bearing on this rung in a way it was not on rung 42's**: a CMD17 issued before SET_BLOCKLEN would move a sector of the card's RESET block length, and every cell of the transfer would still read as a success"
+                # **841: THIS ADJACENCY IS TRUE OF VALUES 43, 44 AND 45 AND IS DELIBERATELY SUPERSEDED AT 46.**
+                # The assertion below reads the two instructions ABOVE the sector read and requires one of
+                # them to be `bl <st_set_blocklen>` - CMD16 then CMD17 with nothing between. Rung 47 (value 46)
+                # inserts `bl <st_data_reset>` THERE ON PURPOSE: that insertion IS the rung, and its whole
+                # claim is that the reset releases the data line on the command below it. A clause that kept
+                # the adjacency at 46 would refuse every build of the arm the rung-46 press asked for. **So
+                # the property is split by value and BOTH halves are checks**: at 43..45 the reads are CMD16
+                # then CMD17 adjacent, exactly as the rung-43 record states; at 46 the two above are the
+                # reset and the reset's own argument setup, and the STRONGER property - the reset sits
+                # BETWEEN the block length and the read, so CMD17 still runs after CMD16 and on a released
+                # line - is asserted by \`xnu_entry_841\` below, which reads all three call sites' line
+                # numbers rather than the two adjacent slots. Neither half is a sentence: each refuses.
+                if [[ $STORAGE_PROBE -le 45 ]]; then
+                    grep -q 'bl.*<st_set_blocklen>' <<<"$blk43_ctx" ||
+                        layout_fail "the two instructions above st_cmd_path's call to st_read_single_block are [$blk43_ctx] and rung 43's record says one of them is the call to st_set_blocklen - CMD16 then CMD17, adjacent, which is the driver's own order (\`core.c:2588\`'s \`mmc_set_blocklen\` before any request can be issued). **The order is load-bearing on this rung in a way it was not on rung 42's**: a CMD17 issued before SET_BLOCKLEN would move a sector of the card's RESET block length, and every cell of the transfer would still read as a success. **At value 46 this clause does not fire and is not weakened**: rung 47 deliberately puts the data-state reset between the two calls, and \`xnu_entry_841\` asserts that insertion and the order it makes, so the value that changes this adjacency carries the clause that reads the new one"
+                else
+                    grep -q 'bl.*<st_data_reset>' <<<"$blk43_ctx" ||
+                        layout_fail "the two instructions above st_cmd_path's call to st_read_single_block are [$blk43_ctx] and at STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE rung 47's whole act IS the insertion of \`bl <st_data_reset>\` between the block length and the read - so one of these two slots must be that call. **A build where it is absent is an arm at this value whose reset is somewhere else**, and the rung-46 press's own cells say why that matters: the reset released the line and CMD17 was still refused because the reset ran below it. Nothing is rebuilt by this refusal"
+                fi
                 for _k in xnu_live_storage_rd_complete xnu_live_storage_rd_err xnu_live_storage_rd_state xnu_live_storage_rd_gpt xnu_live_storage_rd_gated xnu_live_storage_rd_done \
                           xnu_live_storage_rd_words_gated xnu_live_storage_rd_data_wait_timeout xnu_live_storage_rd_int_data_err \
                           xnu_live_storage_rd_gate_state xnu_live_storage_rd_w0 xnu_live_storage_rd_w1 xnu_live_storage_rd_w127 \
@@ -32415,6 +32432,37 @@ verify_trace_symbols() {
                         layout_fail "rung 46 publishes no \`$_k\` string in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE. **The pair is the whole rung**: \`_dr_dat_line = 0\` with \`_dr_data_inhibit = 0\` after a self-cleared byte is THE HOST WAS THE HOLDER and the data path is released; \`_dr_dat_line = 1\` after it is THE LINE IS HELD BY SOMETHING THE HOST DOES NOT OWN - a card-side or pad-side reading, and a different defect. Nothing is rebuilt by this refusal"
                 done
                 echo "  xnu_entry_838: rung 46's data-state reset is read out of the linked image: st_data_reset (at $dr_addr) stores \`#4\` (= SDHCI_RESET_DATA, NOT 1 = RESET_ALL and NOT 2 = RESET_CMD) into SOFTWARE_RESET 0x2f and POLLS the byte for self-clear, publishing \`_dr_dat_line\` and \`_dr_data_inhibit\` after it. **It is the driver's own move** (\`sdhci_init\`'s soft arm, \`sdhci.c:284-285\`, and \`sdhci_finish_data\`'s error arm, \`sdhci.c:1058\`, both write RESET_CMD|RESET_DATA) and it moves NO byte of the medium: the card is in TRAN and a host byte does not re-initialize it"
+            fi
+            if [[ $STORAGE_PROBE -ge 46 ]]; then
+                # **841: RUNG 47'S OWN CLAUSE - THE RESET, MOVED BEFORE THE SECTOR READ.**
+                #
+                # The rung-46 press (840) proved the reset RELEASES the line (`_dr_dat_line = 0`,
+                # `_dr_data_inhibit = 0`) and proved it TOO LATE: the widened guard had already refused
+                # CMD17 in the same boot (`_rd_inhibit_dat = 0x2`, `_rd_sent = 0`), because rung 46's
+                # call sits AFTER `st_read_single_block`. **Rung 47 is ONE call-site MOVE and this
+                # clause asserts exactly that and nothing else about the body** - `st_data_reset` itself
+                # is already asserted by `xnu_entry_838`, which is a STRICT SUBSET of this value and
+                # carries every one of its assertions. **What this clause adds is the ORDER**: the
+                # single `bl <st_data_reset>` in `st_cmd_path` must fall BEFORE the `bl
+                # <st_read_single_block>` and AFTER the `bl <st_set_blocklen>`, so the reset runs on the
+                # block and CMD17 below it runs against the released line. **It also refuses the
+                # DUPLICATE**: a second `bl <st_data_reset>` (the rung-46 site left live at this value)
+                # would issue the reset AFTER the read it was moved to precede, restoring exactly the
+                # ordering 840 measured as too late - and two calls to one body is an arm whose answer
+                # cannot be read.
+                dr47_calls=$(grep -c -- 'bl.*<st_data_reset>' <<<"$stb_path_body")
+                [[ "$dr47_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $dr47_calls call(s) to st_data_reset and rung 47 makes exactly ONE - the reset MOVED to sit before the sector read. Zero means the arm at this value is rung 46's site or below and CMD17 runs on the stuck line the rung-46 press proved too late; two or more means the rung-46 after-read site is STILL LIVE beside the new before-read one, so the reset is issued on both sides of the read and the ordering this rung exists to make is gone. Nothing is rebuilt by this refusal"
+                dr47_ln=$(awk '/bl.*<st_data_reset>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                dr47_rd_ln=$(awk '/bl.*<st_read_single_block>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                dr47_blk_ln=$(awk '/bl.*<st_set_blocklen>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                [[ -n "$dr47_rd_ln" && -n "$dr47_blk_ln" ]] ||
+                    layout_fail "st_cmd_path makes no call to st_read_single_block or to st_set_blocklen, so rung 47's reset cannot be positioned and this clause has nothing to assert. That is itself the refusal: an arm at this value whose sector read or block-length call is absent is an arm whose ordering has no second endpoint. Nothing is rebuilt by this refusal"
+                (( dr47_ln < dr47_rd_ln )) ||
+                    layout_fail "st_cmd_path calls st_data_reset on disassembly line $dr47_ln and st_read_single_block on line $dr47_rd_ln: rung 47's whole act IS that the reset falls BEFORE the read - the rung-46 press measured the reset releasing the data path and the guard refusing CMD17 in the SAME boot because the reset ran after it, so a reset below the read is the ordering 840 proved too late wearing this rung's number. Nothing is rebuilt by this refusal"
+                (( dr47_ln > dr47_blk_ln )) ||
+                    layout_fail "st_cmd_path calls st_data_reset on disassembly line $dr47_ln and st_set_blocklen on line $dr47_blk_ln: the reset must fall AFTER the block length is set and CMD16's own command has completed, so it runs on a quiescent block - a reset BEFORE SET_BLOCKLEN would clear state the ladder's own CMD16 arm depends on. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_841: rung 47's reset is read out of the linked image AT ITS NEW SITE: st_cmd_path calls st_data_reset ONCE on disassembly line $dr47_ln, AFTER st_set_blocklen (line $dr47_blk_ln) and BEFORE st_read_single_block (line $dr47_rd_ln) - **the one call-site move that makes the rung-46 reset load-bearing for the sector read**. The body itself is unchanged and is asserted by xnu_entry_838, whose value is a strict subset of this one. **The rung-46 press is why**: it measured \`_dr_dat_line = 0\` and \`_dr_data_inhibit = 0\` after the reset (THE HOST WAS THE HOLDER, the line released) YET \`_rd_inhibit_dat = 0x2\` and \`_rd_sent = 0\` in the SAME boot, because the reset ran after the read. No new body, no new register, no byte of the medium moves"
             fi
             if [[ $STORAGE_PROBE -ge 41 ]]; then
                 # **831: RUNG 42'S OWN CLAUSE - THE FIRST CLAUSE HERE THAT ASSERTS A COMMAND WHOSE

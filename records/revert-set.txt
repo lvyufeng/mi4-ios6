@@ -10717,3 +10717,65 @@ set=armed-storage-cd3d63bf sha256=6d2047dbbaa847bf043544ba7955f4d8b6cabab70a5fe4
 #
 # **THE GOAL IS NOT MET.** No sector read, no partition table walked, no filesystem, no mount;
 # TWRP-to-storage stays withheld.
+
+# ---------------------------------------------------------------------------
+# 841: THE RUNG-47 ARM - THE BLOCK'S DATA-STATE RESET, MOVED BEFORE THE SECTOR
+# READ. STAGE90_XNU_STORAGE_PROBE=46, VALUE 46 = ORDINAL RUNG 47. **PARKED, NOT
+# PRESSED, NOT ARMED.**
+#
+# WHAT IT IS: the rung-46 press (840) proved the reset RELEASES the data path -
+# `_dr_dat_line = 0` and `_dr_data_inhibit = 0` after it, `_dr_held_after = 0` with
+# the byte self-cleared in `_dr_ticks = 0x827` - and proved it TOO LATE: in the same
+# boot the widened guard had already refused CMD17 (`_rd_inhibit_dat = 0x2`,
+# `_rd_sent = 0`), because rung 46's `st_data_reset` call sits AFTER
+# `st_read_single_block`. **Rung 47 is ONE CALL-SITE MOVE AND NOTHING ELSE**: the
+# SAME `st_data_reset` body, issued after the CMD8/SET_BLOCKLEN chain and BEFORE
+# `st_read_single_block`, so CMD17 runs against the released line. No new body, no
+# new register, no new command, no byte of the medium.
+#
+# THE BUILD CLAUSES ARE THE RUNG. `xnu_entry_841` refuses the build unless
+# `st_cmd_path`'s linked body holds EXACTLY ONE `bl <st_data_reset>` whose
+# disassembly line falls AFTER `bl <st_set_blocklen>` and BEFORE
+# `bl <st_read_single_block>` (measured on this build: reset 521, blocklen 520,
+# read 523) - so a build that kept rung 46's after-read site, or dropped the reset,
+# is REFUSED. **And the value split is explicit**: rung 43's own adjacency clause,
+# which required the two instructions above the sector read to be CMD16 then CMD17
+# with nothing between, is now scoped to values 43..45 and SUPERSEDED AT 46 by an
+# assertion that one of those two slots is the reset - because the insertion IS the
+# rung, and a clause that kept the adjacency at 46 would refuse every build of the
+# arm the rung-46 press asked for. Its first build refused exactly there, which is
+# the ladder's own value-awareness working.
+#
+# THE ENTRY-GROUP PAGE MOVE DID NOT FIRE: `STAGE90_XNU_SEAM_LR` stays 0x8004c2dc,
+# printed by `xnu_entry_535` in this build. The arm's bin is 5,569,148 bytes - the
+# same size as the rung-46 arm's - and its elf is 6,749,440 (+0 from rung 46: the
+# move adds no function).
+#
+# READ THE ROWS: `_dr_timeout = 0` with `_dr_dat_line = 0` and
+# `_dr_data_inhibit = 0` is THE LINE RELEASED BEFORE CMD17. Then `_rd_sent = 1`
+# with `_rd_complete = 1` and `_rd_err = 0` is THE SECTOR READ ANSWERED THE GUARD
+# THAT REFUSED IT AT RUNG 46, and the frontier moves to the sector's CONTENT
+# (`_rd_gpt = 1` is LBA 1 beginning `EFI PART`, `_rd_words_gated = 0x80` is the
+# whole 512 bytes). `_rd_sent = 1` with `_rd_err` carrying `SDHCI_INT_TIMEOUT` is
+# THE CARD NOT ANSWERING; `_rd_int_data_err` nonzero is THE TRANSFER failing;
+# `_rd_data_wait_timeout = 1` with `_rd_words_gated = 0` is THE CARD SILENT. The
+# negative cell is exact: `_rd_inhibit_dat = 0x2` with `_rd_sent = 0` AGAIN means
+# the inhibit is re-asserted between the reset and the read, a different defect one
+# call above.
+#
+# NOTHING IS ARMED AND NO PRESS IS OWED: this arm is PARKED and the park is a
+# RECORD and not a queue. `fastboot boot` only; nothing flashed; the card stays in
+# TRAN. **THE GOAL IS NOT MET** - no sector read, no partition table walked, no
+# filesystem, no mount; TWRP-to-storage stays withheld.
+#
+set=armed-storage-6deb8308 sha256=d417285b7cd0fe8d66424e9df71717b2ef259a65225a074dbce84151e3a63e1c bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-46-entry-rung-47-MOVES-THE-DATA-STATE-RESET-0x04-INTO-SOFTWARE_RESET-0x2F-BEFORE-THE-SECTOR-READ-NOT-PRESSED
+set=armed-storage-6deb8308 sha256=9328dc5c677626b08aeab471a9e49aa4667f64b2a25ede72c62ba1e8ba76c299 bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-46-entry-same-6064644-bytes-as-the-rung-46-arm-s-MEASURED-no-payload-switch-moved
+set=armed-storage-6deb8308 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-46-s-MEASURED-no-payload-switch-moved
+set=armed-storage-6deb8308 sha256=c6d50d33b1793c475eab0bb018719e0d93b9aea9515281c97243c7ae59dbf3e8 bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-size-UNCHANGED-from-the-rung-46-arm-s-6126716
+set=armed-storage-6deb8308 sha256=5a9d4fca7c6435fdfdec43cebe10ef5d0cd1548bdf6a85deeb1af6c282ee423b bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-6deb8308 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-6deb8308 sha256=e78de5f426614f8df62f093e75c8f514bcbd2c27aa62dd339771a83d89ca491f bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-6deb8308 sha256=6deb830869cc4762b9eed39c6873af47d3f414496795f24a416ad3fd5520ae9e bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-6deb8308-IS-THE-SETS-NAME-same-5569148-bytes-as-the-rung-46-arm-and-the-difference-is-ONE-CALL-SITE-the-st_data_reset-call-moved-above-st_read_single_block
+set=armed-storage-6deb8308 sha256=40159a156296b43726ed958d61c757f14763e8ca418e8dc16b4791861974160a bytes=6749440 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-UNCHANGED-from-the-rung-46-arm-s-6749440-because-the-move-adds-no-function
+set=armed-storage-6deb8308 sha256=cdf39e7be859166b28cfa60d14cdc84919742f25b5fc841eb719888932f37b28 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=46-and-differing-from-the-rung-46-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
+set=armed-storage-6deb8308 sha256=679b4f80b938900501027ccc4dcd8d1715638a8be2b98e5c1efa8d10e500cfea bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-this-arm-including-verify_press_ready-sh-which-carries-the-value-46-narration-arm
