@@ -10139,3 +10139,67 @@ set=armed-storage-af522aca sha256=af522aca774b3b93974c3b37d2b41d796b70c052d4997b
 set=armed-storage-af522aca sha256=07ee6b578dbb858ac908b2ed601d3031b577028614376f6b56b07c0a2139bfae bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=40-and-differing-from-the-rung-40-arm-s-in-EXACTLY-TWO-lines-the-artifact-s-own-hash-and-the-ladder-value-39-40
 set=armed-storage-af522aca sha256=d339a6482fc0d80cb324c444123776d05c75448b4fc8c3f2d418904789221b08 bytes=6749248 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-UNCHANGED-from-the-rung-40-arm-s-6749248-because-the-bound-is-one-constant-and-the-body-s-net-size-did-not-move
 set=armed-storage-af522aca sha256=f9ba5c4f4018fe33bf06b72321e5a476727826efb6bf9393baaf847c0d0436b9 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-the-hashes-of-build_entry-sh-and-entry_storage-c-and-this-record-s-own-two-role-lines
+
+#
+# 831, 2026-09-30 - THE RUNG-42 ARM. `armed-storage-3c6803f6`. PARKED, NOT PRESSED, NOT ARMED.
+#
+# **A BUILD AND A PARK, AND NOTHING ELSE** - and it is the FIRST RUNG OF THE DATA PATH, taken because
+# the rung-41 press answered the one question that stood in front of it. **IT ADDS ONE COMMAND BODY,
+# ONE CALL TO IT, AND NOTHING ELSE.**
+#
+# (1) WHAT THE RUNG-41 PRESS SETTLED. 830's press measured the card's own 512 EXT_CSD bytes arriving
+# inside the gated second pass - `_ext_data_gated = 0x80` (all 128 words), `_ext_data_wait_timeout = 0`,
+# `_ext_data_ticks = 0x67ba5` = 22.13 ms, `_ext_sec_count = 0x01d5a000`, `_ext_rev = 7`,
+# `_ext_structure = 2` - all beside `_ext_complete = 1` and `_ext_resp = 0x00000900` (CMD8's own R1,
+# state 4 = TRAN). The data path works end to end, and the frontier the press named is CMD16.
+#
+# (2) WHAT THIS RUNG IS, AND WHY IT IS THIS COMMAND. The driver's own next statement after CMD8 is
+# `core.c:2588`'s `mmc_set_blocklen(card, 512)`; its command is `mmc.h:50`'s `MMC_SET_BLOCKLEN`
+# (opcode 16), its argument is `core.c:2594`'s `cmd.arg = blocklen` (512), and its flags are
+# `core.c:2597`'s `MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_AC` = 0x80 | 0x100 | 0x15 = **405**.
+# `sdhci.c:1140-1143`'s five-bit mapping of 405 is `0x1A`, so the word the block receives is
+# **`0x101A` = 4122** - and the same mapping of CMD13's 405-mapped word is `0x0D1A`, which is why the
+# build asserts THIS body stores 0x101A and does NOT store 0x0D1A or the bare mapping 0x081A (714's
+# class, refused in both directions). **NO DATA PHASE**: it is CMD13's shape (`st_send_status`) one
+# opcode on, on a controller whose command path this ladder has run since rung 11. **Its argument is a
+# LENGTH**, the first command in this ladder whose argument is not an address and not a value the card
+# returned - which is why its R1 is read for `SDHCI_INT_ILLEGAL_CMD` (bit 22) beside the state: a card
+# that will not be told a block length says so there.
+#
+# (3) WHAT THE PRESS WOULD READ. `_blk_complete = 1` with `_blk_err = 0`, `_blk_illegal = 0` and
+# `_blk_state = 4` (TRAN) is CMD16 LANDING and moves the frontier to the FIRST SECTOR READ (CMD17 at
+# LBA 1, where the self-verifying reading lives: the eight bytes `EFI PART`, or an MBR ending `55 aa`).
+# `_blk_illegal = 1` is THE CARD REFUSING `SET_BLOCKLEN`; `_blk_timeout = 1` with `_blk_complete = 0`
+# is the bound expiring; `_blk_inhibit_timeout = 1` is a controller that never came idle; `_blk_stale`
+# is a latch already dirty before the window opened. **`_blk_state_held` is the arm's own comparison**:
+# `_blk_pre_state` is RESPONSE's R1 state before the command and `_blk_state_held` is 1 exactly when it
+# equals the response's own - and on the rung-37 press that comparison read 0 where the arm expected 1,
+# because the field is SAMPLED AT RESPONSE TIME (m823), so a 0 here is CMD16 having moved the card.
+#
+# (4) THE BUILD CLAUSE, `xnu_entry_831`. It refuses BOTH directions: the body at 0x8000fc74 must load
+# r0 = 16, r1 = 512, r2 = 405 before its `bl`, must be the ONLY place 0x101A is materialized (0x081A and
+# 0x0D1A ABSENT), must have the exact device-access set [f9824910:ldr f9824924:ldr f982492e:ldrb
+# f9824930:ldr f9824934:ldr/str] with its counts, must have the asserted program order, must make NO
+# store to TIMEOUT_CONTROL (#46), must have an EMPTY image side, and `st_cmd_path` must call it exactly
+# once UNGATED immediately after `bl <st_send_ext_csd>`. The build's own `xnu_entry_535` clause printed
+# `lr == STAGE90_XNU_SEAM_LR (0x8004b2dc)` and exited 0 - **the entry-group page move did NOT need a
+# `STAGE90_XNU_SEAM_LR`/`EXIT_POP_LR_LITERAL` move on this arm**, which is the hazard that caught five
+# earlier rungs before a press and is re-checked here by the build rather than by a run.
+#
+# (5) SAFETY. It is `fastboot boot` only, nothing flashed, no byte of the medium can change: CMD16 is
+# `ac [31:16] 512 R1` with NO data phase, no storage write, and no register this image could not
+# already reach. The bound on the command poll is `st_send_command`'s own. **NO PRESS HAS BEEN MADE AND
+# NONE IS OWED: this arm is PARKED and NOT ARMED-FOR-PRESS, and the park is a RECORD and not a queue.**
+#
+# **THE GOAL IS NOT MET.** No sector read, no filesystem, no mount; TWRP-to-storage stays withheld.
+set=armed-storage-3c6803f6 sha256=bf3dbc789c83847744068f63a2f9741d59bb26d86688dc16b45acbee4cd6f170 bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-41-entry-rung-42-ADDS-CMD16-SET-BLOCKLEN-OPCODE-16-ARG-512-FLAGS-405-WORD-0x101A-NOT-PRESSED
+set=armed-storage-3c6803f6 sha256=1b4c2252e2b178c1eb9f1c37e2918edc6e5e39b1c30226f81738528d30007121 bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-41-entry-same-size-as-the-rung-41-arm-s-because-the-entry-group-did-not-cross-a-page
+set=armed-storage-3c6803f6 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-41-s-MEASURED-no-payload-switch-moved
+set=armed-storage-3c6803f6 sha256=294801a9d56e57053291effd696516b35ad0c6cda856442e295b351ff2fb49db bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-size-UNCHANGED-from-the-rung-41-arm-s-6126716-the-new-body-absorbed-by-page-padding
+set=armed-storage-3c6803f6 sha256=5c375485931d46f115b63d1435ac86c11cc7c9ad5b59979132a7fa36b1420b37 bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-3c6803f6 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-3c6803f6 sha256=016f1d2f84389e9826cc20a8438ca3da223575e435f3c9949ac3784bca4c5fee bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-3c6803f6 sha256=3c6803f688f2022f898b7cd6f6a6fea7aebae01005f215849559c0e2e0803206 bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-3c6803f6-IS-THE-SETS-NAME-same-5569148-bytes-as-the-rung-41-arm-and-the-difference-is-one-new-command-body-st_set_blocklen-and-one-call-to-it-in-st_cmd_path
+set=armed-storage-3c6803f6 sha256=89d5e5626691e7e82cb46a536dc3b26fefce253b478bf5eec2332ea92a5b4e82 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=41-and-differing-from-the-rung-41-arm-s-in-EXACTLY-TWO-lines-the-artifact-s-own-hash-and-the-ladder-value-40-41
+set=armed-storage-3c6803f6 sha256=1d9d37065174074a0d71ea4b348726bb80ab369b3a50cfa786df7b205f5a99c1 bytes=6749280 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-GREW-by-32-bytes-from-the-rung-41-arm-s-6749248-because-the-new-command-body-is-a-new-function
+set=armed-storage-3c6803f6 sha256=49a8afb49d87a8d007a7cc3b57fe20e869c71078376f560aa141a465054bf672 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-the-hashes-of-build_entry-sh-and-entry_storage-c-and-this-record-s-own-two-role-lines
