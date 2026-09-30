@@ -11123,3 +11123,49 @@ set=armed-storage-28c82f79 sha256=28c82f79cb3ea0c4ad2e5e50f4dd10dcbe029b3a79f4b6
 set=armed-storage-28c82f79 sha256=1b006fc1ccec770037488c1f52484eeec5b8e409df01a67758e438b828de1bf0 bytes=6749560 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-88-bytes-LARGER-than-the-rung-49-arm-s-6749472-because-the-addressing-prelude-the-CSD-cross-check-and-the-new-_rd_-and-_pm_-cells-were-added-and-none-makes-a-device-access
 set=armed-storage-28c82f79 sha256=5270d7290a63bf2e86900beda166c6f723fbf708eca41d15ab49a11095b238a6 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=49-and-differing-from-the-rung-49-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
 set=armed-storage-28c82f79 sha256=16ee77ca361f57e6899f543cefd00cd47fe0cfc68e1cf028becfb010b5cc3028 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-source-list-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+#
+# 848: THE RUNG-50 PRESS - **THE MBR TABLE DECODED RIGHT, AND THE SECTOR THE READ ADDRESSES.**
+# Arm `armed-storage-28c82f79` (STAGE90_XNU_STORAGE_PROBE=49, rung 50) is SPENT.
+# One gate exit 0, one runner exit 0; `fastboot boot` only, nothing flashed,
+# nothing written to storage; `33e80afe` absent from BOTH device lists hand-checked
+# immediately before the gate; **the phone returned**. Capture
+# `out/stage90/captures/rung50-mbrstraddle-20260930-114357-last_kmsg.txt` 654,864 B b2ef6258...
+#
+# **BOTH OWED READINGS DELIVERED.** The rung-49 press (846) published
+# _pm_p0_first = 0x0001FFFF and _pm_p0_len = 0xFFFF0000 - NOT the fields they name.
+# THIS press publishes the CORRECTED decode: _pm_p0_first = _pm_nonzero_first = 1,
+# _pm_p0_len = _pm_nonzero_len = 0xFFFFFFFF. Entry 0 is unambiguously an EFI
+# protective partition pointing at **LBA 1** - status not bootable,
+# _pm_p0_type = 0xEE, first LBA 1, length 0xFFFFFFFF sectors. _pm_sig_ok = 1,
+# _pm_entries = 4, _pm_done = 1, _pm_index = 0.
+#
+# **AND THE ADDRESSING IS MEASURED.** _ext_sec_count_carried = _rd_cap = _pm_cap =
+# 0x01d5a000 (30,777,344 sectors); _rd_cap_over = 1 (above mmc.c:344's 4,194,304
+# threshold); _rd_shift = 0 (block.c:1777's `<< 9` is NOT applied);
+# _rd_blockaddr = _pm_sector_addressed = 1 (**the card is SECTOR-addressed**);
+# _rd_lba = _rd_arg = 0 with _rd_arg_lba_agree = 1 (the CMD17 argument is the sector
+# variable); _pm_next_in_range = 1. **So rungs 43-49 sent BYTE addresses where the
+# card wanted SECTORS**: _rd_arg = 0x200 at value 46 was SECTOR 512, not LBA 1;
+# the `0` of rungs 47-49 was accidentally correct.
+#
+# _pm_next_sector = 1 beside _pm_arg_sector = 0 states the tension - the table
+# names sector 1, this rung read sector 0 - so _pm_next_is_arg = 0, and the next
+# arm sets the read's sector to _pm_next_sector.
+#
+# **THE HONEST NEGATIVE**: _rd_cap_csd_valid = 0 (the CSD carried from rung 34 did
+# not answer), so _rd_cap_agree is ABSENT and the EXT_CSD count is the SINGLE
+# producer - published as a single producer, not asserted as agreement.
+#
+# The read is the PROTECTIVE MBR again (sector 0), so its own cells are unchanged
+# and confirm the act: _rd_complete = 1, _rd_mbr = 1, _rd_sig = 0xAA55,
+# _rd_state = 4 (TRAN), _rd_w0 = 0. The card is still in TRANSFER across the press,
+# exactly as rungs 42-49 left it.
+#
+# The standing readings are UNCHANGED: seam_lr = 0x8004c2dc did NOT move,
+# xnu_live_seam_sctlr = 0x30c57879, abort_entries = 0, the goal's own floor is met
+# as in 504/520/533 (pid 1's syscalls, the fixture's 0xfeedface read back).
+#
+# **ESTABLISHED**: entry 0 is an EFI protective partition at LBA 1, and the card is
+# SECTOR-addressed. **NOT ESTABLISHED (the next arm)**: the partition's OWN sector.
+# **NO FIRER IS ARMED AND NO PRESS IS OWED.** **THE GOAL IS NOT MET** - no
+# partition's own sector read, no filesystem, no mount; TWRP-to-storage withheld.
