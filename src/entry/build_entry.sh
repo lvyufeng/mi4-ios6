@@ -33040,6 +33040,73 @@ verify_trace_symbols() {
                 (( pt_rd3_ln > ge_call_ln && pt_call_ln > pt_rd3_ln )) ||
                     layout_fail "st_cmd_path's calls are out of order: st_gpt_entry_parse on line $ge_call_ln, the last st_read_single_block on line $pt_rd3_ln, st_part_parse on line $pt_call_ln. Rung 55's third read addresses \`st_gpt_part_sector\` + 2, which the ENTRY decode fills, so the order must be entry-decode < third-read < filesystem-decode - a read ABOVE the entry decode would address the carry still 0 (sector 0, the MBR the first read already left) and the decode below a read the parse never saw. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_855: rung 55's filesystem decode is read out of the linked image: st_part_parse (at $pt_addr) makes $pt_allbl call(s), ALL of them to entry_live_write ($pt_livebl) - **so it sends NO command, opens NO window, and touches NO device register** (0 controller-window references) - it decodes a filesystem superblock out of the SAME \`st_read_block\` the sector-\`st_gpt_part_sector + 2\` read filled, and is called by st_cmd_path ONCE on line $pt_call_ln, AFTER the third \`st_read_single_block\` (line $pt_rd3_ln) which is itself AFTER \`st_gpt_entry_parse\` (line $ge_call_ln) whose carry \`st_gpt_part_sector\` the third read addresses. **THE TWO FILESYSTEM MAGICS ARE BOTH MATERIALIZED ($pt_magic of 3 halves present, EXT4's #61267 required)** - ext2/3/4's \`s_magic\` = 0xEF53 at superblock byte 56 (word 14) and f2fs's \`magic\` = 0xF2F52010 at superblock byte 0 (word 0) - so \`_pt_fs_found\` is a comparison and not a reading a human takes. \`_pt_hdr_ok\` and \`_pt_mbr_ok\` re-test the two signatures the buffer must NOT hold (a superblock sector is neither the GPT header nor the MBR), so a third read that landed sector 1 or 0 is named by a cell. No byte of the medium moves, no register is written, and the medium is not touched at all"
+
+            if [[ $STORAGE_PROBE -ge 55 ]]; then
+                # **RUNG 56'S OWN CLAUSE - `st_part_geom`: A SECOND READER OF THE SAME BUFFER, AND ITS
+                # WHOLE SAFETY CLAIM IS THAT IT ADDS *NO* DEVICE ACTION.** Rung 55's clause bounds the
+                # third read; this one bounds the body that reads the SAME 512 bytes AGAIN. It decodes
+                # the superblock's geometry - and its two hazards are that it might reach a device (it
+                # must not) and that it might publish one family's fields off the other family's bytes
+                # (the decode is guarded, and this clause asserts both magics are present so the guard
+                # is a comparison and not a sentence).
+                pg_addr=$(sym_addr st_part_geom) ||
+                    layout_fail "st_part_geom is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: rung 56's geometry decode is that body, and \`noinline\` with \`noclone\` is what keeps it one body rather than a block of the probe or a clone beside it. Nothing is rebuilt by this refusal"
+                pg_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$pg_addr" '
+                    { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bn[n] = $4; bb[n] = ($2 != "") ? 1 : 0 }
+                    BEGIN { t = strtonum(a) }
+                    END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+                [[ -n "$pg_next" ]] ||
+                    layout_fail "st_part_geom (at $pg_addr) has no size in the linked image, so this clause cannot bound its body. This refusal is about the SCAN and not about the arm. Nothing is rebuilt by this refusal"
+                pg_body=$(arm-none-eabi-objdump -d --start-address="$pg_addr" --stop-address="$pg_next" "$OUT/xnu_arm_entry.elf")
+                pg_allbl=$(grep -cE 'bl[[:space:]].*<[^>]+>' <<<"$pg_body" || true)
+                pg_livebl=$(grep -cE 'bl.*<entry_live_write>' <<<"$pg_body" || true)
+                [[ "$pg_allbl" == "$pg_livebl" && "$pg_livebl" -ge 1 ]] ||
+                    layout_fail "st_part_geom makes $pg_allbl call(s) of which $pg_livebl are to entry_live_write, and rung 56's geometry decode must call **NOTHING BUT the live-writer that publishes its cells**. Any other callee means the rung's own safety claim is false: this body exists to decode bytes ALREADY in \`st_read_block\` (the bytes rung 55's THIRD CMD17 landed), so a \`bl <st_send_command>\` here would issue a FOURTH sector read or a control store the arm's record never describes - and every cell would still read as success. **The claim is a NEGATIVE and a negative is only as strong as the check that refuses its violation** ([[mi4-a-claim-in-a-comment-is-not-a-check]]). Nothing is rebuilt by this refusal"
+                pg_dev=$(grep -cE '0xf9824[0-9a-f]{3}' <<<"$pg_body" || true)
+                [[ "$pg_dev" == "0" ]] ||
+                    layout_fail "st_part_geom's disassembly names the controller window ($pg_dev match(es) for 0xf9824xxx) and rung 56's decode touches NO device register: the superblock's geometry is in \`st_read_block\`. A window address here is a device access this rung's record does not describe. Nothing is rebuilt by this refusal"
+                # **BOTH FILESYSTEM MAGICS MUST BE MATERIALIZED, BECAUSE THE GUARD IS A COMPARISON.**
+                # `_pg_which` is derived from the same two words rung 55 compared; a body that published
+                # it without re-testing the magics would be inheriting a verdict rather than taking one.
+                pg_magic=0
+                for _h in '#61267' '#8208' '#62197'; do
+                    grep -qE -- "${_h}([^0-9]|$)" <<<"$pg_body" && pg_magic=$((pg_magic + 1))
+                done
+                [[ "$pg_magic" -ge 2 ]] ||
+                    layout_fail "st_part_geom's disassembly holds $pg_magic of the halves of the two filesystem magics - ext2/3/4's \`s_magic\` = 0xEF53 is movw #61267 and f2fs's \`magic\` = 0xF2F52010 is movw #8208 + movt #62197. **Both must be present**: the family this rung decodes for is derived from a comparison of those two words, so a body without them published \`_pg_which\` as a number nothing computed and every guarded cell below it name the wrong namespace. Nothing is rebuilt by this refusal"
+                grep -qE -- '#61267([^0-9]|$)' <<<"$pg_body" ||
+                    layout_fail "st_part_geom does not materialize ext2/3/4's \`s_magic\` = 0xEF53 (movw #61267), so \`_pg_which\` cannot select the ext half. Nothing is rebuilt by this refusal"
+                # **THE DUAL-MEANING WORD IS THE WHOLE RUNG AND IT MUST BE READ - BOUND TO THE WORD
+                # THE MAGIC COMPARE ALREADY READS, WHICH IS WHY IT IS *RELATIVE*.** The first draft of
+                # this clause grepped for the absolute immediates #96/#100/#104 and refused a CORRECT
+                # body: the compiler reaches `st_read_block`\'s words as `ldr rX, [rBase, #off]` against
+                # a base it materializes with a movw/movt pair, so the superblock byte offsets appear as
+                # NO immediate in the linked image at all - the same wrong-artifact class rung 55\'s own
+                # clause was repaired for ([[mi4-a-claim-in-a-comment-is-not-a-check]]). The binding is
+                # instead RELATIVE TO WORD 14, whose load is identifiable because it feeds the ext2/3/4
+                # `s_magic` compare (the `ldr`, then `movw rX, #61267`, then a `uxth`): word 24 is 40
+                # bytes past word 14, word 25 44, word 26 48 (96 = 56 + 40, and 100/104 follow).
+                pg_o14=$(awk '
+                    /ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #[0-9]+\]/ { if (match($0, /#[0-9]+/)) last = substr($0, RSTART + 1, RLENGTH - 1) }
+                    /#61267/ { print last; exit }
+                ' <<<"$pg_body")
+                [[ -n "$pg_o14" ]] ||
+                    layout_fail "st_part_geom\'s disassembly holds no load of superblock word 14 followed by the ext2/3/4 magic #61267, so this clause cannot bind the geometry reads to the buffer the third read filled. **The word-14 load is the anchor**: it is the one load in this body whose offset is provable from its own comparison, and the three f2fs inode words are read 40/44/48 bytes past it. Nothing is rebuilt by this refusal"
+                for _d in 40 44 48; do
+                    _w=$(( (14 * 4 + _d) / 4 ))
+                    _o=$(( pg_o14 + _d ))
+                    grep -qE "ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #${_o}([^0-9]|$)" <<<"$pg_body" ||
+                        layout_fail "st_part_geom\'s disassembly holds no load at offset ${_o} from its buffer base, which is superblock word ${_w} = ${_o} bytes in (word 14\'s own offset ${pg_o14} plus ${_d}). **Word 24 is the field this rung exists to name twice**: ext2/3/4 read it as \`s_feature_incompat\` (the word \`ext4_feature_set_ok\`, super.c:2526, refuses a mount on) and f2fs read it as \`root_ino\` (fixed to 3 by \`sanity_check_raw_super\`, super.c:1054), with \`node_ino\`/\`meta_ino\` at 1/2 in words 25/26. A body that read one of the three at the wrong word is a decode of a neighbour and its guard selects the wrong namespace - which is the defect this whole body is built to avoid ([[mi4-one-value-two-definitions]]). Nothing is rebuilt by this refusal"
+                done
+                # THE BODY MUST BE CALLED, ONCE, AFTER st_part_parse - which is after the read that filled the buffer.
+                pg_calls=$(grep -c -- 'bl.*<st_part_geom>' <<<"$stb_path_body" || true)
+                [[ "$pg_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $pg_calls call(s) to st_part_geom and rung 56 makes exactly one. **Zero means the body is in the image and nothing calls it**, the shape of a switch no build reads; two or more means two decodes of one buffer. Nothing is rebuilt by this refusal"
+                pg_call_ln=$(grep -n -- 'bl.*<st_part_geom>' <<<"$stb_path_body" | head -1 | cut -d: -f1)
+                (( pg_call_ln > pt_call_ln && pg_call_ln > pt_rd3_ln )) ||
+                    layout_fail "st_cmd_path calls st_part_geom on line $pg_call_ln, st_part_parse on line $pt_call_ln and the last st_read_single_block on line $pt_rd3_ln - **the geometry decode must run after BOTH the read that fills the buffer and the decode that names the family**. Run above the read it decodes bytes the transfer never landed; run above st_part_parse it is on the wrong side of the only other body that reads the same buffer. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_856: rung 56's geometry decode is read out of the linked image: st_part_geom (at $pg_addr) makes $pg_allbl call(s), ALL of them to entry_live_write ($pg_livebl) - **so it sends NO command, opens NO window, and touches NO device register** (0 controller-window references) - and it is called by st_cmd_path ONCE on line $pg_call_ln, AFTER \`st_part_parse\` (line $pt_call_ln) and after the third \`st_read_single_block\` (line $pt_rd3_ln), reading the SAME \`st_read_block\` all three share. **IT IS A SECOND READER OF ONE BUFFER, NOT A NEW DEVICE ACTION**: rung 56 adds no read, no store, no window, no megabyte and no register, so the medium is not touched at all. **BOTH FILESYSTEM MAGICS ARE MATERIALIZED ($pg_magic of 3 halves present, EXT4's #61267 required)** so \`_pg_which\` is a comparison and not an inheritance, and **the dual-meaning word 24 is read at its own immediate (\`#96\`, with f2fs's \`node_ino\`/\`meta_ino\` at word 25/26 = \`#100\`/\`#104\`)** - ext2/3/4's \`s_feature_incompat\` against f2fs's \`root_ino\`, one word, two names, and every family-specific cell is published only inside the branch \`_pg_which\` selects"
+            fi
             fi
             if [[ $STORAGE_PROBE -ge 41 ]]; then
                 # **831: RUNG 42'S OWN CLAUSE - THE FIRST CLAUSE HERE THAT ASSERTS A COMMAND WHOSE
