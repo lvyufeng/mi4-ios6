@@ -340,7 +340,17 @@ unset _self _bad
 # **Both copies are `0x8004b2dc` from 822 on.** Five moves, five pages, and every one caught by the
 # same pair of clauses rather than by a run - which is the point of the pair and the reason this
 # literal is still worth its cost.
-EXIT_POP_LR_LITERAL=0x8004b2dc
+#
+# **832, 2026-09-30: it moved a SIXTH time, by the same page, and the disassembly decided it a sixth
+# time.** Rung 43's block (`entry_storage.c`'s `st_read_single_block`, CMD17) is the second rung whose
+# body did NOT fit inside the entry group's remaining alignment slack - the second in a row that is a
+# LOOP rather than a straight line of stores. The entry build's own clause refused with
+# `the exit's call to FlushPoU_Dcache is at 2147795672 and returns to 2147795676, while
+# entry_trace.c's STAGE90_XNU_SEAM_LR is 0x8004b2dc`, `entry_trace.c`'s constant was re-derived there
+# first, and this literal follows it. **Both copies are `0x8004c2dc` from 832 on** - and the lesson is
+# 822's, unchanged: the entry group's size is what moves, so a rung that adds a loop is exactly the
+# kind of rung that moves it, and the pair of clauses is still what catches it rather than a run.
+EXIT_POP_LR_LITERAL=0x8004c2dc
 exit_pop_lr_addr() {
   local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
   local start size body ret

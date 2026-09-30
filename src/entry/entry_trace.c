@@ -2707,8 +2707,21 @@ void __wrap_platform_cache_idle_exit(void)
  * move is one page and it is the whole of the difference: rung 36's own body fitted inside the
  * existing alignment (`xnu_arm_entry.bin` unchanged at 5,552,764 B) and rung 37's did not
  * (5,569,148 B, **+0x4000**). Every kernel-text address in the image moved with it - the era-stamped
- * paragraphs above still name their own arms' values, by design. */
-#define STAGE90_XNU_SEAM_LR       0x8004b2dcu
+ * paragraphs above still name their own arms' values, by design.
+ *
+ * **AND IT HAS HAPPENED A SIXTH TIME, ON RUNG 43 (`STAGE90_XNU_STORAGE_PROBE=42`, CMD17).** The build
+ * refused with `the exit's call to FlushPoU_Dcache is at 2147795672 and returns to 2147795676, while
+ * entry_trace.c's STAGE90_XNU_SEAM_LR is 0x8004b2dc` - so the constant below is re-derived from the
+ * measurement, **`0x8004b2dc` -> `0x8004c2dc`, +0x1000 exactly**, and `scripts/run_and_capture.sh`'s
+ * `EXIT_POP_LR_LITERAL` moves with it (both copies, one edit each - the hazard
+ * `tools/check_stage_paths.sh` cannot see and only the build's own clause catches). **Rung 42's body
+ * fitted inside the existing alignment** (`xnu_arm_entry.bin` unchanged at 5,569,148 B across the
+ * whole rung-42 arm and its press) and **rung 43's did not** - the 512-byte PIO read is a loop, and a
+ * loop is big enough to push the group over. This is the same class as the five moves before it and
+ * the same one-clause cause: the address is pinned in two entry-side files and moves whenever the
+ * entry group's own size crosses a page, which is a property of the rung and not of the rung's
+ * meaning. */
+#define STAGE90_XNU_SEAM_LR       0x8004c2dcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);

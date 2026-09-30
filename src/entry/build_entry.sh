@@ -32138,6 +32138,165 @@ verify_trace_symbols() {
                     layout_fail "st_send_ext_csd still materializes 384000 = 0x5DC00 (mov #56320 [=$ext41_old40a], movt #5 [=$ext41_old40b]) while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: that is rung 40's own budget, which its press FALSIFIED (\`_ext_data_ticks = 0x5ddf7\`, timeout after 20.03 ms with the block's data still unarrived). The two budgets cannot both be in the image, and the rung-40 build fails THIS test while the rung-41 build fails the one above it - [[mi4-one-value-two-definitions]] refused in BOTH directions. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_829: rung 41's corrected data bound is in the linked image: st_send_ext_csd carries the corrected 24000000 = 1.25 s bound (asserted at the SOURCE, one definition = $ext41_src) in place of rung 40's falsified 384000 = 20 ms (both of whose body immediates are ABSENT, $ext41_old40a/$ext41_old40b), and the mechanism (the per-word DATA_AVAILABLE gate, #2048) is unchanged from rung 40 - **a TIME CHANGE and nothing else, because adding a cell perturbed the loop's allocation and re-surfaced the m828 classifier artifact**"
             fi
+            if [[ $STORAGE_PROBE -ge 42 ]]; then
+                # **832: RUNG 43'S OWN CLAUSE - THE FIRST BODY IN THIS LADDER WHOSE SUBJECT IS THE
+                # MEDIUM RATHER THAN THE CARD.** Every clause below it asserts what a command's
+                # accesses are and what word reaches the block, or (rung 42) what three numbers a
+                # 48-bit R1 command is made of. This one asserts those SAME three numbers for a
+                # command one opcode on - **and then asserts that 512 bytes came back and that the
+                # first eight of them are a signature the medium either holds or does not**, which is
+                # the new kind of fact and the reason the clause is longer than rung 42's.
+                #
+                # **THE ARGUMENT IS AN ADDRESS AND NOT A REGISTER.** `block.c:1776-1777` shifts a
+                # SECTOR number into a byte address for a byte-addressed card, so CMD17 carries
+                # `1 << 9` = **512** - and the SECTOR is 1 and not 0 because a GPT puts the eight
+                # bytes `EFI PART` at the head of LBA 1. **512 is the same number CMD16 carried one
+                # rung down and for an unrelated reason**: there it was a LENGTH (`core.c:2594`'s
+                # `cmd.arg = blocklen`) and here it is an ADDRESS (`block.c:1777`'s `<< 9`), and the
+                # two are asserted equal in `entry_storage.c` (`ST_MMC_READ_BYTEADDR ==
+                # ST_MMC_BLK_LEN`) precisely so that a reader who sees 512 twice has the link rather
+                # than a coincidence. **A body that carried a LENGTH here would read sector 0**, which
+                # is the MBR's boot code and not the GPT header: every cell would still be a plausible
+                # R1 and a plausible transfer, and `_rd_gpt` would be 0 for the wrong reason.
+                #
+                # **THE COMMAND BYTE IS CMD16's AND CMD8's, AND ONLY THE OPCODE HALF MOVES.** CMD17
+                # is `adtc [31:0] data addr R1` (`mmc.h:51`), so `block.c:1779`'s flags are
+                # `MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_ADTC` = **0x19D = 413** - the SAME word rung
+                # 38 asserts for CMD8 - and `sdhci_cmd_to_flags` maps it to the byte `0x1A` that
+                # CMD16 also sends. `ST_SDHCI_CMD_WORD(17, 0x1A)` = `0x111A` = 4378, and the word the
+                # block's COMMAND register actually receives is `ST_SDHCI_CMD_WORD_DATA(17, 0x1A)` =
+                # **0x113A = 4410**, the `0x20` ORed in by `entry_storage.c:3334`'s
+                # `if (mmc_flags & ST_MMC_CMD_ADTC)`. **Both are asserted in the body and both are
+                # read here**, because a body that published only the five-bit word would leave a
+                # reader unable to check `_rd_word_read` against the artifact.
+                #
+                # **AND IT IS THE FIRST CLAUSE IN THE LADDER THAT HAS TO BE SILENT ABOUT THE DATA
+                # LOOP'S INNER INSTRUCTIONS.** The 128-word PIO read is rung 38's loop verbatim
+                # (`PRESENT_STATE & DATA_AVAILABLE`, bounded by `ST_EXT_DATA_TICK_BUDGET`), so the
+                # device surface it contributes is `PRESENT_STATE` and `BUFFER` - two addresses this
+                # ladder has read since rung 38 - and the clause asserts the SET rather than the
+                # order, because gcc is free to reorder a loop body whose only side effects are on
+                # the stack.
+                blk43_addr=$(sym_addr st_read_single_block) ||
+                    layout_fail "rung 43's command body is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: out/xnu_arm_entry.elf has no \`st_read_single_block\`, so CMD17 is never put on the bus and this arm is rung 42 wearing a new number - an absence no cell can show, because every key below belongs to a build that did emit the body. Nothing is rebuilt by this refusal"
+                blk43_next=$(sym_next "$blk43_addr") ||
+                    layout_fail "nothing follows st_read_single_block in the linked image, so the window this clause reads has no end. Nothing is rebuilt by this refusal"
+                blk43_body=$(arm-none-eabi-objdump -d --start-address="$blk43_addr" --stop-address="$blk43_next" "$OUT/xnu_arm_entry.elf")
+                blk43_bl_count=$(grep -c -- 'bl.*<st_send_command>' <<<"$blk43_body" || true)
+                [[ "$blk43_bl_count" == "1" ]] ||
+                    layout_fail "st_read_single_block makes $blk43_bl_count call(s) to st_send_command and rung 43 sends exactly one command - CMD17. Zero means the symbol was reached with an empty window (the scan failed, not the arm); two or more means the immediates this clause reads may belong to the wrong call site. Nothing is rebuilt by this refusal"
+                blk43_bl_ln=$(awk '/bl.*<st_send_command>/{ printf "%d", NR }' <<<"$blk43_body")
+                blk43_r0=$(awk -v n="$blk43_bl_ln" 'NR < n && $0 ~ /movw?[ \t]+r0, #/ { v=$0 } END { print v }' <<<"$blk43_body")
+                blk43_r1=$(awk -v n="$blk43_bl_ln" 'NR < n && $0 ~ /movw?[ \t]+r1, #/ { v=$0 } END { print v }' <<<"$blk43_body")
+                blk43_r2=$(awk -v n="$blk43_bl_ln" 'NR < n && $0 ~ /movw?[ \t]+r2, #/ { v=$0 } END { print v }' <<<"$blk43_body")
+                [[ -n "$blk43_r0" && -n "$blk43_r1" && -n "$blk43_r2" ]] ||
+                    layout_fail "the argument setup before st_read_single_block's call to st_send_command could not be read out of the linked image (r0 line [$blk43_r0], r1 line [$blk43_r1], r2 line [$blk43_r2], the call on line $blk43_bl_ln). This refusal is about the SCAN and not about the arm. Nothing is rebuilt by this refusal"
+                blk43_r0_imm=$(grep -oE '#[0-9]+' <<<"$blk43_r0" | head -1 | tr -d '#')
+                blk43_r1_imm=$(grep -oE '#[0-9]+' <<<"$blk43_r1" | head -1 | tr -d '#')
+                blk43_r2_imm=$(grep -oE '#[0-9]+' <<<"$blk43_r2" | head -1 | tr -d '#')
+                [[ "$blk43_r0_imm" == "17" ]] ||
+                    layout_fail "st_read_single_block loads $blk43_r0_imm into the OPCODE register before its call to st_send_command and rung 43 sends CMD17 - \`MMC_READ_SINGLE_BLOCK\` (mmc.h:51), taken by \`block.c:1821\`'s \`readcmd = MMC_READ_SINGLE_BLOCK\` when \`brq->data.blocks <= 1\` (\`:1810\`). 16 here is CMD16's (rung 42's, asserted one clause down) and 18 would be CMD18's - a MULTI-block read, which is a different command with a different data phase and, on a card that was never told a count, a transfer that never ends"
+                [[ "$blk43_r1_imm" == "512" ]] ||
+                    layout_fail "st_read_single_block loads $blk43_r1_imm into the ARGUMENT register before its call to st_send_command, and rung 43 sends 512 - \`block.c:1776-1777\`'s \`cmd.arg = blk_rq_pos(req)\` with \`if (!mmc_card_blockaddr(card)) cmd.arg <<= 9\`, which for LBA 1 is **1 << 9 = 512, A BYTE ADDRESS**. **0 here is the whole reason this clause exists**: sector 0 holds the MBR's boot code and not a GPT header, so a body that forgot the shift would produce a complete, error-free transfer whose every cell read as success and whose \`_rd_gpt\` was 0 - a false negative that looks exactly like a device that is not GPT"
+                [[ "$blk43_r2_imm" == "181" ]] ||
+                    layout_fail "st_read_single_block loads $blk43_r2_imm into the FLAGS register before its call to st_send_command, and rung 43 sends the DRIVER'S OWN word for CMD17 - \`block.c:1779\`'s \`brq->cmd.flags = MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_ADTC\` = 0x80 (core.h:68's \`MMC_RSP_SPI_S1\`) | 0x15 (core.h:51's \`MMC_RSP_R1\` = PRESENT|CRC|OPCODE) | 0x20 (core.h:36's \`MMC_CMD_ADTC\`) = **181 = 0xB5**. **It is the SAME word rung 38 asserts for CMD8, and that is the point**: \`MMC_CMD_ADTC\` is what makes the controller's own data machinery run at all, so a body that sent CMD13's 405 here would put the command byte 0x1A on the bus, be answered by a valid R1, publish \`_rd_complete = 1\`, \`_rd_err = 0\`, \`_rd_state = 4\`, \`_rd_resp = 0x900\` - **and read no sector at all**, because with \`mmc_flags & ST_MMC_CMD_ADTC\` zero \`st_send_command\` never ORs \`SDHCI_CMD_DATA\` into the word (entry_storage.c:3334), the block never asserts DATA_AVAILABLE, and the 128-word loop would exit on its very first gate into \`_rd_data_wait_timeout = 1\` with \`_rd_words_gated = 0\`. **AND THE THREE FLAG WORDS HERE ARE ALL DIFFERENT NUMBERS WITH THE SAME COMMAND BYTE**: 181 (CMD17, rung 43), 181 again (CMD8, rung 38), 405 (CMD13, rung 37) and 21 (CMD7) all fold to 0x1A through \`sdhci_cmd_to_flags\`'s five bits - which is why the OPCODE is asserted separately above and the two WORDS separately below"
+                blk43_word_hit=$(grep -cE -- '#4378[^0-9]|#4378$' <<<"$blk43_body" || true)
+                [[ "$blk43_word_hit" -ge 1 ]] ||
+                    layout_fail "st_read_single_block's disassembly holds no instruction materializing 4378 = **0x111A** [hit=$blk43_word_hit bytes=${#blk43_body} addr=$blk43_addr next=$blk43_next], the FIVE-BIT command word this rung publishes as \`_rd_word\` - opcode 17 with \`SDHCI_CMD_RESP_SHORT\` 0x02, \`SDHCI_CMD_CRC\` 0x08 and \`SDHCI_CMD_INDEX\` 0x10. Zero here is either the arm not publishing the word at all or a body that published a different one, and both make \`_rd_word\` unreadable against the artifact"
+                blk43_worddata_hit=$(grep -cE -- '#4410[^0-9]|#4410$' <<<"$blk43_body" || true)
+                [[ "$blk43_worddata_hit" -ge 1 ]] ||
+                    layout_fail "st_read_single_block's disassembly holds no instruction materializing 4410 = **0x113A** [hit=$blk43_worddata_hit], the word the block's COMMAND register actually receives - 0x111A with \`SDHCI_CMD_DATA\` 0x20 ORed in by \`entry_storage.c:3334\`. **This is the assert that ties the arm to rung 38's mechanism rather than to a second copy of it**: \`_rd_word_read\` is compared by the press against \`0x113A\` and \`_ext_word_read\` against \`0x083A\`, and the two differ only in the opcode halfword"
+                blk43_word_bad16=$(grep -cE -- '#4122[^0-9]|#4122$' <<<"$blk43_body" || true)
+                blk43_word_bad8=$(grep -cE -- '#2074[^0-9]|#2074$' <<<"$blk43_body" || true)
+                blk43_word_bad13=$(grep -cE -- '#3354[^0-9]|#3354$' <<<"$blk43_body" || true)
+                [[ "$blk43_word_bad16" == "0" && "$blk43_word_bad8" == "0" && "$blk43_word_bad13" == "0" ]] ||
+                    layout_fail "st_read_single_block's disassembly materializes 4122 = 0x101A [$blk43_word_bad16], 2074 = 0x081A [$blk43_word_bad8] or 3354 = 0x0D1A [$blk43_word_bad13] - **the five-bit words of CMD16, CMD8 and CMD13**. Any of the three is a valid \`ac\` command whose answer the card would produce, so \`_rd_complete\`, \`_rd_err\`, \`_rd_state\` and \`_rd_resp\` would all read exactly as they do on a success while no sector was ever asked for - and the two \`ac\` ones have no data phase at all, which would leave the 512-byte loop waiting on a FIFO nothing is filling"
+                blk43_decl="f9824904 f9824906 f982490c f9824910 f9824920 f9824924 f9824928 f982492c f982492e f9824930 f9824934 f9824938"
+                { read -r blk43_dev; read -r blk43_cnt; read -r blk43_img; read -r blk43_imgaddr; } < <(classify_body "$blk43_body" "$blk43_decl")
+                blk43_order=$(printf '%s\n' $blk43_dev | tr '\n' ' ')
+                blk43_order_want="f9824910:ldr f9824928:ldrb f9824934:str f9824934:ldr f9824938:ldr f982492e:ldrb f982492e:strb f9824904:strh f9824904:ldrh f9824906:strh f9824906:ldrh f982490c:strh f982490c:ldrh f9824924:ldr f9824920:ldr f9824930:ldr"
+                [[ "${blk43_order% }" == "$blk43_order_want" ]] ||
+                    layout_fail "st_read_single_block's device accesses IN PROGRAM ORDER, distinct, are [${blk43_order% }] and rung 43's record says [$blk43_order_want]. **IT IS RUNG 38's ORDER, INSTRUCTION FOR INSTRUCTION**, and that is this arm's largest claim: the sector read is the EXT_CSD read's own command path with one opcode changed and one array swapped. **The assertion reads the window's two ends and the whole of the data phase's arming**: \`RESPONSE 0x10\` is read FIRST, before anything in the block is written, which is what makes \`_rd_gate_state\` a reading of the card's OWN R1 (carried up from CMD16) and not of a register this body just moved; then \`HOST_CONTROL 0x28\` as a byte; the \`INT_ENABLE 0x34\` window is opened, read back, and \`SIGNAL_ENABLE 0x38\` is read; \`TIMEOUT_CONTROL 0x2e\` is read then WRITTEN (the byte rung 42's own clause forbids at value 41 and this one requires - \`sdhci.c:827-828\` writes it exactly when \`data || (cmd->flags & MMC_RSP_BUSY)\`, and CMD17 is \`adtc\`); \`BLOCK_SIZE 0x04\`, \`BLOCK_COUNT 0x06\` and \`TRANSFER_MODE 0x0c\` are each written as a HALFWORD and read back; the command runs; then the 128-word loop's \`PRESENT_STATE 0x24\` gate and \`BUFFER 0x20\` read; and the transfer ends on \`INT_STATUS 0x30\` before \`PRESENT_STATE\` is sampled once more. **A body that armed the data phase in a different order would still produce every cell the press reads** - which is why this is an order assertion and not a set one"
+                blk43_set=$(printf '%s\n' $blk43_dev | LC_ALL=C sort -u | tr '\n' ' ')
+                blk43_set_want="f9824904:ldrh f9824904:strh f9824906:ldrh f9824906:strh f982490c:ldrh f982490c:strh f9824910:ldr f9824920:ldr f9824924:ldr f9824928:ldrb f982492e:ldrb f982492e:strb f9824930:ldr f9824934:ldr f9824934:str f9824938:ldr"
+                [[ "${blk43_set% }" == "$blk43_set_want" ]] ||
+                    layout_fail "st_read_single_block's device accesses are [${blk43_set% }] and rung 43's record says [$blk43_set_want]. **It is exactly rung 38's set**, and that is the arm's own claim: rung 43 adds NO register this ladder has not already reached. 0xf9824904 is \`BLOCK_SIZE 0x04\` written then read back (\`0x7200\` = 512 bytes in bits 15:8 and the card's own transfer block size in bits 11:0); 0xf9824906 is \`BLOCK_COUNT 0x06\` = 1; 0xf982490c is \`TRANSFER_MODE 0x0c\` = \`SDHCI_TRNS_READ_1BLK\`; 0xf9824920 is \`BUFFER 0x20\`, one word per gate; 0xf9824924 is \`PRESENT_STATE 0x24\` sampled on every gate and once at the end; 0xf9824928 is \`HOST_CONTROL 0x28\` read as a byte; 0xf982492e is \`TIMEOUT_CONTROL 0x2e\`, read then WRITTEN - the one store rung 42's clause forbids and this clause requires; 0xf9824930 is \`INT_STATUS 0x30\`; 0xf9824934 is \`INT_ENABLE 0x34\` written then read back; 0xf9824938 is \`SIGNAL_ENABLE 0x38\`. **NO byte in the 0x13..0x1B band** - 0x13, 0x17 and 0x1B are the CRC bytes ONE BELOW their own RESPONSE words and belong to CMD9's 136-bit assembly alone; CMD17 answers with a 48-bit R1, so no word has a byte below it"
+                blk43_bytes=$(printf '%s\n' $blk43_dev | tr ' ' '\n' | sed 's/:.*//' | grep -E '^f982491[3b7f]$' | LC_ALL=C sort -u | tr '\n' ' ' || true)
+                [[ -z "${blk43_bytes// /}" ]] ||
+                    layout_fail "st_read_single_block reads byte address(es) [$blk43_bytes] in the 0x13..0x1B band and rung 43's record says that band is EMPTY: **0x13, 0x17 and 0x1B are the CRC bytes ONE BELOW their own RESPONSE words and belong to CMD9's 136-bit assembly alone**. CMD17 answers with a 48-bit R1, so no word has a byte below it and no second word is read - a read here would be a 136-bit bus on a 48-bit command, which is [[mi4-the-136-bit-response-has-one-word-order]]'s class"
+                for _want in f9824910:ldr=1 f982492e:strb=2 f982492e:ldrb=3 f9824934:str=2 f9824934:ldr=2 \
+                              f9824924:ldr=2 f9824920:ldr=1 f9824930:ldr=1 f9824938:ldr=1 f9824928:ldrb=1; do
+                    [[ "$blk43_cnt" == *"$_want"* ]] ||
+                        layout_fail "st_read_single_block's device access counts are [$blk43_cnt] and rung 43's record says \`$_want\` is among them. **FOUR OF THESE ARE LOAD-BEARING.** \`f982492e:strb=2\` says \`TIMEOUT_CONTROL\` is written TWICE - armed with the CSD-derived count before the command and RESTORED to the byte it held at the end - and a single \`strb\` means the controller is left with a data-phase timeout it did not have. \`f9824934:str=2\` and \`f9824934:ldr=2\` say the \`INT_ENABLE\` window is opened, read back, closed and read back: a single store would leave the PIO interrupts enabled for the rest of the run. \`f9824924:ldr=2\` says \`PRESENT_STATE\` is read by TWO instructions - the loop's own gate and the end-of-transfer sample - and \`f9824920:ldr=1\` says the \`BUFFER\` read is ONE instruction, which is the loop's body over 128 iterations. **AND \`f9824910:ldr=1\` IS THE ASSERTION THAT THE PRE-COMMAND RESPONSE IS THE ONLY RESPONSE READ IN THIS BODY**: the post-command R1 the press reads as \`_rd_resp\` comes out of \`st_send_command\`'s own result struct, so a count of TWO here would mean this body read the register again and \`_rd_resp\` had two producers - [[mi4-one-value-two-definitions]]' shape, refused by a count"
+                done
+                # **THE IMAGE SIDE IS RESOLVED TO SYMBOLS, THE WAY RUNG 38's CLAUSE DOES IT.** The
+                # bytes land in `st_read_block`, a file-scope `.bss` array one object over from
+                # `st_ext_csd`; the timeout is computed from the carried CSD through the same two TAAC
+                # tables rung 38 reads; and the result struct lives on the stack, which the classifier
+                # skips by base register. **The exact-set form is NOT used, for 828's measured reason**
+                # (rung 38's clause states it in full): which of these symbols the classifier resolves
+                # is a property of the register allocator and not of the body, so the clause asserts
+                # the two things that are properties of the body - (1) every image-side address
+                # resolves to one of SIX allowed names, and (2) **`st_read_block` is among them**,
+                # which is the transfer itself: a sector read into some other object would satisfy
+                # every device-side assertion above and leave `_rd_w0` a reading of nothing.
+                blk43_img_hits=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v seen="$blk43_imgaddr" '
+                    $3 ~ /^[bBdDrRtT]$/ { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bn[n] = $4 }
+                    END {
+                        m = split(seen, ent, " ")
+                        for (i = 1; i <= m; i++) {
+                            if (ent[i] == "") continue
+                            split(ent[i], p, ":")
+                            a = strtonum("0x" p[1])
+                            hit = ""
+                            for (j = 1; j <= n; j++) if (a >= ba[j] && a < ba[j] + bs[j]) hit = bn[j]
+                            if (hit == "")      printf "%s=nosym ", ent[i]
+                            else { print hit; got[hit] = 1 }
+                        }
+                        for (i = 1; i <= n; i++) if (bn[i] ~ /^st_(read_block|ext_csd|csd_words|csd_words_valid|tacc_exp|tacc_mant)$/ && !(bn[i] in got)) printf "%s=not-accessed ", bn[i]
+                    }')
+                blk43_img_got=$(printf '%s\n' $blk43_img_hits | grep -vE 'nosym|=not-accessed' | LC_ALL=C sort -u | tr '\n' ' ' || true)
+                blk43_img_want="st_read_block st_csd_words st_csd_words_valid st_tacc_exp st_tacc_mant"
+                for _s in $blk43_img_got; do
+                    case " $blk43_img_want " in
+                        *" $_s "*) ;;
+                        *) layout_fail "st_read_single_block's non-device accesses resolve to [${blk43_img_got% }] and \`$_s\` is NOT one of [$blk43_img_want] - the body reached an image object outside the sector buffer, the CSD carry and the two TAAC tables. **\`st_ext_csd\` is deliberately NOT in this rung's list**: rung 43 must not overwrite the card's own EXT_CSD bytes with a sector, or the cells rung 38 publishes would change meaning one rung later. Nothing is rebuilt by this refusal" ;;
+                    esac
+                done
+                [[ "$blk43_img_got" == *"st_read_block"* ]] ||
+                    layout_fail "st_read_single_block's non-device accesses resolve to [${blk43_img_got% }] and \`st_read_block\` - the 512-byte buffer the 128 \`BUFFER\` reads fill - is NOT among them, so the sector this rung exists for went somewhere else while every device-side assertion above still read true. Nothing is rebuilt by this refusal"
+                [[ "$blk43_img_hits" != *"nosym"* ]] ||
+                    layout_fail "st_read_single_block's non-device accesses include an address NO SYMBOL COVERS [$blk43_img_hits] - that is a device access this classifier read as image-side (m704's direction), and the sector read is reaching a register the device clauses above never declared. Nothing is rebuilt by this refusal"
+
+                # **THE TWO SIGNATURE WORDS, ASSERTED AS THE FOUR HALVES GCC ACTUALLY EMITS.** A
+                # 32-bit constant on ARM comes out as a `movw`/`movt` pair, so this reads those
+                # halves rather than the value: `EFI ` = 0x20494645 is movw #17989 (0x4645) with
+                # movt #8265 (0x2049), and `PART` = 0x54524150 is movw #16720 (0x4150) with
+                # movt #21586 (0x5452). **All four must be present**: a body that published the first
+                # four words WITHOUT comparing them would leave the press to decide by eye whether
+                # the sector is a GPT header - a reading a human takes, not a check a build takes -
+                # and the derived cell `_rd_gpt` would be a number nothing computed.
+                blk43_gpt=0
+                for _h in '#17989' '#8265' '#16720' '#21586'; do
+                    grep -qE -- "${_h}([^0-9]|$)" <<<"$blk43_body" && blk43_gpt=$((blk43_gpt + 1))
+                done
+                [[ "$blk43_gpt" == "4" ]] ||
+                    layout_fail "st_read_single_block's disassembly holds $blk43_gpt of the four halves of the two GPT signature words - \`EFI \` = 0x20494645 is movw #17989 + movt #8265 and \`PART\` = 0x54524150 is movw #16720 + movt #21586. **All four must appear**, because the derived cell \`_rd_gpt\` is the comparison \`(w[0] == 0x20494645) && (w[1] == 0x54524150)\` and a body that published the first four words without comparing them would leave the press to decide by eye. Nothing is rebuilt by this refusal"
+                blk43_calls=$(grep -c -- 'bl.*<st_read_single_block>' <<<"$stb_path_body" || true)
+                [[ "$blk43_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $blk43_calls call(s) to st_read_single_block and rung 43 makes exactly one - \`block.c:1770-1829\`'s own request, the driver's first act on the medium after the block length is fixed. **Zero means the body is in the image and nothing calls it**, which is m720's shape: a switch no build reads. Two or more means two sector reads on the bus in one boot, and the second would overwrite the first's cells before the log was taken"
+                blk43_ctx=$(awk '/bl.*<st_read_single_block>/{ printf "%s|", prev2; printf "%s|", prev1; exit } { prev2=prev1; prev1=$0 }' <<<"$stb_path_body")
+                grep -q 'bl.*<st_set_blocklen>' <<<"$blk43_ctx" ||
+                    layout_fail "the two instructions above st_cmd_path's call to st_read_single_block are [$blk43_ctx] and rung 43's record says one of them is the call to st_set_blocklen - CMD16 then CMD17, adjacent, which is the driver's own order (\`core.c:2588\`'s \`mmc_set_blocklen\` before any request can be issued). **The order is load-bearing on this rung in a way it was not on rung 42's**: a CMD17 issued before SET_BLOCKLEN would move a sector of the card's RESET block length, and every cell of the transfer would still read as a success"
+                for _k in xnu_live_storage_rd_complete xnu_live_storage_rd_err xnu_live_storage_rd_state xnu_live_storage_rd_gpt xnu_live_storage_rd_gated xnu_live_storage_rd_done \
+                          xnu_live_storage_rd_words_gated xnu_live_storage_rd_data_wait_timeout xnu_live_storage_rd_int_data_err \
+                          xnu_live_storage_rd_gate_state xnu_live_storage_rd_w0 xnu_live_storage_rd_w1 xnu_live_storage_rd_w127 \
+                          xnu_live_storage_rd_word_read xnu_live_storage_rd_lba xnu_live_storage_rd_arg xnu_live_storage_rd_calls; do
+                    grep -qa "$_k" "$OUT/xnu_arm_entry.elf" ||
+                        layout_fail "rung 43 publishes no \`$_k\` string in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE. **These are what the press reads, and each one is a different outcome**: \`_rd_complete\`/\`_rd_err\`/\`_rd_state\` are CMD17's own R1 (4 = TRAN, and a completed transfer out of TRAN is the row that makes the medium's answer a reading rather than a bus artefact); \`_rd_gpt\` is the DERIVED cell - 1 exactly when LBA 1 begins \`EFI PART\`; \`_rd_gated\`/\`_rd_done\` are the precondition's two outcomes (a refusal must be visible and not silent); \`_rd_words_gated\`/\`_rd_data_wait_timeout\` are the transfer's (128 with 0 timeout is a complete sector, 0 words with 1 is a card that never delivered); \`_rd_int_data_err\` carries the controller's own timeout/CRC/end-bit bits; \`_rd_word_read\` is what the block's COMMAND register held - 0x113A; and \`_rd_w0\`/\`_rd_w1\`/\`_rd_w127\` are the sector itself. **A rung that published the transfer's cells and not the sector's would leave the whole arm unable to say whether the bytes are the card's or the FIFO's**"
+                done
+                echo "  xnu_entry_832: rung 43's command body, read out of the linked image: st_read_single_block (at $blk43_addr) loads [r0=#$blk43_r0_imm (READ_SINGLE_BLOCK), r1=#$blk43_r1_imm (block.c:1777's LBA 1 << 9 - a BYTE ADDRESS and NOT the block length, but the same 512), r2=#$blk43_r2_imm (block.c:1779's MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_ADTC = 0x80 | 0x15 | 0x20 = 181 = 0xB5, CMD8's own flag word - NOT the 0x19D an earlier draft of this clause printed)] immediately before its bl to st_send_command (disassembly line $blk43_bl_ln), and it materializes BOTH command words - the five-bit 0x111A (4378) and the block's own 0x113A (4410) - with CMD16's, CMD8's and CMD13's REFUSED by number; its device accesses IN PROGRAM ORDER are [${blk43_order% }] - **rung 38's order instruction for instruction**: RESPONSE 0x10 read FIRST (the precondition as a reading of the card's own R1), HOST_CONTROL 0x28 as a byte, the INT_ENABLE 0x34 window opened and read back, SIGNAL_ENABLE 0x38 read, TIMEOUT_CONTROL 0x2e READ THEN WRITTEN, BLOCK_SIZE/BLOCK_COUNT/TRANSFER_MODE each written as a halfword and read back, then the command, then the loop's PRESENT_STATE/BUFFER and the end's INT_STATUS - and its full set is [${blk43_set% }], which is rung 38's FIFTEEN accesses EXACTLY: BLOCK_SIZE, BLOCK_COUNT, TRANSFER_MODE, BUFFER, PRESENT_STATE, HOST_CONTROL, TIMEOUT_CONTROL (read AND written - the byte rung 42's clause forbids and this one requires), INT_STATUS, INT_ENABLE, SIGNAL_ENABLE, and NO byte in the 0x13..0x1B band (48-bit R1, not 136); counts [$(printf '%s' $blk43_cnt | tr ' ' ';')]; the image side resolves to symbols among [st_read_block st_csd_words st_csd_words_valid st_tacc_exp st_tacc_mant] with st_read_block REQUIRED and no address left uncovered; the two GPT signature halfwords are both in the body (the DERIVED \`_rd_gpt\` cell); st_cmd_path calls it $blk43_calls time, UNGATED immediately after st_set_blocklen, and the cells the press reads are _rd_gpt (1 = LBA 1 begins \`EFI PART\`), _rd_words_gated (0x80 is a whole sector), _rd_complete/_rd_err/_rd_state/_rd_resp (CMD17's own R1), _rd_data_wait_timeout, _rd_int_data_err, _rd_word_read (0x113A), _rd_gated/_rd_done and _rd_w0/_rd_w1/_rd_w127"
+            fi
             if [[ $STORAGE_PROBE -ge 41 ]]; then
                 # **831: RUNG 42'S OWN CLAUSE - THE FIRST CLAUSE HERE THAT ASSERTS A COMMAND WHOSE
                 # ARGUMENT IS A VALUE THE MEDIUM LATER MOVES BY.** Rungs 11 through 38 assert what a

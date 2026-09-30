@@ -10203,3 +10203,82 @@ set=armed-storage-3c6803f6 sha256=3c6803f688f2022f898b7cd6f6a6fea7aebae01005f215
 set=armed-storage-3c6803f6 sha256=89d5e5626691e7e82cb46a536dc3b26fefce253b478bf5eec2332ea92a5b4e82 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=41-and-differing-from-the-rung-41-arm-s-in-EXACTLY-TWO-lines-the-artifact-s-own-hash-and-the-ladder-value-40-41
 set=armed-storage-3c6803f6 sha256=1d9d37065174074a0d71ea4b348726bb80ab369b3a50cfa786df7b205f5a99c1 bytes=6749280 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-GREW-by-32-bytes-from-the-rung-41-arm-s-6749248-because-the-new-command-body-is-a-new-function
 set=armed-storage-3c6803f6 sha256=49a8afb49d87a8d007a7cc3b57fe20e869c71078376f560aa141a465054bf672 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-the-hashes-of-build_entry-sh-and-entry_storage-c-and-this-record-s-own-two-role-lines
+# 832, 2026-09-30 - THE RUNG-43 ARM. `armed-storage-7228e3f9`. PARKED, NOT PRESSED, NOT ARMED.
+#
+# **A BUILD AND A PARK, AND NOTHING ELSE** - and it is THE LADDER'S FIRST READ OF THE MEDIUM ITSELF,
+# taken because the rung-42 press answered the one question that stood in front of it. **IT ADDS ONE
+# COMMAND BODY, ONE CALL TO IT, ONE 512-BYTE .bss ARRAY, AND NOTHING ELSE.**
+#
+# (1) WHAT THE RUNG-42 PRESS SETTLED. 832's press measured CMD16 `SET_BLOCKLEN` LANDING on every cell
+# the arm was built to move: `_blk_complete = 1`, `_blk_err = 0`, `_blk_illegal = 0`,
+# `_blk_state = 4` (TRAN), `_blk_resp = 0x00000900`, `_blk_word = _blk_word_read = 0x101A`,
+# `_blk_arg = _blk_arg_wrote = 0x200` (512), `_blk_state_held = 1`, `_blk_resp_moved = 0`. The card is
+# in TRAN with a block length set, and the frontier the press named is the FIRST SECTOR READ.
+#
+# (2) WHAT THIS RUNG IS, AND WHY IT IS THIS COMMAND. `block.c:1770-1829`'s read-request construction,
+# the one-block case: `readcmd = MMC_READ_SINGLE_BLOCK` (`:1821`, taken when `brq->data.blocks <= 1`),
+# `cmd.arg = blk_rq_pos(req) << 9` for a byte-addressed card (`:1776-1777`), `cmd.flags =
+# MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_ADTC` (`:1779`). The command is `mmc.h:51`'s
+# `MMC_READ_SINGLE_BLOCK` (opcode 17), the argument is **LBA 1 << 9 = 512**, and the flags are
+# 0x80 | 0x15 | 0x20 = **181 = 0xB5** - **the SAME word rung 38 asserts for CMD8**, because both are
+# `adtc`. `sdhci.c:1140-1143`'s five-bit mapping is `0x1A`, so the five-bit word is `0x111A` (4378)
+# and the word the block's COMMAND register receives is `0x113A` (4410), the `SDHCI_CMD_DATA 0x20`
+# ORed in by entry_storage.c:3334's `if (mmc_flags & ST_MMC_CMD_ADTC)`. **IT IS SECTOR 1 AND NOT 0**
+# because a GPT puts the eight bytes `EFI PART` at the head of LBA 1: the reading proves itself. **AND
+# 512 APPEARS TWICE FOR TWO UNRELATED REASONS** - a LENGTH one rung down and an ADDRESS here - which is
+# why entry_storage.c asserts `ST_MMC_READ_BYTEADDR == ST_MMC_BLK_LEN`. It is the first command in
+# this ladder whose answer is the CONTENT OF THE MEDIUM rather than a card register, and the first
+# whose data phase this ladder reads into its own buffer.
+#
+# (3) WHAT THE PRESS WOULD READ. `_rd_complete = 1` with `_rd_err = 0` and **`_rd_gpt = 1`** is **THE
+# MEDIUM ANSWERING AND LBA 1 HOLDING A GPT HEADER** - the partition table this image could then walk.
+# `_rd_gpt = 0` with non-zero `_rd_w0`/`_rd_w1` is A SECTOR READ THAT IS NOT GPT (an MBR's boot code,
+# or a device not laid out as expected); `_rd_words_gated = 0x80` with `_rd_data_wait_timeout = 0` is
+# THE WHOLE SECTOR; `_rd_words_gated = 0` with `_rd_data_wait_timeout = 1` is THE CARD SILENT after a
+# completed command (rung 40's row, one command down); `_rd_int_data_err` nonzero is THE TRANSFER
+# failing; `_rd_gated = 1` with `_rd_done = 0` is THE PRECONDITION refusing (the card is not in TRAN).
+# **`_rd_gpt` IS THE ARM'S OWN DERIVED CELL**: the comparison of the first two words against
+# 0x20494645 and 0x54524150, and all four signature halves are asserted in the LINKED IMAGE by the
+# clause, so the press reads a check the build took rather than deciding by eye.
+#
+# (4) THE BUILD CLAUSE, `xnu_entry_832`. It refuses the build unless the body at 0x8000ffac loads
+# r0 = 17, r1 = 512, r2 = 181 before its `bl`; materializes BOTH command words (4378 and 4410) and
+# NEITHER of CMD16's 4122, CMD8's 2074 and CMD13's 3354; has the device-access set and PROGRAM ORDER
+# of rung 38's body EXACTLY (fifteen accesses: RESPONSE, HOST_CONTROL, INT_ENABLE open/readback,
+# SIGNAL_ENABLE, TIMEOUT_CONTROL read and written, BLOCK_SIZE/BLOCK_COUNT/TRANSFER_MODE each written
+# and read back, then the command, then the loop's PRESENT_STATE/BUFFER, then INT_STATUS and the final
+# PRESENT_STATE), with the asserted counts; has NO byte in the 0x13..0x1B band (48-bit R1, not 136);
+# resolves its image side to symbol names among [st_read_block st_csd_words st_csd_words_valid
+# st_tacc_exp st_tacc_mant] and **NOT st_ext_csd** (rung 43 must not overwrite the card's own EXT_CSD
+# bytes); carries all four halves of the two GPT signature words; and `st_cmd_path` calls it exactly
+# once, UNGATED, immediately after `bl <st_set_blocklen>`.
+#
+# (4a) **AND THE ENTRY-GROUP PAGE MOVE HAPPENED FOR THE SIXTH TIME ON THIS ARM.** The build refused
+# with the sentence it has used since 696 - the exit's call to FlushPoU_Dcache is at 2147795672 and
+# returns to 2147795676, while entry_trace.c's STAGE90_XNU_SEAM_LR is 0x8004b2dc - because the
+# 512-byte PIO read is a LOOP and is big enough to push the entry group past a page. **BOTH copies
+# moved, one edit each**: `src/entry/entry_trace.c`'s `STAGE90_XNU_SEAM_LR` and
+# `scripts/run_and_capture.sh`'s `EXIT_POP_LR_LITERAL`, 0x8004b2dc -> **0x8004c2dc**, +0x1000 exactly.
+# It was caught by the build's own clause BEFORE a press and before readiness, which is what the pair
+# exists for (696/708/724/770/822 are the five before it, and 770 moved at a BYTE-IDENTICAL bin).
+#
+# (5) SAFETY. It is `fastboot boot` only, nothing flashed, **no byte of the medium can change**: CMD17
+# is `adtc [31:0] data addr R1` and `MMC_DATA_READ` (core.h:41) moves bytes CARD-TO-HOST, so nothing is
+# written to storage; the sector read is one the card's OWN `EXT_CSD_SEC_CNT = 0x01d5a000` says
+# exists; it touches no register this ladder has not already reached since rung 38; and the data-phase
+# bound is rung 41's measured-sufficient 1.25 s. **NO PRESS HAS BEEN MADE AND NONE IS OWED: this arm
+# is PARKED and NOT ARMED-FOR-PRESS, and the park is a RECORD and not a queue.**
+#
+# **THE GOAL IS NOT MET.** No partition table walked, no filesystem, no mount; TWRP-to-storage stays
+# withheld. The filesystem is the next frontier after this one.
+set=armed-storage-7228e3f9 sha256=abd421e7f7ce7b1ead7c58650f19b68666ea60d83ff19e3e2b1c3686851a39a8 bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-42-entry-rung-43-ADDS-CMD17-READ-SINGLE-BLOCK-OPCODE-17-ARG-512-LBA-1-WORD-0x113A-NOT-PRESSED
+set=armed-storage-7228e3f9 sha256=68c2bbc60547a16acdbf0cd5f096631222760a611b039d9f9942ef7a4b17990f bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-42-entry-same-6064644-bytes-as-the-rung-42-arm-s
+set=armed-storage-7228e3f9 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-42-s-MEASURED-no-payload-switch-moved
+set=armed-storage-7228e3f9 sha256=eda633801e8efe48d2e2bc175da985540ffd4575ceb5d6af6af8d283bce55f60 bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-size-UNCHANGED-from-the-rung-42-arm-s-6126716
+set=armed-storage-7228e3f9 sha256=1ea75ff1dd3418a6251c764360b4ee516daa8d2a345c47efad3ea746e5b658e1 bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-7228e3f9 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-7228e3f9 sha256=f0099620d473ebf3a98fc93199b5aef954e15b0e472af001adf1d2e3da63fa1b bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-7228e3f9 sha256=7228e3f91c364d872d1da4f1839bbae138eb50fb7da7d53da57cfd22c72a1f63 bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-7228e3f9-IS-THE-SETS-NAME-same-5569148-bytes-as-the-rung-42-arm-and-the-difference-is-one-new-command-body-st_read_single_block-one-call-to-it-and-one-512-byte-bss-array
+set=armed-storage-7228e3f9 sha256=80dec1cb636d848a5983444384f91194849e63a07510c2aee47137998ba169a8 bytes=6749376 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-GREW-by-96-bytes-from-the-rung-42-arm-s-6749280-because-the-new-command-body-is-a-new-function-with-a-128-iteration-loop
+set=armed-storage-7228e3f9 sha256=2058121a5d5bf6421704dce76bb4fbfe2731110717ac4fa60954c4bd537d0661 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=42-and-differing-from-the-rung-42-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
+set=armed-storage-7228e3f9 sha256=77c2b8532d9d05598f8896319491d43f3f1010c7c1f8d2c5563419471ff8f26e bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-THIS-ONE-including-build_entry-sh-which-carries-the-rung-s-own-clause-REFRESHED-after-the-clause-s-echo-was-corrected-two-WRONG-PROSE-sentences-181-not-0x19D-and-symbol-resolution-not-EMPTY-while-the-bin-stayed-BYTE-IDENTICAL-7228e3f9
