@@ -11014,3 +11014,59 @@ set=armed-storage-ee0ab2e6 sha256=ee0ab2e68c867b2fe065181b424b12ab01051817e461e2
 set=armed-storage-ee0ab2e6 sha256=7caed6e0a86879f412afb638d31f64229c2bd716e8b916bbf622ba76fd8eede3 bytes=6749472 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-32-bytes-LARGER-than-the-rung-48-arm-s-6749440-because-one-function-st_mbr_parse-was-added-and-it-makes-NO-device-access-at-all
 set=armed-storage-ee0ab2e6 sha256=c9a09ecaa5aa568734295f8e3308dfd7f5daf7e50e86c1403ff167be5d670cad bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=48-and-differing-from-the-rung-48-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
 set=armed-storage-ee0ab2e6 sha256=a82aa95a9d1cca9f051b1c5a5dc50ece167c4bba7c35f22b6924390f2a36c20a bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-SIX-of-its-content-lines-move-this-arm-including-entry_storage-c-build_entry-sh-and-verify_press_ready-sh-which-carries-the-value-48-narration-arm
+
+# ---------------------------------------------------------------------------
+# 846: THE RUNG-49 PRESS - **A PROTECTIVE MBR, AND A DECODE DEFECT IN THE ARM.**
+# Arm `armed-storage-ee0ab2e6` (STAGE90_XNU_STORAGE_PROBE=48, rung 49) is SPENT.
+# One gate exit 0, one runner exit 0; `fastboot boot` only, nothing flashed,
+# nothing written to storage; `33e80afe` absent from BOTH device lists hand-checked
+# immediately before the gate; **the phone returned**. Capture
+# `out/stage90/captures/rung49-mbrpt-20260930-103845-last_kmsg.txt` 662,245 B 0656f5ea...
+#
+# THE WALK RAN: _pm_called = 1, _pm_sig = 0xAA55, _pm_sig_ok = 1, _pm_entries = 4,
+# _pm_done = 1, _pm_nonzero = 1, _pm_index = 0, _pm_nz_active = 0. The first
+# non-zero TYPE byte is _pm_nonzero_type = _pm_p0_type = 0x000000EE - **the EFI
+# protective-partition type code**, the single entry a GPT disk keeps in its MBR.
+# So the medium is **A GPT DISK WEARING A PROTECTIVE MBR**.
+#
+# **THE ARM'S OWN 32-BIT CELLS ARE WRONG, AND THE CLASS IS ONE VALUE TWO
+# DEFINITIONS.** _pm_p0_first = _pm_nonzero_first = 0x0001FFFF and
+# _pm_p0_len = _pm_nonzero_len = 0xFFFF0000 are NOT the first LBA and the length.
+# The record is at byte 446 + 16k, so the entry's first-LBA field is at record
+# offset 8 = **byte 454 + 16k** and its length field at offset 12 = **byte
+# 458 + 16k**. 454 = 4*113 + 2 and 458 = 4*114 + 2: **NEITHER IS WORD-ALIGNED**,
+# so each field STRADDLES two words:
+#   first = ((w[113+4k] >> 16) & 0xFFFF) | ((w[114+4k] & 0xFFFF) << 16)
+#   length= ((w[114+4k] >> 16) & 0xFFFF) | ((w[115+4k] & 0xFFFF) << 16)
+# My module published first = w[113+4k] and length = w[114+4k] - ONE WHOLE WORD
+# EACH, STARTING ONE WORD TOO EARLY. That is why first = 0x0001FFFF: low 16 bits
+# are the CHS-last garbage (0xFFFF), high 16 the first LBA's LOW half (0x0001).
+# A reader who took 0x0001FFFF for the first LBA would place partition 0 at sector
+# 131071 instead of 1.
+#
+# **THE ERROR WAS IN THE COMMENT** (arm doc 845 section 2, and the module header):
+# both asserted the two 32-bit fields "ARE word-aligned - the standard's own gift"
+# - a claim in a comment, bound to nothing ([[mi4-a-claim-in-a-comment-is-not-a-check]]).
+# I confused "the field's first byte is at a 4-aligned absolute offset" (452 - also
+# wrong; it is 454) with "the field fits inside one word". The type byte came out
+# right only because byte 450 IS at (w[112] >> 16). **No build clause caught it**:
+# xnu_entry_844 proved the body touches no device, the signature is re-checked, and
+# the call site is ordered, but NOTHING asserted the byte offsets of the fields it
+# decodes.
+#
+# RE-DERIVED from the arm's OWN two raw words (the arms read the sector correctly;
+# only the labels are wrong), entry 0 is: status byte 446 = _pm_p0_active = 0 (not
+# bootable); type = 0xEE; **first LBA = 1**; length = 0xFFFFFFFF sectors. So LBA 0
+# is an EFI protective MBR whose single entry points at LBA 1 - AND RUNG 47 ALREADY
+# READ LBA 1 AND FOUND IT IS NOT `EFI PART`. That tension is the frontier: a
+# protective MBR pointing at a non-GPT-header sector is a stale protective MBR or a
+# GPT that was overwritten. **Only a re-read of LBA 1 (or LBA 2) settles it.**
+#
+# THE STANDING SEAM READING IS UNCHANGED: seam_lr = 0x8004c2dc did NOT move;
+# abort_entries = 0, xnu_entry_failures = 0, slot_post_calls up to 0x8.
+# xnu_live_post_elapsed = 0x09199d73 = 7,951.8 ms - the machine stayed up and idled.
+#
+# THE FRONTIER IS **A CORRECTED PARTITION DECODE (the straddled fields) PLUS THE
+# FIRST PARTITION'S OWN SECTOR**. NO FIRER IS ARMED AND NO PRESS IS OWED.
+# **THE GOAL IS NOT MET** - no partition's own sector read, no filesystem, no
+# mount; TWRP-to-storage stays withheld.

@@ -1,9 +1,11 @@
 # 845 — the rung-49 arm: the MBR's partition table, decoded out of the sector the read already moved
 
-**A BUILD AND A PARK, AND NOTHING ELSE.** Arm `armed-storage-<newhash>`, `STAGE90_XNU_STORAGE_PROBE=48`
-(**VALUE 48 = ORDINAL RUNG 49**), entry bin `<newhash>…`, entry elf, payload `stage90-qcdt.img`; readiness
-5 of 5, park 11 of 11; the entry-group page move did **not** fire (`STAGE90_XNU_SEAM_LR` stays
-`0x8004c2dc`). **PARKED, NOT PRESSED, NOT ARMED.**
+**A BUILD AND A PARK.** Arm `armed-storage-ee0ab2e6`, `STAGE90_XNU_STORAGE_PROBE=48`
+(**VALUE 48 = ORDINAL RUNG 49**), entry bin `ee0ab2e6…` 5,569,148 B, entry elf `7caed6e0…` 6,749,472 B,
+payload `stage90-qcdt.img` `1cf89cd9…`; readiness 5 of 5, park 11 of 11; the entry-group page move did
+**not** fire (`STAGE90_XNU_SEAM_LR` stays `0x8004c2dc`). **PRESSED AS 846 AND NOW SPENT** — and the press
+found a **defect in this arm's own decode**: §2 below is **WRONG**, and 846 §2/§3 records the correction and
+the raw-word re-derivation.
 
 ---
 
