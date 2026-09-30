@@ -10282,3 +10282,159 @@ set=armed-storage-7228e3f9 sha256=7228e3f91c364d872d1da4f1839bbae138eb50fb7da7d5
 set=armed-storage-7228e3f9 sha256=80dec1cb636d848a5983444384f91194849e63a07510c2aee47137998ba169a8 bytes=6749376 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-GREW-by-96-bytes-from-the-rung-42-arm-s-6749280-because-the-new-command-body-is-a-new-function-with-a-128-iteration-loop
 set=armed-storage-7228e3f9 sha256=2058121a5d5bf6421704dce76bb4fbfe2731110717ac4fa60954c4bd537d0661 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=42-and-differing-from-the-rung-42-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
 set=armed-storage-7228e3f9 sha256=77c2b8532d9d05598f8896319491d43f3f1010c7c1f8d2c5563419471ff8f26e bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-THIS-ONE-including-build_entry-sh-which-carries-the-rung-s-own-clause-REFRESHED-after-the-clause-s-echo-was-corrected-two-WRONG-PROSE-sentences-181-not-0x19D-and-symbol-resolution-not-EMPTY-while-the-bin-stayed-BYTE-IDENTICAL-7228e3f9
+
+####################################################################################################
+# 834, 2026-09-30 - THE RUNG-43 PRESS. `armed-storage-7228e3f9` IS SPENT. CMD17'S COMMAND LANDED,
+# ITS DATA DID NOT, AND THE DATA-PHASE INHIBIT GUARD IS THE DEFECT.
+#
+# (1) THE PRESS. A PRESS, made under the standing instruction (`以后不要再问我 直接自动继续`). ONE gate
+# exit 0 / 620 lines, 0 FAIL; ONE runner exit 0. `fastboot boot` only, nothing flashed, nothing written
+# to storage, `33e80afe` absent from BOTH device lists hand-checked immediately before the gate. The
+# phone returned (adb up afterwards). Capture `out/stage90/captures/rung43-cmd17-20260930-0639-last_kmsg.txt`
+# 657,994 B `709a80bedb6de0f9e1c5a2f541b366b5b5698cc1c2b167feabb2b6cf7a8c6a50`; gate
+# `...-gate.txt` 54,132 B `1b853cec28a08bf85ef061f42741f9f2d8db87ed172445fb8cf8d28257856d97` (620 lines);
+# run `...-run.txt` 90,802 B `19b1c285d8ba23a5975bcfb8efc2d820d29c2dc152f80d15f749c24d89949902` (1125
+# lines). Archived by hand into out/stage90/captures/.
+#
+# (2) THE COMMAND LANDED. Every command-side cell moved right: `_rd_sent = 1`, `_rd_calls = 1`,
+# `_rd_op = 0x11` (17), `_rd_lba = 1`, `_rd_arg = _rd_arg_wrote = 0x200` (512), `_rd_flags = 0xB5` = 181
+# - **the number the clause enforces, so the 0x19D -> 181 fix is now confirmed on hardware** -
+# `_rd_flags_mapped = 0x1A`, `_rd_word_bits = 0x111A`, `_rd_word = _rd_word_read = 0x113A`,
+# `_rd_complete = 1`, `_rd_err = 0`, `_rd_state = 4` (TRAN), `_rd_resp = 0x00000900`.
+#
+# (3) THE DATA DID NOT ARRIVE. `_rd_words_gated = 0`, `_rd_data_wait_timeout = 1`,
+# `_rd_data_ticks = 0x016e38cf` = 24,000,719 (the full 1.25 s bound), `_rd_int_status_end = 0x1`
+# (RESPONSE only - NO DATA_AVAILABLE), `_rd_int_data_avail = 0`, `_rd_int_data_err = 0`,
+# `_rd_w0 = _rd_w1 = _rd_w2 = _rd_w3 = _rd_w127 = 0`, `_rd_gpt = 0`. **`_rd_gpt = 0` is NOT "the
+# medium is not GPT"** - it is the derived cell reading a buffer nothing filled; `_rd_words_gated`
+# beside it is what tells the two apart.
+#
+# (4) THE DECISIVE COMPARISON IS IN THE SAME LOG. CMD8 runs earlier in the SAME boot and its read
+# delivered all 128 words - through RUNG 40's GATED SECOND PASS (`_ext_data_gated = 0x80`,
+# `_ext_data_ticks = 0x67bab` = 424,875 = 22.13 ms, `_ext_data_wait_timeout = 0`,
+# `_ext_int_status_end = 0x21` = RESPONSE + DATA_AVAIL) - while its rung-38 FIRST pass read
+# `_ext_words_gated = 0`. **AND `_ext_int_data_end = 0` SAYS CMD8'S TRANSFER NEVER ENDED AT THE
+# BLOCK.** The two data commands are armed IDENTICALLY (`_rd_ena_wrote = _ext_ena_wrote = 0x000f0031`,
+# `blksz = 0x7200`, `blkcnt = 1`, `trns = 0x12`, `readback = 0x8000`) and differ in exactly one
+# arming cell.
+#
+# (5) THE DEFECT: THE GUARD IS BIT-0-ONLY AND THE BLOCK ENFORCES BIT 1.
+#   `_rd_blkcnt_held = 0` against CMD8's `_ext_blkcnt_held = 1` - **the duplicate `BLOCK_COUNT = 1`
+#   write was silently DROPPED.** SDHCI write-protects `BLOCK_COUNT 0x06` while `PRESENT_STATE 0x24`'s
+#   **Command Inhibit (DAT)** bit is set, and `_rd_ps_end = _ext_ps_end = 0x01f80206`
+#   (bit 1 set) says **CMD8 left `DATA_INHIBIT` set and never cleared it** (no DATA_END; rung 41's
+#   press saw the same `_ext_int_status_end = 0x21` and the class was left unread).
+#   `ST_SDHCI_CMD_INHIBIT` (entry_storage.c:2114) is `0x1` - Command Inhibit (CMD) - and
+#   `st_send_command`'s wait tested that ONE bit. **THE VENDOR WAITS ON BOTH BITS FOR A DATA COMMAND**:
+#   `sdhci.c:1087` `mask = SDHCI_CMD_INHIBIT;` `:1089` `if (cmd->data || (cmd->flags & MMC_RSP_BUSY))`
+#   `:1090` `mask |= SDHCI_DATA_INHIBIT;` `:1094` `mask &= ~SDHCI_DATA_INHIBIT;` (the non-data arm).
+#   **CMD17 is `adtc`, so the vendor would have waited on DATA_INHIBIT and this image did not.**
+#   THE CHAIN, closed end to end: CMD8 leaves DATA_INHIBIT set -> CMD17's bit-0-only guard issues anyway
+#   -> BLOCK_COUNT is write-protected so the write is dropped -> the block runs a one-block read with a
+#   count of ZERO -> no DATA_AVAILABLE, no DATA_END, the bound expires, `_rd_gpt = 0`. **Every cell of
+#   the failure is a cell the arm published**, and `_rd_blkcnt_held = 0` - read out BEFORE CMD17 was
+#   sent - is the one that names it.
+#
+# (6) ONE DEFECT, NOT TWO. A stale DATA_INHIBIT with a guard that waits on it never reaches the write;
+# a guard that ignores it reaches a write only a data-command predecessor can refuse. They are two
+# halves of ONE bug, and the fix belongs in the GUARD - the vendor's own rule, and the only place the
+# image can REPORT the condition rather than silently act on a stale bit. [[mi4-one-value-two-definitions]]
+# one register up: `PRESENT_STATE` bit 1 is one quantity with two readings.
+#
+# (7) THE NEXT RUNG (44) IS THAT ONE EDIT - `mask = SDHCI_CMD_INHIBIT; if (mmc_flags & ST_MMC_CMD_ADTC)
+# mask |= SDHCI_DATA_INHIBIT;` - with the mask and the entry bit published as cells. Three outcomes:
+# the inhibit clears -> the sector arrives; it does not clear -> `inhibit_timeout = 1`, CMD17 is NOT
+# sent, and the reading is *CMD8's transfer never ended at the block* (the next defect, one command
+# down); and every NON-data rung below keeps the bit-0-only mask (the vendor's `mask &= ~SDHCI_DATA_INHIBIT`
+# arm), so no pressed arm's evidence moves.
+#
+# (8) SAFETY. `fastboot boot` only; nothing flashed; `MMC_DATA_READ` (core.h:41) moves bytes
+# CARD-TO-HOST, so no byte of the medium can change. **NO PRESS IS OWED BY THIS RECORD and the press is
+# the operator's.**
+#
+# **THE GOAL IS NOT MET.** No sector read, no partition table walked, no filesystem, no mount;
+# TWRP-to-storage stays withheld.
+#
+# 835, 2026-09-30 - THE RUNG-44 ARM. `armed-storage-65824de4`. PARKED, NOT PRESSED, NOT ARMED.
+#
+# **A BUILD AND A PARK, AND NOTHING ELSE** - and it is THE RUNG-43 PRESS'S OWN REPAIR, taken because
+# that press answered the data path's first question by refuting the arming write. **IT ADDS NO
+# COMMAND, NO REGISTER, NO MEGABYTE, NO DEVICE ACT AND NO NEW IMMEDIATE: it is ONE CONDITIONAL inside
+# `st_send_command`'s existing inhibit wait.**
+#
+# (1) WHAT THE RUNG-43 PRESS SETTLED, AND THE DEFECT IT NAMED. 834's press measured CMD17's command
+# LANDING on every command-side cell the arm was built to move (`_rd_complete = 1`, `_rd_err = 0`,
+# `_rd_state = 4`, `_rd_flags = 0xB5`, `_rd_word_bits = 0x111A`, `_rd_word = _rd_word_read = 0x113A`)
+# with NO DATA (`_rd_words_gated = 0`, `_rd_data_wait_timeout = 1`, `_rd_data_ticks = 0x016e38cf`,
+# `_rd_int_status_end = 0x1` - RESPONSE only, `_rd_gpt = 0`). The decisive cell is a SAME-BOOT
+# comparison: `_rd_blkcnt_held = 0` against CMD8's `_ext_blkcnt_held = 1` - the duplicate
+# `BLOCK_COUNT = 1` write was SILENTLY DROPPED, because SDHCI write-protects `BLOCK_COUNT 0x06` while
+# `PRESENT_STATE 0x24`'s **Command Inhibit (DAT)** bit (bit 1) is set, and **CMD8 left that bit set
+# and never cleared it** (`_rd_ps_end = _ext_ps_end = 0x01f80206`, bit 1; `_ext_int_data_end = 0`).
+# So the block ran a one-block read with a count of ZERO, no DATA_AVAILABLE fired, and the 1.25 s bound
+# expired. **THIS IMAGE'S GUARD TESTED BIT 0 ALONE** (`ST_SDHCI_CMD_INHIBIT = 0x1`, entry_storage.c:2114,
+# at the wait in `st_send_command`), where the vendor waits on BOTH for a data command
+# (`sdhci.c:1087-1094`: `mask = SDHCI_CMD_INHIBIT; if (cmd->data || (cmd->flags & MMC_RSP_BUSY)) mask |=
+# SDHCI_DATA_INHIBIT; ... else mask &= ~SDHCI_DATA_INHIBIT`). **CMD17 is `adtc`, so the vendor would have
+# waited and this image did not.** It is `<mi4-one-value-two-definitions>`' shape one register up:
+# `PRESENT_STATE` bit 1 is one quantity with two readings ("the transfer is still active" vs "a read can
+# start"), and this ladder's guard read only bit 0 while the hardware enforced bit 1.
+#
+# (2) WHAT THIS RUNG IS, AND WHY THE FIX BELONGS IN THE GUARD. `st_send_command`'s wait now computes its
+# mask as `mask = ST_SDHCI_CMD_INHIBIT (0x1); if ((mmc_flags & ST_MMC_CMD_ADTC) != 0u) mask |=
+# ST_SDHCI_DATA_INHIBIT (0x2);` and waits on `mask` where the rung-43 image waited on bit 0 alone.
+# `ST_MMC_CMD_ADTC` (0x20) is the ladder's own stand-in for the vendor's `cmd->data` - the same bit
+# entry_storage.c ORs into the block's COMMAND word as `SDHCI_CMD_DATA`. The vendor's `else mask &=
+# ~SDHCI_DATA_INHIBIT` arm is why EVERY NON-DATA RUNG BELOW (CMD13, CMD16) is UNTOUCHED: no pressed arm's
+# evidence moves. **THE TWO HALVES ARE ONE DEFECT AND NOT TWO**: a stale `DATA_INHIBIT` with a guard that
+# waits on it never reaches the write, and a guard that ignores it reaches a write that only a
+# data-command predecessor can refuse - so either alone is harmless and the pair is the bug, and the
+# vendor's own rule is the guard's, and a guard is the only place the image can REPORT the condition
+# rather than silently act on a stale bit.
+#
+# (3) WHAT THE PRESS WOULD READ. **FOUR NEW CELLS BESIDE THE COMMAND**: `_rd_inhibit_mask` (the mask the
+# wait actually used - **0x3 on CMD17**, `0x1` on every non-data rung below), `_rd_inhibit_dat`
+# (`ps_before & DATA_INHIBIT` - the bit the old mask ignored, **0x2 if still set at entry**), and
+# `_rd_inhibit_before` / `_rd_inhibit_polls` (whether the wait had to run at all). **READ THE ROWS AS
+# THE ARM'S OWN TABLE**: `_rd_inhibit_mask = 0x3` is THE DATA COMMAND WAITING ON BOTH BITS - the repair
+# in the press; `_rd_inhibit_mask = 0x1` on CMD17 is **THE RUNG-43 IMAGE WEARING THIS ARM'S NAME** (the
+# build refuses it, so a press seeing it means the wrong bin); `_rd_inhibit_dat = 0x2` is DATA_INHIBIT
+# STILL SET AT CMD17'S ENTRY - the wait had to happen and, with the mask widened, it did; `_rd_inhibit_dat
+# = 0` is the bit ALREADY CLEARED (CMD8's transfer ended at the block after all - the defect is
+# elsewhere); and a NON-DATA rung reading `_rd_inhibit_mask = 0x1` is what stops `ST_MMC_CMD_ADTC` from
+# leaking into a command with no data phase. **THE THREE OUTCOMES ARE ALL SAFE AND ALL READABLE**: the
+# inhibit clears within the bound -> CMD17 proceeds and the sector rung 43 asked for arrives here; it
+# does not clear -> `inhibit_timeout = 1`, CMD17 is NOT sent, and the reading is *CMD8's transfer never
+# formally ended at the block* - the next defect one command down; and CMD16 and every non-data rung
+# below are untouched.
+#
+# (4) THE BUILD CLAUSE, `xnu_entry_835`. It refuses the build unless `st_send_command`'s linked body
+# holds (a) the ADTC test `ands rN, rN, #32` (0x20 = MMC_CMD_ADTC), (b) BOTH compiled mask constants
+# `moveq #1` (CMD_INHIBIT alone) and `movne #3` (CMD_INHIBIT | DATA_INHIBIT), (c) the DATA_INHIBIT
+# extraction `and rN, rN, #2`, (d) at least three stores into the result struct's low slots (the mask,
+# the extracted DATA_INHIBIT bit and the CMD_INHIBIT bit are all PUBLISHED), and (e) all four
+# `xnu_live_storage_rd_inhibit_*` keys as strings in the linked image - so a bit-0-only mask wearing this
+# arm's name is REFUSED at build time, and each missing half names its own defect.
+#
+# (5) SAFETY. It is `fastboot boot` only, nothing flashed, **no byte of the medium can change**: CMD17 is
+# `adtc [31:0] data addr R1` and `MMC_DATA_READ` (core.h:41) moves bytes CARD-TO-HOST; the sector read is
+# one the card's OWN `EXT_CSD_SEC_CNT = 0x01d5a000` says exists; it touches no register this ladder has
+# not already reached since rung 38; and the data-phase bound is rung 41's measured-sufficient 1.25 s.
+# **NO PRESS HAS BEEN MADE AND NONE IS OWED: this arm is PARKED and NOT ARMED-FOR-PRESS, and the park is
+# a RECORD and not a queue.**
+#
+# **THE GOAL IS NOT MET.** No sector read, no partition table walked, no filesystem, no mount;
+# TWRP-to-storage stays withheld.
+#
+# 835's set members (11), by content:
+set=armed-storage-65824de4 sha256=d9747a8ca3184dbb08311c5cff04de8cb92a325521f961eae16b45a87525d717 bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-43-entry-rung-44-WIDENS-st_send_command-s-INHIBIT-WAIT-TO-TEST-DATA_INHIBIT-FOR-AN-adtc-COMMAND-the-rung-43-press-s-repair-NOT-PRESSED
+set=armed-storage-65824de4 sha256=f5d834fc974098e747357f57eb1cedd893d1afb8dd292572ea3c02879fb19ebb bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-43-entry-same-6064644-bytes-as-the-rung-43-arm-s-because-the-entry-group-did-not-cross-a-page
+set=armed-storage-65824de4 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-43-s-MEASURED-no-payload-switch-moved
+set=armed-storage-65824de4 sha256=1e57c28e055a75757e4a0d0bb0417b16b83314115b25866c918e6ee151eea4c9 bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-size-UNCHANGED-from-the-rung-43-arm-s-6126716
+set=armed-storage-65824de4 sha256=4a5078e5dd05f032f4bd4640efc7724c459f97eb0840f0fb3139cc4071617b0e bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-65824de4 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-65824de4 sha256=eecb474d8cb2b78f1def9935350a9cec59d30875b06600cfda9e91ebc7ee1f87 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-65824de4 sha256=65824de454a1bd5c6e586f109cf39114e125612185845f1309296b9e936b8dbd bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-65824de4-IS-THE-SETS-NAME-same-5569148-bytes-as-the-rung-43-arm-and-the-difference-is-ONE-CONDITIONAL-in-st_send_command-s-inhibit-wait-the-mask-widened-to-DATA_INHIBIT-for-an-adtc-command
+set=armed-storage-65824de4 sha256=bca21c2fec4cf4874611418b2ee73240754b46d27065d77e1238318286d482d6 bytes=6749376 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-UNCHANGED-from-the-rung-43-arm-s-6749376-because-the-fix-adds-only-a-conditional-and-two-stores-absorbed-by-padding
+set=armed-storage-65824de4 sha256=d283d082735a35fcc7ce7d8c8303b770c03c87629a2d9a10f5a72854a3caa8e6 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=43-and-differing-from-the-rung-43-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value-42-43
+set=armed-storage-65824de4 sha256=a8b7dfdec1bb8e2d68bb92824ae00db752f3ff5ee147856b8dc81e030c0e4b34 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-THIS-ONE-including-entry_storage-c-which-carries-the-widened-guard-and-build_entry-sh-which-carries-the-rung-s-own-clause-835

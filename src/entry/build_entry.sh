@@ -32297,6 +32297,60 @@ verify_trace_symbols() {
                 done
                 echo "  xnu_entry_832: rung 43's command body, read out of the linked image: st_read_single_block (at $blk43_addr) loads [r0=#$blk43_r0_imm (READ_SINGLE_BLOCK), r1=#$blk43_r1_imm (block.c:1777's LBA 1 << 9 - a BYTE ADDRESS and NOT the block length, but the same 512), r2=#$blk43_r2_imm (block.c:1779's MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_ADTC = 0x80 | 0x15 | 0x20 = 181 = 0xB5, CMD8's own flag word - NOT the 0x19D an earlier draft of this clause printed)] immediately before its bl to st_send_command (disassembly line $blk43_bl_ln), and it materializes BOTH command words - the five-bit 0x111A (4378) and the block's own 0x113A (4410) - with CMD16's, CMD8's and CMD13's REFUSED by number; its device accesses IN PROGRAM ORDER are [${blk43_order% }] - **rung 38's order instruction for instruction**: RESPONSE 0x10 read FIRST (the precondition as a reading of the card's own R1), HOST_CONTROL 0x28 as a byte, the INT_ENABLE 0x34 window opened and read back, SIGNAL_ENABLE 0x38 read, TIMEOUT_CONTROL 0x2e READ THEN WRITTEN, BLOCK_SIZE/BLOCK_COUNT/TRANSFER_MODE each written as a halfword and read back, then the command, then the loop's PRESENT_STATE/BUFFER and the end's INT_STATUS - and its full set is [${blk43_set% }], which is rung 38's FIFTEEN accesses EXACTLY: BLOCK_SIZE, BLOCK_COUNT, TRANSFER_MODE, BUFFER, PRESENT_STATE, HOST_CONTROL, TIMEOUT_CONTROL (read AND written - the byte rung 42's clause forbids and this one requires), INT_STATUS, INT_ENABLE, SIGNAL_ENABLE, and NO byte in the 0x13..0x1B band (48-bit R1, not 136); counts [$(printf '%s' $blk43_cnt | tr ' ' ';')]; the image side resolves to symbols among [st_read_block st_csd_words st_csd_words_valid st_tacc_exp st_tacc_mant] with st_read_block REQUIRED and no address left uncovered; the two GPT signature halfwords are both in the body (the DERIVED \`_rd_gpt\` cell); st_cmd_path calls it $blk43_calls time, UNGATED immediately after st_set_blocklen, and the cells the press reads are _rd_gpt (1 = LBA 1 begins \`EFI PART\`), _rd_words_gated (0x80 is a whole sector), _rd_complete/_rd_err/_rd_state/_rd_resp (CMD17's own R1), _rd_data_wait_timeout, _rd_int_data_err, _rd_word_read (0x113A), _rd_gated/_rd_done and _rd_w0/_rd_w1/_rd_w127"
             fi
+            if [[ $STORAGE_PROBE -ge 43 ]]; then
+                # **835: RUNG 44'S OWN CLAUSE - THE INHIBIT MASK, AND IT IS THE RUNG-43 PRESS'S REPAIR.**
+                #
+                # The rung-43 press measured CMD17's command landing (`complete = 1`, `err = 0`,
+                # `state = 4`, `word_read = 0x113A`) with NO data (`_rd_words_gated = 0`,
+                # `_rd_data_wait_timeout = 1`, `_rd_int_status_end = 0x1` - RESPONSE only), and the
+                # cell that named the cause was **`_rd_blkcnt_held = 0` against CMD8's
+                # `_ext_blkcnt_held = 1`**: the duplicate `BLOCK_COUNT = 1` write was silently
+                # DROPPED because SDHCI write-protects `BLOCK_COUNT 0x06` while `PRESENT_STATE 0x24`'s
+                # **Command Inhibit (DAT)** bit is set, and **CMD8 left that bit set and never cleared
+                # it** (`_ext_int_data_end = 0`; `_rd_ps_end = _ext_ps_end = 0x01f80206`,
+                # bit 1). This image's guard tested bit 0 alone (`ST_SDHCI_CMD_INHIBIT = 0x1`), where
+                # the vendor waits on BOTH for a data command (`sdhci.c:1087-1094`). **CMD17 is `adtc`,
+                # so the vendor would have waited and this image did not.**
+                #
+                # **THIS CLAUSE REFUSES THE BUILD UNLESS THE MASK IS COMPUTED FROM THE ADTC BIT AND
+                # THE NEW BIT IS PUBLISHED** - the same "assert the property, not the sentence" form
+                # the rest of the ladder uses ([[mi4-a-claim-in-a-comment-is-not-a-check]]).
+                stb_c44_addr=$(sym_addr st_send_command) ||
+                    layout_fail "rung 44's repair lives in st_send_command and that symbol is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE. Nothing is rebuilt by this refusal"
+                stb_c44_next=$(sym_next "$stb_c44_addr") ||
+                    layout_fail "nothing follows st_send_command in the linked image, so this clause's window has no end. Nothing is rebuilt by this refusal"
+                stb_c44_body=$(arm-none-eabi-objdump -d --start-address="$stb_c44_addr" --stop-address="$stb_c44_next" "$OUT/xnu_arm_entry.elf")
+                # (1) the ADTC test: `ands rN, r2, #32` (0x20) somewhere before the mask is stored.
+                #     ARM encodes `ands rX, rY, #32` as `e21?3020`; the immediate 0x20 is the vendor's
+                #     `MMC_CMD_ADTC` and the SAME bit entry_storage.c's `SDHCI_CMD_DATA` OR uses.
+                stb_c44_adtc=$(grep -cE '\bands[[:space:]]+r[0-9]+, r[0-9]+, #32\b' <<<"$stb_c44_body" || true)
+                [[ "$stb_c44_adtc" -ge 1 ]] ||
+                    layout_fail "st_send_command's body holds no \`ands rN, rN, #32\` [$stb_c44_adtc] and rung 44's whole repair IS that test: the vendor's \`cmd->flags & MMC_RSP_BUSY\` arm widened to the ladder's own ADTC stand-in (\`MMC_CMD_ADTC\` 0x20). **Zero means the mask is NOT conditioned on the data phase and the DATA_INHIBIT bit is never waited on** - the exact state the rung-43 press measured, in which CMD8's leftover DATA_INHIBIT silently dropped CMD17's BLOCK_COUNT write. Nothing is rebuilt by this refusal"
+                # (2) BOTH mask constants: the `moveq #1` (CMD_INHIBIT alone) and `movne #3`
+                #     (CMD_INHIBIT | DATA_INHIBIT) pair that the conditional select compiles to.
+                stb_c44_m1=$(grep -cE '\bmoveq[[:space:]]+r[0-9]+, #1\b' <<<"$stb_c44_body" || true)
+                stb_c44_m3=$(grep -cE '\bmovne[[:space:]]+r[0-9]+, #3\b' <<<"$stb_c44_body" || true)
+                [[ "$stb_c44_m1" -ge 1 && "$stb_c44_m3" -ge 1 ]] ||
+                    layout_fail "st_send_command's body does not hold the two mask constants [moveq #1=$stb_c44_m1, movne #3=$stb_c44_m3] that rung 44's conditional select must compile to. **The pair is the reading and each half is a different defect**: a missing #1 means the non-data arm lost \`CMD_INHIBIT\` (every command rung below would issue into a busy block); a missing #3 means the DATA_INHIBIT bit was never ORed in for an \`adtc\` command, which is the rung-43 defect. Nothing is rebuilt by this refusal"
+                # (3) the DATA_INHIBIT extraction: `and rN, rN, #2` - the bit published as `_rd_inhibit_dat`.
+                stb_c44_and2=$(grep -cE '\band[[:space:]]+r[0-9]+, r[0-9]+, #2\b' <<<"$stb_c44_body" || true)
+                [[ "$stb_c44_and2" -ge 1 ]] ||
+                    layout_fail "st_send_command's body holds no \`and rN, rN, #2\` [$stb_c44_and2] and rung 44 must PUBLISH \`DATA_INHIBIT\` as found at each data command's entry (\`_rd_inhibit_dat\`). **The mask is the fix; the extracted bit is how a press reads whether the wait had to happen at all** - and a rung that widened the mask without publishing the bit would leave the press unable to tell \"the bit was already cleared\" from \"the wait cleared it\". Nothing is rebuilt by this refusal"
+                # (4) and the four rung-44 keys are STRINGS in the image, because they are what the press reads.
+                for _k in xnu_live_storage_rd_inhibit_mask xnu_live_storage_rd_inhibit_dat \
+                          xnu_live_storage_rd_inhibit_before xnu_live_storage_rd_inhibit_polls; do
+                    grep -qa "$_k" "$OUT/xnu_arm_entry.elf" ||
+                        layout_fail "rung 44 publishes no \`$_k\` string in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE. **These four are the repair's own reading**: \`_rd_inhibit_mask\` MUST be 0x3 on CMD17 (0x1 on every non-data rung below) - a 0x1 here is the rung-43 image wearing this arm's name; \`_rd_inhibit_dat\` is DATA_INHIBIT as found at CMD17's entry; \`_rd_inhibit_before\`/\`_rd_inhibit_polls\` say whether the wait had to run at all. Nothing is rebuilt by this refusal"
+                done
+                # (5) and the mask cell is written at the offset the struct gives it. The three stores
+                #     `and r1,r2,#1` / `and r2,r2,#2` / `str` of the selected mask are all present as
+                #     their instructions above; this closes the loop by requiring the SELECT's result
+                #     to be stored (a computed mask that is never published is a local, not a cell).
+                stb_c44_str=$(grep -cE '\bstr[[:space:]]+r[0-9]+, \[(fp|r[0-9]+), #(4|8|12|16)\]' <<<"$stb_c44_body" || true)
+                [[ "$stb_c44_str" -ge 3 ]] ||
+                    layout_fail "st_send_command's body makes $stb_c44_str store(s) into the result struct's low slots and rung 44 needs at least THREE: the selected mask, the extracted DATA_INHIBIT bit and the CMD_INHIBIT bit are all PUBLISHED, so a build whose mask is computed and never stored is a local variable rather than the cell this rung reads. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_835: rung 44's inhibit mask is read out of the linked image: st_send_command (at $stb_c44_addr) tests the data-phase bit with \`ands rN, rN, #32\` (MMC_CMD_ADTC 0x20, the ladder's own stand-in for the vendor's \`cmd->data\`) and selects the mask with \`moveq #1\` / \`movne #3\` - **SDHCI_CMD_INHIBIT alone for a non-data command and SDHCI_CMD_INHIBIT | SDHCI_DATA_INHIBIT (0x1 | 0x2) for an \`adtc\` one**, which is \`sdhci.c:1087-1094\` transcribed: \`mask = SDHCI_CMD_INHIBIT; if (cmd->data || (cmd->flags & MMC_RSP_BUSY)) mask |= SDHCI_DATA_INHIBIT; ... else mask &= ~SDHCI_DATA_INHIBIT\`. **The rung-43 press is why**: CMD8 left PRESENT_STATE's DATA_INHIBIT (bit 1) set - \`_rd_ps_end = 0x01f80206\`, no DATA_END - and CMD17's bit-0-only guard issued anyway, so BLOCK_COUNT 0x06 was still write-protected, the duplicate write of 1 was SILENTLY DROPPED (\`_rd_blkcnt_held = 0\` against CMD8's \`_ext_blkcnt_held = 1\`), the block ran a one-block read with a count of ZERO, no DATA_AVAILABLE fired and the 1.25 s bound expired. The wait is now bound-gated on BOTH bits for a data command and BIT-0-ONLY for every rung below (\`mask &= ~SDHCI_DATA_INHIBIT\`), so no pressed arm's evidence moves; \`_rd_inhibit_mask\` (0x3 here, 0x1 below), \`_rd_inhibit_dat\` (DATA_INHIBIT as found at entry), \`_rd_inhibit_before\` and \`_rd_inhibit_polls\` are published beside the command, and the four keys are asserted as strings in this artifact"
+            fi
             if [[ $STORAGE_PROBE -ge 41 ]]; then
                 # **831: RUNG 42'S OWN CLAUSE - THE FIRST CLAUSE HERE THAT ASSERTS A COMMAND WHOSE
                 # ARGUMENT IS A VALUE THE MEDIUM LATER MOVES BY.** Rungs 11 through 38 assert what a
