@@ -32187,16 +32187,73 @@ verify_trace_symbols() {
                     layout_fail "st_read_single_block makes $blk43_bl_count call(s) to st_send_command and rung 43 sends exactly one command - CMD17. Zero means the symbol was reached with an empty window (the scan failed, not the arm); two or more means the immediates this clause reads may belong to the wrong call site. Nothing is rebuilt by this refusal"
                 blk43_bl_ln=$(awk '/bl.*<st_send_command>/{ printf "%d", NR }' <<<"$blk43_body")
                 blk43_r0=$(awk -v n="$blk43_bl_ln" 'NR < n && $0 ~ /movw?[ \t]+r0, #/ { v=$0 } END { print v }' <<<"$blk43_body")
-                blk43_r1=$(awk -v n="$blk43_bl_ln" 'NR < n && $0 ~ /movw?[ \t]+r1, #/ { v=$0 } END { print v }' <<<"$blk43_body")
+                # **THE ARGUMENT'S OWN INSTRUCTION, AND AT RUNG 50 IT IS A LOAD AND NOT A `mov`.**
+                # Rungs 43-49 set r1 with a `movw/movt` immediate; rung 50 loads it from the sector
+                # variable's slot. The scan therefore takes the LAST write to r1 of EITHER kind before
+                # the call - a `mov`/`movw` immediate OR an `ldr r1, [rN, #off]` - so the same line
+                # serves both arms and the clause below decides which shape is the correct one by
+                # VALUE. Taking only `mov` lines was the scan's own assumption, and it published the
+                # last unrelated `mov r1` (the command-word cell) at value 49.
+                blk43_r1=$(awk -v n="$blk43_bl_ln" 'NR < n && $0 ~ /(movw?|ldr)[ \t]+r1, / { v=$0 } END { print v }' <<<"$blk43_body")
                 blk43_r2=$(awk -v n="$blk43_bl_ln" 'NR < n && $0 ~ /movw?[ \t]+r2, #/ { v=$0 } END { print v }' <<<"$blk43_body")
                 [[ -n "$blk43_r0" && -n "$blk43_r1" && -n "$blk43_r2" ]] ||
                     layout_fail "the argument setup before st_read_single_block's call to st_send_command could not be read out of the linked image (r0 line [$blk43_r0], r1 line [$blk43_r1], r2 line [$blk43_r2], the call on line $blk43_bl_ln). This refusal is about the SCAN and not about the arm. Nothing is rebuilt by this refusal"
                 blk43_r0_imm=$(grep -oE '#[0-9]+' <<<"$blk43_r0" | head -1 | tr -d '#')
                 blk43_r1_imm=$(grep -oE '#[0-9]+' <<<"$blk43_r1" | head -1 | tr -d '#')
+                # **RUNG 50's ARGUMENT IS NOT AN IMMEDIATE.** From value 49 the read's argument is
+                # `st_read_lba`, a `static` filled by the body itself, so the `mov r1, #N` above the
+                # call is gone and what reaches r1 is a LOAD from the variable's slot. `blk43_r1_isvar`
+                # is 1 when that is what the scan found, and the clauses below then assert the LOAD and
+                # the SHIFT's absence instead of a number. **This is the mirror of the ladder's own
+                # rule for the OPCODE**: the opcode stayed a constant and is still asserted by number,
+                # because it did NOT change; the argument changed from a constant to a value carried
+                # across the boot, so asserting a number here would be asserting the arm below this
+                # one. Read the SOURCE, do not restate it.
+                # **the SHAPE, not the offset**: a LOAD to r1 is a value carried at run time; a `mov`
+                # immediate is a constant. The slot offset (`[r6, #552]` here) is a property of this
+                # build's frame and would be a restatement of the compiler's allocation if asserted by
+                # number, so the clause keys on the OPERAND KIND and on the resolved symbol the build
+                # itself placed there.
+                blk43_r1_isvar=0
+                # **A LOAD IS A VALUE, AND THE ADDRESS IS WHAT SAYS WHICH ONE.** `-d` prints the
+                # instruction but not the symbol a PC-relative-into-register load resolves to, so the
+                # clause recomputes the address the argument load reads - the base register's own
+                # `movw`/`movt` pair plus the offset - and compares it with `st_read_lba`'s address out
+                # of `nm`. A DIFFERENT slot that happened to be loaded the same way is refused, because
+                # rung 50's argument must BE the value the table's decode fills and not merely be
+                # carried at run time ([[mi4-one-value-two-definitions]]).
+                blk43_lba_addr=$(sym_addr st_read_lba) ||
+                    layout_fail "\`st_read_lba\` is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: rung 50's CMD17 argument is a variable filled by the partition decode, and without the symbol this clause cannot tell that load from any other. Nothing is rebuilt by this refusal"
+                if [[ "$blk43_r1" == *"ldr"* ]]; then
+                    blk43_r1_isvar=1
+                    blk43_r1_off=$(grep -oE '#[0-9]+' <<<"$blk43_r1" | tail -1 | tr -d '#')
+                    blk43_r1_reg=$(grep -oE '\[r[0-9]+,' <<<"$blk43_r1" | grep -oE 'r[0-9]+' | head -1)
+                    blk43_r1_w=$(awk -v reg="$blk43_r1_reg" -v n="$blk43_bl_ln" 'NR<n && $0 ~ ("movw[ \t]+"reg", #") {v=$0} END{print v}' <<<"$blk43_body")
+                    blk43_r1_t=$(awk -v reg="$blk43_r1_reg" -v n="$blk43_bl_ln" 'NR<n && $0 ~ ("movt[ \t]+"reg", #") {v=$0} END{print v}' <<<"$blk43_body")
+                    blk43_r1_lo=$(( $(grep -oE '#[0-9]+' <<<"$blk43_r1_w" | head -1 | tr -d '#') ))
+                    blk43_r1_hi=$(( $(grep -oE '#[0-9]+' <<<"$blk43_r1_t" | head -1 | tr -d '#') ))
+                    blk43_r1_addr=$(( (blk43_r1_hi << 16) | blk43_r1_lo ))
+                    blk43_r1_addr=$(( blk43_r1_addr + ${blk43_r1_off:-0} ))
+                    [[ "$blk43_r1_addr" -eq "$(($blk43_lba_addr))" ]] ||
+                        layout_fail "st_read_single_block loads its CMD17 argument from $(printf '0x%08x' "$blk43_r1_addr") (base $blk43_r1_reg = $(printf '0x%08x' "$(( (blk43_r1_hi << 16) | blk43_r1_lo ))") + ${blk43_r1_off:-0}), but rung 50's sector variable \`st_read_lba\` is at $blk43_lba_addr - so r1 receives SOME OTHER object carried at run time, not the value the table's own decode fills. The shape is right and the NUMBER is wrong, which is the defect class this project measures most often. Nothing is rebuilt by this refusal"
+                fi
                 blk43_r2_imm=$(grep -oE '#[0-9]+' <<<"$blk43_r2" | head -1 | tr -d '#')
                 [[ "$blk43_r0_imm" == "17" ]] ||
                     layout_fail "st_read_single_block loads $blk43_r0_imm into the OPCODE register before its call to st_send_command and rung 43 sends CMD17 - \`MMC_READ_SINGLE_BLOCK\` (mmc.h:51), taken by \`block.c:1821\`'s \`readcmd = MMC_READ_SINGLE_BLOCK\` when \`brq->data.blocks <= 1\` (\`:1810\`). 16 here is CMD16's (rung 42's, asserted one clause down) and 18 would be CMD18's - a MULTI-block read, which is a different command with a different data phase and, on a card that was never told a count, a transfer that never ends"
-                if [[ $STORAGE_PROBE -le 46 ]]; then
+                if [[ $STORAGE_PROBE -ge 49 ]]; then
+                    # **RUNG 50: THE ARGUMENT IS A VARIABLE AND THE SHIFT IS ABSENT - BOTH ASSERTED.**
+                    # `st_read_single_block` must load its argument from `st_read_lba`'s slot and must
+                    # NOT apply `block.c:1777`'s `<< 9`, because this card is sector-addressed
+                    # (`mmc.c:344-345`, and rung 38's own `_ext_sec_count` says so). A `movw/movt`
+                    # pair here is rungs 43-49's constant argument surviving into this arm; an `lsl`
+                    # on the loaded register is the byte-address shift applied to a sector and would
+                    # address sector*512 on the bus.
+                    [[ "$blk43_r1_isvar" == "1" ]] ||
+                        layout_fail "st_read_single_block loads its CMD17 argument as [$blk43_r1], which is NOT a load from the sector variable \`st_read_lba\` (slot [r6, #552]). Rung 50's argument is the SECTOR the table named, carried as a value because this card is sector-addressed; an immediate here is one of rungs 43-49's constants, whose \`<< 9\` this rung exists to remove. Nothing is rebuilt by this refusal"
+                    blk43_r1_shift=$(grep -cE 'lsl[s]?[[:space:]]+r1,[[:space:]]*r1' <<<"$blk43_body" || true)
+                    [[ "$blk43_r1_shift" == "0" ]] ||
+                        layout_fail "st_read_single_block shifts r1 left in its body, and rung 50's argument must reach CMD17 **unshifted**: \`block.c:1777\`'s \`if (!mmc_card_blockaddr(card)) arg <<= 9\` is NOT taken on a card above 4,194,304 sectors, and this one is (rung 38's \`_ext_sec_count = 0x01d5a000\`). A shift here sends sector*512 and the transfer completes cleanly against the wrong sector - the exact defect rung 50 repairs. Nothing is rebuilt by this refusal"
+                elif [[ $STORAGE_PROBE -le 46 ]]; then
                     [[ "$blk43_r1_imm" == "512" ]] ||
                         layout_fail "st_read_single_block loads $blk43_r1_imm into the ARGUMENT register before its call to st_send_command, and rung 43 sends 512 - \`block.c:1776-1777\`'s \`cmd.arg = blk_rq_pos(req)\` with \`if (!mmc_card_blockaddr(card)) cmd.arg <<= 9\`, which for LBA 1 is **1 << 9 = 512, A BYTE ADDRESS**. **0 here is the whole reason this clause exists**: sector 0 holds the MBR's boot code and not a GPT header, so a body that forgot the shift would produce a complete, error-free transfer whose every cell read as success and whose \`_rd_gpt\` was 0 - a false negative that looks exactly like a device that is not GPT"
                 else
@@ -32258,14 +32315,23 @@ verify_trace_symbols() {
                             if (hit == "")      printf "%s=nosym ", ent[i]
                             else { print hit; got[hit] = 1 }
                         }
-                        for (i = 1; i <= n; i++) if (bn[i] ~ /^st_(read_block|ext_csd|csd_words|csd_words_valid|tacc_exp|tacc_mant)$/ && !(bn[i] in got)) printf "%s=not-accessed ", bn[i]
+                        for (i = 1; i <= n; i++) if (bn[i] ~ /^st_(read_block|ext_csd|csd_words|csd_words_valid|tacc_exp|tacc_mant|ext_sec_count|read_lba)$/ && !(bn[i] in got)) printf "%s=not-accessed ", bn[i]
                     }')
                 blk43_img_got=$(printf '%s\n' $blk43_img_hits | grep -vE 'nosym|=not-accessed' | LC_ALL=C sort -u | tr '\n' ' ' || true)
+                # **RUNG 50 ADDS TWO OBJECTS TO THIS RUNG'S IMAGE SURFACE, AND THEY ARE THE ARM.**
+                # `st_ext_sec_count` (the capacity rung 38 carried, read to decide the addressing) and
+                # `st_read_lba` (the sector this body's CMD17 argument is loaded from) are both
+                # file-scope owns the read body must reach from value 49 on. They are added to the
+                # ALLOWED set only from that value, so a value-48 build that reached either is still
+                # refused - the set is the arm's own, not a widened one for every rung above.
                 blk43_img_want="st_read_block st_csd_words st_csd_words_valid st_tacc_exp st_tacc_mant"
+                if [[ $STORAGE_PROBE -ge 49 ]]; then
+                    blk43_img_want="$blk43_img_want st_ext_sec_count st_read_lba"
+                fi
                 for _s in $blk43_img_got; do
                     case " $blk43_img_want " in
                         *" $_s "*) ;;
-                        *) layout_fail "st_read_single_block's non-device accesses resolve to [${blk43_img_got% }] and \`$_s\` is NOT one of [$blk43_img_want] - the body reached an image object outside the sector buffer, the CSD carry and the two TAAC tables. **\`st_ext_csd\` is deliberately NOT in this rung's list**: rung 43 must not overwrite the card's own EXT_CSD bytes with a sector, or the cells rung 38 publishes would change meaning one rung later. Nothing is rebuilt by this refusal" ;;
+                        *) layout_fail "st_read_single_block's non-device accesses resolve to [${blk43_img_got% }] and \`$_s\` is NOT one of [$blk43_img_want] - the body reached an image object outside the sector buffer, the CSD carry, the two TAAC tables${STORAGE_PROBE:+ and, from value 49, the capacity and the sector variable}. **\`st_ext_csd\` is deliberately NOT in this rung's list**: rung 43 must not overwrite the card's own EXT_CSD bytes with a sector, or the cells rung 38 publishes would change meaning one rung later. Nothing is rebuilt by this refusal" ;;
                     esac
                 done
                 [[ "$blk43_img_got" == *"st_read_block"* ]] ||
@@ -32587,6 +32653,48 @@ verify_trace_symbols() {
                         layout_fail "rung 49 publishes no \`$_k\` string in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE. **Each one is a different outcome and the press reads them together**: \`_pm_sig_ok\` is the gate (0 = the sector is not an MBR and the four records below are NOT a table); \`_pm_entries\` = 4 is the walk's own bound; \`_pm_p0_*\` is entry 0's record whatever it is; \`_pm_nonzero\`/\`_pm_index\` name the FIRST record whose type byte is not zero, and \`_pm_index\` says WHICH of the four it was - a medium whose first real partition is entry 3 is a different medium from one whose first is entry 0; \`_pm_nonzero_type\`/\`_pm_nonzero_first\`/\`_pm_nonzero_len\` are that partition's type code and its first LBA and length, which is the sector the next rung reads. **A rung that published four records and not the index would leave a reader unable to tell an all-zero table from a malformed one.** Nothing is rebuilt by this refusal"
                 done
                 echo "  xnu_entry_844: rung 49's partition walk is read out of the linked image: st_mbr_parse (at $mp_addr) makes $mp_allbl call(s), ALL of them to entry_live_write ($mp_livebl) - **so it sends NO command, opens NO window, and touches NO device register**: it decodes the four 16-byte MBR records at bytes 446-509 out of the buffer st_read_single_block already filled, re-checks the 0xAA55 signature ITSELF (#43605 present in this body too), and is called by st_cmd_path ONCE on disassembly line $mp_call_ln, AFTER st_read_single_block (line $mp_rd_ln) so the table is the sector the read just moved and not a stale buffer. **The record is not word-aligned** (\`446 = 4*111 + 2\`: byte 0 of each record is word 111+4k's HIGH half, the type byte is word 112+4k's high half, and the first-LBA/length words at 113+4k/114+4k are the aligned little-endian fields the standard puts at bytes 8-11/12-15). No byte of the medium moves, no register is written, and the medium is not touched at all"
+            fi
+            if [[ $STORAGE_PROBE -ge 48 ]]; then
+                # **845: RUNG 50'S OWN CLAUSE - THE TWO 32-BIT FIELDS ARE BUILT FROM THE WORD PAIRS
+                # THEY STRADDLE, AND THAT ARITHMETIC IS ASSERTED IN THE LINKED INSTRUCTION STREAM.**
+                #
+                # The rung-49 press (846) is the whole reason this clause exists. `xnu_entry_844` proved
+                # `st_mbr_parse` touches no device, re-checks the signature and is called once after the
+                # read - **and said NOTHING about the byte offsets of the fields it decodes**, because the
+                # claim that they were word-aligned was a sentence in a comment. The medium was read
+                # correctly and the arm published `0x0001FFFF` for a first LBA of 1. **A comment is not a
+                # check** ([[mi4-a-claim-in-a-comment-is-not-a-check]]), so this clause makes the straddle
+                # structural in the DISASSEMBLY: a field whose bytes begin at `4m + 2` must reach a
+                # register through BOTH a `>> 16` of one word and a `<< 16` of another, one apart.
+                #
+                # **IT DOES NOT ASSERT THE ABSTRACTION - IT ASSERTS THAT A SHIFT HAPPENED.** The scan
+                # below counts, in the decode body, the HIGH-half extractions (`lsr #16`) and the LOW-half
+                # placements (`lsl #16`), counts the loads the loop's own 16-byte stride issues, and
+                # requires the loaded-word count to be exactly ONE MORE than the extraction count: three
+                # words loaded (w113, w114, w115) and two high-half extractions is the straddle; **two
+                # loads and two extractions is the 846 defect, because a field that IS one word needs no
+                # second load.** It is the same shape the ladder uses everywhere - a count that must be a
+                # particular NUMBER rather than a sentence that says the property holds - and it survives
+                # any change to how the buffer is addressed, because it reads the arithmetic and not an
+                # address.
+                # **THE FORM IS NOT THE CLAIM - THE SHIFT IS.** ARM takes a shifted register as an
+                # operand (`orr rD, rN, rM, lsl #16`) as readily as a standalone instruction
+                # (`lsl rD, rM, #16`), and gcc uses BOTH for these two fields in the same loop - so a
+                # count keyed on the standalone spelling read 1 where the arithmetic has 2. Counting
+                # each INSTRUCTION that names the shift counts the placements, whichever spelling the
+                # compiler chose, and there is at most one shifter operand per ARM instruction.
+                mp_hiext=$(grep -cE 'lsr.*#16' <<<"$mp_body" || true)
+                mp_loput=$(grep -cE 'lsl.*#16' <<<"$mp_body" || true)
+                mp_strideld=$(grep -cE 'ldm|ldrd|ldrh|ldr' <<<"$mp_body" || true)
+                [[ "$mp_hiext" -ge 2 ]] ||
+                    layout_fail "st_mbr_parse's disassembly holds $mp_hiext instruction(s) extracting a word's HIGH half (\`lsr rN, rM, #16\`), and rung 50 decodes TWO such fields (the first LBA and the length). **This is the 846 defect as a count**: the arm at 48 read each 32-bit field as ONE WHOLE WORD (\`ldr rN, [..]\` with no shift), which returned the PREVIOUS field's bytes in its low half - \`_pm_p0_first\` came back \`0x0001FFFF\` for a field whose value is 1. A body with fewer than two high-half extractions is not straddling a word boundary and will publish a plausible, wrong LBA. Nothing is rebuilt by this refusal"
+                [[ "$mp_loput" -ge 2 ]] ||
+                    layout_fail "st_mbr_parse's disassembly holds $mp_loput instruction(s) placing a word's LOW half into a field (\`lsl rN, rM, #16\`), and rung 50 assembles TWO such halves. A field that is a whole word needs no low-half placement, so a body with fewer than two is the arm that read one word and published it - 846's \`_pm_p0_len = 0xFFFF0000\` for a length of \`0xFFFFFFFF\`. Nothing is rebuilt by this refusal"
+                (( mp_strideld >= (mp_hiext + 1) )) ||
+                    layout_fail "st_mbr_parse issues $mp_strideld load(s) but only $mp_hiext high-half extraction(s): the straddle needs THREE words for TWO 32-bit fields - w113 and w114 for the first LBA, w114 and w115 for the length - because the second field's low half is the FIRST field's high-half word. **A body with as many loads as extractions read each field from a single word, which is precisely what 846 measured as wrong.** The extra load IS the straddle, and its absence is the defect this clause exists to refuse. Nothing is rebuilt by this refusal"
+                [[ "$mp_strideld" -ge 3 ]] ||
+                    layout_fail "st_mbr_parse issues only $mp_strideld load(s) and rung 50's two straddled 32-bit fields need at least THREE words (113, 114 and 115) plus the flag and type bytes. A body this thin is not decoding four 16-byte records at all. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_845: rung 50's MBR decode is read out of the linked image: st_mbr_parse (at $mp_addr) builds its two 32-bit fields from the WORD PAIRS THEY STRADDLE - $mp_hiext high-half extraction(s) (\`lsr #16\`) and $mp_loput low-half placement(s) (\`lsl #16\`) across $mp_strideld load(s) - **which is THREE words for TWO fields, w113/w114 and w114/w115, because \`446 = 4*111 + 2\` puts each field at byte 2 of its word.** The rung-49 press (846) published \`_pm_p0_first = 0x0001FFFF\` and \`_pm_p0_len = 0xFFFF0000\` from the SAME sector because the arm read one whole word per field; this clause refuses any body whose load count does not exceed its extraction count, which is the arithmetic of \"two fields over three words\". The values themselves are asserted at the SOURCE (ST_MBR_ENTRY_STRADDLE == 1, ST_MBR_F_D0 % 4 == 2, ST_MBR_F_L0 % 4 == 2), so the offset and the instruction stream are held to each other, and no byte of the medium moves"
             fi
             if [[ $STORAGE_PROBE -ge 41 ]]; then
                 # **831: RUNG 42'S OWN CLAUSE - THE FIRST CLAUSE HERE THAT ASSERTS A COMMAND WHOSE

@@ -11070,3 +11070,56 @@ set=armed-storage-ee0ab2e6 sha256=a82aa95a9d1cca9f051b1c5a5dc50ece167c4bba7c35f2
 # FIRST PARTITION'S OWN SECTOR**. NO FIRER IS ARMED AND NO PRESS IS OWED.
 # **THE GOAL IS NOT MET** - no partition's own sector read, no filesystem, no
 # mount; TWRP-to-storage stays withheld.
+#
+# 847 - the rung-50 arm (STAGE90_XNU_STORAGE_PROBE=49, VALUE 49 = ORDINAL RUNG 50):
+#
+# **THE RUNG-49 PRESS'S OWN TWO OWED READINGS, AND THE ADDRESSING THAT MAKES THE READ'S
+# ARGUMENT A SECTOR.** The rung-49 press (846) read a PROTECTIVE MBR and, in the same boot,
+# found the arm's own two 32-bit cells were not the fields they name: it published
+# `_pm_p0_first = 0x0001FFFF` and `_pm_p0_len = 0xFFFF0000` because the MBR's first-LBA
+# field is at byte `454+16k` = `4*113 + 2` and its length at `458+16k` = `4*114 + 2` -
+# **neither is word-aligned**, each straddles, and the arm read one whole word each.
+#
+# The two fields decoded right are:
+#   first  = ((w[113+4k] >> 16) & 0xFFFF) | ((w[114+4k] & 0xFFFF) << 16)   -> 1
+#   length = ((w[114+4k] >> 16) & 0xFFFF) | ((w[115+4k] & 0xFFFF) << 16)   -> 0xFFFFFFFF
+# so entry 0 is an EFI protective partition whose single entry points at **LBA 1** - the
+# sector rung 47 read and found is NOT `EFI PART`. **THAT TENSION IS THE FRONTIER**, and the
+# addressing answers why the read was at the wrong sector all along.
+#
+# **THE ADDRESSING.** `mmc.c:344-345`: `if (card->ext_csd.sectors > (2u*1024*1024*1024)/512)
+# mmc_card_set_blockaddr(card);` - the threshold is 4,194,304 sectors. This card's
+# `_ext_sec_count = 0x01d5a000` = 30,777,344 > threshold, so `mmc_card_blockaddr` is SET and
+# `block.c:1777`'s `if (!mmc_card_blockaddr(card)) brq->cmd.arg <<= 9` is NOT applied.
+# **Rungs 43-49 sent BYTE addresses where the card wanted SECTORS**: `_rd_arg = 0x200` at
+# value 46 was SECTOR 512, not LBA 1. Rung 50 carries the sector as `st_read_lba` with NO
+# shift, and `xnu_entry_832` now REFUSES a CMD17 argument that is an immediate or a body that
+# shifts it left. New clause `xnu_entry_845` makes the decode's straddle structural in the
+# DISASSEMBLY (2+ high-half extractions and 2+ low-half placements across the 21 loads).
+#
+# **THE ACT IS UNCHANGED ON THE MEDIUM AND UNCHANGED ON THE REGISTERS.** The read is the
+# PROTECTIVE MBR again (sector 0); no new command, no new MMIO, no new enable window, no new
+# store. `_pm_next_is_arg = 0` at this rung is the reading that says the table was decoded
+# from a sector OTHER than the partition it names; the next arm sets the read's sector to
+# `_pm_next_sector` and this cell becomes 1. `_rd_cap_agree = 1` is the EXT_CSD count (rung
+# 38) and the CSD count (rung 34) agreeing on the sector-addressed class.
+#
+# The entry-group page move did NOT fire (`STAGE90_XNU_SEAM_LR` stays `0x8004c2dc`).
+# `STAGE90_XNU_PWR_WAIT_TICKS=384000` is inherited from rung 9 unchanged - 20 ms at this
+# device's own 19,200,000 Hz. `fastboot boot` only; nothing flashed.
+#
+# **NO PRESS HAS BEEN MADE AND NONE IS OWED: this arm is PARKED and the park is a RECORD and
+# not a queue. THE PRESS IS THE OPERATOR'S. THE GOAL IS NOT MET** - no partition's own sector
+# read, no filesystem, no mount; TWRP-to-storage stays withheld.
+#
+set=armed-storage-28c82f79 sha256=0141f1e03b0fb0d898dd223419dbff243a1ba0384a88c6a67424d563f512f020 bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-49-entry-rung-50-DECODES-THE-MBR-TABLE-FROM-ITS-STRADDLED-WORD-PAIRS-AND-CARRIES-THE-READ-S-SECTOR-AS-A-VARIABLE-NOT-PRESSED
+set=armed-storage-28c82f79 sha256=d0eb01a389f810c6fe24b51eaf6317667640d4e4b265bfe93f78a324fd96ec73 bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-49-entry-no-payload-switch-moved
+set=armed-storage-28c82f79 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-49-s-MEASURED-no-payload-switch-moved
+set=armed-storage-28c82f79 sha256=2d476ca30ea7a33b24a4cddfa92e04effe01b7dc11f33323b2065c09fb09c9a6 bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-UNCHANGED-from-the-rung-49-arm-s-6126716
+set=armed-storage-28c82f79 sha256=4dbd0373eb5596541063aad292ba7f01fecf691c6a24a5203967c500f73159bf bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-28c82f79 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-28c82f79 sha256=f1b16772049746a4582c04bf30eef21d2c26e65894ac3b44a210e881ef5e26e0 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-28c82f79 sha256=28c82f79cb3ea0c4ad2e5e50f4dd10dcbe029b3a79f4b64ffdf23271b0ccaddb bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-28c82f79-IS-THE-SETS-NAME-same-5569148-bytes-as-the-rung-49-arm-because-the-new-body-adds-no-device-code-and-the-difference-is-st_mbr_parse-s-straddle-decode-plus-the-read-lba-variable
+set=armed-storage-28c82f79 sha256=1b006fc1ccec770037488c1f52484eeec5b8e409df01a67758e438b828de1bf0 bytes=6749560 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-88-bytes-LARGER-than-the-rung-49-arm-s-6749472-because-the-addressing-prelude-the-CSD-cross-check-and-the-new-_rd_-and-_pm_-cells-were-added-and-none-makes-a-device-access
+set=armed-storage-28c82f79 sha256=5270d7290a63bf2e86900beda166c6f723fbf708eca41d15ab49a11095b238a6 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=49-and-differing-from-the-rung-49-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
+set=armed-storage-28c82f79 sha256=401130dc2a73367b6de67786b9aa9dbc2c8e6440ab9139ede556683251b70072 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-source-list-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
