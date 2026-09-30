@@ -32101,6 +32101,43 @@ verify_trace_symbols() {
             fi
             fi
             fi
+            if [[ $STORAGE_PROBE -ge 40 ]]; then
+                # **829: RUNG 41, AND IT IS ONE NUMBER CORRECTED BY A PRESS.** Rung 40's bounded
+                # data wait was built and PRESSED: `_ext_data_waited` ran the whole budget,
+                # `_ext_data_ticks = 0x5ddf7` = 384,503 ticks = 20.03 ms, `_ext_data_wait_timeout = 1`,
+                # `_ext_data_gated = 0`, `_ext_data_avail_seen = 0` - the block never raised
+                # `DATA_AVAILABLE` inside 20 ms. But rung 38 raised it 128 of 128 times and read all
+                # 512 bytes, and rung 38's only difference is a 1.2 s command poll before the read.
+                # **So the mechanism rung 40 added is right and its ARITHMETIC was wrong**: 10 ms was
+                # the shift time under a clock the block is not using for this transfer. Rung 41 sets
+                # the bound to rung 38's own measured-sufficient value - 24000000 ticks = 1.25 s.
+                #
+                # The assertions are DOUBLE-SIDED on purpose: 24000000 = 0x16E3600 is `mov #58976`,
+                # `movt #22`, and the rung-40 budget 384000 = 0x5DC00 is `mov #56320`, `movt #5`, so
+                # NEITHER pair can satisfy the other. And the arm asserts the reading rung 40 could not
+                # publish: `_ext_data_ps_first`, the SECOND pass's own first PRESENT_STATE - which
+                # resolves whether the block was still shifting (DOING_READ, bit 9, `0x200`) when the
+                # wait began, a thing the rung-40 press's post-drain reads could not say.
+                # **829's rung 41 carries NO new cell: its whole content is the corrected number.**
+                # `_ext_data_ps_first` was drafted and REMOVED - adding a `PRESENT_STATE` read before the
+                # wait perturbed the loop's register allocation and made the classifier resolve the
+                # `.bss` fill as `NODECL-f982-0:str` again (the m828 class, re-surfaced by an edit and
+                # caught by this very device clause). A time change must move the TIME and nothing else.
+                # **THE BOUND IS ASSERTED AT THE SOURCE *AND* FALSIFIED IN THE BODY, WHICH IS THE
+                # STRONGER PAIR.** A body-immediate assertion alone is allocator-dependent - the
+                # m828 lesson, and gcc does not materialize 0x016E3600 the way a first guess expects.
+                # So: the SOURCE macro must read 24000000u (one definition, the number the press
+                # corrected), and the BODY must NOT still carry rung 40's 384000. The source is the
+                # tree this image was built from, so the pair binds the number end to end.
+                ext41_src=$(grep -c 'ST_EXT_DATA_TICK_BUDGET    24000000u' "$STORAGE_LADDER_C" || true)
+                [[ "$ext41_src" -eq 1 ]] ||
+                    layout_fail "entry_storage.c must define ST_EXT_DATA_TICK_BUDGET as 24000000u while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - that is rung 41's whole content, the corrected data bound (1.25 s at 19.2 MHz, rung 38's own measured-sufficient value), and this source-level assertion is the one that does not depend on how gcc encodes it. A different number here is [[mi4-one-value-two-definitions]] in the direction that either stalls the boot as a 20 ms bound did or reads the card's data as absent. Nothing is rebuilt by this refusal"
+                ext41_old40a=$(grep -cE 'mov[[:space:]]+r[0-9]+, #56320' <<<"$ext_body" || true)
+                ext41_old40b=$(grep -cE 'movt[[:space:]]+r[0-9]+, #5([^0-9]|$)' <<<"$ext_body" || true)
+                [[ "$ext41_old40a" -eq 0 && "$ext41_old40b" -eq 0 ]] ||
+                    layout_fail "st_send_ext_csd still materializes 384000 = 0x5DC00 (mov #56320 [=$ext41_old40a], movt #5 [=$ext41_old40b]) while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: that is rung 40's own budget, which its press FALSIFIED (\`_ext_data_ticks = 0x5ddf7\`, timeout after 20.03 ms with the block's data still unarrived). The two budgets cannot both be in the image, and the rung-40 build fails THIS test while the rung-41 build fails the one above it - [[mi4-one-value-two-definitions]] refused in BOTH directions. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_829: rung 41's corrected data bound is in the linked image: st_send_ext_csd carries the corrected 24000000 = 1.25 s bound (asserted at the SOURCE, one definition = $ext41_src) in place of rung 40's falsified 384000 = 20 ms (both of whose body immediates are ABSENT, $ext41_old40a/$ext41_old40b), and the mechanism (the per-word DATA_AVAILABLE gate, #2048) is unchanged from rung 40 - **a TIME CHANGE and nothing else, because adding a cell perturbed the loop's allocation and re-surfaced the m828 classifier artifact**"
+            fi
             if [[ $STORAGE_PROBE -ge 39 ]]; then
                 # **828: RUNG 40 IS A WAIT, AND THIS CLAUSE IS WHAT KEEPS IT A WAIT AND NOT A NEW ARM.**
                 # The rung-39 press proved the rung-38 read loop runs BEFORE the data arrives once the
@@ -32127,7 +32164,10 @@ verify_trace_symbols() {
                     layout_fail "st_send_ext_csd tests \`DATA_AVAILABLE\` (PRESENT_STATE bit 11, #2048) $ext40_da time(s) and rung 40 adds a SECOND test - the first pass's per-iteration count and the second pass's per-word gate. One test means the new wait is not in the image; zero means neither pass is gated. Nothing is rebuilt by this refusal"
                 ext40_budget=$(grep -cE 'mov[[:space:]]+r[0-9]+, #56320' <<<"$ext_body" || true)
                 ext40_budgethi=$(grep -cE 'movt[[:space:]]+r[0-9]+, #5([^0-9]|$)' <<<"$ext_body" || true)
-                [[ "$ext40_budget" -ge 1 && "$ext40_budgethi" -ge 1 ]] ||
+                # **RUNG 40's 20 ms BOUND IS ASSERTED ONLY AT VALUE 39.** Rung 41 (value 40)
+                # replaces it and refuses its presence in the clause above, so this test must not
+                # run there - one number, one arm that owns it.
+                [[ $STORAGE_PROBE -ne 39 || ( "$ext40_budget" -ge 1 && "$ext40_budgethi" -ge 1 ) ]] ||
                     layout_fail "st_send_ext_csd materializes 384000 = 0x5DC00 (mov #56320 [=$ext40_budget], movt #5 [=$ext40_budgethi]) and rung 40's bound is exactly 384000 ticks - 20 ms at 19.2 MHz, the one number that makes the wait a BOUND and not a hang. A different pair here is a different budget wearing the same name, which is [[mi4-one-value-two-definitions]] in the direction that kills the card. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_828: rung 40's bounded data wait is in the linked image: st_send_ext_csd tests DATA_AVAILABLE (#2048) $ext40_da time(s) - the first pass's per-iteration count BESIDE the second pass's per-word gate - carries the 384000-tick budget as movable immediates, and publishes ALL FOUR new keys (waited, wait_timeout, gated, ticks) into .rodata; its device surface is rung 38's UNCHANGED ($ext_set), so the wait reaches NO register this body did not already read"
             fi

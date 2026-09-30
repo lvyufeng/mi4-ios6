@@ -10075,3 +10075,67 @@ set=armed-storage-f34cf0fb sha256=f34cf0fbbeb63e49a8c800c6fff5f866420ef3a5bc4c7c
 set=armed-storage-f34cf0fb sha256=d7827623fae2e4ed2c7a748ecb495406d3e6e78c27b3dd1efc2c56c9e627362a bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=39-and-differing-from-the-rung-39-arm-s-in-EXACTLY-TWO-lines-the-artifact-s-own-hash-and-the-ladder-value-38-39
 set=armed-storage-f34cf0fb sha256=4e2719893e2e646705a62e341a43140a17d1ce8012349e550aec0ebd8bcb3e30 bytes=6749248 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-UNCHANGED-from-the-rung-39-arm-s-6749248-because-the-new-loop-moved-into-expansion-the-body-already-had
 set=armed-storage-f34cf0fb sha256=681f86b0cc430dc9d707557ce5b2648e4b8db265adfea57ac9bb8da0d01d764f bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FOUR-of-its-content-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-the-hashes-of-build_entry-sh-and-entry_storage-c-and-this-record-s-own-two-role-lines
+
+#
+# 829, 2026-09-30 - THE RUNG-41 ARM. `armed-storage-af522aca`. PARKED, NOT PRESSED, NOT ARMED.
+#
+# **A BUILD AND A PARK, AND NOTHING ELSE** - and unlike every rung before it, **its content was decided
+# by a PRESS.** The rung-40 arm was built, parked and PRESSED (828's own park, `armed-storage-f34cf0fb`,
+# now SPENT); this arm is what that press said to change. **IT ADDS NO COMMAND, NO REGISTER, NO MEGABYTE,
+# NO DEVICE AND NO CELL: it moves ONE CONSTANT.**
+#
+# (1) WHAT THE RUNG-40 PRESS MEASURED, AND WHY IT IS A CONTROLLED EXPERIMENT. The arm was built to wait
+# for the card's data inside the vendor's own `while (PRESENT_STATE & SDHCI_DATA_AVAILABLE)` gate, and
+# it did exactly that - and it TIMED OUT:
+#     _ext_data_waited        = 0x00014dff   the whole budget was walked
+#     _ext_data_ticks         = 0x0005ddf7   = 384,503 ticks = 20.03 ms at 19.2 MHz
+#     _ext_data_wait_timeout  = 1            the bound FIRED, as designed
+#     _ext_data_gated         = 0            not one of the 128 words arrived inside 20 ms
+#     _ext_data_avail_seen    = 0            the block never raised DATA_AVAILABLE
+#     _ext_doing_read_seen    = 0x80         DOING_READ DID set - the block is reading
+#     _ext_irq_data           = 0x0270003a   DATA_END|DMA_END|SPACE_AVAIL|DATA_AVAIL|DATA_TIMEOUT|
+#                                            DATA_CRC|DATA_END_BIT|ADMA - the vendor's data IRQ set
+#     _ext_complete = 1, _ext_resp = 0x00000900 (CMD8's own R1, state 4 = TRAN), _ext_gated = 0,
+#     _ext_done = 1  - the COMMAND completed cleanly. Nothing is wrong with the command.
+# **AND THE SAME LADDER HAD ALREADY READ THESE BYTES ONCE**: the rung-38 press measured
+# `_ext_words_gated = 0x80` (128 of 128), `_ext_data_avail_seen = 0x80`, `_ext_sec_count = 0x01d5a000`
+# (~14.68 GiB), `_ext_rev = 7`, `_ext_structure = 2`. Rung 38 and rung 40 differ in ONE enable bit and
+# one wait, and rung 38's only advantage is that its command poll waited its full
+# `ST_CMD_DONE_TICK_BUDGET` = **1.2 s** before the read loop ran. **So the card's data DOES arrive, it
+# just needs longer than 20 ms after the command completes - and 1.2 s is a value two presses bracket as
+# sufficient.** The 516 bytes are not held in the FIFO: `_ext_data_avail_seen = 0` at the second pass's
+# `PRESENT_STATE` reads says the block had not yet presented the first word.
+#
+# (2) THE CLASS, AND THE ARITHMETIC THAT WAS WRONG. Rung 40's comment reasoned that "at 400 kHz a
+# 512-byte block takes a little over 10 ms to shift out, so 20 ms is generous headroom". **That
+# arithmetic was falsified by the press**: `_ext_data_ticks` measured 20.03 ms of WAITING and the block
+# was still silent, so the shift is far slower than the nominal 400 kHz implies - a lazy eMMC's EXT_CSD
+# read at the identification clock. **The mechanism (gate every word on DATA_AVAILABLE, bound the wait)
+# is confirmed correct; only the NUMBER was wrong**, which is why this rung changes the number and
+# nothing else. **AND IT IS `[[mi4-one-value-two-definitions]]` IN THE FORM THAT MATTERS**: 20 ms and
+# 1.25 s are two readings of "how long the transfer takes", and the code was using the smaller while
+# the hardware needed the larger - a bound that is right in shape and wrong in size reads a working data
+# path as an absent one.
+#
+# (3) WHAT THE PRESS WOULD READ. The SAME `_ext_*` cells as the rung-40 press, with the expected change:
+# `_ext_data_wait_timeout = 0`, `_ext_data_gated` non-zero, `_ext_words_gated` non-zero, and the card's
+# own fields back where rung 38 left them - `_ext_sec_count = 0x01d5a000`, `_ext_rev = 7`,
+# `_ext_structure = 2`, `_ext_word = _ext_w0` non-zero - all BESIDE `_ext_complete = 1`, which rung 38
+# could not have and rung 40 got with the data missing. **An `_ext_data_gated = 0x80` would be the three
+# readings rung 38 bungled together at once: command complete AND 512 bytes correct AND no dependence on
+# a timeout.** **AND WHAT IT DOES NOT SETTLE:** if the block is silent for a reason other than a slow
+# clock, the press is `_ext_data_wait_timeout = 1` again with `_ext_data_ticks ~ 24000000`, which is a
+# reading and would name the next rung.
+#
+# **THE GOAL IS NOT MET.** No block read, no filesystem, no mount; TWRP-to-storage stays withheld.
+set=armed-storage-af522aca sha256=bbd0ae4c911ee04ad0355b9e2a19033d6229eee946ea3537e81da4c0ca7816d6 bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-40-entry-rung-41-RAISES-THE-DATA-WAIT-BOUND-FROM-20-MS-TO-1-25-S-BECAUSE-THE-RUNG-40-PRESS-MEASURED-20-MS-TOO-SMALL-NOT-PRESSED
+set=armed-storage-af522aca sha256=f74f2cd6381b87ed0720a5e9c05cfcd6836b9290f8b3e09126c469c80b7fc7c2 bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-40-entry-same-size-as-the-rung-40-arm-s-because-the-entry-group-did-not-cross-a-page
+set=armed-storage-af522aca sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-40-s-MEASURED-no-payload-switch-moved
+set=armed-storage-af522aca sha256=1d7d6076b2f932469a5850516ada6d544f203036fb4c18b0875f8553dd815a93 bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-size-UNCHANGED-from-the-rung-40-arm-s-6126716-the-constant-change-absorbed-by-page-padding
+set=armed-storage-af522aca sha256=65e4323da4a57e31e77b2c0a84fd77fff3a9a640c3adf3a93f5aba19f3b5ec5c bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-af522aca sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-af522aca sha256=0482f8be309a7f8d7cc4f15ef98a4bcc349585744ad11a71ab49def8ede9adb5 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-af522aca sha256=af522aca774b3b93974c3b37d2b41d796b70c052d4997bbca0fab2c52006ec73 bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-af522aca-IS-THE-SETS-NAME-same-5569148-bytes-as-the-rung-40-arm-and-the-difference-is-one-64-bit-constant-in-st_send_ext_csd-s-wait-bound
+set=armed-storage-af522aca sha256=07ee6b578dbb858ac908b2ed601d3031b577028614376f6b56b07c0a2139bfae bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=40-and-differing-from-the-rung-40-arm-s-in-EXACTLY-TWO-lines-the-artifact-s-own-hash-and-the-ladder-value-39-40
+set=armed-storage-af522aca sha256=d339a6482fc0d80cb324c444123776d05c75448b4fc8c3f2d418904789221b08 bytes=6749248 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-UNCHANGED-from-the-rung-40-arm-s-6749248-because-the-bound-is-one-constant-and-the-body-s-net-size-did-not-move
+set=armed-storage-af522aca sha256=f9ba5c4f4018fe33bf06b72321e5a476727826efb6bf9393baaf847c0d0436b9 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-the-hashes-of-build_entry-sh-and-entry_storage-c-and-this-record-s-own-two-role-lines
