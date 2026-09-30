@@ -9857,3 +9857,68 @@ set=armed-storage-92b6c552 sha256=9b92a0ea556254c0ddcb2011b3bed93ab61fcaba9c4310
 # filesystem is reached and no mount is made**, so 「让os可以正常启动并且挂载存储」 is not reached and
 # **TWRP-TO-STORAGE STAYS WITHHELD**: the storage it would be written to is the one thing this ladder
 # has not got working. The first clause, 「起码要能进入操作系统」, remains met (818 section 1).
+
+# 825, 2026-09-30 - THE RUNG-38 PRESS. `armed-storage-92b6c552` IS SPENT. THE 512 BYTES ARRIVED.
+#
+# **A PRESS, under the operator's authorization asked for and given in this session** ("Press rung 38
+# now"). ONE gate exit 0 / 0 FAIL, ONE runner exit 0; `fastboot boot` only; nothing flashed; nothing
+# written to storage; `33e80afe` absent from BOTH device lists, hand-checked immediately before the
+# gate. Capture `out/stage90/captures/rung38-cmd8-20260930-005139-last_kmsg.txt` 653,497 B sha
+# `a87a0e93...`, beside it the gate log 52,225 B `be5f739f...` and the run log 89,164 B `0340c3b0...`.
+# The phone returned to Android 29 s after the send.
+#
+# (1) **THE DATA PATH WORKS.** CMD8's OWN R1 is in the register - `_ext_resp = 0x00000900`, state 4 =
+# TRAN, illegal 0, ready 1 - so the command completed and the card answered. The word on the wire is
+# `_ext_word = _ext_word_read = 0x0000083A` (the DATA bit the arm was built around). The three setup
+# registers held: `_ext_blksz = 0x7200`, `_ext_blkcnt = 1`, `_ext_trns = 0x0012`.
+#
+# (2) **AND THE 512 BYTES ARRIVED.** `st_ext_csd[128]` is `.bss`, zeroed at image start and written
+# by NOTHING but this rung's loop; `_ext_words_gated = 0x80`, `_ext_do_read_seen`/`_ext_data_avail_seen`
+# = `0x80`, `_ext_ps_first = 0x01f80a06` (DATA_AVAILABLE set) -> `_ext_ps_end = 0x01f80206` (cleared).
+# The four fields at bytes 192-215 are non-zero and mutually consistent: `_ext_rev = 7` (eMMC v4),
+# `_ext_structure = 2`, `_ext_card_type = 0x57`, **`_ext_sec_count = 0x01d5a000` = 30,777,344 sectors
+# x 512 = 15,757,840,128 B ~= 14.68 GiB (a 16 GB part)**. Four independent non-zero fields at four
+# offsets is not something a stuck read produces. `_ext_w0 = _ext_w127 = 0` - the card's own zero
+# bytes, which is why 824 published them raw beside the decoded fields and not instead of them.
+#
+# (3) **BUT `_ext_complete = 0` / `_ext_timeout = 1`, AND THE CAUSE IS THIS RUNG'S OWN WINDOW.**
+# `_ext_ena_base = 0` and **`_ext_ena_wrote = 0x30`**: the window enabled only `ST_SDHCI_INT_PIO_IRQS`
+# (`DATA_AVAIL | SPACE_AVAIL`) and NEVER `SDHCI_INT_RESPONSE` (bit 0) - the enable bit every command
+# rung from 23 ORs via `ST_SDHCI_INT_ENABLE_CMD` (`0x000F0001`). rung 37's window wrote `0x000F0001`
+# (`_sta_ena_wrote`) and read `_sta_complete = 1`; rung 38 wrote `0x30` and dropped bit 0. `INT_STATUS`
+# latches a bit only for the enables in `INT_ENABLE`, so the block latched the ENABLED data bit
+# (`_ext_status_after = 0x20`) but never the DISABLED RESPONSE bit - the poll watched `INT_CMD_MASK`
+# and ran its full 1.2 s. **`_ext_complete = 0` is NOT "the command did not complete" but "the witness
+# was switched off"** - the `mi4-silence-is-a-reading-only-if-success-is-silent` shape turned on the
+# arm's own instrumentation. The body's own outcome table pre-registered `_ext_complete = 1` as the
+# green light, so the press FALSIFIES its pre-registration, informatively.
+#
+# (4) **THE REPAIR IS ONE OR.** The rung-38 window must OR `ST_SDHCI_INT_ENABLE_CMD` with the PIO pair
+# (`word = int_enable | ST_SDHCI_INT_ENABLE_CMD | ST_SDHCI_INT_PIO_IRQS`), which is also what the
+# vendor leaves set for the host's life (`sdhci_init`, `sdhci.c:291-296`, keeps RESPONSE enabled);
+# rung 37's restore to 0 is what left rung 38 a zero base to add to. The build can assert the fix
+# structurally, requiring the stored window word to carry bit 0.
+#
+# (5) THE TIMEOUT RAN OFF RUNG 35's CARRIED CSD, not a raw register. `_ext_csd_carried = 1`,
+# `_ext_csd_tacc_ns = 8`, `_ext_csd_tacc_clks = 0`, `_ext_timeout_us = 1`, `_ext_timeout_step0 =
+# 0x14000` (81,920 us) - so `_ext_tout_count = 0` (step 0 already covers the target) and
+# `_ext_tout_max = 0xF` (the reserved max this host reaches). `TIMEOUT_CONTROL` was READ
+# (`_ext_tout_was = 0`), written 0, and restored - **the first press in this ladder to write it**.
+#
+# (6) **CONTAINMENT.** Storage cells 673 -> 746; 0 keys lost; 73 added, the ENTIRE `_ext_*` family and
+# nothing else. Whole-log cells: 36 moved and every one a poll count, tick count or free-running
+# timestamp; NOT ONE DECISION CELL MOVED - `_cmd1_resp = 0x40ff8080`, `_nidx_state = 2`,
+# `_csd_structure = 3`, `_sel_state = 3`, `_sel_complete = 1`, `_sta_state = 4`, `_sta_complete = 1`
+# identical across the two boots. `BSD root: md0, major 2, minor 0` unchanged. Nothing on the device
+# changed; the new surface is the controller's own registers, mapped since rung 14.
+#
+# (7) **THE ARM IS SPENT, AND THE NEXT RUNG IS A ONE-OR FIX.** The park stays in
+# `out/stage90/frozen/armed-storage-92b6c552/` as a RECORD and not a queue; re-pressing it buys
+# nothing. The arm that follows ORs `ST_SDHCI_INT_ENABLE_CMD` into the window; after that, CMD16
+# `SET_BLOCKLEN`.
+#
+# **THE GOAL IS NOT MET.** 「把基础驱动跑起来」 took the step it was aimed at - the first data phase in
+# this ladder completed, 512 bytes came off the card into a fresh buffer - but **no block read has
+# been made, no filesystem is reached and no mount is made**, so 「让os可以正常启动并且挂载存储」 is not
+# reached and **TWRP-TO-STORAGE STAYS WITHHELD**. The first clause, 「起码要能进入操作系统」, remains met
+# (818 section 1).
