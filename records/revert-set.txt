@@ -10575,3 +10575,49 @@ set=armed-storage-f8d91170 sha256=f8d911704556b4b934aee13684902df1f88e99376a5340
 set=armed-storage-f8d91170 sha256=5a262a944bf69d514079660e9832ce7bcbed368e7245da533b0687f92b2b6fbe bytes=6749412 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-size-GREW-by-36-bytes-from-the-rung-44-arm-s-6749376-because-the-new-probe-body-is-a-new-function
 set=armed-storage-f8d91170 sha256=76ef75f5ed897d2ba7fea0deb1c689c14673330a904b0dcc5b706523f463f8cb bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=44-and-differing-from-the-rung-44-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value-43-44
 set=armed-storage-f8d91170 sha256=86326168012a384217825ae87d56b799c1e10ee1f070eaced80495f1b7f429ab bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-FIVE-of-its-content-lines-move-THIS-ONE-including-entry_storage-c-which-carries-the-new-probe-body-and-build_entry-sh-which-carries-the-rung-s-own-clause-837-REFRESHED-after-make-check-found-four-unescaped-backticks-in-that-clause-s-echoes-which-were-fixed-while-the-bin-stayed-BYTE-IDENTICAL-f8d91170
+
+# 838, 2026-09-30 - THE RUNG-45 PRESS. `armed-storage-f8d91170` IS SPENT. THE ENABLE WAS ACCEPTED AND
+# THE HYPOTHESIS IS REFUTED - THE MISSING `DATA_END` ENABLE WAS NOT THE CAUSE.
+#
+# (1) A PRESS, made under the standing instruction. One gate exit 0, one runner exit 0; `fastboot boot`
+# only, nothing flashed, nothing written to storage; `33e80afe` absent from BOTH device lists
+# hand-checked immediately before the gate; **the phone returned** (adb up, uptime 1 min). Capture
+# `out/stage90/captures/rung45-dataend-20260930-090017-last_kmsg.txt` 650,634 B `94d107a1...`.
+#
+# (2) THE ENABLE WAS ACCEPTED. `_de_ena_before = 0x00008000` (the window's INT_ENABLE after the chain,
+# bit 15 the hardware's own), `_de_ena_wrote = 0x00008002` (`before | SDHCI_INT_DATA_END`), and
+# **`_de_ena_held = 0x00008002`** - equal to what was written, so THE STORE TOOK AND THE READ-BACK
+# MATCHED. The arm's own precondition for either verdict is met.
+#
+# (3) AND THE LATCH DID NOT APPEAR: **THE HYPOTHESIS IS REFUTED**. `_de_int_status = 0x00000000`,
+# **`_de_data_end = 0`** (the completion did not latch even with bit 1 enabled), `_de_data_avail = 0`.
+# If the missing enable had been the cause, bit 1 would read 1 here - the latch is a level the block
+# asserts at a transfer's own end - and this reading is taken on the state rung 44 left behind with NO
+# new transfer. So the class rung 38's INT_RESPONSE repair closed on the COMMAND side is now measured
+# NOT to recur on the DATA side: the two are different defects.
+#
+# (4) THE LINE AND THE MACHINE ARE STILL HELD. `_de_ps = _de_ps_end = 0x01f80206` (unchanged across the
+# store), **`_de_dat_line = 1`** (DAT_LINE_ACTIVE - the line's own LEVEL, the reading no enable can
+# gate), **`_de_data_inhibit = 1`**, `_de_doing_read = 1`. `_de_ena_restore = _de_ena_readback =
+# 0x00008000`. So the block's DATA STATE MACHINE IS GENUINELY STUCK - not merely masked - and
+# PRESENT_STATE is now measured stuck at a FOURTH sampling in a new boot.
+#
+# (5) THE GUARD STILL REFUSES, BECAUSE THE LINE IS STILL HELD. `_rd_inhibit_mask = 0x3` (the widened
+# guard, still in the bin), `_rd_inhibit_dat = 0x2`, `_rd_inhibit_timeout = 1`, `_rd_inhibit_polls =
+# 0xa700` (the full budget), **`_rd_sent = 0`** - CMD17 still not issued, the guard still doing its job;
+# `_rd_int_status_end = 0x21` (CMD8's RESPONSE | DATA_AVAIL, the stuck transfer's own trace).
+#
+# (6) THE THREE PRESSES READ AS ONE STORY, AND THE NEXT RUNG IS THE ONE LEFT BY ELIMINATION. 834 named
+# the guard (the widened mask untried); 836 tried it, it refused, and moved the defect one command down;
+# **838 tested the press's own candidate (a) and REFUTED it** - the completion was not merely masked.
+# **THE FRONTIER IS NOW RUNG 46: the block's data state machine must be RESET** (`SOFTWARE_RESET 0x2F`,
+# `SDHCI_RESET_DATA` 0x04 - NOT `RESET_ALL` 0x01, NOT `RESET_CMD` 0x02) - the rung-44 press's candidate
+# (b), now the only one left. `_dr_dat_line = 0` + `_dr_data_inhibit = 0` would say THE HOST WAS THE
+# HOLDER (and CMD17 proceeds); `_dr_dat_line = 1` would say THE LINE IS HELD BY SOMETHING THE HOST DOES
+# NOT OWN - a card-side reading and a different defect. **It is NOT yet built.**
+#
+# **NO FIRER IS ARMED AND NO PRESS IS OWED: the next rung is not yet built, and the press is the
+# operator's.**
+#
+# **THE GOAL IS NOT MET.** No sector read, no partition table walked, no filesystem, no mount;
+# TWRP-to-storage stays withheld.
