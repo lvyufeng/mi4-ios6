@@ -11169,3 +11169,63 @@ set=armed-storage-28c82f79 sha256=16ee77ca361f57e6899f543cefd00cd47fe0cfc68e1cf0
 # SECTOR-addressed. **NOT ESTABLISHED (the next arm)**: the partition's OWN sector.
 # **NO FIRER IS ARMED AND NO PRESS IS OWED.** **THE GOAL IS NOT MET** - no
 # partition's own sector read, no filesystem, no mount; TWRP-to-storage withheld.
+#
+# 849 - the rung-51 arm (STAGE90_XNU_STORAGE_PROBE=50, VALUE 50 = ORDINAL RUNG 51):
+#
+# **THE FIRST PARTITION'S OWN SECTOR - THE READ THAT FINALLY ASKS LBA 1.** The rung-50
+# press (848) measured the protective MBR decoded right (`_pm_p0_first = _pm_nonzero_first
+# = 1`, `_pm_p0_len = 0xFFFFFFFF`, `_pm_p0_type = _pm_nonzero_type = 0xEE`) AND the
+# addressing class (`_rd_cap_over = 1`, `_rd_shift = 0`, `_rd_blockaddr =
+# _pm_sector_addressed = 1` - **the card is SECTOR-addressed**). Its own two cells said so:
+# `_pm_next_sector = 1` (the sector the table names) beside `_pm_arg_sector = 0` (the
+# sector that rung read), so `_pm_next_is_arg = 0`.
+#
+# **RUNG 51 IS ONE NUMBER.** `st_read_lba` moves 0 -> **1**: the same CMD17, the same flags,
+# the same block length CMD16 set, the same reset-before-read order, the same cells - the
+# read now addresses the sector the rung-50 decode named. Under this card's sector
+# addressing (`block.c:1777`'s `<< 9` NOT taken) the argument IS the sector, so the 1 on
+# the bus is LBA 1 and not byte 512. **That is why rungs 43-49 never answered the
+# question**: `_rd_arg = 0x200` was SECTOR 512, not LBA 1 - rung 47's "LBA 1" read garbage
+# (`_rd_w0 = 0xe8f9decb`) while rung 50's sector 0 read the real MBR.
+#
+# **THE CELL RUNG 51 EXISTS FOR IS `_rd_gpt`** - published at rung 43, true only when the
+# sector begins `EFI PART`, and never yet read on the right sector. `_rd_gpt = 1` is THE
+# MEDIUM IS A GPT DISK (the protective MBR was telling the truth); `_rd_gpt = 0` with the
+# transfer clean is A SECTOR THAT IS NOT A GPT HEADER, which moves the frontier to LBA 2.
+# **AND THE COMPANION CELL FLIPS**: `_pm_next_is_arg` is 0 at value 49 and 1 at value 50 -
+# it says the sector this rung read and the sector the decode named are the SAME NUMBER.
+#
+# **THE NUMBER IS A BUILD REFUSAL, NOT A SENTENCE.** New clause `xnu_entry_849` reads, out
+# of the linked disassembly, the instruction that FILLS `st_read_lba` - found by the same
+# `[base, #off]` the argument load used (already resolved to the `st_read_lba` SYMBOL by
+# `xnu_entry_832`) - and refuses unless its immediate is **1** and the store is ABOVE the
+# load in program order. So "a variable, at the right address, holding the table's own
+# sector, stored before it is read" cannot be satisfied by an edit that leaves every cell
+# reading as success. The value-49 half of `xnu_entry_832` still holds the variable's kind,
+# its symbol and the shift's absence.
+#
+# **THE ACT IS UNCHANGED ON THE MEDIUM AND UNCHANGED ON THE REGISTERS.** CMD17 reads, so the
+# card stays in TRAN with its block length and its CSD/EXT_CSD exactly as rungs 42-50 left
+# them; only the sector NUMBER moves. The entry bin is the SAME 5,569,148 bytes (the change
+# is one immediate in one instruction).
+#
+# The entry-group page move did NOT fire (`STAGE90_XNU_SEAM_LR` stays `0x8004c2dc`).
+# `STAGE90_XNU_PWR_WAIT_TICKS=384000` is inherited from rung 9 unchanged - 20 ms at this
+# device's own 19,200,000 Hz. `fastboot boot` only; nothing flashed.
+#
+# **NO PRESS HAS BEEN MADE AND NONE IS OWED: this arm is PARKED and the park is a RECORD and
+# not a queue. THE PRESS IS THE OPERATOR'S. THE GOAL IS NOT MET** - the partition's own
+# sector read is the arm, not yet a reading; no filesystem, no mount; TWRP-to-storage stays
+# withheld.
+#
+set=armed-storage-960c57c4 sha256=6c9a50ad358591a52f4d0860fe8d1b9632d6df510c776ef1718ac82fdf31175d bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-50-entry-rung-51-READS-THE-FIRST-PARTITION-S-OWN-SECTOR-LBA-1-NOT-PRESSED
+set=armed-storage-960c57c4 sha256=3a9ab09c49dfb102abb7c98df1ce9f4e342cc4af99a8de94f8f0777f3e8c84be bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-50-entry-no-payload-switch-moved
+set=armed-storage-960c57c4 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-50-s-MEASURED-no-payload-switch-moved
+set=armed-storage-960c57c4 sha256=59b5bcd443e96fea147a5235a929908f33d08645ed8d0f188643c794d168e480 bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-UNCHANGED-from-the-rung-50-arm-s-6126716
+set=armed-storage-960c57c4 sha256=b1220982881fc1f20bc31acc97852793952d2d27c0ebe3b3e9773e264ac6e77c bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-960c57c4 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-960c57c4 sha256=aaef26f6364b9e789c4219dc1fcba0a919a188c9bcfa2b62328d769a7a3012c8 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-960c57c4 sha256=960c57c444559b4a874276ad752aaf18b996d36c09602746ea1c2f91856126cd bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-960c57c4-IS-THE-SETS-NAME-same-5569148-bytes-as-the-rung-50-arm-because-the-whole-rung-is-ONE-IMMEDIATE-in-st_read_lba-s-store-0-to-1
+set=armed-storage-960c57c4 sha256=176bbe5812db3d38aac8c3ae0d540c1b05784ac1fbf8153f6296679b162c6c9d bytes=6749560 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-byte-identical-in-SIZE-to-the-rung-50-arm-s-6749560-because-no-body-was-added-only-the-sector-number-in-the-existing-store
+set=armed-storage-960c57c4 sha256=d653064326444430ee1980cca9db168be9d11a600aee503cbff2150de446e0c3 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=50-and-differing-from-the-rung-50-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
+set=armed-storage-960c57c4 sha256=fbe31b4b76a6cff1f3a2eba5aecba79c3958c44d0eb797d72ec4039fe5b1f1ee bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-source-list-a-member-of-the-manifest-and-not-of-the-gate-s-own-list

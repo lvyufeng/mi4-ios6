@@ -32253,6 +32253,47 @@ verify_trace_symbols() {
                     blk43_r1_shift=$(grep -cE 'lsl[s]?[[:space:]]+r1,[[:space:]]*r1' <<<"$blk43_body" || true)
                     [[ "$blk43_r1_shift" == "0" ]] ||
                         layout_fail "st_read_single_block shifts r1 left in its body, and rung 50's argument must reach CMD17 **unshifted**: \`block.c:1777\`'s \`if (!mmc_card_blockaddr(card)) arg <<= 9\` is NOT taken on a card above 4,194,304 sectors, and this one is (rung 38's \`_ext_sec_count = 0x01d5a000\`). A shift here sends sector*512 and the transfer completes cleanly against the wrong sector - the exact defect rung 50 repairs. Nothing is rebuilt by this refusal"
+                    if [[ $STORAGE_PROBE -ge 50 ]]; then
+                        # **RUNG 51: THE NUMBER STORED IN THAT SLOT, READ OUT OF THE STORE ITSELF.**
+                        #
+                        # The clause above proves the CMD17 argument is a LOAD from `st_read_lba`'s slot,
+                        # and `xnu_entry_832`'s `>= 49` half proves that address resolves to the
+                        # `st_read_lba` SYMBOL. **Neither says what number is in it.** Rung 50 stores 0
+                        # (the protective MBR); rung 51 stores 1 (the sector that MBR's single entry
+                        # names). The difference between those two arms is **one immediate on one
+                        # instruction and NO cell in the log distinguishes them by shape** - both
+                        # publish `_rd_arg = _rd_lba`, both complete, both sit in TRAN. So the number is
+                        # made structural the same way the argument's MODE was: read the instruction
+                        # that fills the slot and refuse unless its immediate is **1**.
+                        #
+                        # **THE STORE IS FOUND BY THE LOAD'S OWN ADDRESS, NOT BY A SLOT LITERAL.** The
+                        # load's base register and frame offset (`blk43_r1_reg`/`blk43_r1_off`, resolved
+                        # to the `st_read_lba` symbol by the clause above) name the object; the store to
+                        # that same `[base, #offset]` is therefore the write that fills THIS variable and
+                        # not some other slot the compiler happened to place the same way
+                        # ([[mi4-one-value-two-definitions]]). The frame offset is never asserted by
+                        # number - it is a property of this build's allocation - it is only required to
+                        # be the SAME on both instructions.
+                        blk43_lba_store=$(grep -E "str[[:space:]]+r[0-9]+, \[$blk43_r1_reg, #$blk43_r1_off\]" <<<"$blk43_body" | tail -1)
+                        [[ -n "$blk43_lba_store" ]] ||
+                            layout_fail "st_read_single_block loads its CMD17 argument from \`[$blk43_r1_reg, #$blk43_r1_off]\` (resolved to \`st_read_lba\`) and its disassembly holds NO \`str rN, [$blk43_r1_reg, #$blk43_r1_off]\` writing that same slot - so the variable this body reads was filled somewhere this clause cannot see. **Rung 51 IS the number stored there** (1, the protective MBR's own target), and a body that only read the slot would carry whatever the previous boot's code left, with every cell still reading as success. Nothing is rebuilt by this refusal"
+                        blk43_lba_sreg=$(grep -oE 'r[0-9]+' <<<"$blk43_lba_store" | head -1)
+                        blk43_lba_sln=$(grep -n -F "$blk43_lba_store" <<<"$blk43_body" | tail -1 | cut -d: -f1)
+                        blk43_r1_ln=$(grep -n -F "$blk43_r1" <<<"$blk43_body" | tail -1 | cut -d: -f1)
+                        [[ -n "$blk43_lba_sreg" && -n "$blk43_lba_sln" && -n "$blk43_r1_ln" ]] ||
+                            layout_fail "st_read_single_block's sector-store scan could not read the register or the line numbers out of the linked body (store [$blk43_lba_store], stored reg [$blk43_lba_sreg], store line [$blk43_lba_sln], load line [$blk43_r1_ln]). This refusal is about the SCAN and not about the arm. Nothing is rebuilt by this refusal"
+                        [[ "$blk43_lba_sreg" != "$blk43_r1_reg" ]] ||
+                            layout_fail "st_read_single_block writes its sector variable with \`$blk43_lba_sreg\` while \`$blk43_lba_sreg\` is ALSO the base register of the load - so the value stored is not the number this clause reads and the whole assertion would be about the wrong operand. Nothing is rebuilt by this refusal"
+                        (( blk43_r1_ln > blk43_lba_sln )) ||
+                            layout_fail "st_read_single_block loads its CMD17 argument on line $blk43_r1_ln and writes the sector variable on line $blk43_lba_sln - **the load is ABOVE the store**, so the number the command sends is the PREVIOUS value and rung 51's sector never reaches the bus. Rung 51 is exactly \"the store happens before the read\", and a build whose order is inverted publishes \`_rd_arg = 0\` while every other cell reads as at value 50. Nothing is rebuilt by this refusal"
+                        blk43_lba_w=$(awk -v reg="$blk43_lba_sreg" -v n="$blk43_lba_sln" 'NR < n && $0 ~ ("(movs?|movw)[ \t]+" reg ", #") { v=$0 } END { print v }' <<<"$blk43_body")
+                        blk43_lba_imm=$(grep -oE '#[0-9]+' <<<"$blk43_lba_w" | head -1 | tr -d '#')
+                        [[ -n "$blk43_lba_imm" ]] ||
+                            layout_fail "st_read_single_block stores \`$blk43_lba_sreg\` into the sector variable at line $blk43_lba_sln and NO \`mov\`/\`movw\` immediate fills that register above it - the value reaching \`st_read_lba\` comes from a computation this clause cannot read, so it could not tell rung 51's 1 from rung 50's 0. Nothing is rebuilt by this refusal"
+                        [[ "$blk43_lba_imm" == "1" ]] ||
+                            layout_fail "st_read_single_block stores **$blk43_lba_imm** into the sector variable \`st_read_lba\` at line $blk43_lba_sln, and at STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE the rung reads **SECTOR 1 - the sector the protective MBR's single entry names** (the \`_pm_next_sector = 1\` the rung-50 press published beside its own \`_pm_arg_sector = 0\`). **0 here is rung 50's protective MBR wearing rung 51's name**: the transfer would complete, \`_rd_state\` would read 4, \`_rd_mbr\` would read 1, and \`_rd_gpt\` would be a comparison against the MBR's boot code rather than against a GPT header - the rung would be a re-run of value 49 with a different label. **The sector and the number are the whole of this rung.** Nothing is rebuilt by this refusal"
+                        echo "  xnu_entry_849: rung 51's sector is read out of the linked image: st_read_single_block stores **#$blk43_lba_imm** into \`st_read_lba\` (disassembly line $blk43_lba_sln) BEFORE it loads that same slot as CMD17's argument (line $blk43_r1_ln), so **the read addresses the sector the rung-50 decode named** - \`_pm_next_sector = 1\` - and \`_rd_gpt\` finally answers the question rungs 43-49 all meant to ask and none did: whether LBA 1 begins \`EFI PART\`. Under this card's sector addressing the argument IS the sector (\`_rd_shift = 0\`), so the number 1 on the bus is LBA 1 and not byte 512. **This clause asserts the VALUE and the ORDER; the mode and the symbol were asserted by the value-49 half above**, so the two halves together hold \"a variable, at the right address, holding the table's own sector, stored before it is read\". No byte of the medium moves and no register changes"
+                    fi
                 elif [[ $STORAGE_PROBE -le 46 ]]; then
                     [[ "$blk43_r1_imm" == "512" ]] ||
                         layout_fail "st_read_single_block loads $blk43_r1_imm into the ARGUMENT register before its call to st_send_command, and rung 43 sends 512 - \`block.c:1776-1777\`'s \`cmd.arg = blk_rq_pos(req)\` with \`if (!mmc_card_blockaddr(card)) cmd.arg <<= 9\`, which for LBA 1 is **1 << 9 = 512, A BYTE ADDRESS**. **0 here is the whole reason this clause exists**: sector 0 holds the MBR's boot code and not a GPT header, so a body that forgot the shift would produce a complete, error-free transfer whose every cell read as success and whose \`_rd_gpt\` was 0 - a false negative that looks exactly like a device that is not GPT"
