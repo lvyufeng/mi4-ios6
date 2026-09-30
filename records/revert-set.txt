@@ -11325,3 +11325,59 @@ set=armed-storage-2dbf8098 sha256=2dbf809839c95df80c290ca0b4b61c872d56fbfc87550a
 set=armed-storage-2dbf8098 sha256=36bfac0ad006c34f89621dec0f2959f3b23b4095016d6fe7efcd35029a9d0ed8 bytes=6765976 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-LARGER-than-the-rung-51-arm-s-6749560-because-st_gpt_parse-and-its-_gp_-cells-were-added-and-none-makes-a-device-access
 set=armed-storage-2dbf8098 sha256=2954b680034879a17e2235ba7dec4d3f76a776834129de594411135508825dfa bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=51-and-differing-from-the-rung-51-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
 set=armed-storage-2dbf8098 sha256=660ee985b70eb926e07201ad10f39b5f55ea2a4aed5761464992ffa7a7fe3f7d bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-source-list-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+#
+# 852 - THE RUNG-52 PRESS (STAGE90_XNU_STORAGE_PROBE=51, value 50 -> arm armed-storage-2dbf8098):
+#
+# **THE PRESS WAS TAKEN AND THE ARM IS SPENT.** One gate exit 0, one runner exit 0; `fastboot boot`
+# only, nothing flashed, nothing written to storage; `33e80afe` absent from BOTH device lists
+# hand-checked immediately before the gate; the phone returned. Capture
+# out/stage90/captures/rung52-gptheader-20260930-122619-last_kmsg.txt 655,874 bytes.
+#
+# **THE READING: THE GPT HEADER DECODED, AND THE ENTRY ARRAY IS AT LBA 2.** `_gp_called = 1`,
+# `_gp_sig_ok = 1`, `_gp_w0 = 0x20494645` ("EFI "), `_gp_w1 = 0x54524150` ("PART") - the module
+# re-checked the signature ITSELF rather than trusting rung 51's derived cell - and THE ONE FIELD THE
+# FRONTIER NAMES READS **`_gp_entry_lba = _gp_next_sector = 2`**: the 128-byte partition ENTRY ARRAY
+# lives at SECTOR 2, which is the NEXT ARM's CMD17 argument. `_gp_arg_sector = _rd_lba = 1` beside it
+# with `_gp_next_is_arg = 0` names the tension ON PURPOSE (the array is at LBA 2, this read was sector
+# 1): the next arm sets the read's sector to `_gp_next_sector` and this cell becomes 1 - **the same
+# shape as 50 -> 51, one number wide.**
+#
+# **THE HEADER'S OWN SELF-CHECK**: `_gp_my_lba = 1` with `_gp_self_ok = 1` - the header's own MyLBA
+# word agrees with the sector it was read from, a SECOND producer agreeing with the decode from a field
+# the HEADER carries. **THE ARRAY'S OWN SHAPE**: `_gp_nentries = 0x1c` (28) entries of
+# `_gp_entry_size = 0x80` (128) bytes, inside a usable region `_gp_first_usable = 0x22` (34) ...
+# `_gp_last_usable = 0x01d59fde` (30,777,310), both in range (`_gp_first_in_range = _gp_last_in_range
+# = 1`). `_gp_cap = 0x01d5a000` and `_gp_sector_addressed = 1` re-measure the addressing class.
+#
+# **NO BYTE OF THE MEDIUM MOVED AND NO DEVICE REGISTER WAS WRITTEN** - this rung is a decode of the
+# sector the rung-51 read already landed, and the run confirms it: the read cells are rung 51's, re-read
+# (`_rd_lba = _rd_arg = 1`, `_rd_shift = 0`, `_rd_blockaddr = 1`, `_rd_gpt = 1`, `_rd_complete = 1`,
+# `_rd_err = 0`, `_rd_state = 4` (TRAN), `_rd_w127 = 0`, `_rd_sig = 0`, `_rd_mbr = 0`). Honest negative
+# `_rd_cap_csd_valid = 0` (single producer). Standing readings unchanged: `seam_lr = 0x8004c2dc` did NOT
+# move, `xnu_live_seam_sctlr = 0x30c57879`, `xnu_entry_failures = 0`, `abort_entries = 0`; the goal's
+# own floor is met as in 504/520/533.
+#
+# **THE FRONTIER IS THE GPT PARTITION ENTRY ARRAY AT LBA 2** - each 128-byte entry carries a
+# partition's TYPE GUID, its FIRST LBA and its LAST LBA, the numbers a filesystem mount eventually
+# needs. Reading sector 2 and decoding the entries is the next arm, and it has the shape of rung 51: the
+# read's sector variable moves 1 -> 2 and `_gp_next_is_arg` becomes 1.
+#
+# **NO FIRER IS ARMED AND NO PRESS IS OWED.** The arm is SPENT and the park is a RECORD, not a queue.
+# **THE GOAL IS NOT MET** - no partition ENTRY read yet, no filesystem, no mount; TWRP-to-storage stays
+# withheld.
+#
+# **THE READING**: `_gp_called = 1`, `_gp_sig_ok = 1`, `_gp_w0 = 0x20494645` ("EFI "),
+# `_gp_w1 = 0x54524150` ("PART"), and THE ONE FIELD THE FRONTIER NAMES READS
+# **`_gp_entry_lba = _gp_next_sector = 2`** - the 128-byte partition ENTRY ARRAY is at SECTOR 2, the
+# next arm's CMD17 argument - with `_gp_arg_sector = _rd_lba = 1` beside `_gp_next_is_arg = 0` naming
+# the tension on purpose; `_gp_my_lba = 1` with `_gp_self_ok = 1` (the header's own MyLBA agrees with
+# the sector read); `_gp_nentries = 0x1c` (28), `_gp_entry_size = 0x80` (128), `_gp_first_usable =
+# 0x22` (34), `_gp_last_usable = 0x01d59fde` (30,777,310), both in range; `_gp_cap = 0x01d5a000`,
+# `_gp_sector_addressed = 1`. The read cells are rung 51's, re-read. Honest negative
+# `_rd_cap_csd_valid = 0` (single producer). Seam `0x8004c2dc` did NOT move; `xnu_entry_failures = 0`,
+# `abort_entries = 0`.
+#
+# **THE FRONTIER IS THE GPT PARTITION ENTRY ARRAY AT LBA 2** - each 128-byte entry carries a
+# partition's TYPE GUID, FIRST LBA and LAST LBA; the next arm moves the read's sector 1 -> 2 and
+# `_gp_next_is_arg` becomes 1. **NO PRESS IS OWED.** **THE GOAL IS NOT MET** - no partition entry read
+# yet, no filesystem, no mount; TWRP-to-storage stays withheld.
