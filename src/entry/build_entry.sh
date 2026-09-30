@@ -32524,6 +32524,70 @@ verify_trace_symbols() {
                     layout_fail "rung 48's MBR comparison is not one comparison: the \`movw #43605\` is at disassembly line [${mbr_imm_ln:-none}] and the \`cmp r?, r?, lsr #16\` at [${mbr_cmp_ln:-none}], and the clause requires the constant loaded BEFORE the shift-compare and within 8 instructions of it. **This is the pairing that makes \`_rd_mbr\` an actual test of the sector's own last word**: the two instructions are GCC's split of the single source expression \`(((st_read_block[ST_EXT_CSD_WORDS - 1u] >> 16) & 0xFFFFu) == 0xAA55u)\`, so a body whose \`#43605\` sat hundreds of instructions from its \`lsr #16\`, or held one and not the other, would be a body that published the cell name without the comparison the name claims. The word INDEX is not asserted here - it is a frame offset and asserting it would pin a stack layout - so this pairing, the count of ONE \`lsr #16\` above, and the key list are together what make the cell real"
                 echo "  xnu_entry_843: rung 48's MBR signature is read out of the linked image: st_read_single_block materializes 0xAA55 (#43605) and touches word index 127, so its derived cell \`_rd_mbr\` compares the sector's OWN LAST WORD's high half against the MBR signature - **and the whole of rung 48 is the address this clause's sibling clause (xnu_entry_832) now asserts: r1 = #$blk43_r1_imm, LBA 0, the PROTECTIVE MBR**. The body is otherwise rung 47's byte for byte; the sector is the only thing that moved"
             fi
+            if [[ $STORAGE_PROBE -ge 48 ]]; then
+                # **844: RUNG 49'S OWN CLAUSE - THE PARTITION TABLE, AND WHY ITS SAFETY IS A NEGATIVE
+                # ASSERTION RATHER THAN A POSITIVE ONE.**
+                #
+                # Every clause above asserts what a body DOES - what command word reaches the block, what
+                # registers it touches, what bytes come back. **This rung's subject is a body that must DO
+                # NOTHING TO THE DEVICE AT ALL**: `st_mbr_parse` walks four 16-byte records that
+                # `st_read_single_block` ALREADY moved into `st_read_block`, so it sends no command, opens
+                # no enable window, writes no register and moves no byte of the medium. The rung's whole
+                # safety claim is a count that must be ZERO, and a claim of that shape is exactly the kind
+                # this ladder insists on making STRUCTURAL rather than a sentence ([[mi4-a-claim-in-a-comment-is-not-a-check]]):
+                # if a later edit let `st_mbr_parse` issue a command, no cell would change and no run
+                # would fail - the arm would quietly be rung 48 with an extra sector read, and the
+                # partition cells would be decoded from a sector nobody meant to fetch.
+                #
+                # **THE CALLS IN THE BODY ARE ASSERTED AS A SET, AND THE SET IS `{entry_live_write}`.**
+                # That is the strongest form of "touches nothing": every `bl` the module makes is to the
+                # live-writer that publishes its cells, so a body containing a `bl <st_send_command>` (or
+                # to any other function at all) is refused by NAME COUNT, without naming the address of a
+                # register - which is what makes it survive any change to how the block is addressed.
+                mp_addr=$(sym_addr st_mbr_parse) ||
+                    layout_fail "rung 49's partition walk is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: out/xnu_arm_entry.elf has no \`st_mbr_parse\`, so the MBR's four partition records are never decoded and this arm is rung 48 wearing a new number - an absence no cell can show, because every key below belongs to a build that did emit the body. Nothing is rebuilt by this refusal"
+                mp_next=$(sym_next "$mp_addr") ||
+                    layout_fail "nothing follows st_mbr_parse in the linked image, so this clause's window has no end. Nothing is rebuilt by this refusal"
+                mp_body=$(arm-none-eabi-objdump -d --start-address="$mp_addr" --stop-address="$mp_next" "$OUT/xnu_arm_entry.elf")
+                mp_allbl=$(grep -cE 'bl[[:space:]].*<[^>]+>' <<<"$mp_body" || true)
+                mp_livebl=$(grep -cE 'bl.*<entry_live_write>' <<<"$mp_body" || true)
+                [[ "$mp_allbl" == "$mp_livebl" && "$mp_livebl" -ge 1 ]] ||
+                    layout_fail "st_mbr_parse makes $mp_allbl call(s) of which $mp_livebl are to entry_live_write, and rung 49's partition walk must call **NOTHING BUT the live-writer that publishes its cells**. Any other callee means the rung's own safety claim is false: this body exists to decode bytes ALREADY in \`st_read_block\`, so a \`bl <st_send_command>\` here would issue a SECOND sector read the arm's record never describes - the transfer would complete, every cell would read as success, and the partition numbers would be decoded from a sector fetched by a step no part of this document names. **The claim is a NEGATIVE and a negative is only as strong as the check that refuses its violation** - a count equal to the live-writer's own call count is that check, and it is deliberately keyed on NAMES and not on register addresses so it survives any change to how the block is addressed. Nothing is rebuilt by this refusal"
+                # **THE SIGNATURE IS RE-CHECKED, AND THE CHECK READS THE SAME IMMEDIATE 843 DOES.** The
+                # module compares `(st_read_block[127] >> 16) & 0xFFFF` against `ST_MBR_SIG` = 0xAA55 =
+                # 43605, so a correct build materializes `#43605` in THIS body too - and that presence is
+                # what says the parse is GATED on the sector really being an MBR rather than assuming it.
+                # A body that decoded four records without re-checking the signature would publish four
+                # LBA-looking numbers off any 512 bytes that happened to sit in the buffer (a read that
+                # was gated, a read that timed out) and every cell would still read as a plausible table.
+                mp_sig=$(grep -cE -- '#43605([^0-9]|$)' <<<"$mp_body" || true)
+                [[ "$mp_sig" -ge 1 ]] ||
+                    layout_fail "st_mbr_parse's disassembly holds no instruction materializing 43605 = **0xAA55** [hit=$mp_sig bytes=${#mp_body} addr=$mp_addr], the MBR signature the module re-checks before walking the table. **Rung 48's press measured the signature from the read's own cells, but this body must not TRUST it**: the parse runs after \`st_read_single_block\` on the SAME boot, and a boot where the read was gated or errored leaves \`st_read_block\` holding whatever the previous rung left there ([mi4-silence-is-a-reading-only-if-success-is-silent]). A \`_pm_sig_ok = 0\` beside the four LBA-looking cells is a reading; four LBA-looking cells with no signature test are four numbers with no provenance. Nothing is rebuilt by this refusal"
+                # **THE CALL SITE IS AFTER THE READ, AND THAT ORDER IS THE RUNG.** The parse reads the
+                # buffer the sector read fills, so a `bl <st_mbr_parse>` BEFORE `bl <st_read_single_block>`
+                # would decode the buffer's PREVIOUS contents - every cell would still publish and the
+                # table would be one boot stale, which is [mi4-the-step-after-the-point-of-no-return] in
+                # its cheapest form. And it must be called EXACTLY ONCE: two calls is an arm whose answer
+                # cannot be attributed to one read.
+                mp_calls=$(grep -c -- 'bl.*<st_mbr_parse>' <<<"$stb_path_body" || true)
+                [[ "$mp_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $mp_calls call(s) to st_mbr_parse and rung 49 parses the sector exactly ONCE. Zero means the partition table is never walked and this arm is rung 48 with a body the linker kept but the caller never reached; two or more means the walk runs on a buffer that a later call may have refilled, so no cell is attributable to one read. Nothing is rebuilt by this refusal"
+                mp_call_ln=$(awk '/bl.*<st_mbr_parse>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                mp_rd_ln=$(awk '/bl.*<st_read_single_block>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                [[ -n "$mp_rd_ln" ]] ||
+                    layout_fail "st_cmd_path makes no call to st_read_single_block, so rung 49's parse has no buffer to walk and this clause has nothing to order it against. That absence is itself the refusal: a value-48 arm whose sector read is gone is an arm whose partition walk would run on a stale buffer. Nothing is rebuilt by this refusal"
+                (( mp_call_ln > mp_rd_ln )) ||
+                    layout_fail "st_cmd_path calls st_mbr_parse on disassembly line $mp_call_ln and st_read_single_block on line $mp_rd_ln: rung 49's WHOLE ACT is that the table is decoded out of the sector the read JUST moved, so the parse must fall AFTER the read. A parse above it walks \`st_read_block\` as the previous rung left it - the cells would publish and read as a plausible MBR table one boot stale, which is the arm's own answer replaced by the arm below it without a single cell changing. Nothing is rebuilt by this refusal"
+                for _k in xnu_live_storage_pm_called xnu_live_storage_pm_sig xnu_live_storage_pm_sig_ok \
+                          xnu_live_storage_pm_entries xnu_live_storage_pm_p0_type xnu_live_storage_pm_p0_active \
+                          xnu_live_storage_pm_p0_first xnu_live_storage_pm_p0_len xnu_live_storage_pm_nonzero \
+                          xnu_live_storage_pm_index xnu_live_storage_pm_nonzero_type xnu_live_storage_pm_nonzero_first \
+                          xnu_live_storage_pm_nonzero_len xnu_live_storage_pm_nz_active xnu_live_storage_pm_done; do
+                    grep -qa "$_k" "$OUT/xnu_arm_entry.elf" ||
+                        layout_fail "rung 49 publishes no \`$_k\` string in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE. **Each one is a different outcome and the press reads them together**: \`_pm_sig_ok\` is the gate (0 = the sector is not an MBR and the four records below are NOT a table); \`_pm_entries\` = 4 is the walk's own bound; \`_pm_p0_*\` is entry 0's record whatever it is; \`_pm_nonzero\`/\`_pm_index\` name the FIRST record whose type byte is not zero, and \`_pm_index\` says WHICH of the four it was - a medium whose first real partition is entry 3 is a different medium from one whose first is entry 0; \`_pm_nonzero_type\`/\`_pm_nonzero_first\`/\`_pm_nonzero_len\` are that partition's type code and its first LBA and length, which is the sector the next rung reads. **A rung that published four records and not the index would leave a reader unable to tell an all-zero table from a malformed one.** Nothing is rebuilt by this refusal"
+                done
+                echo "  xnu_entry_844: rung 49's partition walk is read out of the linked image: st_mbr_parse (at $mp_addr) makes $mp_allbl call(s), ALL of them to entry_live_write ($mp_livebl) - **so it sends NO command, opens NO window, and touches NO device register**: it decodes the four 16-byte MBR records at bytes 446-509 out of the buffer st_read_single_block already filled, re-checks the 0xAA55 signature ITSELF (#43605 present in this body too), and is called by st_cmd_path ONCE on disassembly line $mp_call_ln, AFTER st_read_single_block (line $mp_rd_ln) so the table is the sector the read just moved and not a stale buffer. **The record is not word-aligned** (\`446 = 4*111 + 2\`: byte 0 of each record is word 111+4k's HIGH half, the type byte is word 112+4k's high half, and the first-LBA/length words at 113+4k/114+4k are the aligned little-endian fields the standard puts at bytes 8-11/12-15). No byte of the medium moves, no register is written, and the medium is not touched at all"
+            fi
             if [[ $STORAGE_PROBE -ge 41 ]]; then
                 # **831: RUNG 42'S OWN CLAUSE - THE FIRST CLAUSE HERE THAT ASSERTS A COMMAND WHOSE
                 # ARGUMENT IS A VALUE THE MEDIUM LATER MOVES BY.** Rungs 11 through 38 assert what a

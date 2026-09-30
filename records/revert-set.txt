@@ -10942,3 +10942,75 @@ set=armed-storage-8f0d41fd sha256=923a75fad5131647f2978582ee1e37094afce46a59f783
 #
 # **THE GOAL IS NOT MET**: no partition entry decoded, no filesystem, no mount.
 # NO FIRER IS ARMED AND NO PRESS IS OWED; TWRP-to-storage stays withheld.
+
+# ---------------------------------------------------------------------------
+# 845: THE RUNG-49 ARM - THE MBR PARTITION TABLE, DECODED OUT OF THE SECTOR
+# THE READ ALREADY MOVED. STAGE90_XNU_STORAGE_PROBE=48, VALUE 48 = ORDINAL RUNG 49.
+# **PARKED, NOT PRESSED, NOT ARMED.**
+#
+# WHAT IT IS: the rung-48 press (844) MEASURED THE MEDIUM'S LAYOUT - `_rd_mbr = 1`
+# with `_rd_sig = 0xAA55`, so **THE MEDIUM IS MBR-PARTITIONED** (bytes 510-511 of
+# LBA 0 hold the signature). The partition table is the FOUR 16-BYTE RECORDS at
+# bytes 446-509 of THAT SAME SECTOR - already in the image's `st_read_block` - so
+# rung 49 **sends NO command, opens NO window, moves NO byte off the medium and
+# writes NO register**: it decodes what the read already fetched.
+#
+# **ITS SAFETY CLAIM IS A NEGATIVE AND THE BUILD MAKES IT STRUCTURAL.** A claim of
+# the form "this body does nothing to the device" is only as strong as the check
+# that refuses its violation, so `xnu_entry_844` requires EVERY `bl` in
+# `st_mbr_parse`'s linked body to be to `entry_live_write`, the cell-publisher, and
+# refuses a body containing ANY other callee by name count. If a later edit let the
+# parse issue a command, no cell would change and no run would fail - the arm would
+# quietly be rung 48 with an extra sector read, and the partition cells would be
+# decoded from a sector nobody meant to fetch. Measured on this build: 14 calls, ALL
+# to entry_live_write.
+#
+# **THE RECORD IS NOT WORD-ALIGNED, AND THAT IS THE ONE WAY THIS GOES WRONG
+# SILENTLY.** `446 = 4*111 + 2`, so each record's byte 0 (the boot flag) is the HIGH
+# half of word `111+4k` and its TYPE byte is the HIGH half of word `112+4k`, while
+# the two 32-bit fields the standard puts at bytes 8-11 and 12-15 ARE word-aligned
+# at `113+4k` and `114+4k` and read little-endian with NO swizzle. A parser that
+# took the type from a word's low byte, or byte-reversed the LBA word, would read a
+# plausible but WRONG number and every cell would still read as success.
+#
+# **THE SIGNATURE IS RE-CHECKED, NOT TRUSTED.** The module re-tests
+# `(st_read_block[127] >> 16) & 0xFFFF == 0xAA55` itself and publishes `_pm_sig_ok`;
+# the clause refuses a body that walks the table without materializing 43605. A boot
+# where the read was gated or errored leaves the buffer holding whatever the
+# previous rung left there, and four LBA-looking numbers with no signature test are
+# four numbers with no provenance.
+#
+# **AND THE CALL SITE IS AFTER THE READ.** The clause refuses unless st_cmd_path
+# calls st_mbr_parse EXACTLY ONCE and its line falls BELOW `bl <st_read_single_block>`
+# - a parse above it would publish a table one boot stale with no cell changing.
+#
+# THE ENTRY-GROUP PAGE MOVE DID NOT FIRE: `STAGE90_XNU_SEAM_LR` stays 0x8004c2dc,
+# printed by `xnu_entry_535` in this build. The arm's bin is 5,569,148 bytes (the
+# same size as the rung-47/48 arms'); the elf is 6,749,472 (32 bytes larger than the
+# rung-48 arm's 6,749,440: ONE function added, no device access).
+#
+# READ THE ROWS: `_pm_sig_ok = 1` is THE SECTOR IS AN MBR AND THE FOUR RECORDS ARE A
+# TABLE. `_pm_nonzero = 1` with `_pm_index` names the FIRST record whose type byte is
+# not zero, and `_pm_nonzero_type`/`_pm_nonzero_first`/`_pm_nonzero_len` give its
+# type code and its first LBA and length - **`_pm_nonzero_first` is the sector the
+# next rung reads**. `_pm_p0_*` is entry 0's record whatever it is. `_pm_sig_ok = 0`
+# is THE SECTOR IS NOT AN MBR (stale/gated read). `_pm_nonzero` ABSENT with
+# `_pm_done = 1` is A TABLE WITH NO NON-ZERO TYPE (a protective-only MBR or an empty
+# one), which moves the frontier back to the medium's layout.
+#
+# NOTHING IS ARMED AND NO PRESS IS OWED: this arm is PARKED and the park is a
+# RECORD and not a queue. `fastboot boot` only; nothing flashed; the medium is not
+# touched at all. **THE GOAL IS NOT MET** - no partition's sector read, no
+# filesystem, no mount; TWRP-to-storage stays withheld.
+#
+set=armed-storage-ee0ab2e6 sha256=1cf89cd9a9521e5ba845f164cde43671b8de22bd220617f6d6666bb4b2376ab4 bytes=8589312 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-48-entry-rung-49-PARSES-THE-MBR-PARTITION-TABLE-FROM-THE-SECTOR-RUNG-48-ALREADY-READ-NOT-PRESSED
+set=armed-storage-ee0ab2e6 sha256=a3bb287a8346d739da1d0d6e4597bc61915b36840d820e5b222334828bafe5df bytes=6064644 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-48-entry-no-payload-switch-moved
+set=armed-storage-ee0ab2e6 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-48-s-MEASURED-no-payload-switch-moved
+set=armed-storage-ee0ab2e6 sha256=d4b7380bd83391384c74ee66693ef917bf5129eb9ec0a2a237aa95b63a8a6bb4 bytes=6126716 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-UNCHANGED-from-the-rung-47-and-48-arm-s-6126716
+set=armed-storage-ee0ab2e6 sha256=eab7a5a9a59e8bd0a12368ac42a9b8e11067a3f99999ab5ea9606adf4a47426e bytes=6068224 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-ee0ab2e6 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-ee0ab2e6 sha256=b6e0becb66048394e99894ec145002fa2efebc438416fe35f0c6cb8617a054fc bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-ee0ab2e6 sha256=ee0ab2e68c867b2fe065181b424b12ab01051817e461e20ed8e798a75930b290 bytes=5569148 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-ee0ab2e6-IS-THE-SETS-NAME-same-5569148-bytes-as-the-rung-47-and-48-arms-because-the-new-body-adds-no-device-code-and-the-difference-is-the-st_mbr_parse-function-plus-the-call
+set=armed-storage-ee0ab2e6 sha256=7caed6e0a86879f412afb638d31f64229c2bd716e8b916bbf622ba76fd8eede3 bytes=6749472 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-32-bytes-LARGER-than-the-rung-48-arm-s-6749440-because-one-function-st_mbr_parse-was-added-and-it-makes-NO-device-access-at-all
+set=armed-storage-ee0ab2e6 sha256=c9a09ecaa5aa568734295f8e3308dfd7f5daf7e50e86c1403ff167be5d670cad bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=48-and-differing-from-the-rung-48-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
+set=armed-storage-ee0ab2e6 sha256=a82aa95a9d1cca9f051b1c5a5dc50ece167c4bba7c35f22b6924390f2a36c20a bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-SIX-of-its-content-lines-move-this-arm-including-entry_storage-c-build_entry-sh-and-verify_press_ready-sh-which-carries-the-value-48-narration-arm
