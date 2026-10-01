@@ -40,7 +40,32 @@ for sym in $WANT; do
     grep -qE "(^|[ *])$sym[ (]" "$SHIMS" || refuse "$SHIMS no longer defines $sym (the ten of 871)"
 done
 
-# --- 2. every macro the force header adds is absent from 4570 (or identical where 4570 has it) -----
+# --- 2. the file list names exactly the staged sources ---------------------------------------------
+# `src/supply/hfs_files.txt` is what the build will add to the manifest; it must name every `.c` the
+# stager staged and nothing that is not there, or the build would silently compile a different set
+# from the one 876 measured in place.
+LIST=$REPO_ROOT/src/supply/hfs_files.txt
+if [[ ! -d $XNU/bsd/hfs ]]; then
+    # The tree is not staged (a fresh checkout, or `external/` re-provisioned): the two tree-list
+    # checks cannot run, and they are the ONLY ones that need the tree.  Say so rather than pass
+    # silently - a check that skipped is a check that did not run, and silence would read as covered.
+    printf 'check_hfs_staged: NOT STAGED - %s/bsd/hfs is absent; the tree-list checks did not run.\n' \
+        "${XNU##*/}" >&2
+    printf 'check_hfs_staged: run tools/stage_hfs.sh to stage 2050'\''s HFS+ into the tree.\n' >&2
+elif [[ -f $LIST ]]; then
+    while read -r rel; do
+        case $rel in '' | '#'*) continue ;; esac
+        [[ -f $XNU/$rel ]] || refuse "$LIST names $rel, which is not in the tree (run tools/stage_hfs.sh?)"
+    done <"$LIST"
+    for f in "$XNU"/bsd/hfs/*.c "$XNU"/bsd/hfs/hfscommon/*/*.c; do
+        rel=${f#"$XNU"/}
+        grep -qxF "$rel" "$LIST" || refuse "$rel is staged but not named in $LIST"
+    done
+    [[ -f $XNU/bsd/vfs/vfs_journal.c ]] && \
+        grep -qxF "bsd/vfs/vfs_journal.c" "$LIST" || refuse "vfs_journal.c is staged but not named"
+fi
+
+# --- 3. every macro the force header adds is absent from 4570 (or identical where 4570 has it) -----
 # `#define NAME value` rows only; the function-like `kmem_alloc(map, addr, size)` rows are edits to
 # the CALL SHAPE and are checked by the probe's own compile, not here.
 if [[ -d $XNU/bsd ]]; then

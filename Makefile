@@ -157,7 +157,10 @@ restore:
 #                           checkout that can fall behind them. It refuses a force-header #define that
 #                           4570 already defines at a different value - the "one value, two definitions"
 #                           defect, silent when it happens - and a shims file that no longer defines the
-#                           ten symbols 871 measured the port at. No compiler, no device. (874.)
+#                           ten symbols 871 measured the port at. It also checks src/supply/hfs_files.txt
+#                           (the manifest's HFS additions) against the staged tree, and SKIPS that part
+#                           with a printed note when the tree is not staged rather than passing quietly.
+#                           No compiler, no device. (874/875/876.)
 check:
 	@tools/check_stage_paths.sh
 	@tools/check_set_name_rule.sh
