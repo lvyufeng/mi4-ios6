@@ -55,6 +55,13 @@ ln -s "$SANDBOX/tree" "$SANDBOX/root/hfs"
 cp "$REPO_ROOT/external/xnu-2050.18.24/bsd/vfs/vfs_journal.h" "$SANDBOX/supply/vfs/vfs_journal.h"
 cp "$REPO_ROOT/external/xnu-2050.18.24/bsd/machine/spl.h"     "$SANDBOX/supply/machine/spl.h"
 
+# The journal is not a shim, it is a FILE the port brings: HFS's `journal_*` (18 of the 25 link symbols)
+# are 2050's `bsd/vfs/vfs_journal.c`, `#if JOURNALING`.  It is copied beside the port and compiled by
+# the same loop, so the LINK GAP below counts it as bought rather than owed.  Its header comes with it
+# by a quoted include (`"vfs_journal.h"`), so both land in the tree.
+cp "$REPO_ROOT/external/xnu-2050.18.24/bsd/vfs/vfs_journal.c" "$SANDBOX/tree/vfs_journal.c"
+cp "$REPO_ROOT/external/xnu-2050.18.24/bsd/vfs/vfs_journal.h" "$SANDBOX/tree/vfs_journal.h"
+
 python3 - "$SANDBOX" <<'PY'
 import sys
 sandbox = sys.argv[1]
@@ -104,11 +111,21 @@ open(sandbox + "/port_force.h", "w").write("""/*
 #define M_HFSDIRHINT  95   /* 2050 bsd/sys/malloc.h:188 */
 #define M_HFSBITMAP   96   /* 2050 bsd/sys/malloc.h:189 */
 
+/* Two more of the same kind, owed by the JOURNAL (2050 bsd/vfs/vfs_journal.c, `#if JOURNALING`):
+ * the port brings that file, so its malloc types come with it.  Also free in 4570. */
+#define M_JNL_JNL     91   /* 2050 bsd/sys/malloc.h:184 */
+#define M_JNL_TR      92   /* 2050 bsd/sys/malloc.h:185 */
+
 /* Two obsolete namei flags 4570 dropped.  Both are read only in the absurd branch (declare a wap for
  * a name that does not exist), so the VALUE does not matter and the port should not invent one that
  * looks meaningful.  Kept at 2050's numbers so a future reader can find them. */
 #define DOWHITEOUT   0x00040000  /* 2050 bsd/sys/vnode.h:209, OBSOLETE */
 #define ISWHITEOUT   0x00000080  /* 2050 bsd/sys/vnode.h, OBSOLETE */
+
+/* 2050's journal layer uses a PRIVATE buf flag that 4570's buf_internal.h dropped.  4570 still has
+ * B_ZALLOC (0x08000000) and B_COMMIT_UPL (0x40000000) around it, so 0x10000000 is free here and the
+ * port can take 2050's own value.  Set exactly where 2050 set it, in `modify_block_start`. */
+#define B_NORELSE   0x10000000  /* 2050 bsd/sys/buf_internal.h:216 - don't brelse() in bwrite() */
 
 /* 4570's vfc_vfsflags has no DIRLINKS bit and nothing reads one.  **This value is a PLACEHOLDER and
  * the port must NOT take it as-is**: 0x020 is VFC_VFSCANMOUNTROOT in 4570's table, so the bit has to
@@ -119,6 +136,10 @@ open(sandbox + "/port_force.h", "w").write("""/*
 /* 4570's kmem_alloc takes the owning memory tag; 2050's took three arguments.  One line here instead
  * of seven call sites.  VM_KERN_MEMORY_FILE is 4570's own answer for a filesystem's buffer. */
 #define kmem_alloc(map, addr, size) kmem_alloc((map), (addr), (size), VM_KERN_MEMORY_FILE)
+
+/* Its kobject sibling, dropped in the same 4570 restructuring (vm_kern.h:160 vs :240): the JOURNAL
+ * calls it four times (vfs_journal.c:1120, 1708, 1878, 2061).  Same one-line shape. */
+#define kmem_alloc_kobject(map, addr, size) kmem_alloc_kobject((map), (addr), (size), VM_KERN_MEMORY_FILE)
 """)
 
 # --- shim 3: the OPTIONS the port's own configuration declares --------------------------------------
@@ -142,6 +163,12 @@ with open(sandbox + "/port_force.h", "a") as f:
 #endif
 #ifndef CONFIG_HFS_STD
 #define CONFIG_HFS_STD 1
+#endif
+/* MASTER:192.  The journal's real body is `#if JOURNALING` (vfs_journal.c:124); unset, the file
+ * compiles its `#else` stub arm and the TRIM entry points HFS calls (journal_trim_set_callback,
+ * journal_trim_add_extent, journal_trim_remove_extent) never exist. */
+#ifndef JOURNALING
+#define JOURNALING 1
 #endif
 
 /* 4570's bsd/sys/cprotect.h dropped `cp_wrap_func_t` and `cp_register_wraps` (it restructured the
@@ -273,19 +300,25 @@ printf '\n== THE LINK GAP (CONFIG_PROTECT=0): symbols 4570 does not define and t
 printf '%s\n' "$GAP" | sed 's/^/  /'
 printf '  -- %d symbol(s) of external debt, in these families:\n' "$(printf '%s\n' "$GAP" | grep -c .)"
 cat <<'EOF'
-     journal_* + fslog_fs_corrupt   HFS's transaction journal - 2050's bsd/vfs/vfs_journal.c (its own
-                                    file), needed at mount even read-only (the journal is replayed).
+     fslog_fs_corrupt
+     fslog_fs_corrupt               hfs_vfsops.c:7702's one call, on a corrupt volume.  2050 defines it
+                                    in bsd/vfs/vfs_fslog.c:343, but its whole body is one fslog_err()
+                                    call and 4570 dropped the fslog API (no fslog_err, no FSLOG_KEY_*).
+                                    An empty shim, not a port.
      IOBSD*                         IOBSDGetPlatformSerialNumber / IsMediaEjectable /
                                     IterateMediaWithContent - from 2050's iokit/bsddev/IOKitBSDInit.cpp.
      renames                        vnode_name -> vnode_getname; is_suser() -> vfs_context_issuser();
-                                    proc_tbe / vfs_markdependency / ubc_create_upl -> ubc_create_upl_kernel.
+                                    ubc_create_upl -> ubc_create_upl_kernel; vfs_markdependency (4570 has
+                                    neither decl nor def); proc_tbe; proc_apply_thread_selfdiskacc (4570
+                                    dropped `thread->appliedstate.hw_disk` entirely - a no-op shim).
                                     One-line shims, not ports.
 EOF
 
 cat <<'EOF'
 
 WHAT THE TWO NUMBERS MEAN
-  CONFIG_PROTECT=0   ALL 36 FILES COMPILE.  Two of the eight "drifts" 865 named were not drifts at all:
+  CONFIG_PROTECT=0   ALL 37 FILES COMPILE (the 36 of HFS proper plus the journal it brings with it).
+                     Two of the eight "drifts" 865 named were not drifts at all:
                      (1) hfs_vfsutils.c:3140's `VTOCMP(vp)->cmp_type` read as `int` only because
                      `HFS_COMPRESSION` (2050's own bsd/conf/MASTER:193 option) was UNSET, so `VTOCMP`
                      never defined and the expression degraded to an implicit-int call; (2) the whole
@@ -299,8 +332,11 @@ WHAT THE TWO NUMBERS MEAN
                      restructured cprotect, so this is real work rather than a flag - the extra cost of
                      mounting a volume whose files carry protection.
 
-  So the compile half of the port is DONE at CONFIG_PROTECT=0, and the remaining cost is the LINK GAP
-  printed above: the journal (its own source file), three IOBSD* calls, and five renamed VFS symbols.
-  The mount still needs a `vfstbllist[]` row before mockfs, an `FT_HFS`, and the `HFS` option - which
-  a build sets, not this probe.
+  So the compile half of the port is DONE at CONFIG_PROTECT=0, and the LINK GAP is 10 symbols, ALL of
+  them one-line shims: three IOBSD* calls, six renamed or dropped VFS/thread helpers, and ONE empty
+  body (fslog_fs_corrupt).  The journal - 18 symbols and the file that carried them, the largest single
+  item 865 left open - is closed: 2050's bsd/vfs/vfs_journal.c compiles here once its own options and
+  malloc types are supplied (M_JNL_JNL/M_JNL_TR, both free in 4570), and it no longer appears in the
+  gap.  The mount still needs a `vfstbllist[]` row before mockfs, an `FT_HFS`, and the `HFS` option -
+  which a build sets, not this probe.
 EOF
