@@ -54,12 +54,21 @@ cp "$SRC/bsd/machine/spl.h"     "$DST/bsd/machine/spl.h"
 say "stage_hfs: applying the hfs_macos_defs.h substitution"
 "$HERE/hfs_patch_macos_defs.py" "$DST/bsd/hfs/hfs_macos_defs.h"
 
+# --- 4. the root row, in the STATIC table ---------------------------------------------------------
+# 874: the row vfs_mountroot walks must be BEFORE mockfs in vfstbllist[], and vfs_fsadd appends after
+# it, so the row is a STATIC entry - a tracked patch to the untracked tree, guarded by STAGE90_HFS_ROOT
+# so it is inert when the port is off. One definition of the edit, like the substitution above.
+say "stage_hfs: applying the vfs_conf.c HFS root row"
+"$HERE/patch_vfs_conf_hfs_row.py" "$DST/bsd/vfs/vfs_conf.c"
+
 N=$(find "$DST/bsd/hfs" -name '*.c' | wc -l)
-say "stage_hfs: staged $N .c file(s) under $DST/bsd/hfs (plus vfs_journal.c, spl.h)"
+say "stage_hfs: staged $N .c file(s) under $DST/bsd/hfs (plus vfs_journal.c, spl.h, the root row)"
 say ""
 say "REMAINING for a real HFS root (each its own step, none done here):"
-say "  * wire the HFS sources + src/shims/hfs/hfs_port_force.h into the kernel build"
-say "  * link src/supply/stage90_hfs_shims.c (the ten symbols 4570 lacks, 871)"
-say "  * the ROOT ROW: an HFS row BEFORE mockfs in bsd/vfs/vfs_conf.c - it must be STATIC, because"
-say "    874 measured that a vfs_fsadd registration lands after mockfs and is never tried as a root"
-say "  * CONFIG_PROTECT=0 in the build, and the eMMC driver behind the medium (867)"
+say "  * the ROOT ROW is staged but INERT until the port is on: build with STAGE90_XNU_HFS=1, which"
+say "    defines STAGE90_HFS_ROOT for vfs_conf.c and puts the row in vfstbllist[] before mockfs"
+say "  * src/shims/hfs/hfs_cprotect_port.h closes the cprotect gap (877/878): 37/37 compile with it"
+say "  * CONFIG_PROTECT=1 keeps the struct bufattr layout the rest of the kernel has - do NOT flip it"
+say "    per-file; the port's cprotect layer is declarations, and the ENGINE (cp_register_wraps has no"
+say "    caller) is still owed"
+say "  * the eMMC driver behind the medium (867): HFS mounts nothing until a byte moves"

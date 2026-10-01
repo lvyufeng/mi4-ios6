@@ -16,6 +16,13 @@
 #
 # It needs no compiler and no device, so it fails in a second.  See
 # [[mi4-a-claim-in-a-comment-is-not-a-check]].
+#
+# 874 ADDED A THIRD KIND OF PORT EDIT, so it gets a section here too: `bsd/vfs/vfs_conf.c` carries a
+# patch (the static HFS root row before mockfs), applied by the stager and guarded by `STAGE90_HFS_ROOT`.
+# It is the same "tracked edit to an untracked tree" as `hfs_macos_defs.h`, and the same drift applies:
+# re-provisioning `external/` restores the row-less file, and a build would then silently mount mockfs
+# with HFS wired but unreachable as root.  Section 4 refuses that, and refuses the two ways the row can
+# be present yet wrong (after mockfs - so never tried - and a stray duplicate `FT_HFS`).
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -97,9 +104,45 @@ if [[ -d $XNU/bsd ]]; then
              | sed -E 's/^#define[[:space:]]+//' | awk '{print $1, $2}')
 fi
 
+# --- 4. the HFS root row is present, guarded, and BEFORE mockfs in the static table ----------------
+# 874: `vfs_mountroot` walks `vfstbllist[]`, takes the first row that mounts and `break`s, and mockfs
+# always mounts - so the HFS row has to be a STATIC entry ahead of mockfs, not one registered at boot
+# (`vfs_fsadd` appends after the last static row, `vfs_init.c:578`).  Three things are checked, in the
+# direction that catches a re-provision (the row ABSENT), a mis-placement (the row AFTER mockfs), and
+# the earlier hand-edit defect (a duplicate enumerator, which does not compile).
+CONF=$XNU/bsd/vfs/vfs_conf.c
+if [[ -d $XNU/bsd ]]; then
+    if [[ ! -f $CONF ]]; then
+        refuse "$CONF is absent although the tree is staged - the root row cannot be there"
+    else
+        # (a) the guard and the marker, i.e. the patch ran at all.
+        grep -q "STAGE90_HFS_ROOT" "$CONF" \
+            || refuse "$CONF carries no STAGE90_HFS_ROOT guard - the 874 root row is ABSENT (run tools/stage_hfs.sh)"
+        grep -q "patch_vfs_conf_hfs_row.py" "$CONF" \
+            || refuse "$CONF carries no 874 marker comment - it may have been hand-edited, not patched"
+        # (b) the row must be BEFORE mockfs IN THE TABLE.  Anchor on mockfs's own table ROW, not on
+        #     `#if MOCKFS`: that preprocessor line appears twice (the extern block first, the table
+        #     block second), and the extern block is ABOVE the table - so anchoring on it compares
+        #     against the wrong line and reports a correct row as mis-placed.  The row is compared by
+        #     line number: the HFS row must sit above the mockfs row, because `vfs_mountroot` takes the
+        #     first row that mounts and mockfs always does.
+        hfs_line=$(grep -n '{ &hfs_vfsops, "hfs"' "$CONF" | head -1 | cut -d: -f1)
+        mnt_line=$(grep -n '{ &mockfs_vfsops, "mockfs"' "$CONF" | head -1 | cut -d: -f1)
+        if [[ -n $hfs_line && -n $mnt_line ]] && (( hfs_line > mnt_line )); then
+            refuse "$CONF has the HFS row at line $hfs_line, AFTER the mockfs row (line $mnt_line) - vfs_mountroot" \
+                   "takes the first row that mounts and mockfs always does, so it would never be tried as root"
+        fi
+        [[ -n $hfs_line ]] || refuse "$CONF has no '{ &hfs_vfsops, \"hfs\"' row in the static table"
+        # (c) exactly one FT_HFS enumerator (a second is a redefinition the compiler catches, but this
+        #     says WHICH patch produced it, and it is the shape a hand-edit produced once already).
+        n=$(grep -c 'FT_HFS     = 17' "$CONF")
+        [[ $n -eq 1 ]] || refuse "$CONF declares FT_HFS $n time(s), must be exactly one (874's row adds it)"
+    fi
+fi
+
 if (( fail )); then
     printf 'check_hfs_staged: FAIL - the HFS+ port'\''s tracked artifacts drifted from what they claim\n' >&2
     exit 1
 fi
-printf 'check_hfs_staged: ok - %d shim symbol(s) present; force-header additions do not collide with 4570\n' \
+printf 'check_hfs_staged: ok - %d shim symbol(s) present; force-header additions do not collide with 4570; 874 root row guarded and before mockfs\n' \
     "$(printf '%s\n' $WANT | grep -c .)"

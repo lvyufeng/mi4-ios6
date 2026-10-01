@@ -512,6 +512,18 @@ DEFINES=(
     -USECURE_KERNEL
 )
 
+# **874's root row.** The HFS+ port supplies `hfs_mountroot` (the `vfc_mountroot` slot a root mount
+# needs), and the row that carries it must be in the STATIC `vfstbllist[]`, before `mockfs` - 874
+# measured that a row registered after boot (`vfs_fsadd`) lands after mockfs and is never tried. That
+# table is inside the untracked 4570 tree, so the row is a **tracked patch** to `bsd/vfs/vfs_conf.c`
+# (`tools/patch_vfs_conf_hfs_row.py`, applied by `tools/stage_hfs.sh`) guarded by `STAGE90_HFS_ROOT`.
+# The guard is DEFINED for every compilation exactly when the port is on, so `vfs_conf.c` - a bsd file
+# compiled by this loop - sees the same switch the HFS sources do, and the patch is inert when the
+# port is off (the row's `#if STAGE90_HFS_ROOT` is false and `vfs_conf.c` compiles byte-for-byte as
+# 4570 shipped it). It is added to the array rather than to `EXTRA_DEFINES` because it is a property
+# of the configuration the pool is, and the pool's external `hfs_mountroot` lives in the HFS objects.
+[[ ${HFS_PORT:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_HFS_ROOT=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.
