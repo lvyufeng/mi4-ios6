@@ -11872,3 +11872,78 @@ set=armed-storage-bf9408ca sha256=bf9408cae2d72422d35492484c6f1de342cd9ce602c71c
 set=armed-storage-bf9408ca sha256=c86a002aa0800cec3d330f0a25e4e20986d57d9c4209e82ff6898d927fb3547e bytes=6767024 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-STAGE90_XNU_SEAM_LR-0x8004d2dc-UNCHANGED-from-rung-53
 set=armed-storage-bf9408ca sha256=cc348efd98436777f2eef67edbfd99827821a052a7b677605cc005156cb9dd85 bytes=920 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=56-UNCHANGED-plus-STAGE90_XNU_MOUNT=1-the-one-entry-switch-this-arm-adds
 set=armed-storage-bf9408ca sha256=1139876c0e847d3b7b6bdd283f283671fed173cd124f2b2e2c0a7c923c5ebc52 bytes=2335 file=xnu_arm_entry-sources.txt
+
+# ====================================================================================================
+# 863 (2026-10-01): THE SELECTED PARTITION NAMES ITSELF, AND RUNG 57'S OWN WITNESS IS REPAIRED.
+# ====================================================================================================
+#
+# **THIS IS A STORAGE-LADDER RUNG (value 57), NOT A MOUNT-TRACK ARM.** `STAGE90_XNU_STORAGE_PROBE=57`
+# (bound raised at `entry_storage.c:130`, `> 56` -> `> 57`), and `STAGE90_XNU_MOUNT` returns to its
+# DEFAULT 0 - so this arm is the ladder WITHOUT 862's mount callback. The two tracks are separate;
+# 862 was parked and never pressed, and this arm does not stack on it.
+#
+# **WHAT RUNG 57 MEASURED, AND THE DEFECT IT LEFT BEHIND.** 857/858 walked the WHOLE GPT entry array
+# (one CMD17 per array sector over `1 .. st_gpt_array_nsec`), decoded each sector while it was in the
+# buffer, and carried the `StartingLBA` whose extent `EndingLBA - StartingLBA` is LARGEST into
+# `st_gpt_data_sector`. 858's press showed the chain works - **and that the first partition is not the
+# filesystem** (rung 57's selector reads `st_gpt_data_sector + ST_FS_SB_SECTOR_OFF`; by-name, the
+# largest extent is `userdata` p25 = ext4, while the FIRST partition is `sbl1` p1). **But `st_part_parse`
+# and `st_part_geom`'s witness cells (`_pt_next_is_arg`, `_pt_part_sector`, `_pt_sb_sector`,
+# `_pt_part_in_range`) still compared against `st_gpt_part_sector + ST_FS_SB_SECTOR_OFF` - the FIRST
+# partition's road.** So a CORRECT rung-57 read would have logged `_pt_next_is_arg = 0`: one value with
+# two definitions (the `mi4-one-value-two-definitions` class), the code using one while meaning the
+# other. **THIS ARM CAPTURES THE SELECTED ENTRY'S IDENTITY AND PUBLISHES A WITNESS FOR IT** - the
+# identity of the mountable partition is what the goal's last clause needs, and the repair costs no
+# new device action.
+#
+# **TWO CARRIES, FILLED DURING THE SAME WALK.** `st_gpt_data_type[4]` (the selected entry's
+# PartitionTypeGUID, words 0..3 = bytes 0..15) and `st_gpt_data_name[4]` (its PartitionName, first 16
+# bytes = words 14..17, i.e. `ST_GPT_E_NAME_W0 = 14`, `_Static_assert`ed at `14 * 4 == 56`). Both are
+# written inside `st_gpt_entry_parse`'s `if (extent > st_gpt_best_extent)` branch - the SAME branch
+# that already carried `st_gpt_data_sector` - so the selection rule is untouched and the carries can
+# only ever describe the entry the selector will read.
+#
+# **THE NAME FOLDS BY CHARACTER, AND A BUILD FIRST CAUGHT IT FOLDING BY WORD.** The first version read
+# only `st_gpt_data_name[0]` and took its `>> 16` byte as character 2, so it packed characters 0,2,4,6
+# of the word stream - which on this archive's labels is `uedt`, not `user`. The fold now extracts both
+# bytes of words 0 and 1 into `_dp_name_p0`, and both bytes of words 2 and 3 into `_dp_name_p1`, in the
+# order the bytes appear. **The clause reads the FOLD's shape** (`uxth` / `and #255` / `and #65280`
+# plus an `orr ..., lsl #16`), which is how the packing came to be inspected at all.
+#
+# **`st_data_part` IS THE BODY, AND IT READS NO DEVICE AND SENDS NO COMMAND** - the whole reason this
+# rung is safe to build and park: every `bl` in it is to `entry_live_write`, and it has ZERO references
+# to the controller window `0xf9824xxx`. It publishes `_dp_type_w0..w3`, `_dp_name_w0..w3`,
+# `_dp_name_p0`, `_dp_name_p1`, `_dp_name_nonzero`, `_dp_data_sb_sector`, `_dp_first_sb_sector`,
+# `_dp_part_is_first` and `_dp_next_is_arg` (`st_read_lba == st_gpt_data_sector + 2`) - THE CORRECTED
+# WITNESS, beside the old one, both in one capture.
+#
+# **THE BUILD CLAUSE IS THE BINDING, NOT THE PROSE** (`xnu_entry_857`). The carries are reached off ONE
+# base register with offsets (base-relative `ldr [rX, #off]`), so the clause proves the BINDING rather
+# than hunting for `movw` pairs - the FIRST `movw`/`movt` pair in the body is the key-string address,
+# not the base, which is a `mi4-measurement-defects` trap this clause walked into and out of by counting
+# `grep -c` matches for the base halves over the WHOLE body. It also refuses offset-0 (`[rX]`) and
+# offset-4 (`[rX, #4]`) loads from the base - the walk's own bound and array base - and asserts the
+# two carries are adjacent (`st_gpt_data_name` immediately follows `st_gpt_data_type`).
+#
+# **NOTHING MOVED THAT MUST NOT MOVE.** Payload config byte-identical (`6c2b6038...`, MEASURED against
+# every rung since 23 - `STAGE90_XNU_ENTRY=1` is the only payload switch and it is unchanged, so the
+# entry switches move the entry image ONLY); selector base binding intact (`st_sector_for_read` at
+# `0x8000cff8` loads base `0x805601e4` at offsets 0/4/8); build counts hold (`blk43_calls`/`dr47_calls`
+# = 3, `ge_calls` = 1); **THE ENTRY-GROUP PAGE MOVE DID NOT FIRE** - `STAGE90_XNU_SEAM_LR` stays
+# `0x8004d2dc` in `entry_trace.c` and `EXIT_POP_LR_LITERAL` in `run_and_capture.sh`.
+#
+# **THE PRESS IS THE OPERATOR'S - this arm is PARKED, not armed. THE GOAL IS NOT MET: naming the
+# mountable partition is not a mounted filesystem, no filesystem is reached, and TWRP-to-storage
+# STAYS WITHHELD.**
+#
+set=armed-storage-b00b87bb sha256=61b4adae1a9f88ca05787f2d135be487fefe2c1c3e20feaa63800b8e67a9dc7b bytes=8605696 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STAGE90_XNU_STORAGE_PROBE-57-entry-rung-58-selects-the-largest-extent-and-NAMES-it-NOT-PRESSED
+set=armed-storage-b00b87bb sha256=6d89c098a8bbd8d22f88ecb0a4780b32e781abe292571dd0a2046ea0397a6623 bytes=6081060 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-PROBE-57-entry-no-payload-switch-moved
+set=armed-storage-b00b87bb sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-58-s-MEASURED-no-payload-switch-moved
+set=armed-storage-b00b87bb sha256=fd71ea2845d294c4693bfc53aa2aeb3fe6e9397cff66765ca661274ffc02417e bytes=6143132 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-b00b87bb sha256=0a1089b6d9a6d789c4fde1709b312eec2477ad1ba5d448717402ab5086c085c9 bytes=6084608 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-b00b87bb sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-b00b87bb sha256=291ff8a4b515c82878d9b53b389f70251f7ce235499841c215e282dfbbd213f2 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-b00b87bb sha256=b00b87bbf0a0773239125f31abb75e7643b6f2aca1eec4408af0f0879860b24e bytes=5585564 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-b00b87bb-IS-THE-SETS-NAME-the-value-57-arm-captures-the-SELECTED-GPT-entry-s-Name-and-TypeGUID-in-the-same-walk-and-repairs-rung-57-s-own-against-the-FIRST-partition-witness
+set=armed-storage-b00b87bb sha256=764ad976f1268ed8599d7ed904e31d7e273b2aeb7a3819ad1f2b0a0a207ce0f7 bytes=6767120 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-STAGE90_XNU_SEAM_LR-0x8004d2dc-UNCHANGED-from-rung-53
+set=armed-storage-b00b87bb sha256=d2ca37b6aa4e2f2432c86ca48b94b2248785dd3153bc1aadce0d2c819a236c9e bytes=920 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=57-plus-STAGE90_XNU_MOUNT=0-BACK-TO-ITS-DEFAULT-so-this-arm-does-not-stack-on-the-unpressed-862-mount-park
+set=armed-storage-b00b87bb sha256=12d89f11c18b7fe11c27ae642aedfa92756b6567cde9ce45e94402366323c0af bytes=2335 file=xnu_arm_entry-sources.txt

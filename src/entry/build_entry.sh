@@ -33191,6 +33191,113 @@ verify_trace_symbols() {
                     layout_fail "st_cmd_path calls st_part_geom on line $pg_call_ln, st_part_parse on line $pt_call_ln and the last st_read_single_block on line $pt_rd3_ln - **the geometry decode must run after BOTH the read that fills the buffer and the decode that names the family**. Run above the read it decodes bytes the transfer never landed; run above st_part_parse it is on the wrong side of the only other body that reads the same buffer. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_856: rung 56's geometry decode is read out of the linked image: st_part_geom (at $pg_addr) makes $pg_allbl call(s), ALL of them to entry_live_write ($pg_livebl) - **so it sends NO command, opens NO window, and touches NO device register** (0 controller-window references) - and it is called by st_cmd_path ONCE on line $pg_call_ln, AFTER \`st_part_parse\` (line $pt_call_ln) and after the third \`st_read_single_block\` (line $pt_rd3_ln), reading the SAME \`st_read_block\` all three share. **IT IS A SECOND READER OF ONE BUFFER, NOT A NEW DEVICE ACTION**: rung 56 adds no read, no store, no window, no megabyte and no register, so the medium is not touched at all. **BOTH FILESYSTEM MAGICS ARE MATERIALIZED ($pg_magic of 3 halves present, EXT4's #61267 required)** so \`_pg_which\` is a comparison and not an inheritance, and **the dual-meaning word 24 is read at its own immediate (\`#96\`, with f2fs's \`node_ino\`/\`meta_ino\` at word 25/26 = \`#100\`/\`#104\`)** - ext2/3/4's \`s_feature_incompat\` against f2fs's \`root_ino\`, one word, two names, and every family-specific cell is published only inside the branch \`_pg_which\` selects"
             fi
+            if [[ $STORAGE_PROBE -ge 57 ]]; then
+                # **RUNG 58'S OWN CLAUSE - `st_data_part`: A THIRD READER OF CARRIES, AND ITS WHOLE
+                # CLAIM IS A NEGATIVE (it sends no command) PLUS A WITNESS RUNG 57 GOT WRONG.** The
+                # body must call NOTHING but the live-writer, and it must read the SELECTED entry's
+                # carries (`st_gpt_data_sector`/`st_gpt_best_extent`/`st_gpt_scan_sector`, the type
+                # GUID `st_gpt_data_type`, the name `st_gpt_data_name`) and the read's own sector
+                # (`st_read_lba`) - and must NOT read the walk's three shape words (`st_gpt_array_nsec`
+                # + 0/4/8) or rung 53's `st_gpt_part_sector`, which live in the SAME .bss and would be
+                # silently decoded if the carry addresses were wrong (m828: prove the BINDING, not the
+                # instruction shape; [[mi4-one-value-two-definitions]]).
+                dp_addr=$(sym_addr st_data_part) ||
+                    layout_fail "st_data_part is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: rung 58's selected-partition identity decode is that body, and \`noinline\` with \`noclone\` is what keeps it one body rather than a block of the probe or a clone beside it. Nothing is rebuilt by this refusal"
+                dp_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$dp_addr" '
+                    { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bn[n] = $4; bb[n] = ($2 != "") ? 1 : 0 }
+                    BEGIN { t = strtonum(a) }
+                    END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+                [[ -n "$dp_next" ]] ||
+                    layout_fail "st_data_part (at $dp_addr) has no size in the linked image, so this clause cannot bound its body. This refusal is about the SCAN and not about the arm. Nothing is rebuilt by this refusal"
+                dp_body=$(arm-none-eabi-objdump -d --start-address="$dp_addr" --stop-address="$dp_next" "$OUT/xnu_arm_entry.elf")
+                dp_allbl=$(grep -cE 'bl[[:space:]].*<[^>]+>' <<<"$dp_body" || true)
+                dp_livebl=$(grep -cE 'bl.*<entry_live_write>' <<<"$dp_body" || true)
+                [[ "$dp_allbl" == "$dp_livebl" && "$dp_livebl" -ge 1 ]] ||
+                    layout_fail "st_data_part makes $dp_allbl call(s) of which $dp_livebl are to entry_live_write, and rung 58's identity decode must call **NOTHING BUT the live-writer that publishes its cells**. Any other callee means the rung's own safety claim is false: this body exists to publish carries the walk and the fourth read ALREADY filled, so a \`bl <st_send_command>\` here would issue a FIFTH sector read the arm's record never describes - and every cell would still read as success. **The claim is a NEGATIVE and a negative is only as strong as the check that refuses its violation** ([[mi4-a-claim-in-a-comment-is-not-a-check]]). Nothing is rebuilt by this refusal"
+                dp_dev=$(grep -cE '0xf9824[0-9a-f]{3}' <<<"$dp_body" || true)
+                [[ "$dp_dev" == "0" ]] ||
+                    layout_fail "st_data_part's disassembly names the controller window ($dp_dev match(es) for 0xf9824xxx) and rung 58's identity decode touches NO device register: the name and type GUID are CARRIES the walk filled. A window address here is a device access this rung's record does not describe. Nothing is rebuilt by this refusal"
+                # **THE BODY MUST REACH THE SELECTED ENTRY'S CARRIES, AND BY *OFFSET OFF A PROVEN
+                # BASE*, NOT BY IMMEDIATE.** The carries live in one .bss; the compiler materializes ONE
+                # base and reaches them all by `ldr rX, [base, #off]`, so the addresses appear as no
+                # `movw` immediate at all (m828: prove the BINDING - the same wrong-artifact class rung
+                # 56's clause was repaired for). The anchor is `st_gpt_array_nsec`: the selector clause
+                # already proves it is the base the walk's shape words sit at, and rung 58's deductions
+                # below are offsets from it. `off(sym)` is `sym - st_gpt_array_nsec`.
+                dp_ds_addr=$(sym_addr st_gpt_data_sector) ||
+                    layout_fail "\`st_gpt_data_sector\` - the selected partition's \`StartingLBA\` rung 58 publishes - is not in the linked image. Nothing is rebuilt by this refusal"
+                dp_be_addr=$(sym_addr st_gpt_best_extent) ||
+                    layout_fail "\`st_gpt_best_extent\` - the selected extent rung 58 publishes - is not in the linked image. Nothing is rebuilt by this refusal"
+                dp_ss_addr=$(sym_addr st_gpt_scan_sector) ||
+                    layout_fail "\`st_gpt_scan_sector\` - the array sector the selection came from, which rung 58 publishes - is not in the linked image. Nothing is rebuilt by this refusal"
+                dp_dt_addr=$(sym_addr st_gpt_data_type) ||
+                    layout_fail "\`st_gpt_data_type\` - the selected entry's 16-byte PartitionTypeGUID, captured by rung 58's branch - is not in the linked image: the walk would have no object to carry the type GUID into. Nothing is rebuilt by this refusal"
+                dp_dn_addr=$(sym_addr st_gpt_data_name) ||
+                    layout_fail "\`st_gpt_data_name\` - the selected entry's PartitionName, captured by rung 58's branch - is not in the linked image: the walk would have no object to carry the label into. Nothing is rebuilt by this refusal"
+                dp_rl_addr=$(sym_addr st_read_lba) ||
+                    layout_fail "\`st_read_lba\` - the sector the fourth read actually addressed - is not in the linked image, so rung 58 cannot publish the corrected witness \`_dp_next_is_arg\`. Nothing is rebuilt by this refusal"
+                dp_an_addr=$(sym_addr st_gpt_array_nsec) ||
+                    layout_fail "\`st_gpt_array_nsec\` - the base this clause anchors rung 58's carries to - is not in the linked image. Nothing is rebuilt by this refusal"
+                [[ $(( dp_dn_addr - dp_dt_addr )) -eq 16 ]] ||
+                    layout_fail "rung 58's two capture arrays are not adjacent as this clause reads: \`st_gpt_data_type\` $dp_dt_addr, \`st_gpt_data_name\` $dp_dn_addr - expected a 16-byte gap (four words each). Nothing is rebuilt by this refusal"
+                # **THE BASE IS MATERIALIZED ONCE AND THE REQUIRED CARRIES ARE REACHED OFF IT.** The
+                # anchor pair is `st_gpt_array_nsec` (the same address the selector clause reads), and the
+                # body must load the four selected-entry words the name fold consumes (the type GUID and
+                # name are reached as words at `st_gpt_data_type`'s and `st_gpt_data_name`'s offsets, with
+                # the last name word at `st_gpt_data_name + 12`) and the read's own sector.
+                dp_an_lo=$(( dp_an_addr & 0xFFFF ))
+                dp_an_hi=$(( ( dp_an_addr >> 16 ) & 0xFFFF ))
+                dp_lo=$(grep -cE "movw[[:space:]]+r[0-9]+, #${dp_an_lo}([^0-9]|$)" <<<"$dp_body" || true)
+                dp_hi=$(grep -cE "movt[[:space:]]+r[0-9]+, #${dp_an_hi}([^0-9]|$)" <<<"$dp_body" || true)
+                [[ "$dp_lo" -ge 1 && "$dp_hi" -ge 1 ]] ||
+                    layout_fail "st_data_part (at $dp_addr) never materializes the base pair [$dp_an_lo, $dp_an_hi] of \`st_gpt_array_nsec\` ($dp_an_addr): found $dp_lo \`movw #$dp_an_lo\` and $dp_hi \`movt #$dp_an_hi\`. Rung 58's carries are reached by offsets off THIS base (the anchor the selector clause already proves), so a body without it reaches a different object. The FIRST pair in the body is the key string's address, not the base, so this check counts the pair anywhere. Nothing is rebuilt by this refusal"
+                dp_off_dt=$(( dp_dt_addr - dp_an_addr ))
+                dp_off_dn=$(( dp_dn_addr - dp_an_addr ))
+                dp_off_rl=$(( dp_rl_addr - dp_an_addr ))
+                dp_off_nl=$(( dp_dn_addr + 12 - dp_an_addr ))
+                dp_o_dt=$(grep -cE "ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #${dp_off_dt}\]" <<<"$dp_body" || true)
+                dp_o_dn=$(grep -cE "ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #${dp_off_dn}\]" <<<"$dp_body" || true)
+                dp_o_nl=$(grep -cE "ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #${dp_off_nl}\]" <<<"$dp_body" || true)
+                dp_o_ds=$(grep -cE "ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #$(( dp_ds_addr - dp_an_addr ))\]" <<<"$dp_body" || true)
+                dp_o_be=$(grep -cE "ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #$(( dp_be_addr - dp_an_addr ))\]" <<<"$dp_body" || true)
+                dp_o_ss=$(grep -cE "ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #$(( dp_ss_addr - dp_an_addr ))\]" <<<"$dp_body" || true)
+                dp_o_rl=$(grep -cE "ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #${dp_off_rl}\]" <<<"$dp_body" || true)
+                [[ "$dp_o_dt" -ge 1 && "$dp_o_dn" -ge 1 && "$dp_o_nl" -ge 1 && "$dp_o_rl" -ge 1 ]] ||
+                    layout_fail "st_data_part (at $dp_addr) does not load the selected entry's identity and the read's sector off its base $dp_an_addr: \`st_gpt_data_type\` (offset #${dp_off_dt}) $dp_o_dt time(s), \`st_gpt_data_name\` (offset #${dp_off_dn}) $dp_o_dn, the name's last word (offset #${dp_off_nl}) $dp_o_nl, \`st_read_lba\` (offset #${dp_off_rl}) $dp_o_rl. Rung 58 publishes the selected entry's TYPE GUID and NAME and the corrected witness against the READ'S OWN SECTOR; a body missing any of the four loads is publishing a different partition's identity or a witness that is not about the read. Nothing is rebuilt by this refusal"
+                [[ "$dp_o_ds" -ge 1 && "$dp_o_be" -ge 1 && "$dp_o_ss" -ge 1 ]] ||
+                    layout_fail "st_data_part (at $dp_addr) does not publish the selection's own numbers: \`st_gpt_data_sector\` (offset #$(( dp_ds_addr - dp_an_addr ))) $dp_o_ds time(s), \`st_gpt_best_extent\` (offset #$(( dp_be_addr - dp_an_addr ))) $dp_o_be, \`st_gpt_scan_sector\` (offset #$(( dp_ss_addr - dp_an_addr ))) $dp_o_ss - every one of these must appear, because WHICH partition the name and type belong to is the extent, the sector and the array position beside them. Nothing is rebuilt by this refusal"
+                # **THE BODY MUST NOT REACH THE WALK'S OWN BOUND (`st_gpt_array_nsec`'s VALUE at offset
+                # 0) OR THE ARRAY BASE (`st_gpt_entry_lba`, offset #4).** Those two words ARE the selector's
+                # map; rung 58's body is about the SELECTED entry's carries, and a bare `[base]` load or a
+                # `[base, #4]` load here would mean the selector's arithmetic leaked into the publisher and
+                # the cells could answer about the walk's bounds rather than the selected partition. (The
+                # base REGISTER is `st_gpt_array_nsec`'s address - that is the anchor - but its VALUE is
+                # what must not be read.)
+                dp_o_v0=$(grep -cE 'ldr[[:space:]]+r[0-9]+, \[r[0-9]+\]$' <<<"$dp_body" || true)
+                dp_o_4=$(grep -cE 'ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #4\]' <<<"$dp_body" || true)
+                [[ "$dp_o_v0" == "0" && "$dp_o_4" == "0" ]] ||
+                    layout_fail "st_data_part's disassembly loads the walk's own bound at offset 0 ($dp_o_v0 time(s)) or the array base at offset #4 ($dp_o_4) - the two words the SECTOR SELECTOR computes with. Rung 58's body publishes the SELECTED entry's identity, not the walk's shape: those loads mean the selector's map leaked in and the cells could answer about the wrong object. Nothing is rebuilt by this refusal"
+                # **THE NAME FOLD IS A STRUCTURAL PROPERTY, NOT A SENTENCE.** The label is UTF-16LE, so each
+                # character's ASCII code is a `__le16` word's LOW byte, and packing the two characters
+                # of one word is `(w & 0xFF) | ((w >> 8) & 0xFF) << 8` - which the compiler recognizes as
+                # `w & 0xFFFF` and emits as **`uxth`** (unsigned halfword extend), then combines two such
+                # halfwords with `orr rX, rY, rZ, lsl #16`. The clause therefore requires BOTH the
+                # low-half extraction (`uxth`, or an explicit `and`/`bic` with #255/#65280) AND the
+                # `orr`-with-`lsl #16` that places one word's characters above bit 15 - the two shapes
+                # with no other meaning in this body. A body with neither is not decoding a UTF-16 label.
+                dp_mask=$(grep -cE '(uxth[[:space:]]+r[0-9]+, r[0-9]+|(and|bic)[[:space:]]+r[0-9]+, r[0-9]+, #(255|65280|16711680)([^0-9]|$))' <<<"$dp_body" || true)
+                dp_orrs=$(grep -cE 'orr[[:space:]]+r[0-9]+, r[0-9]+, r[0-9]+, lsl #16([^0-9]|$)' <<<"$dp_body" || true)
+                [[ "$dp_mask" -ge 1 && "$dp_orrs" -ge 1 ]] ||
+                    layout_fail "st_data_part's disassembly does not fold the name's character bytes: found $dp_mask low-half extraction(s) (expected \`uxth\`, the compiler's form for a \`__le16\` word's two characters, or an \`and\`/\`bic\` with #255/#65280) and $dp_orrs \`orr ..., lsl #16\`(s). The PartitionName is 36 UTF-16LE characters at entry byte 56, so the label is decoded two characters per word - a body with neither shape is not decoding the label the walk carried. Nothing is rebuilt by this refusal"
+                # THE BODY MUST BE CALLED, ONCE, AFTER THE READ AND THE OTHER TWO SUPERBLOCK READERS.
+                dp_calls=$(grep -c -- 'bl.*<st_data_part>' <<<"$stb_path_body" || true)
+                [[ "$dp_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $dp_calls call(s) to st_data_part and rung 58 makes exactly one. **Zero means the body is in the image and nothing calls it**, the shape of a switch no build reads; two or more means the identity is published twice. Nothing is rebuilt by this refusal"
+                dp_call_ln=$(grep -n -- 'bl.*<st_data_part>' <<<"$stb_path_body" | head -1 | cut -d: -f1)
+                (( dp_call_ln > pt_rd3_ln && dp_call_ln > pg_call_ln )) ||
+                    layout_fail "st_cmd_path calls st_data_part on line $dp_call_ln, the last st_read_single_block on line $pt_rd3_ln and st_part_geom on line $pg_call_ln. **Rung 58 publishes the read's own sector (\`st_read_lba\`) and the carries the walk filled, so it MUST run after the read** - run above it, \`st_read_lba\` names an earlier sector and \`_dp_next_is_arg\` answers about someone else's transfer. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_857: rung 58's selected-partition identity decode is read out of the linked image: st_data_part (at $dp_addr) makes $dp_allbl call(s), ALL of them to entry_live_write ($dp_livebl) - **so it sends NO command, opens NO window, and touches NO device register** (0 controller-window references) - and it is called by st_cmd_path ONCE on line $dp_call_ln, AFTER the fourth \`st_read_single_block\` (line $pt_rd3_ln) and \`st_part_geom\` (line $pg_call_ln). **IT IS A THIRD READER OF CARRIES, NOT A NEW DEVICE ACTION**: rung 58 adds no read, no store, no window and no register - it publishes the SELECTED entry's 16-byte \`PartitionTypeGUID\` (\`st_gpt_data_type\`) and its UTF-16LE \`PartitionName\` (\`st_gpt_data_name\`, folded two characters per \`__le16\` word, \`$dp_mask\` low-half extraction(s) and \`$dp_orrs\` \`orr ..., lsl #16\`) that rung 58's \`extent > best\` branch captured on the SAME statement that set \`st_gpt_data_sector\`, so name, type and sector are one entry by construction. **AND IT CORRECTS RUNG 57's WITNESS**: \`_dp_next_is_arg\` compares the read's own sector \`st_read_lba\` against \`st_gpt_data_sector + ST_FS_SB_SECTOR_OFF\` - the SELECTED partition - where \`st_part_parse\`'s \`_pt_next_is_arg\` compares it against \`st_gpt_part_sector + ST_FS_SB_SECTOR_OFF\` (rung 55's FIRST partition). On this disk those two partitions differ (858), so a CORRECT rung-57 read logs \`_pt_next_is_arg = 0\` and \`_dp_next_is_arg = 1\` beside \`_dp_part_is_first = 0\`, which is the cell that makes the two-partition picture legible. No byte of the medium moves, no register is written, and the medium is not touched at all"
+            fi
             fi
             if [[ $STORAGE_PROBE -ge 41 ]]; then
                 # **831: RUNG 42'S OWN CLAUSE - THE FIRST CLAUSE HERE THAT ASSERTS A COMMAND WHOSE
