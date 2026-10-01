@@ -671,11 +671,34 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_PWR_WAIT_TICKS STAGE90_XNU_MOUNT STAGE90_XNU_HFS_ROOT_MEDIA
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP)
+# **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
+# added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
+# UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this
+# gate refused the rung-58 arm `armed-storage-b00b87bb` (recorded 05:24, before 882's 13:14) on a key its
+# build could not have written. 882's own "nothing moved that must not move" section missed it because it
+# checked only 882's live arm and never re-ran the gate against an older park - and the press this blocks
+# is exactly the one 867 section 3.1 names as the unblocker for the eMMC-driver clause. The honest rule is
+# grounded on the ARTIFACT and not on the calendar: the entry image carries `entry_root_media_hfs_root_arm_on`
+# / `..._off` UNCONDITIONALLY (882 section 8), so this gate asks the entry ELF which arm it is rather than
+# guessing from a date. An image that carries the HFS root arm MUST record the key - a record without it
+# could send a run with the volume mapped where the exec image was expected, 882's one unloseable failure,
+# and the two arms' `xnu_live_storage_*` cells would not tell them apart afterwards. An image that CANNOT
+# carry the arm has no such value to record, and demanding one would refuse a correct record. The key stays
+# in `ENTRY_CFG_KEYS` above, so the CONVERSE check below still ACCEPTS a post-882 record that carries it.
+_entry_hfs_arm=""
+if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/dev/null \
+     | grep -q 'entry_root_media_hfs_root_arm_on'; then
+  _entry_hfs_arm=on
+fi
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
+  if [[ -z $_v && $_k == STAGE90_XNU_HFS_ROOT_MEDIA && -z $_entry_hfs_arm ]]; then
+    printf '  %s=(absent, and this entry image carries no HFS root arm to name - the key is N/A here)\n' "$_k"
+    continue
+  fi
   [[ -n $_v ]] \
-    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The fifteen variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, POST_END_RUN, POST_END_TICKS, STORAGE_PROBE, PWR_WAIT_TICKS, MOUNT, HFS_ROOT_MEDIA, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence"
+    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The fifteen variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, POST_END_RUN, POST_END_TICKS, STORAGE_PROBE, PWR_WAIT_TICKS, MOUNT, HFS_ROOT_MEDIA, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence - and HFS_ROOT_MEDIA is required only when this image is the HFS root arm, which the entry ELF above reports"
   printf '  %s=%s\n' "$_k" "$_v"
 done
 # And the converse, so a key the list above does not name cannot arrive unshown (a *tenth* when the list

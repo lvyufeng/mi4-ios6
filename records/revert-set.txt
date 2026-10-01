@@ -11980,3 +11980,53 @@ set=armed-storage-65c6424b sha256=6e2e336bb2016a1ff2e07c22936e6e3599bd5b9f984c65
 set=armed-storage-65c6424b sha256=88585a341220327c688b257892d0beaa40d29c031f9d630dbd38f7d4f8ab2e2b bytes=9129984 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-HFS+-root-media-arm-NOT-PRESSED
 set=armed-storage-65c6424b sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
 set=armed-storage-65c6424b sha256=a705337bab36887255c537a246103c4867fdb2d08de82748ae0a837f44410e36 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+#
+# ====================================================================================================
+# 883 (2026-10-01): THE RUNG-58 ARM REBUILT FROM THE TREE THAT EXISTS — 863's `b00b87bb` IS NO LONGER
+# REVERTIBLE, AND THIS IS THE SAME EXPERIMENT REBUILT RATHER THAN AN OLD IMAGE RESTORED.
+# ====================================================================================================
+#
+# **WHY THIS SET EXISTS AND `armed-storage-b00b87bb` COULD NOT BE USED.** The plan for this step was to
+# revert `out/stage90/` to 863's parked rung-58 arm with `cp -r`, no build — the project's canonical
+# mechanism. That failed on a MEASURED fact: 863's entry image (`b00b87bb`, built 05:24) predates edits
+# to `src/entry/build_entry.sh`, `entry_storage.c` and `entry_trace.c` by 864 (rung 59, 06:48), 866
+# (rung 60, 09:05), 877 (10:20) and 882 (13:14), so `preflight_boot_check.sh`'s sources clause refuses
+# it — "the entry image is not the build of these sources". Rebuilding the entry image with 863's own
+# switch set (PROBE=57, MOUNT=0, HFS_ROOT_MEDIA=0, ISTACK_SEPARATE=0, POST_END_TICKS=115200000)
+# produced a bin of the SAME SIZE (5,585,564) but a DIFFERENT hash (`5936b246…`, not `b00b87bb…`) —
+# so the arm is NOT byte-reproducible across the later edits, and a revert of the stale park leaves the
+# gate RED on the sources clause. `b00b87bb` remains a RECORD of what 863 measured; it is no longer a
+# revertible target.
+#
+# **THIS SET IS THE SAME EXPERIMENT, REBUILT.** It is `STAGE90_XNU_STORAGE_PROBE=57` (VALUE 57 =
+# ORDINAL RUNG 58), `STAGE90_XNU_MOUNT=0` (the storage ladder, NOT 862's mount track), `HFS_ROOT_MEDIA=0`
+# (882's split is absent, so `st_medium_disk_base` serves the RAM disk on both paths) — and its payload
+# switch record is `6c2b6038…`, BYTE-IDENTICAL to rungs 23..59, so NO payload switch moved. It is the
+# arm 867 §3.1 names as the press that unstacks the eMMC-driver clause: it carries rung 57's selection
+# (walk the whole GPT entry array, select the largest extent) AND 863's repair of rung 57's own witness
+# (`st_part_parse` compared the superblock road against the FIRST partition while the selector read the
+# SELECTED one), publishing the selected entry's `Name` + `TypeGUID` in the same walk. A press of it
+# would read `_dp_next_is_arg = 1` with `_dp_part_is_first = 0`.
+#
+# **THE ENTRY IMAGE IS A NEW BUILD, AND THAT IS WHAT THE SOURCES CLAUSE MEASURES.** The two builds
+# differ in the versions of `build_entry.sh`/`entry_storage.c`/`entry_trace.c` they embedded (this one
+# carries 864/866/877/882's additions), which is why the bin hash moves and why this is a record of a
+# DISTINCT artifact and not a re-park of `b00b87bb`. `src/entry/build_entry.sh` is byte-for-byte
+# reproducible from ONE tree, but not across a tree that changed — 863's note "size-neutral against
+# rung 56's" holds here too: the size is 5,585,564 bytes, the same.
+#
+# **THE PAYLOAD IS NOT REPRODUCIBLE (408), SO `out/stage90/` IS THE ONLY COPY OF THESE BYTES** — hence
+# this record, written by hand in the step that MEASURED the set. `fastboot boot` only; nothing flashed;
+# the park is a RECORD, not a queue. **THE PRESS IS THE OPERATOR'S. THE GOAL IS NOT MET.**
+#
+set=armed-storage-5936b246 sha256=6862e4ce114d93a4900030b343992c82f27dfd7fca3cb729876bba5166fd1cb3 bytes=8605696 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STAGE90_XNU_STORAGE_PROBE-57-entry-rung-58-rebuilt-from-the-2026-10-01-tree-selection-plus-the-repaired-witness-NOT-PRESSED
+set=armed-storage-5936b246 sha256=94c80f5c0a38abb5f5d4ed85f1397f80f07c1a75fa1bcd69bd0a53707b6f2e9b bytes=6081060 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-PROBE-57-entry-no-payload-switch-moved
+set=armed-storage-5936b246 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-59-s-MEASURED-no-payload-switch-moved
+set=armed-storage-5936b246 sha256=509339c791e08bd4d1d0556d344285a9602e25e5c83bba3f67bb3dd57d9610b3 bytes=6143132 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-5936b246 sha256=5c62bff95410cb07b6cfe74f30ef98407459bb6af15e7b2723324c6b07afaa28 bytes=6084608 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-5936b246 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-5936b246 sha256=f976283ad03d61e47f95b15e28e47077e4af3fb5a0eb8482bef5bd7d3e3d978f bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-5936b246 sha256=5936b246cf04123f008016fc5665cc0abf5511d33b556a93b3e540a83f03507e bytes=5585564 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-5936b246-IS-THE-SETS-NAME-the-value-57-arm-captures-the-SELECTED-GPT-entry-s-Name-and-TypeGUID-in-the-same-walk-and-repairs-rung-57-s-own-against-the-FIRST-partition-witness-rebuilt-from-the-2026-10-01-tree-because-863-s-b00b87bb-predates-864-866-877-882
+set=armed-storage-5936b246 sha256=0ea7b8ec1f1cfa753a8fd1b7d87ad56b3009971675534eff94251891888230a4 bytes=6767852 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-STAGE90_XNU_SEAM_LR-0x8004d2dc-UNCHANGED-from-rung-53
+set=armed-storage-5936b246 sha256=fce458d8c4f5077dc8eaba2b2db4b8280f63ebd15e55bc91e35faea2d030bb0f bytes=949 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=57-plus-STAGE90_XNU_MOUNT=0-and-STAGE90_XNU_HFS_ROOT_MEDIA=0-so-this-arm-is-the-storage-ladder-does-NOT-stack-on-862-s-mount-park-and-does-NOT-carry-882-s-split
+set=armed-storage-5936b246 sha256=56ad446d2bcb3c368447fc15f0b6c4e9fe575133e65d97002ac61807b989d797 bytes=2335 file=xnu_arm_entry-sources.txt
