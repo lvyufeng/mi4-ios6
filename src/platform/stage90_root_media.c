@@ -728,7 +728,27 @@ st_media_memdev_info(dev_t dev, dk_memdev_info_t *info)
 {
     uint32_t unit = (uint32_t)minor(dev);
 
+    #if STAGE90_XNU_HFS_ROOT_MEDIA
+    /*
+     * **892: ON THE HFS ARM THE STRATEGY SERVES THE VOLUME, SO DECLINING MEMORY-BACKING LOSES THE
+     * EXEC.** 866 set this to 0 unconditionally, and its safety paragraph rested on "the strategy
+     * serves disk 0 from `g_stage90_ramdisk`, which is the very address `mi_base` names" - a fact
+     * that is TRUE ONLY WHILE THE STRATEGY'S MEDIUM IS THE MACH-O. 882's `STAGE90_XNU_HFS_ROOT_MEDIA`
+     * moves `st_medium_disk_base(0)` to the volume (`g_stage90_root_hfs`), so with `mi_mdev = 0`
+     * mockfs's file node is served the volume's raw bytes - `0x482B` at offset 1024, not `MH_MAGIC`
+     * - and `load_init_program` fails `/sbin/launchd` with ENOEXEC. That is the rung-61 press (892).
+     *
+     * The answer must describe the medium mockfs can exec from - the MACH-O - and accept the
+     * memory-backing (so mockfs's fall-through maps `g_stage90_ramdisk`, below), while the STRATEGY
+     * still serves the volume for the HFS reader. If `hfs_mountroot` succeeds the root is HFS+ and
+     * `/sbin/launchd` arrives through the strategy; if it fails, mockfs mounts and memory-backs the
+     * Mach-O. **BOTH PATHS THEN EXEC** - which is the split 882's own comment describes
+     * ("`DKIOCGETMEMDEVINFO` ... stay[s] on the Mach-O") and which 866's hard 0 silently defeated.
+     */
+    info->mi_mdev = 1;
+#else
     info->mi_mdev = 0;                                   /* 866: DECLINE memory-backing - the rung */
+#endif
     /*
      * **866: THE BOUNDS TEST MOVES ABOVE THE `mi_phys` STORE, AND THAT IS A REPAIR RATHER THAN A
      * REORDERING.** 862 wrote `info->mi_phys = (st_media_flags[unit] & ST_MEDIA_MDPHYS) ...` first and

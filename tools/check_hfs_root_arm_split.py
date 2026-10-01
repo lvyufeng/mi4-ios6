@@ -127,6 +127,27 @@ def main(argv):
                 "st_media_memdev_info derives its answer from st_medium_disk_base. That reads as a "
                 "cleanup - one accessor instead of two - and it is the defect: the two accessors exist "
                 "PRECISELY because the two readers must disagree on this arm")
+        # 892: THE BASE IS NOT THE WHOLE ANSWER. `mi_mdev` is the field mockfs's branch is DECIDED on
+        # (mockfs_vfsops.c:101-109), and when it is 0 the base above is dead - so a hard `mi_mdev = 0`
+        # defeats the split just as surely as moving the base does. 892's rung-61 press proved it: the
+        # arm set STAGE90_XNU_HFS_ROOT_MEDIA=1 with 866's unconditional `mi_mdev = 0`, so mockfs's file
+        # node was served the VOLUME and `/sbin/launchd` died with ENOEXEC. The flag must FOLLOW the
+        # switch: 1 on the HFS arm (memory-back the Mach-O, since the strategy there serves the
+        # volume), 0 off it (866's rung, where the strategy already serves the Mach-O).
+        if "mi_mdev" not in memdev:
+            failures.append(
+                "st_media_memdev_info never stores mi_mdev - mockfs's memory-backed branch is decided on "
+                "that field, so an answer that does not set it is not an answer")
+        elif "STAGE90_XNU_HFS_ROOT_MEDIA" not in memdev:
+            failures.append(
+                "st_media_memdev_info sets mi_mdev WITHOUT reading STAGE90_XNU_HFS_ROOT_MEDIA. An "
+                "unconditional value is the 866/892 defect: with mi_mdev=0 on the HFS arm the file "
+                "node's pages come through the strategy, which there serves the VOLUME, so the exec "
+                "reads 0x482B instead of MH_MAGIC (892). The flag must follow the switch")
+        elif re.search(r"mi_mdev\s*=\s*1\s*;", memdev) is None or re.search(r"mi_mdev\s*=\s*0\s*;", memdev) is None:
+            failures.append(
+                "st_media_memdev_info names the switch but does not carry BOTH `mi_mdev = 1;` (the HFS "
+                "arm) and `mi_mdev = 0;` (the baseline) - one of the two mount paths has lost its value")
 
     if failures:
         print("check_hfs_root_arm_split: REFUSING - the HFS-root arm's split is not intact:", file=sys.stderr)
@@ -137,7 +158,8 @@ def main(argv):
         return 1
 
     print("check_hfs_root_arm_split: the strategy serves the volume on STAGE90_XNU_HFS_ROOT_MEDIA and "
-          "DKIOCGETMEMDEVINFO answers with the Mach-O on every arm - the fall-through still reaches an exec")
+          "DKIOCGETMEMDEVINFO answers with the Mach-O on every arm, with mi_mdev == the switch (1 on the "
+          "HFS arm, 0 off it) - both mount paths still reach an exec")
     return 0
 
 

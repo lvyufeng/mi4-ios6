@@ -12044,3 +12044,20 @@ set=armed-storage-5c440167 sha256=5c440167928fe0e0d33ea38e10acf4bc8eea435bb057dd
 set=armed-storage-5c440167 sha256=80cc0748b4b659c14eb632ec539b6b83bf9efd943b6f4222c1eac02cdc94d7d1 bytes=7292692 file=xnu_arm_entry.elf role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
 set=armed-storage-5c440167 sha256=86a34c81ae89b235c8b4855119f758af0c062c70e803dbb7f47c843365804854 bytes=977 file=xnu_arm_entry-config.txt role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
 set=armed-storage-5c440167 sha256=fbf5bf2ad0d9b35b8992c70ed2a56e5546d8343e268b99f7ef16732560c0fada bytes=2335 file=xnu_arm_entry-sources.txt role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
+#
+# armed-storage-1cb894c8 - rung 61 CORRECTED: the mi_mdev word follows STAGE90_XNU_HFS_ROOT_MEDIA
+# (PROBE=60, MOUNT=1, HFS_ROOT_MEDIA=1, EMMC_STRATEGY=1). 892 diagnosed the ENOEXEC at
+# load_init_program: 866's unconditional `mi_mdev=0` forced mockfs's file node through
+# st_media_strategy, which under HFS=1 serves the VOLUME, so `/sbin/launchd` read 0x482B not
+# MH_MAGIC. Here mi_mdev=1, so mockfs maps the Mach-O from memory on the HFS arm. NOT PRESSED.
+set=armed-storage-1cb894c8 sha256=de743c30dc04acd9f337cb5de987c6efad2565f868a939fff57e62ebf0f134ce bytes=9129984 file=stage90-qcdt.img role=PROBE-60-MOUNT-1-HFS-1-EMMC-1-rung-61-CORRECTED-mi_mdev-follows-the-HFS-switch-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-NOT-PRESSED
+set=armed-storage-1cb894c8 sha256=f85b8134f4a18634f7ea81e1d1c4bacf9c18a4246e2134d3a7d1b88ed92b0791 bytes=6605348 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-1cb894c8-entry-no-payload-switch-moved-from-rung-61
+set=armed-storage-1cb894c8 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rung-61-s-MEASURED-no-payload-switch-moved
+set=armed-storage-1cb894c8 sha256=3c0558fdbc3acf7b396330532067168d15b077ea15c38c0169395c58ee58aa9c bytes=6667420 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-1cb894c8 sha256=b8575c39523b38395afa5a4ace8074346b0dfc8668baf2e14fc677636bc725c3 bytes=6608896 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-1cb894c8 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-1cb894c8 sha256=3afe93d14ff064df81625c7430e457ef52b2ea4627cb89aa037ae7dccced6db1 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-1cb894c8 sha256=1cb894c8a3dab4b45809e63354c4bb100588814f0d2e71c176dedcf1d0aa3411 bytes=6109852 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-1cb894c8-IS-THE-SETS-NAME-rung-61-corrected-st_media_memdev_info-s-mi_mdev-follows-STAGE90_XNU_HFS_ROOT_MEDIA-1-on-the-HFS-arm-0-off-it
+set=armed-storage-1cb894c8 sha256=b863a8932ab20bf1849d0f60ae5254bb0f867ad4499c1aaa67327d410e713370 bytes=7292692 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-1cb894c8 sha256=259375de1b72996e95e223c5981a3706839589b7a8405119eed9fe5f06e3377a bytes=977 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-PROBE=60-MOUNT=1-HFS_ROOT_MEDIA=1-EMMC_STRATEGY=1-the-rung-61-set-with-mi_mdev-corrected
+set=armed-storage-1cb894c8 sha256=1cbb1e237fe9aa5da720aecc66de292af2baa16497d564e4e28a7b4e33df585f bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-list-bound-by-the-build
