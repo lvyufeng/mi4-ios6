@@ -71,6 +71,48 @@ typedef struct cp_wrap_func *cp_wrap_func_t;
 #endif
 
 /* ------------------------------------------------------------------------------------------------
+ * 1b. Scoped renames - 4570 MOVED these symbols into the common VFS after 2050, so 2050's HFS copies
+ *     collide at link.
+ *
+ * Reached only by the FIRST real kernel link of the port (895's step): experiments 869/871/873 proved
+ * 38/38 COMPILE and a zero link gap against the *probe's* stand-ins, and 885 linked the port only
+ * into the *platform* objects. Linking the whole 37-file port together with 4570's own `vfs_subr.o`
+ * and `vfs_cprotect.o` is what exposes these - measured, not predicted: `ld` reports
+ * `multiple definition of` exactly these three, and no others (a `comm` of every HFS object's defined
+ * symbols against the rest of the pool gives five mangled names collapsing to these three token
+ * roots). Each is 2050's private copy of something 4570 now owns in the shared layer:
+ *
+ *   - `flush_cache_on_write` - 2050 defines it in `bsd/hfs/hfs_readwrite.c:94` (the HFS write path's
+ *     own knob). 4570 has NO such symbol in its `vfs_subr.c` (verified), so it is a genuine HFS
+ *     private global, not a superseded copy - but 4570's `vfs_subr.o` defines `flush_cache_on_write`
+ *     (a `static`, but the `SYSCTL_INT(_kern, OID_AUTO, flush_cache_on_write, ...)` at
+ *     `vfs_subr.c:9837` emits the non-static `sysctl__kern_flush_cache_on_write` + its
+ *     `__set_...` linker-set entry, which DO collide with HFS's identically-named sysctl node).
+ *     Renaming the token in HFS files renames HFS's sysctl node (the `##name` concatenation) and its
+ *     pointer in the same stroke; 4570's own node is untouched.
+ *   - `root_unmounted_cleanly` - same shape: 2050's `hfs_vfsops.c:1271` registers
+ *     `SYSCTL_INT(_vfs_generic, OID_AUTO, root_unmounted_cleanly, ...)`; 4570's `vfs_subr.c:3919`
+ *     registers the identical node name. Two NODES of one name is the collision.
+ *   - `cp_key_store_action` - 2050's `hfs_cprotect.c` defines it (twice: the real body at `:79` and
+ *     the `#else` stub at `:1745`, one of which compiles). 4570 MOVED this function into
+ *     `bsd/vfs/vfs_cprotect.c:301`, and `bsd/sys/cprotect.h:182` still declares it - so 4570's
+ *     `vfs_cprotect.o` owns the name. HFS's copy is dead (nothing in the HFS subset calls it), so the
+ *     rename is a pure rename with no HFS caller to follow.
+ *
+ * These are **renames, not stand-ins**: the symbol survives in the tree, and the port keeps its own
+ * copy private rather than pretending 4570's answer is its own (`mi4-one-value-two-definitions` - the
+ * same defect that made `cp_is_valid_class` a rename in `hfs_cprotect_port.h`). A token rename is
+ * safe here because each token is read in exactly ONE staged file (grep over `bsd/hfs/` +
+ * `vfs_journal.c`: `flush_cache_on_write` -> hfs_readwrite.c only, `root_unmounted_cleanly` ->
+ * hfs_vfsops.c only, `cp_key_store_action` -> hfs_cprotect.c only), and the forced header reaches no
+ * other translation unit. The value of a sysctl node is its NAME, so HFS's knob moves to
+ * `kern.stage90_hfs.*` rather than shadowing 4570's.
+ * --------------------------------------------------------------------------------------------- */
+#define flush_cache_on_write      stage90_hfs_flush_cache_on_write
+#define root_unmounted_cleanly    stage90_hfs_root_unmounted_cleanly
+#define cp_key_store_action       stage90_hfs_cp_key_store_action
+
+/* ------------------------------------------------------------------------------------------------
  * 2. The port's own configuration options (experiments 865/869).
  *
  * 2050's `bsd/conf/MASTER` declares these as OPTIONS and 4570's does not carry HFS at all.  They are

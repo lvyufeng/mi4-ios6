@@ -12061,3 +12061,26 @@ set=armed-storage-1cb894c8 sha256=1cb894c8a3dab4b45809e63354c4bb100588814f0d2e71
 set=armed-storage-1cb894c8 sha256=b863a8932ab20bf1849d0f60ae5254bb0f867ad4499c1aaa67327d410e713370 bytes=7292692 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
 set=armed-storage-1cb894c8 sha256=259375de1b72996e95e223c5981a3706839589b7a8405119eed9fe5f06e3377a bytes=977 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-PROBE=60-MOUNT=1-HFS_ROOT_MEDIA=1-EMMC_STRATEGY=1-the-rung-61-set-with-mi_mdev-corrected
 set=armed-storage-1cb894c8 sha256=1cbb1e237fe9aa5da720aecc66de292af2baa16497d564e4e28a7b4e33df585f bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-list-bound-by-the-build
+#
+# armed-storage-59ec5fd6 - THE HFS+ PORT IS LINKED INTO THE ENTRY IMAGE (895's step).
+# (PROBE=60, MOUNT=1, HFS_ROOT_MEDIA=1, EMMC_STRATEGY=1 - the rung-61 corrected set, unchanged.)
+# 895 root-caused 894: the entry image's vfstbllist was devfs/mockfs/routefs, so vfs_mountroot
+# took mockfs and mounted off RAM. Cause: the 874 HFS root ROW is compiled by the PORT switch
+# (STAGE90_HFS_ROOT, in build_xnu_arm_kernel.sh) into bsd/vfs/vfs_conf.o, and the pool was built
+# HFS-OFF. Here the POOL was rebuilt with STAGE90_HFS=1, so the 36 HFS objects enter the entry
+# link through the pool glob (build_entry.sh:27706) and vfs_conf.o carries the HFS row. THREE
+# link collisions (2050's HFS vs 4570's moved copies: sysctl__kern_flush_cache_on_write,
+# sysctl__vfs_generic_root_unmounted_cleanly, cp_key_store_action) are fixed by scoped token
+# renames in src/shims/hfs/hfs_port_force.h (the port's one-definition file). The entry image now
+# carries hfs_mountroot at +8 of the HFS row, BEFORE mockfs. Seam UNCHANGED (0x8004d2dc).
+set=armed-storage-59ec5fd6 sha256=43b7dd6ce45a7d5214e223f2653294e4fa60e7fd2061afd6e64bbb2360751346 bytes=9519104 file=stage90-qcdt.img role=PROBE-60-MOUNT-1-HFS-1-EMMC-1-HFS-PORT-LINKED-INTO-THE-ENTRY-IMAGE-895-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-NOT-PRESSED
+set=armed-storage-59ec5fd6 sha256=9861884a5fba31b85b8298f13ef0aafecc3641c65f5cc40409ff0a435ed4e561 bytes=6994444 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-59ec5fd6-entry-no-payload-switch-moved-from-rung-61
+set=armed-storage-59ec5fd6 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rung-61-S-measured-6c2b6038-no-payload-switch-moved
+set=armed-storage-59ec5fd6 sha256=687c2f46204aed3df1b6ea7a93f8922de2bc99bdc65e3e784f40d61cec3c63a1 bytes=7056516 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-59ec5fd6 sha256=26fd9c65ac0bbc0ef8991415d13b771aa966b84c73e788d7e6d4a6ba1bc5e3e6 bytes=6998016 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-59ec5fd6 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-59ec5fd6 sha256=f036ea00caa590b049262f21e335134f404a232feee0f7d093a3588d0c9826ab bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-59ec5fd6 sha256=59ec5fd6f61f005d2e784aafb92012390d96fe3d2c19febcfd7be2e6db6c03ec bytes=6498948 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-59ec5fd6-IS-THE-SETS-NAME-the-HFS-port-874-root-row-links-BEFORE-mockfs-with-hfs_mountroot-at-plus-8-vfstbllist-word-17
+set=armed-storage-59ec5fd6 sha256=9ebfa1a001908a9dd4cbf4cb92228e169157ab8080de377461f735923212b756 bytes=7710720 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-59ec5fd6 sha256=0bd20a758d60cbf9721b01086d7c3578545e8fbfeabb117b99244d1bf63bd306 bytes=977 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-PROBE=60-MOUNT=1-HFS_ROOT_MEDIA=1-EMMC_STRATEGY=1-unchanged-from-rung-61-the-port-is-linked-NOT-switched
+set=armed-storage-59ec5fd6 sha256=deaf35c951d2bce956f8e5616fc78217e8540590b922e9d65e846a5ee179149e bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-list-bound-by-the-build

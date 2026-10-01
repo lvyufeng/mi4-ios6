@@ -1575,14 +1575,57 @@ if [[ $ALLOW_XNU_ENTRY -eq 1 ]]; then
   # would be a run whose only net is the one under suspicion.
   echo
   echo "== the net's reach in the entry image =="
-  if ! "$PYTHON" - "$ENTRY_BIN" "$PAYLOAD_BIN" <<'PY'
-import struct, sys
+  if ! "$PYTHON" - "$ENTRY_BIN" "$PAYLOAD_BIN" "$OUT/xnu_arm_entry.elf" "$OUT/stage90.elf" <<'PY'
+import struct, subprocess, sys
 
 # The three encodings one or two instructions can carry an address in, over two ranges: the watchdog's
 # page, and the GIC one nibble below it - the witness that the scan can see anything at all.
-ENTRY, PAYLOAD = sys.argv[1], sys.argv[2]
+ENTRY, PAYLOAD, ENTRY_ELF, PAYLOAD_ELF = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 WATCH_LO, WATCH_HI = 0xf9010000, 0xf901ffff
 WIT_LO, WIT_HI = 0xf9000000, 0xf900ffff
+
+# ** A NAMED DATA OBJECT IS NOT A LITERAL POOL, and this clause counts literal pools. ** The census
+# below matched a bare `0xf901xxxx` word anywhere in the flat image, and until the HFS+ port was
+# linked into the entry image (895's step) nothing in it happened to carry one. The port brings 2050's
+# Unicode tables, and `cjk_bitmap` (`hfs_encodings.c`, 0x28d8 bytes of CJK coverage bitmaps) contains
+# exactly one word in the page - `0xf9011f7f` at VA 0x805296f0 - which is DATA, reached by no `ldr`,
+# and materialises no address. The scan cannot tell it from a literal-pool word because the entry's
+# linker script folds `.rodata` into the output `.text` (entry.ld: *".text (incl. .rodata ...)"*), so a
+# data table and a literal pool are the same PROGBITS section and the same flat `nm`/bin bytes.
+# readelf still separates them: the word is inside a named `OBJECT` symbol. So the scan now excludes
+# every named `OBJECT` span before counting, which is the property the paragraph claims - **no CODE
+# carries the page** - rather than "no word of any kind does". The exclusion is by symbol, so it is
+# re-derived from the artifact: a data table that grows or moves is excluded wherever it lands, and a
+# genuine literal pool (not a named object) is still counted. The positive control below is unaffected:
+# the payload's `movt` sites are code, not named objects.
+def load_base(elf):
+    out = subprocess.run(["readelf", "-lW", elf], stdout=subprocess.PIPE, text=True).stdout
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) >= 3 and f[0] == "LOAD":
+            return int(f[2], 16)          # the lowest LOAD vaddr; both images have exactly one
+    return None
+
+def obj_spans(elf, base, nbytes):
+    # Every named OBJECT symbol's [vaddr, vaddr+size) span, mapped to bin offsets (bin = VA - base,
+    # because objcopy -O binary drops the leading file offset and starts at the lowest loadable VA).
+    out = subprocess.run(["readelf", "-sW", elf], stdout=subprocess.PIPE, text=True).stdout
+    spans = []
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) >= 8 and f[3] == "OBJECT":
+            try:
+                va, sz = int(f[1], 16), int(f[2], 16)
+            except ValueError:
+                continue
+            if sz:
+                spans.append((va - base, va - base + sz))
+    m = bytearray(nbytes)
+    for a, b in spans:
+        a, b = max(0, a), min(nbytes, b)
+        if b > a:
+            m[a:b] = b"\x01" * (b - a)
+    return m
 
 def ror(v, n):
     n &= 31
@@ -1598,7 +1641,7 @@ def movt_pattern(imm):
 MOVT_WATCH, MASK = movt_pattern(0xf901)
 MOVT_WITNESS, _ = movt_pattern(0xf900)
 
-def census(path):
+def census(path, objmask=None):
     d = open(path, 'rb').read()
     if len(d) < 4096:
         sys.exit("  %s is %d bytes - this is a scan that could not look" % (path, len(d)))
@@ -1606,6 +1649,8 @@ def census(path):
     wit = dict(pool=0, movt=0, mov=0)      # in the GIC's pages, one nibble below
     enc = 0                                # words carrying the movt encoding at all, data included
     for i in range(len(d) // 4):
+        if objmask is not None and objmask[i * 4]:
+            continue                       # a named data object, not a literal pool (see above)
         w = struct.unpack_from('<I', d, i * 4)[0]
         if WATCH_LO <= w <= WATCH_HI:
             hit['pool'] += 1
@@ -1628,7 +1673,7 @@ def census(path):
                 wit['mov'] += 1
     return len(d) // 4, enc, hit, wit
 
-words, enc, hit, wit = census(ENTRY)
+words, enc, hit, wit = census(ENTRY, obj_spans(ENTRY_ELF, load_base(ENTRY_ELF), len(open(ENTRY, 'rb').read())))
 print("  %s:" % ENTRY)
 print("    %d aligned words, %d carrying the movt encoding (a ceiling)" % (words, enc))
 print("    [0xf9010000, 0xf901ffff]   pool word %d   movt rD, #0xf901 %d   mov/mvn immediate %d"
@@ -1648,7 +1693,7 @@ carried = any(hit.values())
 if unread:
     print("    the witness is EMPTY: this scan did not see the GIC either, so the zero above is a")
     print("    scan that saw nothing rather than a page that is not carried - that is not a reading.")
-words, _, contr, _ = census(PAYLOAD)
+words, _, contr, _ = census(PAYLOAD, obj_spans(PAYLOAD_ELF, load_base(PAYLOAD_ELF), len(open(PAYLOAD, 'rb').read())))
 print("  positive control - the payload, which arms the net, so it must carry the page:")
 print("    %s" % PAYLOAD)
 print("    pool word %d   movt rD, #0xf901 %d   mov/mvn immediate %d"
