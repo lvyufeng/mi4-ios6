@@ -50,15 +50,36 @@ started:
 The first two are host-side oroperator-side and honest; they are different experiments and neither is a
 ladder rung. The third is the one the *device's own data* would want and the one there is no source for.
 
-## 3. The honest bound
+## 3. The reading is now a device measurement
 
-**This is a reading, not a measurement, and it is a reading of the PORT's subject, not of the device's raw
-bytes.** It rests on 863's recorded finding (`userdata` = ext4) and on `cancro-platform.md` (an Android
-partition set), **not** on a GPT dump in this repository — the rung-57/58/59/60 presses that would carry the
-selected entry's `PartitionTypeGUID` are **parked and unpressed**, so the device's own answer to "what type is
-the selected partition" is not yet in hand. **The type it would return is the thing the first press would
-settle** — and no HFS type GUID appears anywhere in the recorded material (searched: `48465300`,
-`Apple_HFS`, `AF00`, `Apple_Boot`).
+The finding rested on prose when first written; it has since been **verified against the device directly,
+read-only, with no boot and no write.** `adb` (Android is up per 860) reports:
+
+```
+by-name:  userdata -> /dev/block/mmcblk0p25    (also system p23, cache p24, persist p21)
+blkid:    p25  LABEL="data"     TYPE="ext4"    <- the partition rung 57 selects
+          p23  LABEL="/"        TYPE="ext4"
+          p24 (cache)           TYPE="ext4"
+          p21 (persist)         TYPE="ext4"
+          p22 (modem)           TYPE="vfat"
+/proc/partitions: p25 = 13,291,503 KB  (~12.7 GB, the LARGEST partition; next is p23 at 1.28 GB)
+```
+
+So `userdata` is the largest extent **and** it is **ext4**, and **no partition on this device is HFS**. The
+largest-partition rule and the ext4 type are one and the same partition. `cancro-platform.md`'s table
+(p21 `persist`, p20 `recovery`, p19 `boot`, p23 `system`, p24 `cache`, p25 `userdata`) matches the device
+exactly. **This is a measurement, not a citation** — it needs only `adb`, not a press, and it touches neither
+the boot path nor `fastboot` reachability.
+
+## 4. The honest bound
+
+**The device's own answer is now in hand** (§3: `blkid` says `p25` = ext4, `adb`, read-only, no press), so
+the constraint is measured rather than inferred from 863 and `cancro-platform.md`. What is **not** yet in hand
+is the *GPT entry type GUID* for that entry — that is what rungs 57/58/59/60 carry, and they are parked and
+unpressed. The Linux-side `TYPE="ext4"` and the GPT `PartitionTypeGUID` are different fields: the former is
+the filesystem now on the partition, the latter is the entry's declared type. They agree here (a GPT
+`Linux filesystem data` entry holding an ext4 volume), but the GPT reading is still the rung's to make. No HFS
+type GUID appears anywhere in the recorded material (searched: `48465300`, `Apple_HFS`, `AF00`, `Apple_Boot`).
 
 **THE GOAL IS NOT MET.** What this adds is that the **medium (867) and the medium's filesystem (880) are one
 decision**, and that decision is the operator's, because the only route that uses the device's real eMMC
