@@ -32334,7 +32334,65 @@ verify_trace_symbols() {
                             blk43_sel_bl=$(grep -c -- 'bl.*<st_sector_for_read>' <<<"$blk43_body" || true)
                             [[ "$blk43_sel_bl" == "1" ]] ||
                                 layout_fail "st_read_single_block calls \`st_sector_for_read\` $blk43_sel_bl time(s) and rung 54 calls it exactly once - the ONE store to \`st_read_lba\` this body makes takes the selector's return, and two calls would mean a second store the single-store clauses below read as the only one. Nothing is rebuilt by this refusal"
-                            if [[ $STORAGE_PROBE -ge 54 ]]; then
+                            if [[ $STORAGE_PROBE -ge 56 ]]; then
+                                # **RUNG 57's SELECTOR ARITHMETIC: THE WALK BOUND, THE ARRAY BASE, AND
+                                # THE LARGE PARTITION'S OWN StartingLBA, OUT OF ONE BASE REGISTER.**
+                                #
+                                # Rung 54's selector returned `1` for the header and `2` for the array;
+                                # rung 55's third arm returned `st_gpt_part_sector + ST_FS_SB_SECTOR_OFF`.
+                                # Rung 57 replaces the third arm with a **count**: the array is
+                                # `ceil(nentries * entry_size / 512)` sectors long (7 on this disk: 28 x
+                                # 128 = 3584 bytes), so the selector takes an ORDINAL - `1` the header, the
+                                # next `st_gpt_array_nsec` ordinals the array sectors, and the final ordinal
+                                # the LARGE partition's superblock sector.
+                                #
+                                # **THE THREE NUMBERS ARE ONE OBJECT, AND THE CLAUSE ASSERTS THE OBJECT.**
+                                # `st_gpt_array_nsec` (offset 0), `st_gpt_entry_lba` (offset 4) and
+                                # `st_gpt_data_sector` (offset 8) are three consecutive `.bss` words, and
+                                # the compiler materializes the base ONCE and reaches all three by offset.
+                                # The clause therefore reads the base binding and the three offsets, and
+                                # holds the base against the address `nm` gives `st_gpt_array_nsec` - so it
+                                # proves the selector addresses THAT object (m828's rule: PROVE THE BINDING,
+                                # NOT THE INSTRUCTION SHAPE), and it independently checks the .bss adjacency
+                                # so the offsets 4 and 8 are known to name the array base and the data
+                                # partition's `StartingLBA` and not two arbitrary neighbours.
+                                #
+                                # **WHY THE BOUND AND NOT `st_gpt_part_sector`.** Rung 55's third read
+                                # addressed the FIRST surviving partition, which the rung-56 press (858)
+                                # measured at ~2 MB of firmware with no filesystem magic. Rung 57's walk
+                                # reads EVERY array sector and keeps the entry with the largest extent, so
+                                # the sector the last read addresses is a value the walk COMPUTES
+                                # (`st_gpt_data_sector`), not the first entry's. A selector that still
+                                # loads `st_gpt_part_sector` here is rung 55 wearing rung 57's name - one
+                                # read of one array sector, and the superblock of whatever partition
+                                # happens to be first.
+                                blk43_sel_an_addr=$(sym_addr st_gpt_array_nsec) ||
+                                    layout_fail "\`st_gpt_array_nsec\` - the walk bound rung 57's selector reads - is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: the selector then has no count to compare the ordinal against, and the walk's length is whatever the compiler left in a register. Nothing is rebuilt by this refusal"
+                                blk43_sel_el_addr=$(sym_addr st_gpt_entry_lba) ||
+                                    layout_fail "\`st_gpt_entry_lba\` - the array's first sector - is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: the array sectors then come from a fixed constant and not from the header's own \`PartitionEntryLBA\`. Nothing is rebuilt by this refusal"
+                                blk43_sel_ds_addr=$(sym_addr st_gpt_data_sector) ||
+                                    layout_fail "\`st_gpt_data_sector\` - the large partition's \`StartingLBA\`, which the walk computes - is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: the last read then addresses no partition the walk chose. Nothing is rebuilt by this refusal"
+                                blk43_sel_lo=$(grep -oE 'movw.*#[0-9]+' <<<"$blk43_sel_body" | grep -oE '[0-9]+$' | head -1 || true)
+                                blk43_sel_hi=$(grep -oE 'movt.*#[0-9]+' <<<"$blk43_sel_body" | grep -oE '[0-9]+$' | head -1 || true)
+                                blk43_sel_lo_exp=$(( blk43_sel_an_addr & 0xFFFF ))
+                                blk43_sel_hi_exp=$(( ( blk43_sel_an_addr >> 16 ) & 0xFFFF ))
+                                [[ -n "$blk43_sel_lo" && -n "$blk43_sel_hi" ]] ||
+                                    layout_fail "rung 57's sector selector \`st_sector_for_read\` (at $blk43_sel_addr) materializes no \`movw\`/\`movt\` pair (lo [$blk43_sel_lo], hi [$blk43_sel_hi]), so it reaches no carry at all. Rung 57's ordinal-to-sector map reads \`st_gpt_array_nsec\`, \`st_gpt_entry_lba\` and \`st_gpt_data_sector\`. Nothing is rebuilt by this refusal"
+                                [[ "$blk43_sel_lo" -eq "$blk43_sel_lo_exp" && "$blk43_sel_hi" -eq "$blk43_sel_hi_exp" ]] ||
+                                    layout_fail "rung 57's sector selector \`st_sector_for_read\` (at $blk43_sel_addr) materializes the base pair [$blk43_sel_lo, $blk43_sel_hi] = $(printf '0x%04x%04x' "$blk43_sel_hi" "$blk43_sel_lo") but \`st_gpt_array_nsec\` lives at $blk43_sel_an_addr, i.e. [$blk43_sel_lo_exp, $blk43_sel_hi_exp]. The base must be THAT object: the selector's three numbers are the three consecutive \`.bss\` words \`st_gpt_array_nsec\` (the walk bound), \`st_gpt_entry_lba\` (the array's first sector) and \`st_gpt_data_sector\` (the large partition's \`StartingLBA\`), and a base for any other address is a map built on different data. Nothing is rebuilt by this refusal"
+                                [[ $(( blk43_sel_el_addr - blk43_sel_an_addr )) -eq 4 && $(( blk43_sel_ds_addr - blk43_sel_an_addr )) -eq 8 ]] ||
+                                    layout_fail "rung 57's three walk carries are not the adjacency this clause reads: \`st_gpt_array_nsec\` $blk43_sel_an_addr, \`st_gpt_entry_lba\` $blk43_sel_el_addr, \`st_gpt_data_sector\` $blk43_sel_ds_addr - expected offsets 0/4/8. The selector reaches all three from ONE base register by the immediates 0, #4 and #8, so an adjacency other than 4 and 8 makes those three loads name three other words. Nothing is rebuilt by this refusal"
+                                blk43_sel_o0=$(grep -cE 'ldr[[:space:]]+r[0-9]+, \[r[0-9]+\]$' <<<"$blk43_sel_body" || true)
+                                blk43_sel_o4=$(grep -cE 'ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #4\]' <<<"$blk43_sel_body" || true)
+                                blk43_sel_o8=$(grep -cE 'ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #8\]' <<<"$blk43_sel_body" || true)
+                                [[ "$blk43_sel_o0" -ge 1 && "$blk43_sel_o4" -ge 1 && "$blk43_sel_o8" -ge 1 ]] ||
+                                    layout_fail "rung 57's sector selector \`st_sector_for_read\` (at $blk43_sel_addr) does not load all THREE carries off its base: offset 0 (the walk bound \`st_gpt_array_nsec\`) $blk43_sel_o0 time(s), offset #4 (the array base \`st_gpt_entry_lba\`) $blk43_sel_o4, offset #8 (the data partition's \`StartingLBA\` \`st_gpt_data_sector\`) $blk43_sel_o8. The ordinal map is \`ordinal == 0 -> 1\`; \`1 <= ordinal <= bound -> entry_lba + (ordinal - 1)\` (the \`sub #1\` and the \`add\`); \`ordinal > bound -> data_sector + ST_FS_SB_SECTOR_OFF\`. A missing offset 0 is rung 54's two-arm selector (no walk bound, no loop); a missing #8 is rung 55's selector (the FIRST partition instead of the large one). Nothing is rebuilt by this refusal"
+                                blk43_sel_sub1=$(grep -cE 'sub[[:space:]]+r[0-9]+, r[0-9]+, #1([^0-9]|$)' <<<"$blk43_sel_body" || true)
+                                blk43_sel_add2=$(grep -cE 'add[[:space:]]+r[0-9]+, r[0-9]+, #2([^0-9]|$)' <<<"$blk43_sel_body" || true)
+                                [[ "$blk43_sel_sub1" -ge 1 && "$blk43_sel_add2" -ge 1 ]] ||
+                                    layout_fail "rung 57's sector selector \`st_sector_for_read\` (at $blk43_sel_addr) does not carry BOTH offsets its two maps need: \`sub #1\` (the \`(ordinal - 1)\` of the array map) $blk43_sel_sub1 time(s) and \`add #2\` (\`ST_FS_SB_SECTOR_OFF\`, the superblock's own offset into the partition) $blk43_sel_add2. The array map is \`entry_lba + (ordinal - 1)\` because ordinal 1 names the array's FIRST sector; the data map is \`data_sector + 2\` because ext2/3/4 and f2fs both put their superblock at partition byte 1024 = sector 2 (\`ext4.h:1009\`, \`f2fs_fs.h:59\`). Nothing is rebuilt by this refusal"
+                                echo "  xnu_entry_849: rung 57's THREE carries are read out of the selector body: st_sector_for_read (at $blk43_sel_addr, called once by st_read_single_block) materializes the base pair [$blk43_sel_lo, $blk43_sel_hi] asserting the address $blk43_sel_an_addr \`nm\` gives **\`st_gpt_array_nsec\`** and reaches **offset 0 (the walk bound), offset #4 (\`st_gpt_entry_lba\`, the array's first sector) and offset #8 (\`st_gpt_data_sector\`, the LARGE partition's \`StartingLBA\` the walk selects)** off that one base, with \`sub #1\` for the array map \`entry_lba + (ordinal - 1)\` and \`add #2\` for the superblock map \`data_sector + ST_FS_SB_SECTOR_OFF\`. With the header arm \`ordinal == 0 -> 1\` and the bound arm (the \`cmp\`/\`bcc\` against offset 0) this is the whole ordinal-to-sector map: **the FIRST read sends sector 1 - the GPT HEADER; the next \`st_gpt_array_nsec\` reads send the ENTRY ARRAY sectors in turn; and the LAST read sends the selected partition's superblock sector, whose bytes the filesystem decode walks**. Every number is an immediate or an address in the linked image, not a sentence in a comment"
+                            elif [[ $STORAGE_PROBE -ge 54 ]]; then
                                 # **RUNG 55's THIRD ARM: THE SELECTOR LOADS THE PARTITION'S OWN SECTOR.**
                                 # Rung 55 adds a third read at the partition's own superblock sector, and the
                                 # selector's third arm computes `st_gpt_part_sector + ST_FS_SB_SECTOR_OFF` from a
@@ -33246,8 +33304,35 @@ verify_trace_symbols() {
                     layout_fail "st_send_ext_csd materializes 384000 = 0x5DC00 (mov #56320 [=$ext40_budget], movt #5 [=$ext40_budgethi]) and rung 40's bound is exactly 384000 ticks - 20 ms at 19.2 MHz, the one number that makes the wait a BOUND and not a hang. A different pair here is a different budget wearing the same name, which is [[mi4-one-value-two-definitions]] in the direction that kills the card. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_828: rung 40's bounded data wait is in the linked image: st_send_ext_csd tests DATA_AVAILABLE (#2048) $ext40_da time(s) - the first pass's per-iteration count BESIDE the second pass's per-word gate - carries the 384000-tick budget as movable immediates, and publishes ALL FOUR new keys (waited, wait_timeout, gated, ticks) into .rodata; its device surface is rung 38's UNCHANGED ($ext_set), so the wait reaches NO register this body did not already read"
             fi
+            if [[ $STORAGE_PROBE -ge 56 ]]; then
+                # **RUNG 57 ADDS ONE IMAGE ACCESS TO THIS BODY, AND THE CLAUSE NAMES WHICH ONE.**
+                #
+                # Rung 11's rule for `st_cmd_path` was "an EMPTY image side", and it held for forty
+                # values because the body reaches no image symbol at all - every result it produces goes
+                # through `entry_live_write` (a call, with a `.rodata` string) and its structs are stack
+                # objects the classifier skips by base register. Rung 57's walk needs the array's length,
+                # so the body reads exactly ONE image word: **`st_gpt_array_nsec`, the bound, ONCE,
+                # read into a local above the loop** (the source comment beside the loop says why it is
+                # hoisted - a bound read inside the loop's tail test leaves the address in a register
+                # the classifier's epoch invalidates at the back-edge, and it refused a correct build
+                # with a bare `NODECL-8056-0:ldr`).
+                #
+                # **THE CLAUSE DOES NOT WEAKEN TO "SOME IMAGE ACCESS", IT BOUNDS THE SET TO THE
+                # CARRY.** An enumeration of `IMG:ldr` alone would pass a body that read any symbol
+                # anywhere; the address is therefore read out of `nm` and held against the ONE entry
+                # the classifier reports, so a body that read a *different* word is a build refusal.
+                # This is rung 55's and rung 56's repair applied to the third clause of the same family
+                # (`mi4-a-claim-in-a-comment-is-not-a-check`): the property is the identity of the
+                # access, not the absence of one.
+                stb_path_an_addr=$(sym_addr st_gpt_array_nsec) ||
+                    layout_fail "\`st_gpt_array_nsec\` - rung 57's walk bound, the one image word st_cmd_path reads - is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: the body then has no bound to read and the loop runs against whatever the compiler left. Nothing is rebuilt by this refusal"
+                stb_path_want_addr="$(printf '%08x' "$stb_path_an_addr"):ldr"
+                [[ "${stb_path_img% }" == "IMG:ldr" && "${stb_path_imgaddr% }" == "$stb_path_want_addr" ]] ||
+                    layout_fail "st_cmd_path's non-device memory accesses are [$stb_path_img] at [$stb_path_imgaddr] and rung 57 adds exactly ONE - the walk bound \`st_gpt_array_nsec\` at $stb_path_an_addr, read ONCE into a local above the loop and classified \`IMG:ldr\` at [$stb_path_want_addr]. Every other access this body makes goes through \`entry_live_write\` (a call, with a \`.rodata\` string) or through its two stack structs, which the classifier skips by base register. A second entry, an \`UNK:\`, or an address that is not that word means either a symbol this rung never declared or an access it could not resolve - and a body that reads the bound INSIDE the loop reads it through a register the epoch invalidates at the back-edge, which is the false \`NODECL-8056-0:ldr\` this rung already had to repair. Nothing is rebuilt by this refusal"
+            else
             [[ -z "${stb_path_img// /}" ]] ||
                 layout_fail "st_cmd_path's non-device memory accesses are [$stb_path_img] at [$stb_path_imgaddr] and rung 11's record says that set is EMPTY - this function publishes through entry_live_write (a call, with a .rodata string) and its two result structs live on the stack, which the classifier skips by base register. A non-empty set here means either a symbol this rung never declared or an access it could not resolve. Nothing is rebuilt by this refusal"
+            fi
             [[ "$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_path_body")" == "2" ]] ||
                 layout_fail "st_cmd_path makes $(grep -c -- 'bl.*<st_send_command>' <<<"$stb_path_body") call(s) to st_send_command and rung 11 makes exactly two - \`mmc_go_idle\`'s CMD0 and \`mmc_attach_mmc\`'s CMD1 (mmc.c:1356-1359), which is the driver's own pair, in the driver's own order, in one function. Zero means the command function is in the image and nothing calls it (m720's shape: a switch no build reads), one means half of the driver's own sequence, and three or more means this arm is putting a command on the bus that its record does not name. The call is also what keeps st_send_command's body in the image at all - an unreferenced static is dropped, so a zero count and an image WITHOUT the symbol would be one build. Nothing is rebuilt by this refusal"
             echo "  xnu_entry_721: st_send_command's device accesses are [$stb_cmd_set] with counts [$stb_cmd_cnt], its stores in order [$stb_cmd_store_order] and its image side the pointer-argument pair [$stb_cmd_img]; st_cmd_path's are [$stb_path_set] $stb_path_store_txt and an EMPTY image side, and it calls st_send_command 2 time(s) - the driver's own first command: CMD0 (word 0x0000, no response read) then CMD1 (word 0x0102, MMC_RSP_R3) with the completion polled out of the controller's own INT_STATUS and the response read out of RESPONSE 0x10, and no data-path register, no POWER_CONTROL, no GCC word, no core_mem word and no byte of the medium"

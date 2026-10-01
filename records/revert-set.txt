@@ -11756,3 +11756,58 @@ set=armed-storage-63c6d77d sha256=d5768aa9cd2561fece50c29c3ca35acb123d54ff1c4806
 #
 # **NO FIRER IS ARMED AND NO PRESS IS OWED.** `armed-storage-63c6d77d` is SPENT and the park is a
 # RECORD, not a queue. Below it `armed-storage-e8597e3e` (rung 53) was already spent.
+
+# ============================================================================================
+# 859 - THE RUNG-57 ARM (STAGE90_XNU_STORAGE_PROBE=56, VALUE 56 = ORDINAL RUNG 57)
+# **A HOST-SIDE ARM AND NOTHING ELSE: BUILT AND PARKED, NOT PRESSED, NOT ARMED.**
+# ============================================================================================
+#
+# **RUNG 57 WALKS THE WHOLE GPT ENTRY ARRAY AND SELECTS THE LARGE PARTITION.** Rungs 54/55/56 read
+# ONE array sector (the 58-entry array's first 4 entries) and the rung-56 press (858) measured entry 0
+# at a ~2 MB extent with no filesystem magic. The GPT header declares `NumberOfPartitionEntries = 28`
+# of `SizeOfPartitionEntry = 128` bytes = 3584 bytes = **SEVEN 512-byte sectors**, so this rung reads
+# EACH array sector in turn (`st_sector_for_read` maps ordinal -> sector:
+# `0 -> ST_GPT_HEADER_SECTOR`; `1..st_gpt_array_nsec -> st_gpt_entry_lba + (ordinal-1)`;
+# the final ordinal -> `st_gpt_data_sector + ST_FS_SB_SECTOR_OFF`), decoding each sector's entries
+# while THAT sector is in the buffer, and carries the `StartingLBA` of the entry with the LARGEST
+# extent (`EndingLBA - StartingLBA`) as `st_gpt_data_sector`. **THE LAST READ LANDS THAT PARTITION'S
+# SUPERBLOCK, NOT PARTITION 1's** - which is the whole point: 858 proved partition 1 is firmware.
+#
+# **WHY BY EXTENT AND NOT BY NAME.** The Mi 4's GPT geometry is NOT recorded anywhere in this archive
+# (only name->devnode and sizes, docs/reference/local-device-findings.md:72-98), so the data
+# partition cannot be found by name from these sources. Every OS-mountable filesystem partition is
+# the large one; the small ones are firmware/vendor blobs. The extent is the reading, and
+# `st_gpt_best_extent` / `st_gpt_scan_sector` publish it so the selection is checkable.
+#
+# **NO BYTE OF THE MEDIUM MOVES AND NO NEW DEVICE MECHANISM IS ADDED.** It is a read-COUNT change on
+# the same CMD17 path rungs 51-56 already use: `blk43_calls` = 3 headline calls (header, the array
+# LOOP, the superblock) and `dr47_calls` = 3, held to exactly the rung-55 values because a textual
+# `bl` count reads CALL SITES and not executions - the loop is ONE call site. (already in the record)
+#
+# **A BUILD-CLAUSE DEFECT WAS FOUND AND REPAIRED, AND IT IS THE SAME CLASS AS RUNGS 55 AND 56.**
+# The first cut read the loop bound `st_gpt_array_nsec` inside the `for` tail test. The loop body's
+# first instruction is a branch TARGET (the back-edge lands there), so it ends a linear region and the
+# device-access classifier's `epoch` advances - which invalidates every base materialized before it,
+# including the loop-invariant address of the bound, which GCC had hoisted ABOVE the loop. The
+# classifier therefore refused a CORRECT build with a bare `NODECL-8056-0:ldr`. **The repair is in the
+# SOURCE: the bound is read into a local ONCE above the loop**, so the only `movw`/`movt` for that
+# address is outside every loop region. (This is a codegen-class artifact, not a defect in the arm.)
+# The `st_cmd_path` image-access clause was then widened from "EMPTY" to "exactly `st_gpt_array_nsec`
+# at its own `nm` address, `IMG:ldr`", so the property is the IDENTITY of the one access rather than
+# the absence of any - rungs 55's and 56's repair applied to the third clause of the same family.
+#
+# **READINESS 5 of 5, `make check` exit 0, and THE ENTRY-GROUP PAGE MOVE DID NOT FIRE** -
+# `STAGE90_XNU_SEAM_LR` stays `0x8004d2dc` (rung 53's value) in entry_trace.c and
+# `EXIT_POP_LR_LITERAL` in run_and_capture.sh. **THE PRESS IS THE OPERATOR'S.**
+#
+set=armed-storage-71b54d73 sha256=5b513c30920ec7c637b7dfd901884eb6c410ffdf67bf4a5259f5cb7e45e3f622 bytes=8605696 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STORAGE_PROBE-56-entry-RUNG-57-WALKS-THE-WHOLE-ENTRY-ARRAY-AND-SELECTS-THE-LARGEST-EXTENT-THEN-READS-ITS-SUPERBLOCK-NOT-PRESSED
+set=armed-storage-71b54d73 sha256=8d3a0c16932e077f323a76d422480f5851a16344a63b852866c10c3b11471832 bytes=6081028 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-56-entry-no-payload-switch-moved
+set=armed-storage-71b54d73 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-56-s-MEASURED-no-payload-switch-moved
+set=armed-storage-71b54d73 sha256=36fa8cafd2afac55d4e55eea6c97249535f3fc3ffeb2d0d51e1d86366bb7c946 bytes=6143100 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-71b54d73 sha256=55459ca8beb8aaa715ba5a65cb952baba3f900345f60850594f4a505d16e4c40 bytes=6084608 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-71b54d73 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-71b54d73 sha256=710d175996e03c56f31200f73dd315f5c65135e6cb1769b7f7cfa71f889372d5 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-71b54d73 sha256=71b54d73f1f2ffd3b48ba0aaf8b76eb4b59204ce7834a518790d956e322eb979 bytes=5585532 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-71b54d73-IS-THE-SETS-NAME-SIZE-NEUTRAL-against-the-rung-56-arm-s-5585532-bytes-content-different-because-st_gpt_array_nsec-st_gpt_data_sector-st_gpt_best_extent-st_gpt_scan_sector-and-the-array-walk-loop-were-added
+set=armed-storage-71b54d73 sha256=d672ff8ee5e745b3af893e84a15ec2e7e38257d4f8fd41f425b2be9f1b33b298 bytes=6766440 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-STAGE90_XNU_SEAM_LR-0x8004d2dc-UNCHANGED-from-rung-53
+set=armed-storage-71b54d73 sha256=ec55941b7eaf635200bdfb69c61a3262ed0cac35531a63dbb8a28ce2e6d78850 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=56-and-differing-from-the-rung-56-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
+set=armed-storage-71b54d73 sha256=b58c9c9a1d33990522b7aeea2df6001cfa5a0d9beb9d542b956cedf6435f97e5 bytes=2335 file=xnu_arm_entry-sources.txt
