@@ -55,9 +55,21 @@ CONFIG_PROTECT=0, APPLE TARGET                    ok=38  fail=0  (armv7-apple-da
 
 - Two target arrays: `TARGET_ELF` (unchanged) and `TARGET_MACHO` (`armv7-apple-darwin -mabi=aapcs`), with the
   reason each exists in a comment.
-- `run_configuration` takes a third argument (`elf`/`macho`) selecting the target, the `MACH_KERNEL=1` global,
-  and a separate object directory (`obj-macho/`).
+- `run_configuration` takes a third argument (`elf`/`macho`) selecting the target, the apple block's extra
+  defines and a separate object directory (`obj-macho/`).
 - A third block runs the port under the apple invocation; the summary text is corrected.
+
+**And the apple block carries the real build's per-BSD-component defines, not just the triple.** The first
+version of this block added only `-DMACH_KERNEL=1` — a plausible-looking difference, but the real build's
+`case bsd` (`build_xnu_arm_macho.sh:167`) gives a BSD file seven defines
+(`DRIVER_PRIVATE`, `_KERNEL_BUILD`, `KERNEL_BUILD`, `MACH_KERNEL`, `BSD_BUILD`, `BSD_KERNEL_PRIVATE`,
+`LP64_DEBUG`) plus a BSD-only force-include (`sys/types.h`) and two include-path additions (`bsd`, `osfmk`).
+"A port that compiles under one and not the other does not build" applies **word for word to one define as to
+one triple** — the whole point of the block is to hold the invocation constant, so it now reuses the build's
+own `case bsd` arms. What is deliberately *not* there is `MACH_KERNEL_PRIVATE` and `_CLOCK_T`: the real build
+gives those to `osfmk` only, and HFS is a BSD file. **Re-measured with the full set: still 38/38.** What stays
+probe-side is the ELF block's own `CDEFS`, so the two blocks differ in the target and these seven defines and
+nothing else.
 
 ## 5. What this changes, and what it does not
 

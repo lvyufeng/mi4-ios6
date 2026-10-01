@@ -304,10 +304,15 @@ run_configuration() {
     local label=$1 protect=$2 tmode=$3 ok=0 fail=0 hang=0 src key
     local extra=(); [[ $protect == 0 ]] && extra=(-UCONFIG_PROTECT)
     local tflags=(); case $tmode in macho) tflags=("${TARGET_MACHO[@]}") ;; *) tflags=("${TARGET_ELF[@]}") ;; esac
-    # The apple-target build carries MACH_KERNEL=1 globally (build_xnu_arm_macho.sh); the ELF
-    # invocation gets it per-component, and HFS is a BSD file so it does not.  Give the macho arm
-    # the same global list the macho build uses, minus what is already in CDEFS.
-    [[ $tmode == macho ]] && extra+=(-DMACH_KERNEL=1)
+    # The apple-target build carries the REAL build's per-BSD-component defines (build_xnu_arm_macho.sh's
+    # `case bsd`: DRIVER_PRIVATE, _KERNEL_BUILD, KERNEL_BUILD, MACH_KERNEL, BSD_BUILD, BSD_KERNEL_PRIVATE,
+    # LP64_DEBUG) plus its BSD extras (`-include sys/types.h`, `bsd`/`osfmk` on the include path).  Holding
+    # the invocation constant is the point: MACH_KERNEL_PRIVATE and _CLOCK_T are deliberately NOT here,
+    # because the real build gives them to osfmk only and HFS is a BSD file.  What stays probe-side is the
+    # ELF block's own CDEFS, so the two blocks differ in the target and these extra defines and nothing else.
+    [[ $tmode == macho ]] && extra+=(-DMACH_KERNEL=1 -DDRIVER_PRIVATE=1 -D_KERNEL_BUILD=1 -DKERNEL_BUILD=1
+                                      -DBSD_BUILD=1 -DBSD_KERNEL_PRIVATE=1 -DLP64_DEBUG=0
+                                      -include sys/types.h -I"$XNU/bsd" -I"$XNU/osfmk")
     # Object dir: keep the ELF and Mach-O results apart.
     local odir="$SANDBOX/obj"; [[ $tmode == macho ]] && odir="$SANDBOX/obj-macho"; mkdir -p "$odir"
     printf '\n== %s ==\n' "$label"
