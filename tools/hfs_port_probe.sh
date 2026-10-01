@@ -73,173 +73,34 @@ cp "$REPO_ROOT/external/xnu-2050.18.24/bsd/machine/spl.h"     "$SANDBOX/supply/m
 cp "$REPO_ROOT/external/xnu-2050.18.24/bsd/vfs/vfs_journal.c" "$SANDBOX/tree/vfs_journal.c"
 cp "$REPO_ROOT/external/xnu-2050.18.24/bsd/vfs/vfs_journal.h" "$SANDBOX/tree/vfs_journal.h"
 
-python3 - "$SANDBOX" <<'PY'
-import sys
-sandbox = sys.argv[1]
+python3 - "$SANDBOX" "$REPO_ROOT" <<'PY'
+import sys, subprocess, os
+sandbox, repo_root = sys.argv[1], sys.argv[2]
 
-# --- shim 1: the one header that cannot be used as written -----------------------------------------
-# 4570's <stdbool.h> is reached through <kern/...> and defines `false` and `true` as macros.  2050's
-# hfs_macos_defs.h declares them as enum members under `#if !TYPE_BOOL` - and TYPE_BOOL is 0 for C
-# (`hfs_macos_defs.h:65`, it is 1 only under __cplusplus), so the enum is compiled and the macros win.
-# The enum is the only thing supplying the values, so replacing it with the definitions it used to make
-# is the whole change to this file.  Nothing else in it differs.
-p = sandbox + "/tree/hfs_macos_defs.h"
-s = open(p).read()
-old = """#if !TYPE_BOOL
+# --- the one header that cannot be used as written --------------------------------------------------
+# 4570's <stdbool.h> is reached through <kern/...> and defines `false` and `true` as macros; 2050's
+# hfs_macos_defs.h declares them as enum members, which cannot be declared under those macros.  The
+# substitution is ONE tracked tool, called here AND by tools/stage_hfs.sh, so the probe measures the
+# file the build produces rather than a second copy of the edit.
+subprocess.run([repo_root + "/tools/hfs_patch_macos_defs.py",
+                sandbox + "/tree/hfs_macos_defs.h"], check=True)
 
-enum {
-\tfalse\t\t\t\t\t\t= 0,
-\ttrue\t\t\t\t\t\t= 1
-};
-
-#endif  /*  !TYPE_BOOL */"""
-assert old in s, "the false/true enum is not where this script expects it"
-new = """/* PORT SHIM (tools/hfs_port_probe.sh): 4570 reaches <stdbool.h>, which #defines false/true, so
- * this enum cannot be declared under those macros.  It becomes the definitions it used to make. */
-#if !TYPE_BOOL
-#ifndef false
-#define false\t0
-#endif
-#ifndef true
-#define true\t1
-#endif
-#endif  /*  !TYPE_BOOL */"""
-open(p, "w").write(s.replace(old, new))
-
-# --- shim 2: everything the port ADDS, in one forced header ----------------------------------------
-# Forced rather than patched in, so that what the port owes 4570 is one readable list.  Each row names
-# the 2050 file and line it comes from, so a reader can tell an addition from a substitution.
-open(sandbox + "/port_force.h", "w").write("""/*
- * Everything the HFS+ port ADDS to 4570, in one forced header.
- * Nothing here edits an Apple source file; `make check`-visible drift is what this file is for.
- */
-
-/* The five malloc types 2050's bsd/sys/malloc.h declares and 4570's does not.  At 2050's own numbers:
- * 4570's highest M_* is 128 and 75/76/77/95/96 are all free, so no other type moves. */
-#define M_HFSMNT      75   /* 2050 bsd/sys/malloc.h:168 */
-#define M_HFSNODE     76   /* 2050 bsd/sys/malloc.h:169 */
-#define M_HFSFORK     77   /* 2050 bsd/sys/malloc.h:170 */
-#define M_HFSDIRHINT  95   /* 2050 bsd/sys/malloc.h:188 */
-#define M_HFSBITMAP   96   /* 2050 bsd/sys/malloc.h:189 */
-
-/* Two more of the same kind, owed by the JOURNAL (2050 bsd/vfs/vfs_journal.c, `#if JOURNALING`):
- * the port brings that file, so its malloc types come with it.  Also free in 4570. */
-#define M_JNL_JNL     91   /* 2050 bsd/sys/malloc.h:184 */
-#define M_JNL_TR      92   /* 2050 bsd/sys/malloc.h:185 */
-
-/* Two obsolete namei flags 4570 dropped.  Both are read only in the absurd branch (declare a wap for
- * a name that does not exist), so the VALUE does not matter and the port should not invent one that
- * looks meaningful.  Kept at 2050's numbers so a future reader can find them. */
-#define DOWHITEOUT   0x00040000  /* 2050 bsd/sys/vnode.h:209, OBSOLETE */
-#define ISWHITEOUT   0x00000080  /* 2050 bsd/sys/vnode.h, OBSOLETE */
-
-/* 2050's journal layer uses a PRIVATE buf flag that 4570's buf_internal.h dropped.  4570 still has
- * B_ZALLOC (0x08000000) and B_COMMIT_UPL (0x40000000) around it, so 0x10000000 is free here and the
- * port can take 2050's own value.  Set exactly where 2050 set it, in `modify_block_start`. */
-#define B_NORELSE   0x10000000  /* 2050 bsd/sys/buf_internal.h:216 - don't brelse() in bwrite() */
-
-/* 4570's vfc_vfsflags has no DIRLINKS bit and nothing reads one.  **This value is a PLACEHOLDER and
- * the port must NOT take it as-is**: 0x020 is VFC_VFSCANMOUNTROOT in 4570's table, so the bit has to
- * be chosen free and its meaning registered with whatever reads it - which 4570's vfs_syscalls.c
- * dropped along with the bit. */
-#define VFC_VFSDIRLINKS 0x800
-
-/* 4570's kmem_alloc takes the owning memory tag; 2050's took three arguments.  One line here instead
- * of seven call sites.  VM_KERN_MEMORY_FILE is 4570's own answer for a filesystem's buffer. */
-#define kmem_alloc(map, addr, size) kmem_alloc((map), (addr), (size), VM_KERN_MEMORY_FILE)
-
-/* Its kobject sibling, dropped in the same 4570 restructuring (vm_kern.h:160 vs :240): the JOURNAL
- * calls it four times (vfs_journal.c:1120, 1708, 1878, 2061).  Same one-line shape. */
-#define kmem_alloc_kobject(map, addr, size) kmem_alloc_kobject((map), (addr), (size), VM_KERN_MEMORY_FILE)
-""")
-
-# --- shim 3: the OPTIONS the port's own configuration declares --------------------------------------
-# 2050's `bsd/conf/MASTER` declares these as OPTIONS, and 4570's `bsd/conf/MASTER` declares the same
-# names.  They are what a REAL port turns on; without them every `#if HFS_COMPRESSION` block in HFS -
-# including `hfs_cnode.h`'s `c_decmp` field and the `VTOCMP` macro - is switched off, and `VTOCMP(vp)`
-# degrades to an implicit-int CALL (which is why one expression in `hfs_vfsutils.c` reads `int`).
-# Appended to the forced header so the option is visible in the same one list as the drift it prevents.
-with open(sandbox + "/port_force.h", "a") as f:
-    f.write('''
-/* 2050 bsd/conf/MASTER:193 and 4570 bsd/conf/MASTER - the port's own configuration options.
- * `HFS` (MASTER:188) is the one that turns on hfscommon/Unicode/UnicodeWrappers.c and
- * hfs_encodings.c (`#if HFS`); without it those two files compile to nothing and every symbol they
- * define - FastRelString, GetEmbeddedFileID, ConvertUnicodeToUTF8Mangled, hfs_converterinit, the
- * unicode converters - shows up as an undefined link symbol the port does not actually owe. */
-#ifndef HFS
-#define HFS 1
-#endif
-#ifndef HFS_COMPRESSION
-#define HFS_COMPRESSION 1
-#endif
-#ifndef CONFIG_HFS_STD
-#define CONFIG_HFS_STD 1
-#endif
-/* MASTER:192.  The journal's real body is `#if JOURNALING` (vfs_journal.c:124); unset, the file
- * compiles its `#else` stub arm and the TRIM entry points HFS calls (journal_trim_set_callback,
- * journal_trim_add_extent, journal_trim_remove_extent) never exist. */
-#ifndef JOURNALING
-#define JOURNALING 1
-#endif
-
-/* 4570's bsd/sys/cprotect.h dropped `cp_wrap_func_t` and `cp_register_wraps` (it restructured the
- * cprotect API).  At CONFIG_PROTECT=0 hfs_cprotect.c's body is a stub that IGNORES its argument, so
- * this placeholder is honest rather than a semantic claim; at CONFIG_PROTECT=1 the real port must
- * decide whether to call 4570's `cp_*` API or drop the call - which is the extra cost 865 named. */
-#ifndef cp_wrap_func_t
-typedef void *cp_wrap_func_t;
-#endif
-''')
+# Everything the port ADDS to 4570 - the malloc types, the namei flags, the kmem_alloc arity, the
+# port's own options - is NOT built here any more.  It lives in one tracked header,
+# `src/shims/hfs/hfs_port_force.h`, which this probe force-includes (see FORCE_INCLUDES) and which the
+# real build force-includes too.  One definition, so the probe's measurement is a statement about the
+# same header the kernel compiles against.
 
 print("sandbox ready")
 PY
 
-# --- the ten shims, as a FILE the port brings -------------------------------------------------------
-# 869 measured the link gap at ten symbols.  This writes the ten bodies, so the probe can show the gap
-# reaching ZERO rather than only naming what is owed.  Each is a one-line shim and each is honest about
-# WHY it is a shim (a body whose fields 4570 dropped is EMPTY, not invented).  Written into the tree so
-# the same compile loop builds it; nothing here edits an Apple source.
-cat >"$SANDBOX/tree/port_shims.c" <<'SHIMS'
-/*
- * The ten symbols 2050's HFS+ needs and 4570 does not define (tools/hfs_port_probe.sh, experiment 869).
- * Four are EMPTY BODIES because 4570 dropped the state they would write: fslog_fs_corrupt (4570 has no
- * fslog API), proc_tbe (P_TBE became P_RESV6), vfs_markdependency (no mnt_dependent_process/pid), and
- * proc_apply_thread_selfdiskacc (no thread->appliedstate.hw_disk).  Three are RENAMES.  Three are the
- * BSD-side IOKit shims HFS uses for the media's serial/ejectability/journal-content, none of which a
- * root filesystem needs - each returns the failure that makes HFS fall back.
- */
-#include <mach/kern_return.h>
-#include <sys/types.h>
-#include <sys/param.h>
-#include <sys/vnode.h>
-#include <sys/vnode_internal.h>
-#include <sys/vfs_context.h>
-#include <sys/ubc.h>
-#include <sys/ubc_internal.h>
-#include <sys/proc.h>
-#include <sys/mount.h>
-#include <sys/mount_internal.h>
-#include <vm/vm_kern.h>
-
-/* renames */
-const char *vnode_name(vnode_t vp) { return vnode_getname(vp); }
-int is_suser(void) { return vfs_context_issuser(vfs_context_current()); }
-int ubc_create_upl(vnode_t vp, off_t off, int size, upl_t *uplp, upl_page_info_t **plp, int flags)
-{ return ubc_create_upl_kernel(vp, off, size, uplp, plp, flags, VM_KERN_MEMORY_FILE); }
-
-/* empty bodies - 4570 dropped the state */
-int  proc_tbe(proc_t p) { (void)p; return 0; }
-void vfs_markdependency(mount_t mp) { (void)mp; }
-int  proc_apply_thread_selfdiskacc(int policy) { (void)policy; return 0; }
-void fslog_fs_corrupt(mount_t mp) { (void)mp; }
-
-/* BSD-side IOKit shims - the failure that makes HFS fall back */
-kern_return_t IOBSDGetPlatformSerialNumber(char *s, u_int32_t len) { (void)s; (void)len; return KERN_FAILURE; }
-int IOBSDIsMediaEjectable(const char *cdev_name) { (void)cdev_name; return 0; }
-void IOBSDIterateMediaWithContent(const char *uuid_cstring,
-                                  int (*func)(const char *, const char *, void *), void *arg)
-{ (void)uuid_cstring; (void)func; (void)arg; }
-SHIMS
+# --- the ten shims, as the TRACKED file the port brings ---------------------------------------------
+# 869 measured the link gap at ten symbols; 871 wrote the ten bodies and measured the gap at zero.
+# Those bodies are now `src/supply/stage90_hfs_shims.c` - ONE definition, the same file the real build
+# links - rather than a heredoc here.  The probe copies it into its tree so the same compile loop that
+# builds the HFS sources builds it too; the copy is what the loop needs (a path under $SANDBOX/tree),
+# and it is byte-identical to the tracked file, so there is no second copy of the bodies to drift.
+cp "$REPO_ROOT/src/supply/stage90_hfs_shims.c" "$SANDBOX/tree/port_shims.c"
 
 # ---------------------------------------------------------------------------------------------------
 # The compile.  The same clang, the same flags, the same configuration defines and the same forced
@@ -286,7 +147,12 @@ FORCE_INCLUDES=(
     -include sys/_types/_caddr_t.h
     -include sys/_types/_u_char.h
     -include meta_features.h
-    -include "$SANDBOX/port_force.h"
+    # THE SINGLE DEFINITION of what the port adds to 4570.  The probe used to build its own
+    # port_force.h in the sandbox; that was a second copy of the same list the real build's
+    # src/shims/hfs/hfs_port_force.h carries, which is this project's "one value, two definitions"
+    # defect.  The probe now force-includes the tracked file, so the measurement and the build share
+    # one header and the probe's 38/38 (871/873) is a statement about THAT header.
+    -include "$REPO_ROOT/src/shims/hfs/hfs_port_force.h"
 )
 
 CDEFS=(

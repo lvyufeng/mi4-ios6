@@ -150,6 +150,14 @@ restore:
 #                           `--selftest` holds nine fixtures - the four shapes this tree holds, and each of
 #                           the five ways the arithmetic goes wrong - and exits 2 for a failed selftest,
 #                           which is a different failure from the tree being wrong (experiment 810).
+#   check_hfs_staged.sh
+#                           the HFS+ port's tracked additions (src/shims/hfs/hfs_port_force.h and
+#                           src/supply/stage90_hfs_shims.c) are the ONE definition the host-only probe
+#                           AND tools/stage_hfs.sh both use; the untracked 4570 tree is a re-provisionable
+#                           checkout that can fall behind them. It refuses a force-header #define that
+#                           4570 already defines at a different value - the "one value, two definitions"
+#                           defect, silent when it happens - and a shims file that no longer defines the
+#                           ten symbols 871 measured the port at. No compiler, no device. (874.)
 check:
 	@tools/check_stage_paths.sh
 	@tools/check_set_name_rule.sh
@@ -168,6 +176,7 @@ check:
 	@tools/check_line_citations.py
 	@tools/check_response_word_order.py --selftest >/dev/null
 	@tools/check_response_word_order.py
+	@tools/check_hfs_staged.sh
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not
