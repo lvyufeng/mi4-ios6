@@ -1342,6 +1342,7 @@ PL_COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" iokit) )
 # because that is the header's component and because `bsd_autoconf` is the reader.
 PLATFORM_BSD_SOURCES=("$REPO_ROOT/src/supply/stage90_pthread_functions.c"
                       "$REPO_ROOT/src/supply/stage90_crypto_functions.c"
+                      "$REPO_ROOT/src/platform/stage90_root_media.c"
                       "$PSEUDO_INITS_SRC")
 PL_BSD_ROOTS=(-I"$XNU/bsd")
 for _c in "${COMPONENT_LIST[@]}"; do

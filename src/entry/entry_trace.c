@@ -2499,6 +2499,12 @@ void __wrap_platform_cache_idle_exit(void)
 #ifndef STAGE90_XNU_STORAGE_PROBE
 #define STAGE90_XNU_STORAGE_PROBE 0
 #endif
+/* 861: the mount-probe arm. Off by default so this is a pass-through (`$MOUNT`'s default in
+ * `build_entry.sh` is 0, and this is the same value for a compile that reaches this file any other
+ * way) - the wrapper below is the identity it has been since 457 until the arm asks otherwise. */
+#ifndef STAGE90_XNU_MOUNT
+#define STAGE90_XNU_MOUNT 0
+#endif
 #if STAGE90_XNU_STORAGE_PROBE
     /*
      * **692: the storage line's first act on the device, and the site is the same one 690 chose for the
@@ -3975,6 +3981,10 @@ extern void entry_note_dtprop(uint32_t entry, uint32_t key0, uint32_t key1, uint
 extern void entry_note_mdevadd(uint32_t caller, uint32_t devid, uint32_t base, uint32_t size,
                                uint32_t phys, uint32_t ret);
 extern void entry_note_mdevlookup(uint32_t caller, uint32_t devid, uint32_t ret);
+/* 861: `src/platform/stage90_root_media.c`'s registration, declared `extern` the way the stub
+ * notes above are. `__wrap_mdevlookup` hands the mount path the number this returns; the symbol is
+ * present in every configuration (the object is in `LINK_OBJS`), so the extern is unconditional. */
+extern int entry_root_media_register(int disk);
 extern void entry_note_dtwalk(uint32_t t1, uint32_t root, uint32_t count, uint32_t first,
                               uint32_t set, uint32_t kids, uint32_t class0, uint32_t class1,
                               uint32_t control);
@@ -4418,7 +4428,26 @@ int __real_mdevlookup(int devid);
 int __wrap_mdevlookup(int devid)
 {
     uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
-    int r = __real_mdevlookup(devid);
+    int r;
+
+#if STAGE90_XNU_MOUNT
+    /*
+     * 861: 530 section 9's route. The inlined `mdevlookup(xchar)` in `bsd_init` is the one supplier
+     * of `rootdev` this payload owns (530 section 2), so answering it with the block device
+     * `stage90_root_media.c` registered makes `vfs_mountroot` mount the payload's medium:
+     * `bdevvp` then `vfs_init_io_attributes` over that `dev_t`, with the missing RAM disk out of the
+     * path entirely. `entry_root_media_register(devid)` returns the `dev_t` as an `int`
+     * (`makedev(major, unit)`, `memdev.c:602`'s shape), so the cast is the number, not a conversion.
+     *
+     * `devid` is what the boot chose - `mdevlookup(0)` for the RAM disk - and it keys which disk's
+     * geometry is used, which is the hook the storage ladder's rung 57 needs to point the root at the
+     * partition it selected by extent rather than at partition 1. The real lookup is **not** called
+     * on this arm: there is no RAM disk to look up, and calling it would only return `-1` again.
+     */
+    r = entry_root_media_register(devid);
+#else
+    r = __real_mdevlookup(devid);
+#endif
 
     entry_note_mdevlookup(caller, (uint32_t)devid, (uint32_t)r);
     return r;
