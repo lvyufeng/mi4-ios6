@@ -11699,3 +11699,60 @@ set=armed-storage-63c6d77d sha256=63c6d77daad0cbe522739378a02b9c0d584df5857613ec
 set=armed-storage-63c6d77d sha256=0e7c59e690fd148188da08e2ca6fb002b0020309ec3a3355b2f1242cc1b6e4ae bytes=6766300 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-STAGE90_XNU_SEAM_LR-0x8004d2dc-UNCHANGED-from-rung-53
 set=armed-storage-63c6d77d sha256=18798916544bfe36f13ebf7e9b1c252d6e8097f7e8924f7f081c619f98cc5ecc bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=55-and-differing-from-the-rung-55-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
 set=armed-storage-63c6d77d sha256=d5768aa9cd2561fece50c29c3ca35acb123d54ff1c480632929e517929a19531 bytes=2335 file=xnu_arm_entry-sources.txt
+
+# ============================================================================================
+# 858 - THE RUNG-56 PRESS (STAGE90_XNU_STORAGE_PROBE=55, VALUE 55 = ORDINAL RUNG 56):
+# **THE PRESS WAS TAKEN AND `armed-storage-63c6d77d` IS SPENT.**
+# ============================================================================================
+#
+# **THE PRESS WAS TAKEN AND THE ARM IS SPENT.** One gate exit 0, one runner exit 0; `fastboot boot`
+# only, nothing flashed, nothing written to storage; `33e80afe` absent from both device lists
+# hand-checked immediately before the gate; **the device returned** and `adb` lists `4a2fe00b` as
+# `device` again. Capture `out/stage90/captures/rung56-fsgeom-20261001-010335-last_kmsg.txt` 663,149 B
+# `db5695026641900b0fe0c098e102d9439d18833664db2784b50220b6c88b2787`. Transcript: experiment-858.
+#
+# **NO BRICK**: `xnu_entry_failures = 0`, `abort_entries = 0`. The watchdog and the software dead-man
+# were armed as the gate printed; neither was needed to return the run.
+#
+# **THIS ONE PRESS SETTLES THREE PARKED RUNGS.** Rungs 54, 55 and 56 were all parked and unpressed,
+# and a cumulative ladder compiles every lower body in - so one boot answers all three: does a GPT
+# partition exist (yes), does it carry a filesystem superblock (NO), what is the superblock's
+# geometry (nothing to decode, and the guard said so).
+#
+# **THE WHOLE GPT CHAIN WORKS.** Three CMD17 reads, ordinals 1/2/3, and for each the sector written
+# to the argument register equals the sector the decode expected (`_rd_arg_lba_agree = 1`):
+# ordinal 1 -> LBA 1 (GPT header), ordinal 2 -> LBA 2 (entry array), ordinal 3 -> LBA 0x24 (the
+# partition's superblock sector). Every read clean: `_rd_complete = 1`, `_rd_err = 0`, `_rd_state = 4`
+# (TRAN), `_rd_words_gated = 0x80`, `_rd_illegal = 0`. Header: `_gp_sig_ok = 1`,
+# `_gp_w0 = 0x20494645` ("EFI "), `_gp_w1 = 0x54524150` ("PART"), `_gp_entry_lba = 2`,
+# `_gp_entry_size = 0x80`, `_gp_nentries = 0x1c`.
+#
+# **THE RESULT: THE FIRST PARTITION IS ~2 MB AND CARRIES NO FILESYSTEM.** Entry 0 is found
+# (`_ge_found = 1`, `_ge_blank = 0`, `_ge_index = 0`) with type GUID words
+# `0xdea0ba2c 0x4805cbdd 0x28f4f9b4 0x983e1c25` and extent `_ge_first_lba = 0x22` (34),
+# `_ge_last_lba = 0xfff` (4095) - a **0x1000-sector, ~2 MB** extent, a vendor/firmware partition and
+# not a filesystem. The third read addressed `_ge_part_sector + 2 = 0x24` and landed it
+# (`_pt_arg_sector = _pt_sb_sector = 0x24`, `_pt_next_is_arg = 1`) but the bytes are not a superblock:
+# `_pt_w0 = _pt_f2fs_magic = 0xe1a04614` (ARM code `mov r4, lr, lsr #12`), `_pt_ext_magic = 0xf0f0`,
+# and **`_pt_fs_found = 0`** with both negative signature checks holding (`_pt_hdr_ok = 0`,
+# `_pt_mbr_ok = 0`).
+#
+# **THE GEOMETRY GUARD HELD, CORRECTLY.** `_pg_called = 1` and **`_pg_decoded = 0` with
+# `_pg_which = 0`** - on a buffer where no magic was found, the guard publishes 0 and NO family cell
+# is vended; the two raw words (`_pg_w0 = 0xe1a04614`, `_pg_w24 = 0x97b425ed`) are still published so
+# the shared byte is visible without either name being trusted. The word-24 dual meaning never had to
+# be resolved.
+#
+# **THE FRONTIER IS THE ENTRY INDEX, NOT A NEW DEVICE MECHANISM.** The GPT declares 28 entries but
+# this rung reads ONE array sector, so the walk is bounded to `_ge_nentries_used = 4` and entry 0 is
+# the small vendor partition. The filesystem-bearing partition is at a higher index one sector does
+# not reach. The next rung walks the whole entry array (7 sectors) and selects the LARGE extent, then
+# reads ITS superblock - a read-count change of the same shape as rungs 53->54.
+#
+# **NO BYTE OF THE MEDIUM MOVED** - three CMD17 reads, `fastboot boot` only.
+# **THE GOAL IS NOT MET** - the first partition is not a filesystem, no filesystem is mounted, no
+# TWRP was written. But the storage frontier moved from "is there a filesystem here" (rung 55's
+# question, answered NO for partition 1) to "which partition is the filesystem" (rung 57's).
+#
+# **NO FIRER IS ARMED AND NO PRESS IS OWED.** `armed-storage-63c6d77d` is SPENT and the park is a
+# RECORD, not a queue. Below it `armed-storage-e8597e3e` (rung 53) was already spent.
