@@ -14677,6 +14677,13 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     IOKIT_BSDDEV_IOKITBSDINIT_OBJ=${STAGE90_ENTRY_IOKIT_BSDDEV_IOKITBSDINIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_bsddev_IOKitBSDInit.o}
     STAGE90_PTHREAD_FUNCTIONS_OBJ=${STAGE90_ENTRY_STAGE90_PTHREAD_FUNCTIONS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_pthread_functions.o}
     STAGE90_CRYPTO_FUNCTIONS_OBJ=${STAGE90_ENTRY_STAGE90_CRYPTO_FUNCTIONS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_crypto_functions.o}
+    # 877: the HFS+ port's ten shims (experiments 869/871). Compiled by the same platform block as the
+    # two tables above, with the bsd define set and the bsd import roots - the file includes `<sys/vnode.h>`,
+    # `<sys/vfs_context.h>`, `<sys/ubc_internal.h>` and `<vm/vm_kern.h>`, so its view of those structs has
+    # to be the kernel's rather than a copy of it (the reason `stage90_pthread_functions.c` is compiled
+    # there too). It is linked HERE and not by the HFS sources it stands in for, because it defines
+    # symbols the *rest of the kernel* - anything that calls the HFS entry points - reaches as well.
+    STAGE90_HFS_SHIMS_OBJ=${STAGE90_ENTRY_STAGE90_HFS_SHIMS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_hfs_shims.o}
     # 439: `pseudo_inits[]`, generated per configuration by tools/gen_pseudo_inits.py and compiled by
     # the same platform block as the two tables above - so the object's *name* is the generator's
     # basename (`stage90_pseudo_inits.o`), while its *source* lives under the configuration that
@@ -27266,6 +27273,14 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # nothing from the tree; see where it is built. Linked beside the table that points into it.
     LINK_OBJS+=("$STAGE90_AES_OBJ")
     require "$STAGE90_CRYPTO_FUNCTIONS_OBJ" "run ./tools/build_xnu_arm_kernel.sh --platform-only first (its platform block compiles src/supply/stage90_crypto_functions.c)"
+    # 877: the HFS+ port's ten shims. The platform block compiles this object only when the port is on
+    # (`STAGE90_XNU_HFS=1`; with it off nothing in the manifest references these symbols), so the link
+    # takes it **if it exists** rather than requiring it. That is the honest shape: the object's
+    # presence IS the record that the port was built, and 868 measured what its absence costs when the
+    # port IS on - 25 undefined symbols named one at a time by the linker, not a clean stop.
+    if [[ -f $STAGE90_HFS_SHIMS_OBJ ]]; then
+        LINK_OBJS+=("$STAGE90_HFS_SHIMS_OBJ")
+    fi
 
     # --------------------------------------------------------------------------------------------
     # 439: `pseudo_inits`, supplied by this image - and it is *this* link line that has to carry it.

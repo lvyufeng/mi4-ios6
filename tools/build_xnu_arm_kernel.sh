@@ -63,6 +63,41 @@ MIG_KSERVER=${MIG_KSERVER_OUT:-$REPO_ROOT/out/mach_headers/kserver}
 OUT=${XNU_KERNEL_OBJ_OUT:-$REPO_ROOT/out/xnu_kernel_obj}
 MANIFEST=${MANIFEST:-$REPO_ROOT/out/xnu_arm_manifest.txt}
 
+# **The HFS+ port's sources, which are not in any `conf/files`** (experiments 875/877).  2050's HFS
+# is staged into this tree by `tools/stage_hfs.sh`, but its rows are deliberately NOT added to the
+# untracked `bsd/conf/files`: the port's additions live in TRACKED files, so the build names them from
+# a tracked list instead.  Two halves, and both are needed or neither works:
+#
+#   HFS_FILES   37 paths (36 `.c` under `bsd/hfs/` plus `bsd/vfs/vfs_journal.c`), handed to
+#               `list_sources.py --extra` so the manifest contains them.  `--extra` REFUSES a
+#               named-but-absent path, so an unstaged tree stops the build instead of producing a
+#               kernel that quietly has no HFS in it.
+#   HFS_FORCE   the ONE header that IS the port's additions (the five malloc types, the journal's two,
+#               the obsolete namei flags, the `kmem_alloc` arity macros, and the port's own options
+#               `HFS`/`HFS_COMPRESSION`/`CONFIG_HFS_STD`/`JOURNALING`).  It is force-included for the
+#               HFS files ONLY - it is the port's definition and no other file should see it - for the
+#               same reason `-include sys/types.h` is per-BSD-file: a global `-include` would put these
+#               macros in front of 730 files that were never measured with them.
+#
+# `hfs_files.txt` is the same 37 the in-place measurement in experiment 876 compiled, so the list and
+# the measurement cannot disagree; `tools/check_hfs_staged.sh` (in `make check`) guards that.
+HFS_FILES=$REPO_ROOT/src/supply/hfs_files.txt
+HFS_FORCE=$REPO_ROOT/src/shims/hfs/hfs_port_force.h
+
+# **And it is OFF by default, because the wiring is correct and the port is not yet complete** (877).
+# Measured through this very pipeline in that step: 32 of the port's 36 `.c` files compile, and the
+# four that do not - `hfs_cprotect.c`, `hfs_readwrite.c`, `hfs_vfsops.c`, `hfs_vnops.c` - fail in the
+# cprotect API family (`CP_WRITE_ACCESS`, `CP_PREFETCH`, `struct cprotect`, `struct cp_root_xattr`,
+# `CP_PREV_MAJOR_VERS`, ...).  That is exactly the gap 865 named when it measured the port at 34/38
+# under `CONFIG_PROTECT=1`, and **it cannot be closed by a per-file switch**: `bsd/sys/buf_internal.h`
+# gates two fields *inside `struct bufattr`* (`:82-92`) on `CONFIG_PROTECT`, so the option is a
+# struct-LAYOUT axis, not a filesystem one.  Compiling these four with `-DCONFIG_PROTECT=0` while the
+# other 704 files are built with the configuration's `CONFIG_PROTECT=1` would be a second definition of
+# `struct bufattr` - silent, and wrong at the wrong offset ([[mi4-one-value-two-definitions]]).  So the
+# switch stays 0 and the port does not reach a kernel until its cprotect work lands; the build is
+# correct in both positions and this is the one that cannot lie about what the tree can do.
+HFS_PORT=${STAGE90_XNU_HFS:-0}
+
 # Apple's COMPONENT_LIST, `makedefs/MakeInc.def:46`. It is named once here because it is read in
 # two places - the per-file import roots below, and the runtime block after the loop - and a second
 # copy of it is how `-I$XNU/bsd` went missing for 68 libkern files once already. The error that
@@ -159,7 +194,15 @@ fi
 # about. A required input that a generated input determines has to be generated too, or the report is
 # about two different configurations.
 if [[ $ONLY_PLATFORM -eq 0 ]]; then
-    LS_MESSAGE=$("$TOOLS_DIR/xnu_config/list_sources.py" "$CONFIG" --write "$MANIFEST" 2>&1) || {
+    # The HFS sources join the manifest here when the port is on (`$HFS_PORT`, above), from the
+    # tracked list (`--extra`); with it off the manifest is the base 733 exactly as before, so this
+    # edit changes nothing about the arm on disk.  When it IS on, `--extra` exits non-zero and writes
+    # NO manifest for a path it cannot find, so a tree that has not been staged cannot produce a kernel
+    # that claims to have HFS.
+    _hfs_extra=()
+    [[ $HFS_PORT -eq 1 ]] && _hfs_extra=(--extra "$HFS_FILES")
+    LS_MESSAGE=$("$TOOLS_DIR/xnu_config/list_sources.py" "$CONFIG" --write "$MANIFEST" \
+                 "${_hfs_extra[@]}" 2>&1) || {
         echo "$LS_MESSAGE" >&2
         exit 2
     }
@@ -961,6 +1004,18 @@ while read -r src; do
     BSD_FORCE=()
     [[ $SRC_COMPONENT == bsd ]] && BSD_FORCE=(-include sys/types.h)
 
+    # And the HFS+ port's own additions, for the HFS files only (experiments 875/877).  Every file
+    # under `bsd/hfs/` - the staged 2050 sources - plus the one out-of-directory member of the port,
+    # `bsd/vfs/vfs_journal.c` (the journal HFS calls; it is `#if JOURNALING`, which this header turns
+    # on).  The test is on the PATH and not on "is it in `$HFS_FILES`" deliberately: a membership test
+    # would have to read the list again per file, and the path test is the same set by construction -
+    # `hfs_files.txt` names exactly these paths, and `tools/stage_hfs.sh` stages exactly them.
+    # `-include` rather than a flag because the additions are macros a 2050 source reads without
+    # declaring (see the header's own comment): nothing in the port may be edited to add an #include.
+    if [[ $HFS_PORT -eq 1 && ( ${src#"$XNU"/} == bsd/hfs/* || ${src#"$XNU"/} == bsd/vfs/vfs_journal.c ) ]]; then
+        BSD_FORCE+=(-include "$HFS_FORCE")
+    fi
+
     # `bsd/dev/unix_startup.c` includes `<netinet/tcp_var.h>`, which includes `<netinet/in_pcb.h>`,
     # and **in 4570 `in_pcb.h` is not self-contained**: it uses `struct in_addr`, `struct in6_addr`,
     # `struct route` and `struct sockaddr_in` at `:114,176,185,295` and includes `<netinet/in.h>`,
@@ -1344,6 +1399,10 @@ PLATFORM_BSD_SOURCES=("$REPO_ROOT/src/supply/stage90_pthread_functions.c"
                       "$REPO_ROOT/src/supply/stage90_crypto_functions.c"
                       "$REPO_ROOT/src/platform/stage90_root_media.c"
                       "$PSEUDO_INITS_SRC")
+# And the HFS+ port's ten shims, only when the port is on (`$HFS_PORT`, above): with it off nothing in
+# the manifest references them, so compiling the object would add ten definitions no link needs - and
+# `build_entry.sh`'s `require` for it would then be owed an object the pool mode never builds.
+[[ $HFS_PORT -eq 1 ]] && PLATFORM_BSD_SOURCES+=("$REPO_ROOT/src/supply/stage90_hfs_shims.c")
 PL_BSD_ROOTS=(-I"$XNU/bsd")
 for _c in "${COMPONENT_LIST[@]}"; do
     [[ $_c == bsd ]] && continue

@@ -209,6 +209,20 @@ def main():
     ap.add_argument("--write", metavar="PATH",
                     help="write the selected file list here, one path per line, instead of "
                          "printing it - so the manifest is a build input rather than a report")
+    # Extra sources the configuration selects but that are NOT in this tree's `conf/files`.  This is
+    # for the HFS+ port (experiments 875/877): 2050's HFS sources are staged into 4570's tree but their
+    # rows are deliberately NOT added to the untracked `bsd/conf/files` - the port's additions live in
+    # tracked files - so the build names them here instead.  Paths are relative to `--xnu`, comments
+    # (`#`) and blanks are skipped, and a named-but-absent file is **refused, not reported**: this list
+    # is a build input, and the one failure it can have is the silent one.  `external/` is a
+    # re-provisionable checkout, so a tree that has not been staged (`tools/stage_hfs.sh`) would make
+    # every HFS path vanish - and a manifest that quietly lost 37 files would compile a kernel with no
+    # HFS in it while the wiring claimed otherwise, which is exactly the defect this project pays for
+    # most often.  The base `conf/files` entries are allowed to be absent (3 are, being MIG-generated);
+    # these are not, because nothing generates them but the stager.
+    ap.add_argument("--extra", metavar="LIST",
+                    help="a file listing extra sources (one path relative to --xnu per line) that the "
+                         "manifest MUST contain; a named-but-absent path is an error, not a note")
     args = ap.parse_args()
 
     options = expand_options(args.xnu, args.config)
@@ -261,6 +275,35 @@ def main():
                 print(f"  {mark} {path}{suffix}")
         if not args.write:
             print()
+
+    # The extra sources (see --extra): named by a tracked list, resolved against the tree, reported
+    # if absent.  They are added whether or not `--write` is given, so a dry run shows them too.
+    if args.extra:
+        extra_missing = []
+        n_extra = 0
+        for line in open(args.extra, encoding="utf-8", errors="replace"):
+            rel = line.split("#", 1)[0].strip()
+            if not rel:
+                continue
+            path = os.path.normpath(os.path.join(args.xnu, rel))
+            selected.append(path)
+            total += 1
+            n_extra += 1
+            if os.path.isfile(path):
+                present += 1
+            else:
+                extra_missing.append(path)
+        if extra_missing:
+            print(f"{args.extra}: {len(extra_missing)} named file(s) are not in the tree:", file=sys.stderr)
+            for path in extra_missing:
+                print(f"  MISSING {path}", file=sys.stderr)
+            print(f"these ARE the build input (--extra), not an optional reading: nothing but"
+                  f" tools/stage_hfs.sh puts them there. Stage the tree first; a manifest that"
+                  f" silently dropped them is a kernel with no HFS (see this option's own comment).",
+                  file=sys.stderr)
+            return 2
+        if not args.write:
+            print(f"== extra (--extra {args.extra}): {n_extra} file(s) ==")
 
     if args.write:
         # Sorted and de-duplicated: a file can be listed by both `files` and `files.<arch>`, and a
