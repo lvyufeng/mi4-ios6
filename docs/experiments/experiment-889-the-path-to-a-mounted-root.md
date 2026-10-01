@@ -12,15 +12,24 @@ destructive reformat is LAST.
 
 ---
 
+> **UPDATE 2026-10-01 (890): step 0's press is SPENT and the runbook below is changed.** The rung-58
+> press answered rung 57's question: the selected largest partition is **`userdata`, carrying ext4**
+> (`_dp_name_p0/p1` = `user`/`data`, `_pt_ext_magic = 0xef53`, `_pg_which = 1`). So the destructive
+> **HFS+ reformat of step 3 is no longer obviously necessary** — the mountable partition already holds
+> a filesystem, and an ext2/3/4 client exists in the XNU tree. Steps 1 and 4 stand; step 3 is now a
+> *choice* (mount the existing ext4 vs. reformat), and the cheaper branch is live. See experiment 890.
+
 ## 1. Why the order is what it is (the three facts that fix it)
 
 - **The tree holds only the press.** `build_entry.sh` hardcodes `OUT=out/stage90`, and the gate requires
   the live `src/entry/` to hash to the entry image's source manifest. So the staged arm cannot be rebuilt
   in place — 888 measured that even a switch-OFF rung-57 rebuild gives `773d49f9…` where the press is
-  `5936b246…`. The parked arm is its only copy (**886**, **888**).
-- **The selection is `userdata` = EXT4, and the device has no HFS volume** (**884**). So a ported HFS+
-  (**885**) and a card-reading strategy are necessary but not sufficient: something must put an HFS+
-  filesystem *on* `userdata` (**880**). That is a destructive device write, so it goes last.
+  `5936b246…`. The parked arm is its only copy (**886**, **888**). *(The rung-58 press is now spent;
+  the tree is free for the step-1 patch.)*
+- **The selection is `userdata` = EXT4 — measured by the press, not inferred** (**890**). The ported
+  HFS+ (**885**) and a card-reading strategy are still what serves the mount, but the medium does not
+  need an HFS+ filesystem written to it: `userdata` already carries a well-formed ext4. The HFS+ route
+  (**880**) remains available if ext4 mounting proves harder than HFS+ (**884**).
 - **The ladder is cumulative and unwashed above rung 56** (**stage90-phase-status**): rungs 57/58/59/60
   are built and parked but unpressed. One press washes several (858: one press washed three).
 
