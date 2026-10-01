@@ -51,29 +51,73 @@ filesystem in the path). To mount HFS+ instead:
 | C | **the HFS row is reached first**: it is already *before* mockfs (879), and the port is on, so `vfs_mountroot` calls `hfs_mountroot` before `mockfs_mountroot` | `vfs_conf.c` (879's patch) |
 | D | **C is sufficient only if B is real**: `hfs_mountroot` reads blocks through `buf_strategy` → `st_media_strategy`, which today serves disk 0's whole RAM disk and disk 1's one staged sector | `stage90_root_media.c:324` |
 
-**The safety property — why this cannot brick or regress the boot.** `vfs_mountroot`
+**The safety property — and the correction the maps forced on it.** `vfs_mountroot`
 (`vfs_subr.c:1069-1080`) walks `vfstbllist[]` and calls each row's `vfc_mountroot`, breaking on the
-**first** that returns 0. 879 put the HFS row **before** mockfs. So:
+**first** that returns 0. 879 put the HFS row **before** mockfs, so **order** gives fall-through: if
+`hfs_mountroot` returns non-zero the walk continues to mockfs.
 
-- HFS mounts → the root is the HFS+ image; the exec reads `/sbin/launchd` from it (the branch this arm
-  is testing).
-- HFS fails (bad image, a port runtime bug, a stub returning garbage) → `hfs_mountroot` returns non-zero,
-  the walk **continues to mockfs**, and the boot is **exactly today's boot** — the 8 KB RAM disk, the
-  Mach-O, process 1. **A failed HFS mount is a fall-through, not a panic.**
+**But order is not enough, and this is the correction.** The mockfs fall-through only reaches a working
+exec if disk 0 still serves it the **Mach-O**: `mockfs_mountroot` asks the root device
+`DKIOCGETMEMDEVINFO` and maps its one file node onto `mi_base << 12`; today `mi_base` is
+`g_stage90_ramdisk`, the Mach-O. HFS, by contrast, reads the **same root device** through `buf_strategy`
+→ `st_media_strategy`, and for it to mount the image the strategy must serve the **image**. So the two
+rows want disk 0 to serve *different bytes by different access paths*:
 
-That is the property that makes this arm worth building before the medium is real: it exercises the
-whole HFS+ mount path on hardware **without giving up the working boot**. Nothing is written to any
-partition; the image is RAM the payload already owns.
+| reader | access path | bytes it needs |
+| --- | --- | --- |
+| `hfs_mountroot` | `buf_meta_bread` → `VNOP_STRATEGY` → `st_media_strategy` | the **HFS+ image** |
+| `mockfs_mountroot` | `DKIOCGETMEMDEVINFO` → `mi_base << 12`, mapped | the **Mach-O** |
 
-## 4. What this step does NOT build (the arm itself), and why
+**The medium must answer them differently** for the arm to be safe: `st_media_strategy` serves the image
+while `st_media_memdev_info` keeps answering `mi_mdev = 1`, `mi_base = g_stage90_ramdisk >> 12` so the
+mockfs fallback still maps the Mach-O. (866 set `mi_mdev = 0` to force mockfs *through* the strategy for
+the driver goal; this arm deliberately **reverses that one word**, because here the strategy is the HFS
+path and mockfs must stay on its own.) With that split:
 
-The image is built and the shape is fixed. Wiring B (the medium) is the next step and it is **not done
-here**, for one measured reason at the time of writing: **`hfs_mountroot`'s exact block-device
-requirements are being mapped** (the ioctls it issues before its first read, the block size it assumes,
-whether it needs `VFS_STATFS`) so the medium answers them correctly rather than by guess. The medium
-already answers the twelve `vfs_init_io_attributes` ioctls and `DKIOCGETMEMDEVINFO`; what is left is
-the HFS-specific set, and building against a guessed set is the "stand-in the right size and the wrong
-value" class ([`mi4-stand-in-size-is-not-value`]).
+- HFS mounts → the root is the HFS+ image; the exec reads `/sbin/launchd` from it (the branch under test).
+- HFS fails → `hfs_mountroot` returns non-zero, mockfs mounts, maps the Mach-O, and the boot is **exactly
+  today's boot**. **A failed HFS mount is a fall-through, not a panic.**
+
+Without the split — if disk 0 served the image to *both* paths — a failed HFS mount would also break
+mockfs (it would map the image, not a Mach-O, as its "executable"), and the boot would panic at
+`load_init_program`. So the split is **load-bearing for the safety property**, and the arm must carry a
+check that `st_media_memdev_info`'s disk-0 answer still names the Mach-O while the strategy serves the
+image. Nothing is written to any partition; both are RAM the payload already owns.
+
+## 4. What the maps found, and what is left to wire
+
+The three maps (this step's) settled the medium's surface:
+
+- **The medium already answers every ioctl the mount requires.** `hfs_mountfs` mandates
+  `DKIOCGETBLOCKSIZE` and `DKIOCGETBLOCKCOUNT` (`hfs_vfsops.c:1326,1373`; both `ENXIO` if unserved), and
+  a first read of **512 bytes at byte offset 1024** (sector 2, `HFS_PRI_SECTOR(512)=2`). `st_media_ioctl`
+  answers both, and `st_media_strategy` serves `b_blkno * 512` — so sector 2 is byte 1024 for it too.
+  `DKIOCGETPHYSICALBLOCKSIZE`, `DKIOCGETFEATURES`, `DKIOCISSOLIDSTATE`, `DKIOCISVIRTUAL` may return
+  `ENOTTY` and are tolerated. **Nothing new is required of the ioctl set.**
+- **The image is panic-safe and needs no cprotect engine for a mount** (§3a below): B-tree node size
+  4096 (not 512, which `BTree.c:272` panics on), content-protection attribute bit 30 clear (so the NULL
+  `g_cp_wrap_func` deref 878 flagged is not reached), `lastMountedVersion` ≠ `'HFSJ'` (no journal work),
+  and the pure-HFS+ branch (`drEmbedSigWord` = 0).
+- **What is left is the disk-0 byte split of §3** — `st_media_strategy` serving the image while
+  `st_media_memdev_info` keeps naming the Mach-O — plus putting the image's bytes where the payload can
+  read them (the `g_stage90_ramdisk` role). That is the arm, and it is the next step.
+
+## 3a. The image's own structure, measured
+
+`tools/build_hfs_root_image.sh`'s output was read structurally (not just magic-checked):
+
+```
+VH:  sig=0x482b ver=4 blockSize=4096 totalBlocks=128 free=77
+     attributes=0x80000100  (bit30 content-protection = 0, bit8 unmounted = 1)
+     lastMountedVersion = 'H+Lx'  (not 'HFSJ'; journaled bit clear)
+     drEmbedSigWord @1024+124 = 0x0000  (pure HFS+, not the embedded-MDB branch)
+     allocationFile 1 blk, extentsFile 8 blk, catalogFile 8 blk, attributesFile 16 blk, startupFile 0
+     catalog node0 nodeSize=4096, extents node0 nodeSize=4096
+```
+
+`cat_idlookup(kHFSRootFolderID=2)` must resolve the root folder from this catalog for the mount to
+succeed, and the full path (`sbin`→`launchd`) for the exec — `mkfs.hfsplus` writes those, which is why a
+**real formatter** was used rather than a hand-built tree.
 
 ## 5. The honest bound
 
