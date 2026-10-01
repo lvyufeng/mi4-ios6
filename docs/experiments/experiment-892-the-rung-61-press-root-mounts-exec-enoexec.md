@@ -106,28 +106,38 @@ its bytes from the wrong array. Whether `hfs_mountroot` itself returned non-zero
 
 ### The fix (build, no device needed)
 
-The medium `mi_mdev` answers must be the **same** array `st_medium_disk_base(0)` serves:
+The invariant the arm needs: **`DKIOCGETMEMDEVINFO` must describe the medium mockfs can exec
+from — the Mach-O, `g_stage90_ramdisk` — and `mi_mdev` must be 1 on the HFS arm so mockfs actually
+uses it** (because there the *strategy* serves the volume, so memory-backing is the only way mockfs
+gets the Mach-O).
 
 ```
-info->mi_mdev = STAGE90_XNU_HFS_ROOT_MEDIA ? 0 : 1;
-info->mi_base = STAGE90_XNU_HFS_ROOT_MEDIA ? ((uintptr_t)g_stage90_root_hfs >> PAGE_SHIFT)
-                                           : ((uintptr_t)g_stage90_ramdisk  >> PAGE_SHIFT);
+#if STAGE90_XNU_HFS_ROOT_MEDIA
+    info->mi_mdev = 1;   /* the strategy serves the volume, so mockfs must map the Mach-O from memory */
+#else
+    info->mi_mdev = 0;   /* 866: decline memory-backing; there the strategy already serves the Mach-O */
+#endif
+    ...
+    info->mi_base = (uintptr_t)g_stage90_ramdisk >> ST_MEDIA_PAGE_SHIFT;   /* the Mach-O, on both arms */
 ```
 
-- **`HFS=0`** (866's arm) → `mi_mdev=1`, `mi_base=g_stage90_ramdisk` — **exactly what 890 ran**, the
-  working exec. Unchanged.
-- **`HFS=1`** → `mi_mdev=1`, `mi_base=g_stage90_root_hfs` — mockfs maps the **volume** as a raw
-  byte array at its file offset 0. But the volume is an HFS+ container, so its offset 0 is still not
-  the Mach-O. The file node therefore cannot read `/sbin/launchd` **unless it is served through the
-  filesystem** (`hfs_mountroot` → the HFS+ reader's `cluster_pagein` → `st_media_strategy` →
-  `g_stage90_root_hfs`), which is the 882 design's intent.
+- **`HFS=0`** (866's arm) → `mi_mdev=0`, `mi_base=g_stage90_ramdisk` — **exactly what 890 ran**, the
+  working exec. Byte-for-byte unchanged.
+- **`HFS=1`** → `mi_mdev=1`, `mi_base=g_stage90_ramdisk`. Now **both mount paths give a working
+  exec**:
+  - if **`hfs_mountroot` returns 0** (the intended arm), the root is HFS+ and `/sbin/launchd` is
+    served through the HFS+ reader → `cluster_pagein` → `st_media_strategy` → `g_stage90_root_hfs`
+    (the volume) → the Mach-O at the correct in-volume offset;
+  - if **`hfs_mountroot` returns non-zero**, mockfs mounts and memory-backs `g_stage90_ramdisk` —
+    the Mach-O at its file offset 0 — so the fall-through **also** execs.
 
-So the fix restores memory-backing on the `HFS=1` arm, and the question becomes whether mockfs
-mounts (memory-backed, mapping `g_stage90_root_hfs`'s non-Mach-O offset 0 → ENOEXEC again) or HFS
-mounts **first** and serves `/sbin/launchd` through the HFS+ reader. Both are reachable; the next
-rung is to build the `HFS=1`-with-`mi_mdev=1` arm (and, if the HFS read of `/sbin/launchd` still
-fails, to debug that read path). **The rung must be a build + park; whether to press it is the same
-standing-instruction question as below.**
+That is the split 882 §"safety" *described* ("`DKIOCGETMEMDEVINFO` … stay[s] on the Mach-O") but
+that 866's hardcoded `mi_mdev = 0` **silently defeated** — the base is dead when the flag is 0.
+
+So the next rung is to build the `HFS=1`-with-`mi_mdev=1` arm (rung 62) and press it. If the exec
+then succeeds, the root is either HFS+ (goal clause met, storage mounted) or mockfs (890's state
+restored, and the HFS read path is the next thing to debug). **The rung must be a build + park; the
+press follows the same standing-instruction reading as below.**
 
 **THE GOAL IS NOT MET** — the OS executes no `launchd`; but for the first time the boot reaches the
 exec of a real root-filesystem init, and the card unit reads the device.
