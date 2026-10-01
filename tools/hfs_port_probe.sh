@@ -120,6 +120,39 @@ open(sandbox + "/port_force.h", "w").write("""/*
  * of seven call sites.  VM_KERN_MEMORY_FILE is 4570's own answer for a filesystem's buffer. */
 #define kmem_alloc(map, addr, size) kmem_alloc((map), (addr), (size), VM_KERN_MEMORY_FILE)
 """)
+
+# --- shim 3: the OPTIONS the port's own configuration declares --------------------------------------
+# 2050's `bsd/conf/MASTER` declares these as OPTIONS, and 4570's `bsd/conf/MASTER` declares the same
+# names.  They are what a REAL port turns on; without them every `#if HFS_COMPRESSION` block in HFS -
+# including `hfs_cnode.h`'s `c_decmp` field and the `VTOCMP` macro - is switched off, and `VTOCMP(vp)`
+# degrades to an implicit-int CALL (which is why one expression in `hfs_vfsutils.c` reads `int`).
+# Appended to the forced header so the option is visible in the same one list as the drift it prevents.
+with open(sandbox + "/port_force.h", "a") as f:
+    f.write('''
+/* 2050 bsd/conf/MASTER:193 and 4570 bsd/conf/MASTER - the port's own configuration options.
+ * `HFS` (MASTER:188) is the one that turns on hfscommon/Unicode/UnicodeWrappers.c and
+ * hfs_encodings.c (`#if HFS`); without it those two files compile to nothing and every symbol they
+ * define - FastRelString, GetEmbeddedFileID, ConvertUnicodeToUTF8Mangled, hfs_converterinit, the
+ * unicode converters - shows up as an undefined link symbol the port does not actually owe. */
+#ifndef HFS
+#define HFS 1
+#endif
+#ifndef HFS_COMPRESSION
+#define HFS_COMPRESSION 1
+#endif
+#ifndef CONFIG_HFS_STD
+#define CONFIG_HFS_STD 1
+#endif
+
+/* 4570's bsd/sys/cprotect.h dropped `cp_wrap_func_t` and `cp_register_wraps` (it restructured the
+ * cprotect API).  At CONFIG_PROTECT=0 hfs_cprotect.c's body is a stub that IGNORES its argument, so
+ * this placeholder is honest rather than a semantic claim; at CONFIG_PROTECT=1 the real port must
+ * decide whether to call 4570's `cp_*` API or drop the call - which is the extra cost 865 named. */
+#ifndef cp_wrap_func_t
+typedef void *cp_wrap_func_t;
+#endif
+''')
+
 print("sandbox ready")
 PY
 
@@ -217,16 +250,57 @@ echo "  clang:        --target=$TARGET -mcpu=cortex-a15, the stage90 kernel buil
 run_configuration "CONFIG_PROTECT=0  (protection off - hfs_cprotect.c is then dead code)" 0
 run_configuration "CONFIG_PROTECT=1  (the stage90 configuration's own value)"             1
 
+# ---------------------------------------------------------------------------------------------------
+# THE LINK GAP.  A compile count is a floor on the work; 865 said so and left the link unmeasured.
+# This subtracts, from the symbols the compiled port leaves UNDEFINED, (a) everything the built kernel
+# already defines (its own object set plus the linked entry image) and (b) everything the port defines
+# within itself.  What remains is exactly what 4570 does NOT supply and the port must bring or shim -
+# the real external debt, and the number a port decision needs.
+# ---------------------------------------------------------------------------------------------------
+LINK_GAP() {
+    local nm=kern_all.txt undef=hfs_undef.txt def=hfs_def.txt
+    { arm-none-eabi-nm "$REPO_ROOT"/out/xnu_macho_obj/*.o "$REPO_ROOT"/out/xnu_arm_full_obj/*.o 2>/dev/null \
+        | awk '$2 ~ /^[TtDdBbRrWwVvGgSs]$/{print $3}'
+      arm-none-eabi-nm "$REPO_ROOT"/out/stage90/xnu_arm_entry.elf 2>/dev/null \
+        | awk '$2 ~ /^[TtDdBbRrWwVv]$/{print $3}'; } | sort -u >"$SANDBOX/$nm"
+    arm-none-eabi-nm "$SANDBOX"/obj/0-*.o 2>/dev/null | awk '$1=="U"{print $2}' | sort -u >"$SANDBOX/$undef"
+    arm-none-eabi-nm "$SANDBOX"/obj/0-*.o 2>/dev/null | awk '$2 ~ /^[TtDdBbRrWwVvGgSs]$/{print $3}' | sort -u >"$SANDBOX/$def"
+    comm -23 "$SANDBOX/$undef" "$SANDBOX/$nm" | comm -23 - "$SANDBOX/$def"
+}
+
+GAP=$(LINK_GAP)
+printf '\n== THE LINK GAP (CONFIG_PROTECT=0): symbols 4570 does not define and the port must bring ==\n'
+printf '%s\n' "$GAP" | sed 's/^/  /'
+printf '  -- %d symbol(s) of external debt, in these families:\n' "$(printf '%s\n' "$GAP" | grep -c .)"
+cat <<'EOF'
+     journal_* + fslog_fs_corrupt   HFS's transaction journal - 2050's bsd/vfs/vfs_journal.c (its own
+                                    file), needed at mount even read-only (the journal is replayed).
+     IOBSD*                         IOBSDGetPlatformSerialNumber / IsMediaEjectable /
+                                    IterateMediaWithContent - from 2050's iokit/bsddev/IOKitBSDInit.cpp.
+     renames                        vnode_name -> vnode_getname; is_suser() -> vfs_context_issuser();
+                                    proc_tbe / vfs_markdependency / ubc_create_upl -> ubc_create_upl_kernel.
+                                    One-line shims, not ports.
+EOF
+
 cat <<'EOF'
 
 WHAT THE TWO NUMBERS MEAN
-  CONFIG_PROTECT=0   all but two files compile, and one of the two is hfs_cprotect.c - a file that
-                     exists only for POSIX file protection and that a root filesystem does not need.
-                     The other is ONE EXPRESSION: hfs_vfsutils.c:3140's `VTOCMP(vp)->cmp_type`, where
-                     4570 keeps `decmpfs_cnode.c_decmp` as an `int` slot on the cnode and 2050 keeps a
-                     pointer.  So "protection off" is one file dropped and one line changed.
-  CONFIG_PROTECT=1   four more files fail, all of them on 2050's `cp_*` API: `struct cp_wrap_func` and
-                     `cp_wrap_func_t`, `CP_READ_ACCESS`/`CP_WRITE_ACCESS`, `struct cp_root_xattr`.  4570
-                     renamed and restructured cprotect, so this is real work rather than a flag - it is
-                     the extra cost of mounting a volume whose files carry protection.
+  CONFIG_PROTECT=0   ALL 36 FILES COMPILE.  Two of the eight "drifts" 865 named were not drifts at all:
+                     (1) hfs_vfsutils.c:3140's `VTOCMP(vp)->cmp_type` read as `int` only because
+                     `HFS_COMPRESSION` (2050's own bsd/conf/MASTER:193 option) was UNSET, so `VTOCMP`
+                     never defined and the expression degraded to an implicit-int call; (2) the whole
+                     hfscommon/Unicode + hfs_encodings family never compiled because the `HFS` option
+                     (MASTER:188) was unset.  Setting both leaves ONE file, hfs_cprotect.c, which exists
+                     only for POSIX protection and which a root filesystem does not need (at
+                     CONFIG_PROTECT=0 its body is a one-line stub, and the `cp_wrap_func_t` it names is
+                     the ONE type 4570's cprotect dropped - a placeholder typedef closes it).
+  CONFIG_PROTECT=1   four files fail, all on 2050's `cp_*` API: `struct cp_wrap_func`, `cp_wrap_func_t`,
+                     `CP_READ_ACCESS`/`CP_WRITE_ACCESS`, `struct cp_root_xattr`.  4570 renamed and
+                     restructured cprotect, so this is real work rather than a flag - the extra cost of
+                     mounting a volume whose files carry protection.
+
+  So the compile half of the port is DONE at CONFIG_PROTECT=0, and the remaining cost is the LINK GAP
+  printed above: the journal (its own source file), three IOBSD* calls, and five renamed VFS symbols.
+  The mount still needs a `vfstbllist[]` row before mockfs, an `FT_HFS`, and the `HFS` option - which
+  a build sets, not this probe.
 EOF
