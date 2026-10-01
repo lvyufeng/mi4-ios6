@@ -58,31 +58,76 @@ this boot simply went past it to the exec, and the exec failed.
 The card unit and the *root* are **two different disks**, and the log says which is which:
 
 ```
-rootmedia_major=0x05  rootmedia_dev=0x05000000  rootmedia_blocks=0x00000010   # md0: 16 blocks = 512 KiB
-rootmedia_hfs=0x00000001
-rootmedia_strategy_medium=0x00000000
-rootmedia_strategy_sector=0x00400002  rootmedia_stage_blocks=0x00000001
+rootmedia_major=0x05  rootmedia_dev=0x05000000  rootmedia_blocks=0x00000010  rootmedia_pages=0x2
+rootmedia_strategy_bytes=0x00080000                     # 524288 = the vol CE
+rootmedia_hfs=0x00000001                                # = STAGE90_XNU_HFS_ROOT_MEDIA (the switch)
+rootmedia_strategy_dev=0x05000000  rootmedia_strategy_blkno=0x0  count=0x1000
+rootmedia_strategy_medium=0x0  rootmedia_served=1  rootmedia_refused=0
 ```
 
-- **The card is major 4, unit 2** (`card_dev=0x04000002`) — it registered and read `userdata`'s
-  extent (`card_lba=0x400000`, `card_blocks=0x1959fde`, `card_refused=0`), but it is **not** the
-  mounted root.
-- **The mounted root is `md0`, major 5** (`rootmedia_dev=0x05000000`) with **`rootmedia_blocks=0x10`
-  = 16 blocks = 512 KiB** — the size of the **in-payload HFS+ volume** (`build_hfs_root_image.sh`;
-  889 §4). `rootmedia_hfs=1` confirms the HFS+ port ran.
+- **The mounted root is `md0`, major 5** — and exactly **one** 4096-byte read was served from it:
+  `strategy_dev=0x05000000` (disk 0), `blkno=0`, `count=4096`, `served=1`, `refused=0`. That single
+  read is the file node's offset-0 page — i.e. `/sbin/launchd`'s first 4 KiB came through
+  `st_media_strategy`.
+- **`rootmedia_hfs=1` is not a "mount succeeded" reading** — it is the *switch value*
+  (`entry_live_write("xnu_live_rootmedia_hfs", STAGE90_XNU_HFS_ROOT_MEDIA)`), published on both the
+  mounting and the mockfs path.
+- **`rootmedia_blocks=0x10` (16) / `pages=0x2` are the Mach-O's** (8192 B), but
+  **`rootmedia_strategy_bytes=0x80000` (524288) is the volume's** — the two readers of disk 0
+  disagree, and the strategy's is the one the exec path used.
 
-So the boot **did not mount `userdata`/ext4 and did not mount the card** — it mounted the small
-in-payload HFS+ medium. The card read is a *side effect* of this arm (the door opened, the strategy
-read the ladder once), not the source of the root.
+### The root cause — 866's safety paragraph is false when `HFS_ROOT_MEDIA=1`
 
-**The frontier is therefore inside the 512 KiB HFS+ medium**: `load_init_program` reads
-`/sbin/launchd` off it and gets a file whose bytes are not a valid Mach-O for the kernel
-(**ENOEXEC, 8**). The medium is exactly the fixture that 889 §4 says carries "`/sbin/launchd` = the
-same Mach-O `entry_ramdisk.s` carries" — so the next question is host-side and cheap: **does the
-512 KiB HFS+ volume's `/sbin/launchd` hold the intended Mach-O bytes, and at the offset the HFS+
-reader returns?** Either the volume was built with the wrong (or truncated) Mach-O, or the HFS+
-reader's file-data path returns the wrong blocks. That is a **build/code** question — no device
-needed for the first pass.
+`st_media_strategy` served the **volume** for that disk-0 read (under `HFS=1`,
+`st_medium_disk_base(0)` returns `g_stage90_root_hfs`). Process 1's file node therefore received the
+volume's raw bytes — HFS+ signature `0x482B` at offset 1024, not `0xfeedface` — so
+`exec_mach_imgact` returned **ENOEXEC (8)**. The volume itself is **correct** (host-verified: a valid
+ARM32 Mach-O, sha256 `b1e0609b…`, byte-identical to the ramdisk blob); it simply is not the Mach-O,
+and the read went to the volume.
 
-**THE GOAL IS NOT MET** — the OS executes no `launchd`; but for the first time the boot reaches the exec
-of a real root-filesystem init, and the card unit reads the device.
+The defect is a conflict between two rungs that were never pressed together:
+
+- **866 (rung 60)** sets `info->mi_mdev = 0;` **unconditionally** — deliberately (it "DECLINE[s]
+  memory-backing") so the file node's pages come through `st_media_strategy`. Its written safety
+  argument is: *"THE BRANCH IT TAKES CANNOT LOSE THE EXEC, because both branches read the same bytes…
+  The strategy serves disk 0 from `g_stage90_ramdisk`."*
+- **882/891 (`HFS_ROOT_MEDIA=1`)** moves `st_medium_disk_base(0)` **to the volume**, `g_stage90_root_hfs`.
+
+Those two are only jointly safe if they agree, and this arm set **both at once** — so the strategy
+served `g_stage90_root_hfs` while `mi_mdev=0` forced mockfs onto that same strategy. **866's guarantee
+holds only under `HFS=0`; 882 moved the medium without moving the guarantee.** Its split doc went to
+great lengths to keep `DKIOCGETMEMDEVINFO`'s base on the Mach-O, but `mi_mdev=0` overrides the base
+entirely — the base is dead when the flag is 0.
+
+This is not the HFS port failing to mount: it is the **fall-through** (or the HFS file read) taking
+its bytes from the wrong array. Whether `hfs_mountroot` itself returned non-zero (→ mockfs) or zero
+(→ HFS reading the volume) is not separately readable (`hfs_mountroot` only prints under
+`HFS_MOUNT_DEBUG`), **but under either branch the bytes came from the volume**, which is the defect.
+
+### The fix (build, no device needed)
+
+The medium `mi_mdev` answers must be the **same** array `st_medium_disk_base(0)` serves:
+
+```
+info->mi_mdev = STAGE90_XNU_HFS_ROOT_MEDIA ? 0 : 1;
+info->mi_base = STAGE90_XNU_HFS_ROOT_MEDIA ? ((uintptr_t)g_stage90_root_hfs >> PAGE_SHIFT)
+                                           : ((uintptr_t)g_stage90_ramdisk  >> PAGE_SHIFT);
+```
+
+- **`HFS=0`** (866's arm) → `mi_mdev=1`, `mi_base=g_stage90_ramdisk` — **exactly what 890 ran**, the
+  working exec. Unchanged.
+- **`HFS=1`** → `mi_mdev=1`, `mi_base=g_stage90_root_hfs` — mockfs maps the **volume** as a raw
+  byte array at its file offset 0. But the volume is an HFS+ container, so its offset 0 is still not
+  the Mach-O. The file node therefore cannot read `/sbin/launchd` **unless it is served through the
+  filesystem** (`hfs_mountroot` → the HFS+ reader's `cluster_pagein` → `st_media_strategy` →
+  `g_stage90_root_hfs`), which is the 882 design's intent.
+
+So the fix restores memory-backing on the `HFS=1` arm, and the question becomes whether mockfs
+mounts (memory-backed, mapping `g_stage90_root_hfs`'s non-Mach-O offset 0 → ENOEXEC again) or HFS
+mounts **first** and serves `/sbin/launchd` through the HFS+ reader. Both are reachable; the next
+rung is to build the `HFS=1`-with-`mi_mdev=1` arm (and, if the HFS read of `/sbin/launchd` still
+fails, to debug that read path). **The rung must be a build + park; whether to press it is the same
+standing-instruction question as below.**
+
+**THE GOAL IS NOT MET** — the OS executes no `launchd`; but for the first time the boot reaches the
+exec of a real root-filesystem init, and the card unit reads the device.
