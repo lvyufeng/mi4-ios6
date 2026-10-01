@@ -34,6 +34,38 @@
  * called (`IOKitBSDInit.cpp:447`) - because mockfs SKIPS the memory-backed path when `mi_phys` is
  * true (`mockfs_vfsops.c:104-109`).
  *
+ * **866 (rung 60): THE MEDIUM AND THE EXEC ARE NO LONGER ONE FIELD APART, BECAUSE THIS DEVICE NOW
+ * SERVES THE ROOT FROM ITS OWN `strategy` INSTEAD OF HANDING `mockfs` A POINTER TO IT.**
+ *
+ * 865's finding was that `mockfs_mountroot` asks this device `DKIOCGETMEMDEVINFO`, and an answer with
+ * `mi_mdev` true makes `mockfs_fsnode.c:333-344` map the file node straight onto `mi_base << 12` - so
+ * `/sbin/launchd`'s bytes come from raw memory and **no `strategy` is ever entered**. The merge that
+ * hid it is at `st_media_memdev_info` below. This rung splits the two: the answer now carries
+ * `mi_mdev = 0` **for every unit, unconditionally**, so mockfs's memory-backed branch is never taken
+ * and the file node's pages must come through `cluster_pagein` -> `mockfs_strategy` -> `buf_strategy`
+ * -> `spec_strategy` -> this file's `st_media_strategy`. (865 section 4 proposed dropping
+ * `DKIOCGETMEMDEVINFO` altogether;** that is the one shape this rung must NOT take** - `mockfs_mountroot`
+ * loses its only source and the run stops at the mount. The fail-safe value is `mi_mdev = 0`: the
+ * ioctl still SUCCEEDS, so `vfs_mountroot` proceeds, and only the optimisation is declined.)
+ *
+ * **AND THE ARM CANNOT LOSE THE EXEC, WHICH IS THE WHOLE REASON IT IS SAFE TO BUILD.** The memory the
+ * device serves and the memory mockfs *would* have mapped are the SAME BYTES, for both units:
+ *
+ *   - disk 0 is the RAM disk: `st_medium_disk_bytes(0) == st_media_bytes()`, the array's own length,
+ *     and `st_media_strategy` answers from `g_stage90_ramdisk` at `b_blkno * 512`. mockfs's memory
+ *     path would have read `g_stage90_ramdisk` at `f_offset`. **Byte for byte the same array.**
+ *   - disk 1 is the staged sector: the strategy answers from `st_medium_virt`, and `mi_base` still
+ *     names `st_medium_virt`, so the two branches differ only in *how* the byte is fetched.
+ *
+ * So whichever branch mockfs takes, `/sbin/launchd`'s bytes are the same bytes and `exec_mach_imgact`
+ * sees the same `MH_MAGIC`. **`b_blkno` IS IN DEVICE-BLOCK UNITS AT THIS LAYER, and that is a fact
+ * read off Apple's own strategy rather than assumed**: `mdevstrategy` (`bsd/dev/memdev.c:251`) opens
+ * with `blkoff = buf_blkno(bp) * mdev[devid].mdSecsize`, and `cluster_io` sets `cbp->b_blkno = blkno`
+ * from `VNOP_BLOCKMAP` (`vfs_cluster.c:1700`) with `blkno = f_offset / mnt_devblocksize`
+ * (`mockfs_blockmap`), so a file offset of N bytes reaches this body as block N/512. A body that
+ * treated `b_blkno` as a page number would serve every page from offset 0 - a wrong answer that reads
+ * like a working device, which is why the two are separated here rather than reasoned about.
+ *
  * **It is also NOT free-standing geometry.** The geometry is DERIVED: blocks = the RAM disk's own
  * byte length / 512, pages = that length >> 12. There is no second number to keep in step, which is
  * the point - `mi_base << 12` must land on exactly the memory `mockfs` was told the device is, and a
@@ -116,11 +148,15 @@ extern char STAGE90_ROOT_MEDIA_SIZE_SYM[];
 
 /*
  * The flags this device answers `DKIOCGETMEMDEVINFO` from: ON `mdInited` (a non-inited device
- * returns ENXIO, `memdev.c:419`) and OFF `mdPhys`. `mdPhys` off is load-bearing and copied from
- * memdev's own choice (`mdevadd` is called with `phys = 0`, `IOKitBSDInit.cpp:447`): mockfs's
- * `mockfs_mountroot` reads `mi_phys` into `mockfs_physical_memory` and then *skips the memory-backed
- * optimisation entirely* when it is true (`mockfs_vfsops.c:104-109`), so answering "physical" would
- * re-open the `cluster_pagein` path this whole experiment exists to close.
+ * returns ENXIO, `memdev.c:419`) and OFF `mdPhys`, copied from memdev's own choice (`mdevadd` is
+ * called with `phys = 0`, `IOKitBSDInit.cpp:447`).
+ *
+ * **866: BOTH OF THOSE NOW DESCRIBE A FIELD `mockfs` NO LONGER BRANCHES ON, AND THAT IS DELIBERATE.**
+ * The answer's `mi_mdev` is 0 for every unit (see `st_media_memdev_info`), so `mockfs`'s
+ * memory-backed branch is never taken and `mi_phys` is never read by anything: mockfs's guard
+ * (`mockfs_vfsops.c:105`) sits *inside* the branch that decides to use the answer at all. The two
+ * flags are kept set as before so that this device still reports itself as an inited, non-physical
+ * memory device to any *other* reader, and so that the one value this rung moves is one value.
  */
 #define ST_MEDIA_MDINITED  0x1u
 #define ST_MEDIA_MDPHYS    0x2u
@@ -175,6 +211,47 @@ st_media_bytes(void)
     return (unsigned)((uintptr_t)STAGE90_ROOT_MEDIA_SIZE_SYM - (uintptr_t)g_stage90_ramdisk);
 }
 
+/*
+ * **THE TWO ACCESSORS THE STRATEGY IS WRITTEN AGAINST, SO ITS BODY READS AS ONE RULE INSTEAD OF A
+ * `switch`, AND SO THERE IS EXACTLY ONE DEFINITION OF WHAT EACH UNIT'S MEDIUM IS.**
+ *
+ * The rule is the handover, and there is only one of it: **a unit whose medium has been staged IS the
+ * staged sector; every other unit is the RAM disk.** That is the same fact `DKIOCGETMEMDEVINFO`
+ * branches on (`ST_MEDIA_STAGED`), read from the same cell, so the two halves of this device cannot
+ * come to disagree about which medium unit 1 has. **A per-unit SIZE ARRAY WAS THE FIRST DRAFT AND IT
+ * WAS WRONG**: it needed a third cell to be kept in step with `st_media_blockcount[]` and
+ * `st_medium_pages`, and a strategy whose base and length disagreed about which medium they described
+ * would serve bytes from a `.bss` array that is 512 long at offsets the length test believed were the
+ * RAM disk's. Deriving both from `ST_MEDIA_BLOCKSIZE` - the same constant `entry_root_media_stage`
+ * sets `st_media_blockcount[1]` to `1` of - makes `length == blockcount * blocksize` true by
+ * construction for the staged unit rather than by two edits that happen to agree.
+ *
+ * **Zero is the one answer that means "no medium at all"**, and it is what `st_medium_disk_bytes`
+ * returns for a unit number this device does not own (`unit >= ST_MEDIA_DISKS`) - the only way the
+ * strategy can be reached with nothing behind it. A unit whose medium is not staged is not a hole: it
+ * answers the RAM disk's length, which is the medium it really does have at that moment (the same one
+ * 862 gave it, reached by the same address). `base` is a plain address: both media are already
+ * addressable (`mdPhys == 0`), so no `<< 12` appears here and none should - that shift turns a page
+ * NUMBER into an address, and there is no page number to shift.
+ */
+static const uint8_t *
+st_medium_disk_base(uint32_t unit)
+{
+    if (unit == 1u && st_medium_staged != 0u)
+        return (const uint8_t *)st_medium_virt;
+    return (const uint8_t *)g_stage90_ramdisk;
+}
+
+static unsigned
+st_medium_disk_bytes(uint32_t unit)
+{
+    if (unit >= ST_MEDIA_DISKS)
+        return 0u;
+    if (unit == 1u && st_medium_staged != 0u)
+        return ST_MEDIA_BLOCKSIZE;        /* the ONE sector 864 handed over */
+    return st_media_bytes();
+}
+
 /* ----------------------------------------------------------- the switch bodies (memdev's shape) */
 
 static int
@@ -194,9 +271,8 @@ st_media_close(dev_t dev, int flags, int devtype, struct proc *p)
 /*
  * The data half. **861/862 left this as `eno_strat` on purpose** - a stand-in with no sectors to move
  * has Apple's own "not a strategy" stub as its honest answer, and a body that "pretended" would be
- * inventing bytes. 864 replaces it with a body that serves the ONE sector the entry image actually
- * holds (see `st_medium_virt` above) and refuses everything else, which is a smaller claim than a
- * disk and a true one.
+ * inventing bytes. 864 replaced it with a body that served the ONE sector the entry image holds; **866
+ * (rung 60) makes it serve the root's medium as well, and that is the rung this body is now about.**
  *
  * The shape is `mdevstrategy`'s (`bsd/dev/memdev.c:235-345`), which is in this tree and linked, and
  * every accessor is the kernel's own `buf_*` - `buf_device`, `buf_blkno`, `buf_count`, `buf_flags`
@@ -210,12 +286,38 @@ st_media_close(dev_t dev, int flags, int devtype, struct proc *p)
  * `xnu_live_rootmedia_served` absent from the log, and one that runs only to refuse says so in
  * `xnu_live_rootmedia_refused`.
  *
- * **THE TRANSFER IS BOUNDED BY THREE INDEPENDENT TESTS, AND THEY ARE THREE BECAUSE THEY FAIL
- * DIFFERENTLY.** `st_medium_staged == 0` is "there is no medium" (the mount path was reached without
- * the ladder); `buf_blkno(bp) != 0` is "the OS asked for a sector this device does not have"
- * (`st_medium_sector` is at a partition-relative block 0, see the staging call); and
- * `buf_count(bp) > 512` is "the OS asked for more than one sector" - a request whose first half is
- * servable and whose rest is not, refused whole rather than half-served.
+ * **866 (rung 60): IT SERVES, AND FROM HERE THE ROOT ITSELF ARRIVES THROUGH IT.**
+ *
+ * Disk 0 is the entry image's RAM disk - `/sbin/launchd`'s own bytes, the array `mdevadd` was given
+ * in 468 - and disk 1 is the sector 864 staged. Until this rung the strategy only ever answered
+ * about disk 1, because `mi_mdev` true kept mockfs on the memory-backed path for the root; now that
+ * the answer is `mi_mdev = 0` for every unit, **the root's file-node pages arrive here too**, and
+ * the body below is what serves them.
+ *
+ * **IT IS `mdevstrategy`'s ARITHMETIC, WITH THE ONE DIFFERENCE THAT MATTERS AND NO OTHER.**
+ * Apple's body (`bsd/dev/memdev.c:235-345`) computes `blkoff = buf_blkno(bp) * mdSecsize` and reads
+ * `(mdBase << 12) + blkoff`; that `<< 12` exists because the RAM disk's daemon stores its base as a
+ * PAGE NUMBER. **Here both media are already addressable** - `g_stage90_ramdisk` is a label in this
+ * kernel's mapping and `st_medium_virt` is a `.bss` array - which is exactly `mdPhys == 0`, so the
+ * base is a virtual address and the block offset is added to it directly. **`ST_MEDIA_BLOCKSIZE` is
+ * the `mdSecsize` of that product**: the block number this body is handed is in 512-byte units
+ * because `cluster_io` takes it from `mockfs_blockmap`'s `b_blkno = f_offset / blksize` with
+ * `blksize = mnt_devblocksize = DKIOCGETBLOCKSIZE = 512`. **That is the fact that makes these two
+ * media the SAME MEDIUM the memory-backed path would have mapped** - the file byte at offset N comes
+ * from the same address whichever branch ran - and it is read off Apple's own strategy rather than
+ * assumed, because the one wrong reading here (treating `b_blkno` as a page) still returns data and
+ * still looks like a working device.
+ *
+ * **THE TRANSFER IS BOUNDED BY FOUR INDEPENDENT TESTS, AND THEY ARE FOUR BECAUSE THEY FAIL
+ * DIFFERENTLY.** A unit with no medium (`st_medium_disk_bytes` == 0: disk 1 before the ladder has
+ * staged, or a unit number past the two) is "there is no medium at all" -> `ENXIO`; a request at or
+ * past the end is the EOF case and returns with the residual equal to the count, exactly as
+ * `mdevstrategy` does; a request that runs past the end is trimmed to the end rather than refused
+ * whole; and a write is `EROFS`, because neither medium is this image's to write. **The `EINVAL` the
+ * old body returned for `blkno != 0` is gone with the reasoning that produced it**: at 864 the device
+ * owned exactly one sector, so any other block was out of the medium - and a root that must supply a
+ * whole executable is not one sector, so that test would have refused the very read this rung exists
+ * to serve.
  */
 extern void bcopy(const void *from, void *to, size_t len);   /* `bsd/dev/memdev.c` calls it too */
 
@@ -224,49 +326,76 @@ st_media_strategy(struct buf *bp)
 {
     caddr_t vaddr;
     uint32_t unit = (uint32_t)minor(buf_device(bp));
+    uint32_t count = (uint32_t)buf_count(bp);
+    const uint8_t *base;
+    unsigned len;
+    uint64_t off;                     /* 512-byte blocks * 512 - 64-bit because a block number needs it */
 
     st_medium_refused++;
     entry_live_write("xnu_live_rootmedia_refused", st_medium_refused);
     entry_live_write("xnu_live_rootmedia_strategy_dev", (unsigned)buf_device(bp));
     entry_live_write("xnu_live_rootmedia_strategy_blkno", (unsigned)buf_blkno(bp));
-    entry_live_write("xnu_live_rootmedia_strategy_count", (unsigned)buf_count(bp));
+    entry_live_write("xnu_live_rootmedia_strategy_count", (unsigned)count);
     entry_live_write("xnu_live_rootmedia_strategy_read",
                      (buf_flags(bp) & B_READ) ? 1u : 0u);
 
-    if (st_medium_staged == 0u) {                 /* no medium: the ladder has not run */
-        buf_seterror(bp, ENXIO);
-        buf_biodone(bp);
-        return;
-    }
+    /*
+     * **866: THE CELL THAT SAYS WHICH MEDIUM THIS CALL WAS ABOUT.** With `mi_mdev = 0` the root's own
+     * file-node pages arrive here, so a run must be able to tell a disk-0 request (the RAM disk - the
+     * root) from a disk-1 one (the staged sector, which nothing reads yet). `_strategy_medium` is 0
+     * for the RAM disk and 1 for the staged sector, derived from the same `st_medium_staged` cell the
+     * accessors and `DKIOCGETMEMDEVINFO` all read - **one definition of "which medium unit 1 has",
+     * published rather than re-derived**, because a second spelling here is how the base and the
+     * length would come to disagree. What the bounds below used is not published again: it is the same
+     * `st_media_bytes()`/`ST_MEDIA_BLOCKSIZE` pair `DKIOCGETMEMDEVINFO` already answers with, and a
+     * second cell would be the second spelling this file exists to avoid.
+     */
+    entry_live_write("xnu_live_rootmedia_strategy_medium",
+                     (unit == 1u && st_medium_staged != 0u) ? 1u : 0u);
+
     if (unit >= ST_MEDIA_DISKS) {
         buf_seterror(bp, ENXIO);
         buf_biodone(bp);
         return;
     }
-    if ((buf_flags(bp) & B_READ) == 0) {          /* this device is read-only: it has one sector */
+    len  = st_medium_disk_bytes(unit);
+    base = st_medium_disk_base(unit);
+    if (len == 0u || base == 0) {                 /* no medium: disk 1 before the ladder staged */
+        buf_seterror(bp, ENXIO);
+        buf_biodone(bp);
+        return;
+    }
+    if ((buf_flags(bp) & B_READ) == 0) {          /* neither medium is this image's to write */
         buf_seterror(bp, EROFS);
         buf_biodone(bp);
         return;
     }
-    if (buf_blkno(bp) != 0) {                     /* the only block this device has */
-        buf_seterror(bp, EINVAL);
+
+    off = (uint64_t)(uint32_t)buf_blkno(bp) * ST_MEDIA_BLOCKSIZE;   /* mdSecsize's product */
+    /* The one reading a run must have: WHICH offset of the medium was asked for. Published before
+     * the bounds are applied, so a refused request names the offset it was refused at. */
+    entry_live_write("xnu_live_rootmedia_strategy_offset", (unsigned)off);
+
+    if (off >= (uint64_t)len) {
+        /* `mdevstrategy`'s EOF rule, and it is not an error: reading AT the end returns nothing and
+         * leaves the residual equal to the count. A genuine over-read (past the end) is EINVAL. */
+        if (off > (uint64_t)len) {
+            buf_seterror(bp, EINVAL);
+        }
         buf_biodone(bp);
         return;
     }
-    if (buf_count(bp) > ST_MEDIA_BLOCKSIZE) {     /* more than the one sector it owns */
-        buf_seterror(bp, EINVAL);
-        buf_biodone(bp);
-        return;
-    }
+    if (off + (uint64_t)count > (uint64_t)len)
+        count = (uint32_t)((uint64_t)len - off);   /* trim to the end rather than refuse whole */
 
     if (buf_map(bp, &vaddr) != 0) {               /* memdev panics here; this arm must not */
         buf_seterror(bp, EFAULT);
         buf_biodone(bp);
         return;
     }
-    bcopy((const void *)st_medium_virt, (void *)vaddr, (size_t)buf_count(bp));
+    bcopy((const void *)(base + (uint32_t)off), (void *)vaddr, (size_t)count);
     buf_unmap(bp);
-    buf_setresid(bp, 0);
+    buf_setresid(bp, (uint32_t)buf_count(bp) - count);
     buf_biodone(bp);
 
     st_medium_refused--;
@@ -289,39 +418,82 @@ st_media_size(dev_t dev)
  * `mockfs_mountroot` (`mockfs_vfsops.c:101`) asks the root device `DKIOCGETMEMDEVINFO`; only if the
  * call SUCCEEDS (returns 0) does it set `mockfs_memory_backed = mi_mdev` and point the file node's
  * pager straight at `mi_base << 12` (`mockfs_fsnode.c:333-344`, `pager_map_to_phys_contiguous`).
- * When it does, `/sbin/launchd`'s bytes come out of the mapped physical pages with no `strategy` at
- * all; when it does not, they must come through `cluster_pagein` -> the device's `strategy`, which
- * `eno_strat` does not implement. So this one body is the difference between "mockfs mounts" and
- * "mockfs mounts AND process 1 can be exec'd from it".
+ *
+ * **866 (rung 60): `mi_mdev` IS NOW 0, UNCONDITIONALLY, AND THAT ONE WORD IS THE RUNG.**
+ *
+ * 862 wrote `mi_mdev = 1` after `mdevadd`'s own answer, and its note explains the reasoning that
+ * produced it (see the file top): with the answer TRUE, mockfs takes the memory-backed branch and
+ * `/sbin/launchd` is mapped from raw memory, so process 1 is exec-able and nothing has to implement a
+ * `strategy`. **That is also exactly the reason `st_media_strategy` had never executed**, even after
+ * 864 built it and 865 proved the two are one field apart. This rung takes the other arm: with
+ * `mi_mdev` FALSE the memory-backed branch is not taken, and the file node's pages must come through
+ * `cluster_pagein` -> `mockfs_strategy` -> `buf_strategy` -> `spec_strategy` -> `st_media_strategy`.
+ *
+ * **The call still SUCCEEDS** - `mi_base` and `mi_size` are filled exactly as before - and that
+ * distinction is the arm's whole safety argument, because the two ways this could go wrong are not
+ * symmetric. 865 section 4 proposed making the device stop answering `DKIOCGETMEMDEVINFO` at all, and
+ * **that is the shape rung 60 must NOT take**: `mockfs_mountroot` takes its memory-backed setup
+ * inside `if (!VNOP_IOCTL(...))`, so an `ENOTTY` here leaves `mockfs_memdev_base` at zero for a root
+ * that has no other source, and the run stops at the MOUNT instead of at the exec. A successful call
+ * carrying `mi_mdev = 0` declines the optimisation and nothing else - which is also why the base and
+ * the size stay filled: they are the same numbers a reader of this cell would have seen before, so
+ * the only value this rung moves is the one the branch is decided on.
+ *
+ * **AND THE BRANCH IT TAKES CANNOT LOSE THE EXEC, because both branches read the same bytes.** The
+ * strategy serves disk 0 from `g_stage90_ramdisk` and disk 1 from `st_medium_virt` (`st_medium_disk_base`),
+ * which are the very arrays `mi_base` names below; a file byte at offset N therefore comes from the
+ * same address whether the pager mapped it or the strategy copied it. `exec_mach_imgact` sees the same
+ * `MH_MAGIC` either way. **That is what separates this arm from the one 865 section 4 refused to
+ * build**: the risk there was that the file node's bytes would become *somebody else's sector*
+ * (`st_medium_virt` holding a partition's superblock), and the fix is not to avoid the strategy but to
+ * point it at the bytes the root already had.
  *
  * It is `noinline` on purpose: 855's build clause read a two-arm `if`'s stores out of the LINKED
  * disassembly and was refuted by the linker's own tail-merge (LINKED ORDER IS NOT SOURCE ORDER). A
  * check that reads this function's body is reading a property of ONE named function, which is
- * layout-independent.
+ * layout-independent - and this rung's clause reads exactly the `mi_mdev` store in it.
  */
 __attribute__((noinline)) static int
 st_media_memdev_info(dev_t dev, dk_memdev_info_t *info)
 {
     uint32_t unit = (uint32_t)minor(dev);
 
-    info->mi_mdev = 1;                                   /* yes, a memory device (`boolean_t` = int)  */
+    info->mi_mdev = 0;                                   /* 866: DECLINE memory-backing - the rung */
+    /*
+     * **866: THE BOUNDS TEST MOVES ABOVE THE `mi_phys` STORE, AND THAT IS A REPAIR RATHER THAN A
+     * REORDERING.** 862 wrote `info->mi_phys = (st_media_flags[unit] & ST_MEDIA_MDPHYS) ...` first and
+     * the `unit >= ST_MEDIA_DISKS` refusal after it, so a `minor(dev)` of 2 or more indexed
+     * `st_media_flags` past its two entries and read whatever the linker put next before this function
+     * declined the unit. In practice `unit` is a number this device handed out, so the read never
+     * happened - but "the caller never does that" is the same reasoning that makes an out-of-range
+     * read survive until a caller does, and the fix is one statement's position. **`mi_phys` is read
+     * by nothing on this arm anyway** (mockfs only consults it inside the branch `mi_mdev = 0` now
+     * closes - see the flag block above): the store is kept because it is part of an answer that
+     * describes a device, not because a branch depends on it.
+     */
+    if (unit >= ST_MEDIA_DISKS) {
+        info->mi_phys = 0;
+        info->mi_base = 0u;
+        info->mi_size = 0u;
+        return EINVAL;
+    }
     info->mi_phys = (st_media_flags[unit] & ST_MEDIA_MDPHYS) ? 1 : 0;
     /*
      * **THE BASE AND THE SIZE ARE THE DEVICE'S OWN, AND FOR DISK 1 THEY ARE THE STAGED SECTOR.**
      * Disk 0 is the RAM disk 862 chose (its address and length are the link's own symbols). Disk 1 is
      * the medium 864 staged: the base is the address of the staged array and the page count is the
-     * one the accessor derived - so `mi_base << 12` lands on `st_medium_virt` and `mockfs`'s
-     * `pager_map_to_phys_contiguous` maps the file node straight onto the sector the ladder read.
+     * one the accessor derived.
+     *
+     * **866: THESE ARE NOW THE SAME BASE THE STRATEGY SERVES FROM, AND THAT IS NOT A COINCIDENCE.**
+     * `st_medium_disk_base` returns exactly these two addresses for exactly these two units, so the
+     * branch mockfs takes and the branch this file implements describe ONE medium and not two. A
+     * reader who wants to know whether the level still holds the bytes can compare this function's
+     * two stores against that accessor's two returns - which is what the build clause does.
      *
      * **`mi_size` IS A COUNT OF PAGES, NOT OF SECTORS** (`memdev.c`'s `mdevadd` is called with
      * `size >> 12` and `mockfs_fsnode.c:342` shifts it back with `<< PAGE_SHIFT`). The one sector this
      * device holds is therefore `<= 1` page, and the count is rounded so it is never 0.
      */
-    if (unit >= ST_MEDIA_DISKS) {
-        info->mi_base = 0u;
-        info->mi_size = 0u;
-        return EINVAL;
-    }
     if (st_media_flags[unit] & ST_MEDIA_STAGED) {
         info->mi_base = (uint32_t)((uintptr_t)st_medium_virt >> ST_MEDIA_PAGE_SHIFT);
         info->mi_size = (uint64_t)((st_medium_pages != 0u) ? st_medium_pages : 1u);

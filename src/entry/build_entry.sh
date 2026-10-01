@@ -33400,6 +33400,99 @@ verify_trace_symbols() {
                     layout_fail "st_media_strategy (at $sm_addr) calls \`entry_root_media_stage\` $sm_stage time(s): the strategy SERVES, it does not STAGE. Staging is the ladder's act, once, before the OS reaches the mount path (that is what makes the bytes and the sector one entry by construction). Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_864: rung 59's coupling is read out of the linked image - entry_root_media_mount_disk (at $md_addr) makes its four calls [entry_storage_probe st_sel_publish st_read_selected entry_root_media_stage] and NO other callee, and the transfer it hands over is ONE reset and ONE read inside st_read_selected (at $sr_addr: $sr_reset \`st_data_reset\`, $sr_read \`st_read_single_block\` - the selected partition's superblock), and st_media_strategy (at $sm_addr) is a real body that calls the kernel's own buf accessors [buf_device buf_blkno buf_count buf_flags buf_map buf_unmap buf_setresid buf_seterror buf_biodone] and \`bcopy\` to MOVE THE STAGED BYTES - and calls NEITHER \`st_read_single_block\` NOR \`entry_root_media_stage\`. **THE ROOT DEVICE DOES NOT MOVE**: the mount path's answer is still \`entry_root_media_register(devid)\` (861), and the staged partition is an ADDITION at its own dev_t that the strategy serves and the next experiment reads. No byte of the medium moves, no register is written, and the medium is not touched at all by this arm beyond the one read rung 57 already made"
             fi
+            if [[ $STORAGE_PROBE -ge 59 ]]; then
+                # **866: RUNG 60'S OWN CLAUSE - THE ONE WORD THAT MAKES 864'S STRATEGY REACHABLE.**
+                #
+                # 864 built the coupling and 865 found that NOTHING EVER REACHES IT: `mockfs_mountroot`
+                # asks the root device `DKIOCGETMEMDEVINFO`, and while that answer carries `mi_mdev = 1`
+                # mockfs maps its one file node STRAIGHT onto raw memory (`mi_base << 12`,
+                # `mockfs_fsnode.c:333-344`) - so the file's byte zero IS memory, there is no filesystem
+                # in the path, and `st_media_strategy` never runs. Rung 60 sets `mi_mdev = 0` and the
+                # file node's pages must then come through `cluster_pagein` -> ... -> `st_media_strategy`.
+                #
+                # **THE CLAUSE READS THE LINKED IMAGE, NOT THE SOURCE**, which is the project's own rule
+                # ([[mi4-a-claim-in-a-comment-is-not-a-check]]) - and it reads ONE function's body, so
+                # the property it asserts is layout-independent ([[mi4-linked-code-order-is-not-source-order]]).
+                mi_addr=$(sym_addr st_media_memdev_info) ||
+                    layout_fail "st_media_memdev_info is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: rung 60 **is** that function's answer, and it is the only place the memory-backed branch is decided. If it is gone (inlined into the ioctl switch, or the module not linked) then nothing this rung asserts about the branch exists. Nothing is rebuilt by this refusal"
+                mi_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$mi_addr" '
+                    { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bn[n] = $4; bb[n] = ($2 != "") ? 1 : 0 }
+                    BEGIN { t = strtonum(a) }
+                    END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+                [[ -n "$mi_next" ]] ||
+                    layout_fail "st_media_memdev_info (at $mi_addr) has no size in the linked image, so this clause cannot bound its body. This refusal is about the SCAN and not about the arm. Nothing is rebuilt by this refusal"
+                mi_body=$(arm-none-eabi-objdump -d --start-address="$mi_addr" --stop-address="$mi_next" "$OUT/xnu_arm_entry.elf")
+                # **THE ARM ITSELF: THE `mi_mdev` SLOT IS STORED ZERO, AND THE WORD `1` IS NOT IN THE BODY.**
+                # `dk_memdev_info_t` (`bsd/sys/disk.h:291-294`) puts `mi_mdev` FIRST, so the store is
+                # `str rX, [rY]` - an offset-0 store - and the `mov rX, #0` immediately above it is the
+                # value. The second half is the stronger half and is checked over the WHOLE body rather
+                # than at the store: a `#1` anywhere here means some slot of this answer still carries
+                # one, and the one slot whose value decides a BRANCH is the first. **A `mi_mdev` that
+                # says 1 while everything else in the answer is unchanged is exactly the state 862 was
+                # in**, so this is the refusal that tells the arm from its neighbour.
+                mi_zero=$(grep -cE 'str[[:space:]]+r[0-9]+, \[r[0-9]+\]$' <<<"$mi_body" || true)
+                mi_mov0=$(grep -cE 'mov[[:space:]]+r[0-9]+, #0([^0-9]|$)' <<<"$mi_body" || true)
+                [[ "$mi_zero" -ge 1 && "$mi_mov0" -ge 1 ]] ||
+                    layout_fail "st_media_memdev_info (at $mi_addr) has $mi_zero offset-0 store(s) of the form \`str rX, [rY]\` and $mi_mov0 \`mov rX, #0\`. \`mi_mdev\` is the FIRST field of \`dk_memdev_info_t\` (\`bsd/sys/disk.h:291\`), so the arm's one word is an offset-0 store of zero - and without both shapes the answer this device gives mockfs does not carry it. Nothing is rebuilt by this refusal"
+                # **THE ARM'S ONE WORD, ANCHORED - AND THE ANCHOR IS THE WHOLE POINT.** The first draft
+                # of this clause asked whether the constant `1` appeared ANYWHERE in the body, on the
+                # reasoning that 862's answer was the one that carried it. **THAT CHECK IS WRONG IN BOTH
+                # DIRECTIONS AND THE BUILD PROVED IT**: (a) it would REFUSE A CORRECT BODY, because
+                # `mi_size` is a PAGE count with a floor of one (`(st_medium_pages != 0u) ? ... : 1u`),
+                # so GCC emits a `#1` in the staged branch that has nothing to do with `mi_mdev`; and
+                # (b) it MISSED the one encoding this compiler actually uses, because the instruction is
+                # `movweq r2, #1` and a pattern listing `movw` does not match `movweq` (no boundary
+                # before `eq`). What the arm asserts is narrow and exact - **the FIRST FIELD is stored
+                # ZERO** - so the check is bound to that store: find the body's offset-0 store, and
+                # require the nearest preceding instruction that WRITES its value register to be
+                # `mov <that register>, #0`. 862's answer would have `mov rX, #1` in that position and
+                # is refused; the size floor is above the store and is never consulted. This is
+                # [[mi4-linked-code-order-is-not-source-order]]'s lesson applied one level in - the
+                # property is read by register and value, not by position in the listing.
+                mi_st_dst=$(grep -oE 'str[[:space:]]+r[0-9]+, \[r[0-9]+\][[:space:]]*$' <<<"$mi_body" | head -1 | grep -oE 'r[0-9]+' | head -1)
+                [[ -n "$mi_st_dst" ]] ||
+                    layout_fail "st_media_memdev_info (at $mi_addr) has no offset-0 store of the form \`str rX, [rY]\`: \`mi_mdev\` is the FIRST field of \`dk_memdev_info_t\` (\`bsd/sys/disk.h:291\`), so rung 60's one word is not being written at all. Nothing is rebuilt by this refusal"
+                mi_wr='(mov|movw|movt|movs|mvn|orr|orn|eor|and|ands|bic|add|adds|sub|subs|rsb|mul|lsl|lsls|lsr|lsrs|asr|asrs|ror|adr|ldr|ldrb|ldrh|ldrd|ldm|pop|uxtb|uxth|sxtb|sxth|ubfx|sbfx|bfi|rev|clz|mla)'
+                mi_mdev_set=$(awk -v reg="$mi_st_dst" -v wr="$mi_wr" '
+                    { l[NR] = $0 }
+                    END {
+                        sl = 0
+                        for (i = 1; i <= NR; i++)
+                            if (l[i] ~ ("str[[:space:]]+" reg ", \\[r[0-9]+\\][[:space:]]*$")) { sl = i; break }
+                        last = ""
+                        for (j = 1; j < sl; j++)
+                            if (l[j] ~ ("[[:space:]]" wr "[[:space:]]+" reg ",")) last = l[j]
+                        print last
+                    }' <<<"$mi_body")
+                grep -qE "mov[[:space:]]+${mi_st_dst}, #0([^0-9]|$)" <<<"$mi_mdev_set" ||
+                    layout_fail "st_media_memdev_info (at $mi_addr) stores its FIRST field (\`mi_mdev\`) from ${mi_st_dst}, and the nearest instruction above that store which writes ${mi_st_dst} is [${mi_mdev_set}]. **Rung 60 IS that word being ZERO**: mockfs takes the memory-backed branch on it, so a body whose first field is set to anything else is 862's answer wearing rung 60's record - the strategy built, parked and documented, and never reached, so the press would return a log indistinguishable from rung 59's while every file said otherwise. **The check is anchored to the store's own register rather than to a constant anywhere in the body**, because this body legitimately carries a \`#1\` (the \`mi_size\` floor, emitted as \`movweq rX, #1\`) and a pattern that scanned for one would refuse a correct build. Nothing is rebuilt by this refusal"
+                # **THE BASE AND THE SIZE STAY FILLED, AND THAT IS NOT DECORATION - IT IS THE SAFETY
+                # ARGUMENT.** 865 section 4's shape (make the device stop answering at all) leaves
+                # `mockfs_memdev_base` at zero for a root that has no other source, and the run would
+                # stop at the MOUNT. Both fields are read by mockfs only INSIDE the branch `mi_mdev = 0`
+                # now closes, so they are carried unchanged - which is exactly what makes the two arms
+                # differ in ONE word rather than two.
+                mi_mem=$(grep -cE 'bl.*<memcpy>|ldm[[:space:]]+r[0-9]+!' <<<"$mi_body" || true)
+                mi_b8=$(grep -cE 'str[[:space:]]+r[0-9]+, \[r[0-9]+, #8\]' <<<"$mi_body" || true)
+                [[ "$mi_b8" -ge 1 ]] || [[ "$mi_mem" -ge 1 ]] ||
+                    layout_fail "st_media_memdev_info (at $mi_addr) carries no store of the base to \`mi_base\` (offset #8) and no aggregate move: found $mi_b8 \`str ..., [rY, #8]\` and $mi_mem memcpy/multi-register load(s). **The base and the size are the numbers the identity of this medium rests on**, and they are what make this arm differ from 865 section 4's unsafe shape by one word instead of two. Nothing is rebuilt by this refusal"
+                # **THE STRATEGY IS STILL THERE AND STILL SERVES FROM MEMORY.** Rung 59's clause above
+                # holds its SHAPE; this one holds the fact this rung turns from a plan into a call -
+                # and it is checked from the same linked image, so a build that quietly stopped linking
+                # the module would fail here rather than at the press.
+                sm60_addr=$(sym_addr st_media_strategy) ||
+                    layout_fail "st_media_strategy is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: rung 60 makes mockfs ENTER that body, so a build without it is a root whose file node has no source at all. Nothing is rebuilt by this refusal"
+                sm60_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$sm60_addr" '
+                    { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bn[n] = $4; bb[n] = ($2 != "") ? 1 : 0 }
+                    BEGIN { t = strtonum(a) }
+                    END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+                sm60_body=$(arm-none-eabi-objdump -d --start-address="$sm60_addr" --stop-address="$sm60_next" "$OUT/xnu_arm_entry.elf")
+                grep -qE "bl.*<st_read_single_block>" <<<"$sm60_body" &&
+                    layout_fail "st_media_strategy (at $sm60_addr) calls the ladder's \`st_read_single_block\`. **Rung 60 makes this body REACHABLE, so this refusal is now about a path the OS will actually take**: a strategy that read the card would be a transfer on the kernel's own schedule, with the card left in whatever state that transfer ends in - the reading the whole storage ladder exists to keep OFF the boot path ([[mi4-hardware-run-safety-gate]]). This is the same negative rung 59's clause makes, and it is the one that matters most now that the body runs. Nothing is rebuilt by this refusal"
+                grep -qE "bl.*<eno_strat>" <<<"$sm60_body" &&
+                    layout_fail "st_media_strategy (at $sm60_addr) calls \`eno_strat\` - the ENOTTY strategy that moves no byte. That is the body a device which does NOT answer \`DKIOCGETMEMDEVINFO\` would fall through to, so a link from here means the two shapes were merged: the strategy both declines memory-backing AND refuses to serve, which mounts and cannot exec ([[mi4-one-value-two-definitions]]). Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_866: rung 60's arm is read out of the linked image - st_media_memdev_info (at $mi_addr) stores ZERO to the FIRST field of its answer ($mi_zero offset-0 store(s), $mi_mov0 \`mov rX, #0\`, and the store's OWN source register set to zero) while the base at offset #8 is still carried ($mi_b8 store(s), $mi_mem aggregate move(s)) - so the device still ANSWERS \`DKIOCGETMEMDEVINFO\` and only DECLINES the memory-backed branch, which is what makes this one word different from 865 section 4's unsafe shape. st_media_strategy (at $sm60_addr) is still linked and calls NEITHER \`st_read_single_block\` NOR \`eno_strat\`: **it serves the bytes the pager would have mapped, out of the same arrays \`mi_base\` names, so the branch mockfs now takes cannot lose the exec.** No byte of the medium moves, no register is written, and the medium is not touched at all by this arm beyond the one read rung 57 already made"
+            fi
             if [[ $STORAGE_PROBE -ge 41 ]]; then
                 # **831: RUNG 42'S OWN CLAUSE - THE FIRST CLAUSE HERE THAT ASSERTS A COMMAND WHOSE
                 # ARGUMENT IS A VALUE THE MEDIUM LATER MOVES BY.** Rungs 11 through 38 assert what a
