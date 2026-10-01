@@ -35714,6 +35714,37 @@ verify_root_device() {
         [[ "$(word_at $((rt_i + m_off)))" == "00000000" ]] ||
             layout_fail "routefs's entry has a mountroot at word +$m_off - vfs_mountroot would mount it instead of mockfs"
         say "  xnu_entry_459: vfstbllist names mockfs with ops at 0x$(sym_addr mockfs_vfsops) and mountroot $(sym_addr mockfs_mountroot) at word +$m_off, and devfs and routefs have no mountroot at that word - so vfs_mountroot mounts mockfs"
+
+        # --- 895: does the HFS root row actually reach the STATIC table? -----------------------------------
+        #
+        # 894's press read the answer this clause exists to state: with STAGE90_XNU_HFS_ROOT_MEDIA=1 the
+        # boot still mounted mockfs off `rd=md0` and pid 1 exec'd a Mach-O from MEMORY, because
+        # `rootmedia_strategy_served` was ABSENT - the strategy was never called, so no HFS reader was in
+        # the path. The cause is here, and it is not the medium: `STAGE90_XNU_HFS_ROOT_MEDIA` moves
+        # `st_medium_disk_base(0)` to the volume blob `g_stage90_root_hfs`, but the 874 root ROW that
+        # would CALL `hfs_mountroot` is compiled into `bsd/vfs/vfs_conf.c` only under a DIFFERENT switch
+        # (`STAGE90_HFS_ROOT`, set by the port build), and THIS image's `vfs_conf.o` is the pooled one
+        # built with it OFF. So the table has three rows - devfs/mockfs/routefs - and `vfs_mountroot`
+        # takes mockfs. A reader who sees `HFS_ROOT_MEDIA=1` in the config and concludes the HFS row is
+        # live has made exactly the mistake 894 caught; the row's presence is a property of the LINKED
+        # image, so it is read back here.
+        #
+        # This is a NOTE and not a refusal: the HFS-medium arm is a legitimate arm (it tests that the
+        # strategy serves the volume - and 894 proved the fall-through execs), and a study arm may set
+        # the medium without linking the port. But the condition is made STRUCTURAL so no arm's prose can
+        # claim a mount it cannot deliver (`mi4-a-claim-in-a-comment-is-not-a-check`).
+        hfs_i=$(find_ops hfs_vfsops 2>/dev/null) || hfs_i=""
+        if [[ -n $hfs_i ]]; then
+            [[ "$(word_at $((hfs_i + m_off)))" == "$(rev_word "$(sym_addr hfs_mountroot)")" ]] ||
+                layout_fail "an hfs_vfsops row is in vfstbllist but does not carry hfs_mountroot at word +$m_off - hfs_mountroot would never be called and the volume could be mounted by the generic path"
+            (( hfs_i < j )) ||
+                layout_fail "the hfs row is AFTER mockfs in vfstbllist; vfs_mountroot takes the first row that mounts and mockfs always does, so the HFS row would never be tried (874)"
+            say "  xnu_entry_895: vfstbllist carries an HFS row at word $hfs_i, with hfs_mountroot at +$m_off and BEFORE mockfs - so vfs_mountroot reaches it first."
+        elif [[ $HFS_ROOT_MEDIA -eq 1 ]]; then
+            say "  xnu_entry_895: NOTE - STAGE90_XNU_HFS_ROOT_MEDIA=1 but the linked image has NO hfs_vfsops row in vfstbllist (the table is devfs/mockfs/routefs): the strategy's medium is the volume, but nothing CALLS hfs_mountroot, so vfs_mountroot mounts mockfs off rd=md0 and pid 1 execs from RAM. This is 894's reading - the port (STAGE90_HFS_ROOT) is not linked into the entry image. The mount clause is NOT reachable from this arm."
+        else
+            say "  xnu_entry_895: the linked image has no HFS root row (the port is off); vfstbllist is devfs/mockfs/routefs and mockfs is the root - the baseline."
+        fi
     }
 
     # --- the RAM disk's own two numbers -------------------------------------------------------------------
