@@ -63,6 +63,28 @@ say "stage_hfs: applying the vfs_conf.c HFS root row"
 
 N=$(find "$DST/bsd/hfs" -name '*.c' | wc -l)
 say "stage_hfs: staged $N .c file(s) under $DST/bsd/hfs (plus vfs_journal.c, spl.h, the root row)"
+# --- 5. the record, for the one gate that cannot see the enumerated files -------------------------
+#
+# **THIS IS NOT A SECOND DEFINITION OF THE FOOTPRINT; IT IS A RECORD OF A STATE THAT HAS NO OTHER
+# WITNESS.** `tools/check_hfs_staged.sh` re-derives what was staged from the file list and the tree,
+# and `scripts/xnu_compile_graph_scan.py` reads that same list - so both know the enumerated members.
+# What neither can know is that an UNENUMERATED file is not also sitting in the tree: `git status
+# --short` collapses 36 of the 37 files to the single line `?? bsd/hfs/`, so a stray edit inside that
+# directory is invisible to a membership test over the list.
+#
+# A FRESH WRITE IS WHAT MAKES THE STRING TRUSTWORTHY. This assignment is unconditional, so if someone
+# hand-edits the staged tree after a run, `git status` differs from this record and the gate that
+# compares them refuses - the property "written by the stager" is preserved rather than the property
+# "looks clean". The comparison itself lives in `scripts/xnu_compile_graph_scan.py`, which is where the
+# gate that needs it is; what belongs here is the measurement.
+if [[ -n ${STAGE_HFS_RECORD:-} ]]; then
+    # `--untracked-files=all` and not the default: the default collapses the 36 files under `bsd/hfs/` to
+    # the single line `?? bsd/hfs/`, which is a record that cannot distinguish the stager's own output
+    # from that plus a stray file inside the same directory. The reader uses the same two flags.
+    git -C "$DST" status --short --untracked-files=all > "$STAGE_HFS_RECORD"
+    say "stage_hfs: recorded the staged tree's git status in $STAGE_HFS_RECORD"
+fi
+
 say ""
 say "REMAINING for a real HFS root (each its own step, none done here):"
 say "  * the ROOT ROW is staged but INERT until the port is on: build with STAGE90_XNU_HFS=1, which"

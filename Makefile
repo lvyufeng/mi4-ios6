@@ -181,6 +181,17 @@ check:
 	@tools/check_response_word_order.py --selftest >/dev/null
 	@tools/check_response_word_order.py
 	@tools/check_hfs_staged.sh
+# 882: the HFS+ root volume and the arm that mounts it. Three claims, each one a committed artifact
+# or a copied claim rather than a preference:
+#   check_hfs_root_blob.py     reads the volume header out of the COMMITTED blob and refuses the fields
+#                              the HFS sources index by (a stale blob still parses; it just mounts
+#                              nothing). It reads the file, not a build, so it runs on any machine.
+#   check_hfs_root_arm_split.py  the property experiment-881 section 3 is about - disk 0's strategy and
+#                              DKIOCGETMEMDEVINFO must answer with DIFFERENT bytes on the HFS arm,
+#                              because a failed hfs_mountroot has to fall through to a working mockfs.
+#                              The one-line "cleanup" that undoes it reads as an improvement.
+	@tools/check_hfs_root_blob.py src/entry/blob/xnu_arm_entry_root_hfs.img
+	@tools/check_hfs_root_arm_split.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not

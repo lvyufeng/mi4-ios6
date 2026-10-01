@@ -1,6 +1,18 @@
 /*
  * The payload-owned ROOT MEDIA (experiment 861) - 530 section 9's wrapping route, made buildable.
  *
+ * **882 (THE HFS+ ARM): DISK 0 CAN HOLD EITHER THE MACH-O OR AN HFS+ VOLUME, AND THE SPLIT IS THE
+ * SAFETY ARGUMENT.** Everything below this paragraph describes the device as 861-866 built it: disk 0
+ * is `/sbin/launchd`'s own bytes and the strategy and `DKIOCGETMEMDEVINFO` agree about that, which is
+ * what makes the root memory-backable and process 1 exec-able. `STAGE90_XNU_HFS_ROOT_MEDIA=1` moves
+ * the STRATEGY's medium to a committed HFS+ volume (`src/entry/blob/`, the `.incbin` object) while
+ * `DKIOCGETMEMDEVINFO` and the length `spec_open` caches stay on the Mach-O - because the two readers
+ * serve two different rows of `vfstbllist[]` (`hfs_mountroot` reads blocks; `mockfs_mountroot` maps
+ * memory), and the arm is only safe if a failed HFS mount finds mockfs still able to exec. The switch
+ * is off by default, so the readings below are the baseline's; the three call sites that read it are
+ * `st_media_strategy_bytes`, `st_medium_disk_base` and the two `entry_live_write`s in
+ * `entry_root_media_register` that publish the pair.
+ *
  * What this is, and the two things it is NOT
  * ------------------------------------------
  * `bsd_init` computes the root device in a handful of inlined instructions and hands it to
@@ -128,8 +140,63 @@ extern void entry_live_write(const char *key, unsigned int value);
 #error "STAGE90_ROOT_MEDIA_SIZE_SYM must name the RAM disk end symbol - entry_trace.c's build sets it"
 #endif
 
+/*
+ * **882: THE HFS+ ARM'S OWN SWITCH, AND WHY IT IS NOT THE MOUNT SWITCH.**
+ *
+ * `STAGE90_XNU_MOUNT=1` (861) decides WHO the root device is - it makes `__wrap_mdevlookup` answer
+ * this `bdevsw` instead of the real (missing) RAM disk. That arm is 866's and was pressed at rung 60:
+ * with it on and this switch OFF the device is disk-0-is-the-RAM-disk, `mi_mdev = 0`, and the root's
+ * file-node pages arrive through `st_media_strategy` from `g_stage90_ramdisk` - the healthy baseline.
+ *
+ * This switch decides WHAT IS BEHIND DISK 0, and it does so in the one place that can hold the whole
+ * safety argument: `st_medium_disk_base` and `st_media_mount_bytes`. With it on, disk 0's strategy
+ * serves an HFS+ volume instead of the raw Mach-O, and the two accessors are then **not equal** - the
+ * strategy base is the volume and the memdev base is still the Mach-O - which is exactly the split
+ * `experiment-881` section 3 says the arm cannot be safe without. A failed `hfs_mountroot` falls
+ * through to `mockfs_mountroot`, which asks `DKIOCGETMEMDEVINFO` for its bytes and must still be told
+ * where the Mach-O is; if the same bytes answered both, the fall-through would map the volume as
+ * process 1's executable and the boot would die at `load_init_program` on a `MH_MAGIC` that is not
+ * there. So the blob's byte range serves `st_medium_disk_base` and `st_media_mount_bytes` only, and
+ * `g_stage90_ramdisk` keeps both `DKIOCGETMEMDEVINFO` and the length `spec_open` caches.
+ *
+ * It defaults to 0 so that the shipped image is byte-for-byte the rung-60 arm's, and it is a
+ * SEPARATE dimension from `STAGE90_XNU_MOUNT` on purpose: a root told to be this device while disk 0
+ * still holds the Mach-O is the baseline, and that combination has to stay buildable.
+ */
+#ifndef STAGE90_XNU_HFS_ROOT_MEDIA
+#define STAGE90_XNU_HFS_ROOT_MEDIA 0
+#endif
+
 extern char g_stage90_ramdisk[];
 extern char STAGE90_ROOT_MEDIA_SIZE_SYM[];
+
+/*
+ * **882: WHICH ARM COMPILED THIS FILE, AS A SYMBOL RATHER THAN A COMMENT.**
+ *
+ * Two different symbol NAMES rather than one symbol with two values, and that is the whole point. This
+ * translation unit is compiled by `tools/build_xnu_arm_kernel.sh`'s platform block (its
+ * `PLATFORM_BSD_SOURCES`), and `src/entry/build_entry.sh` links the object - **two scripts, one
+ * object, and the switch has to reach both.** `XNU_KERNEL_EXTRA_DEFINES` is the hook that reaches the
+ * first, so a build with the wrong one of the two environment variables set would produce an image
+ * where the entry side believes it is on the HFS arm and the module serves the Mach-O - a mismatch
+ * whose only symptom is a mount that fails on the device for a reason no log line names. A value read
+ * out of a disassembly would be `mi4-linked-code-order-is-not-source-order` again; a NAME is a
+ * property of the object, so `nm` answers it and the entry build can refuse before the link.
+ */
+#if STAGE90_XNU_HFS_ROOT_MEDIA
+int entry_root_media_hfs_root_arm_on(void)  { return 1; }
+#else
+int entry_root_media_hfs_root_arm_off(void) { return 0; }
+#endif
+
+#if STAGE90_XNU_HFS_ROOT_MEDIA
+/* Defined by `src/entry/blob/xnu_arm_entry_root_hfs.S` (`.incbin` of the committed HFS+ volume).
+ * Only declared here, and only on this arm: with the switch off the section the object carries is
+ * still linked, so these are present either way - but nothing else in this file may name them, which
+ * is what the build's clause reads. */
+extern char g_stage90_root_hfs[];
+extern char g_stage90_root_hfs_end[];
+#endif
 
 /* Page size for the byte -> page conversion. The kernel's own `PAGE_SHIFT` is 12 on this port; the
  * literal is used rather than including a machine header so this file stays in the BSD component's
@@ -211,6 +278,35 @@ st_media_bytes(void)
     return (unsigned)((uintptr_t)STAGE90_ROOT_MEDIA_SIZE_SYM - (uintptr_t)g_stage90_ramdisk);
 }
 
+/* The Mach-O's own length, which is `st_media_bytes` - named separately for the callers that want
+ * "the bytes `mockfs` must be told about" rather than "the bytes the strategy serves", which are the
+ * same number on every arm but 882's. The two names are the point: a call site that is handed
+ * `st_media_bytes()` reads as a claim about mockfs, and after 882 that claim is false. */
+#define st_media_mount_bytes() st_media_bytes()
+
+/*
+ * **882: THE BYTES DISK 0's STRATEGY SERVES, WHICH IS THE BLOB WHEN THE HFS ARM IS ON.**
+ *
+ * Every other reader of this device - `DKIOCGETMEMDEVINFO`, `si_devsize` through
+ * `DKIOCGETBLOCKCOUNT` at `spec_open`, `st_media_size` - stays on the Mach-O, and that is deliberate
+ * rather than incomplete: those readers are mockfs's, and mockfs is the fall-through the arm's safety
+ * rests on. Only `st_medium_disk_base` and the strategy's bound ask this question, because only they
+ * are the filesystem's path. See the switch's comment above for why the split is load-bearing.
+ *
+ * It is a `noinline` function, not an `#if` inside the accessor, so a build clause can read which
+ * constant each arm returns BY VALUE (`mi4-linked-code-order-is-not-source-order`: a clause reading
+ * the linked disassembly to prove an ORDER reads LAYOUT, and the linker's tail-merge refuted 855).
+ */
+__attribute__((noinline)) static unsigned
+st_media_strategy_bytes(void)
+{
+#if STAGE90_XNU_HFS_ROOT_MEDIA
+    return (unsigned)((uintptr_t)g_stage90_root_hfs_end - (uintptr_t)g_stage90_root_hfs);
+#else
+    return st_media_bytes();
+#endif
+}
+
 /*
  * **THE TWO ACCESSORS THE STRATEGY IS WRITTEN AGAINST, SO ITS BODY READS AS ONE RULE INSTEAD OF A
  * `switch`, AND SO THERE IS EXACTLY ONE DEFINITION OF WHAT EACH UNIT'S MEDIUM IS.**
@@ -239,7 +335,11 @@ st_medium_disk_base(uint32_t unit)
 {
     if (unit == 1u && st_medium_staged != 0u)
         return (const uint8_t *)st_medium_virt;
+#if STAGE90_XNU_HFS_ROOT_MEDIA
+    return (const uint8_t *)g_stage90_root_hfs;   /* 882: the volume, not the Mach-O - see above */
+#else
     return (const uint8_t *)g_stage90_ramdisk;
+#endif
 }
 
 static unsigned
@@ -249,7 +349,7 @@ st_medium_disk_bytes(uint32_t unit)
         return 0u;
     if (unit == 1u && st_medium_staged != 0u)
         return ST_MEDIA_BLOCKSIZE;        /* the ONE sector 864 handed over */
-    return st_media_bytes();
+    return st_media_strategy_bytes();     /* 882: the volume on the HFS arm, the Mach-O without it */
 }
 
 /* ----------------------------------------------------------- the switch bodies (memdev's shape) */
@@ -646,6 +746,18 @@ entry_root_media_register(int disk)
          * non-zero `..._blocks` says the device is memory-backed over the RAM disk and not merely
          * present. */
         entry_live_write("xnu_live_rootmedia_pages", (unsigned)(bytes >> ST_MEDIA_PAGE_SHIFT));
+        /*
+         * **882: THE ONE PAIR OF NUMBERS THAT SAYS WHICH ARM THIS IS.** `_blocks` and `_pages` above
+         * are the Mach-O's - what `DKIOCGETMEMDEVINFO` and `spec_open` see - and they are the same on
+         * both arms, because mockfs's fall-through must not move. The strategy's medium is the number
+         * that moves, and on the HFS arm it must equal the blob's byte count (524288) while `_pages`
+         * still says 2. A run that reads `_strategy_bytes` == `_blocks*512` is on the baseline (the
+         * strategy serves the Mach-O); one that reads `_strategy_bytes` != `_blocks*512` is on the
+         * split, and only that reading proves the volume is the medium rather than an assumption.
+         */
+        entry_live_write("xnu_live_rootmedia_strategy_bytes",
+                         (unsigned)st_media_strategy_bytes());
+        entry_live_write("xnu_live_rootmedia_hfs", (unsigned)STAGE90_XNU_HFS_ROOT_MEDIA);
     } else {
         entry_live_write("xnu_live_rootmedia_stage_major", (unsigned)st_media_major[disk]);
         entry_live_write("xnu_live_rootmedia_stage_dev",   (unsigned)dev);

@@ -668,6 +668,24 @@ STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
 # mounts it - 530 section 9's route. Default 0: the wrapper is the pass-through it has been since 457,
 # so the shipped image is unchanged (this is an arms dimension, not a behaviour that ships by default).
 MOUNT=${STAGE90_XNU_MOUNT:-0}
+# **882: the HFS+ root arm.** With `STAGE90_XNU_HFS_ROOT_MEDIA=1`, disk 0's *strategy* serves the
+# committed HFS+ volume (`src/entry/blob/xnu_arm_entry_root_hfs.img`) while `DKIOCGETMEMDEVINFO` and
+# `spec_open` still see the RAM disk - so a FAILED `hfs_mountroot` falls through to a mockfs whose
+# file node is still the Mach-O. The two readers must disagree; see
+# `tools/check_hfs_root_arm_split.py` and experiment 881 section 3.
+#
+# **A DEFAULTED SWITCH IS NOT AN UNSET ONE.** The record writer at the bottom is
+# `STAGE90_XNU_HFS_ROOT_MEDIA=$HFS_ROOT_MEDIA` - the RESOLVED variable - and not
+# `${STAGE90_XNU_HFS_ROOT_MEDIA}`. The first build of this arm printed the empty string for the second
+# spelling, and 678's two-way arm-key check refused it, which is right: an unset environment variable
+# and a variable explicitly set to 0 are the same image and two different records
+# (`mi4-off-option-two-spellings` one layer up).
+HFS_ROOT_MEDIA=${STAGE90_XNU_HFS_ROOT_MEDIA:-0}
+case "$HFS_ROOT_MEDIA" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_HFS_ROOT_MEDIA='$HFS_ROOT_MEDIA' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **The allowed rungs are the LADDER'S OWN BOUND, read out of the source it guards - not a list here.**
 # Until 732 this was a hand-typed `case` naming `0` through `13`, and raising the ladder to 14 in
 # `entry_storage.c` therefore did not raise it here: the two readings of one quantity disagreed, and the
@@ -840,6 +858,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_SEAM_END_RUN STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS
                 STAGE90_XNU_STORAGE_PROBE
                 STAGE90_XNU_MOUNT
+                STAGE90_XNU_HFS_ROOT_MEDIA
                 STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_XNU_IDLE_NO_SLEEP)
 #
@@ -937,6 +956,7 @@ do
         STAGE90_XNU_POST_END_TICKS)   _v=$SEAM_POST_END_TICKS ;;
         STAGE90_XNU_STORAGE_PROBE)    _v=$STORAGE_PROBE ;;
         STAGE90_XNU_MOUNT)            _v=$MOUNT ;;
+        STAGE90_XNU_HFS_ROOT_MEDIA)   _v=$HFS_ROOT_MEDIA ;;
         STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
@@ -1168,6 +1188,41 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
 run python3 "$REPO_ROOT/tools/host_ramdisk_macho_check.py" "$OUT/xnu_arm_entry_ramdisk.o" \
     || { say "the RAM disk Mach-O (entry_ramdisk.s) is not what parse_machfile reads"; exit 1; }
 
+# ------------------------------------------------------ 882: the HFS+ root volume, as bytes
+#
+# The volume disk 0's strategy serves on the HFS arm. It is `.incbin` and nothing else
+# (`src/entry/blob/xnu_arm_entry_root_hfs.S`), and the image it includes is COMMITTED because `out/` is
+# gitignored: a build on a machine that had not run `tools/build_hfs_root_image.sh` would otherwise
+# embed nothing and the arm would measure the fall-through only.
+#
+# **The object is built ONLY when the arm is on**, and that is deliberate rather than an optimisation.
+# `LINK_OBJS` is what pass 1 links to decide what is undefined, so an object that is present on the off
+# arm changes the off arm's image - and the off arm has to be the baseline the arm is compared against.
+# The two `[[ -f ]]` guards are written out rather than routed through this script's `require()` helper
+# because that helper is defined further down the file: the first build of this step used it here and
+# died with `require: command not found`, a helper used before its definition.
+ROOT_HFS_SRC="$REPO_ROOT/src/entry/blob/xnu_arm_entry_root_hfs.S"
+ROOT_HFS_IMG="$REPO_ROOT/src/entry/blob/xnu_arm_entry_root_hfs.img"
+ROOT_HFS_OBJ="$OUT/xnu_arm_entry_root_hfs.o"
+if [[ $HFS_ROOT_MEDIA -eq 1 ]]; then
+    [[ -f "$ROOT_HFS_SRC" ]] || {
+        say "STAGE90_XNU_HFS_ROOT_MEDIA=1 and $ROOT_HFS_SRC is missing: the arm's medium has no wrapper,"
+        say "so the strategy would serve whatever the linker left at g_stage90_root_hfs"; exit 2; }
+    [[ -f "$ROOT_HFS_IMG" ]] || {
+        say "STAGE90_XNU_HFS_ROOT_MEDIA=1 and $ROOT_HFS_IMG is missing: the committed 524288-byte HFS+"
+        say "volume is the arm's medium. Regenerate it with tools/build_hfs_root_image.sh (its output"
+        say "is NOT byte-reproducible - mkfs.hfsplus stamps the volume - so a regenerated file replaces"
+        say "the committed one rather than being compared against it)."; exit 2; }
+    # `-I` is what resolves the `.incbin` operand; without it the assembler searches its own cwd, which
+    # is `$OUT` for the other objects and would silently find nothing (or, worse, a stale copy).
+    run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
+        -c -I "$REPO_ROOT/src/entry/blob" "$ROOT_HFS_SRC" -o "$ROOT_HFS_OBJ"
+    # Checked on the OBJECT and not only on the committed file: this is the only thing that catches the
+    # `.incbin` resolving a different image than the one `make check` reads.
+    run python3 "$REPO_ROOT/tools/check_hfs_root_blob.py" "$ROOT_HFS_OBJ" \
+        || { say "the HFS+ root volume in $ROOT_HFS_OBJ is not a volume this kernel can mount"; exit 1; }
+fi
+
 # **The last kernel constructor (332).** Apple's `libsa/lastkernelconstructor.c` is a translation unit
 # like the ones above rather than an XNU object this project links: it is not in Apple's ARM manifest,
 # its own file cannot be compiled for this target (see the source's header - the Darwin-assembler
@@ -1295,6 +1350,11 @@ LINK_OBJS=(
     # script, so a name defined here is never handed to the stub generator.
     "$OUT/xnu_arm_entry_ramdisk.o"
 )
+
+# 882: the HFS+ volume joins the link ONLY on its own arm. The array above is what pass 1 links, so a
+# conditional member here is a *different link* on the two arms rather than the same link with one more
+# array in it - which is exactly what the off-arm baseline requires (the blob must not appear in it).
+[[ $HFS_ROOT_MEDIA -eq 1 ]] && LINK_OBJS+=("$ROOT_HFS_OBJ")
 
 # 481: the decrementer's owner, and the three wrappers that put it in place. Before pass 1 runs, for
 # a reason the two above do not have - see `PASS1_LDFLAGS` below, which is what this object's presence
@@ -27080,6 +27140,43 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     platform_obj_fresh "$STAGE90_TIMER_OBJ" "$REPO_ROOT/src/platform/MSM8974Timer.cpp"
     platform_obj_fresh "$STAGE90_GIC_OBJ" "$REPO_ROOT/src/platform/MSM8974GIC.cpp"
     platform_obj_fresh "$STAGE90_ROOT_MEDIA_OBJ" "$REPO_ROOT/src/platform/stage90_root_media.c"
+    # **882: the module and this build must agree about which medium disk 0's strategy serves.**
+    # `stage90_root_media.c` is compiled by `tools/build_xnu_arm_kernel.sh`, NOT by this script, and
+    # `STAGE90_XNU_HFS_ROOT_MEDIA` reaches it as `XNU_KERNEL_EXTRA_DEFINES` - a second command line
+    # that nothing forces to match this one. The module defines exactly ONE of
+    # `entry_root_media_hfs_root_arm_on` / `..._off`, unconditionally, so the object itself says which
+    # arm it was compiled for and the two spellings cannot be reconciled by accident.
+    #
+    # This is `mi4-one-value-two-definitions` with the switch as the value, and its failure is the
+    # quiet kind: the module would serve the Mach-O under a build that believes it serves the volume,
+    # every source check above would be green (they read the source, not the object), and the arm would
+    # measure the baseline.
+    media_arm=""
+    if arm-none-eabi-nm "$STAGE90_ROOT_MEDIA_OBJ" 2>/dev/null | grep -q 'T entry_root_media_hfs_root_arm_on'; then
+        media_arm=1
+    elif arm-none-eabi-nm "$STAGE90_ROOT_MEDIA_OBJ" 2>/dev/null | grep -q 'T entry_root_media_hfs_root_arm_off'; then
+        media_arm=0
+    else
+        say "REFUSING: $STAGE90_ROOT_MEDIA_OBJ carries neither entry_root_media_hfs_root_arm_on nor" >&2
+        say "          entry_root_media_hfs_root_arm_off, so this build cannot tell which medium its" >&2
+        say "          strategy serves. The module defines exactly one of the two unconditionally;" >&2
+        say "          their absence means the object is not from stage90_root_media.c. Rebuild it:" >&2
+        say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    fi
+    if [[ $media_arm != "$HFS_ROOT_MEDIA" ]]; then
+        say "REFUSING: the platform block compiled stage90_root_media.c with STAGE90_XNU_HFS_ROOT_MEDIA=" >&2
+        say "          '$media_arm' and this build's STAGE90_XNU_HFS_ROOT_MEDIA is '$HFS_ROOT_MEDIA'." >&2
+        say "          The module would serve $([[ $media_arm == 1 ]] && echo 'the HFS+ volume' || echo 'the Mach-O')" >&2
+        say "          under a build that believes it serves $([[ $HFS_ROOT_MEDIA == 1 ]] && echo 'the HFS+ volume' || echo 'the Mach-O')." >&2
+        say "          One object, two scripts, and the switch has to reach both. Rebuild the module with" >&2
+        say "          the same value this script was given:" >&2
+        say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+        say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_HFS_ROOT_MEDIA=$HFS_ROOT_MEDIA' \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    fi
+    say "  xnu_entry_882: the root-media module was compiled for the HFS-root arm this build links (STAGE90_XNU_HFS_ROOT_MEDIA=$media_arm)"
     platform_obj_fresh "$REPO_ROOT/out/xnu_platform_obj/stage90_platform_config_tables.o" \
                        "$REPO_ROOT/src/platform/stage90_platform_config_tables.c"
     # **What this rule does not cover, said rather than left to look complete.** The other three
@@ -35567,6 +35664,65 @@ verify_root_device() {
         layout_fail "g_stage90_ramdisk_end is 0x$ramdisk_end_va but the array ends at 0x$(printf '%x' $((ramdisk_va + ramdisk_size))) - the alias entry_ramdisk.s defines is not this array's end, so 862's page count would be wrong with every other check still green"
     say "  xnu_entry_862: g_stage90_ramdisk_end is 0x$ramdisk_end_va, exactly g_stage90_ramdisk + its size - the root media's page count is derived from the array, not from a second copy of 0x2000"
 
+    # --- 882: the HFS+ volume, and the FOUR things its arithmetic depends on -------------------------
+    #
+    # The volume is read by LOGICAL BLOCK NUMBER through `st_media_strategy`, which serves
+    # `base + b_blkno * 512` - so the array's address IS the volume's byte 0, and four things follow
+    # that no other check can see:
+    #
+    #   1. `g_stage90_root_hfs` is 4096-aligned. `.align 12` in the wrapper says so, and the derived
+    #      `g_stage90_root_hfs_end` in the same file says the length, but the LINK is where an orphan
+    #      placement would move the array off its alignment - and a base that is not a page multiple
+    #      rounds DOWN through `mi_base << 12`, serving the volume's byte -N as byte 0. The first
+    #      mount read would then land 1024 bytes early and find neither the boot blocks nor the header.
+    #   2. The length is 524288 exactly - the number `tools/build_hfs_root_image.sh` records and
+    #      `check_hfs_root_blob.py` asserts on the file. A truncated array is a volume whose extents
+    #      run past the medium, which `st_media_strategy` TRIMS rather than refuses (it is the EOF
+    #      rule), so the mount would fail with an EOF the volume header does not explain.
+    #   3. It is inside the copied image and clear of `.bss`, for the same reason the RAM disk is: the
+    #      payload zeroes `[__bss_start, __bss_end)` after copying the image in.
+    #   4. It is below the boot_args page and `topOfKernelData`, which are two addresses the payload
+    #      and XNU respectively hand memory out from.
+    #
+    # The three numbers are read out of the LINK, not transcribed - the two addresses with `nm` and the
+    # length as their difference.
+    if [[ $HFS_ROOT_MEDIA -eq 1 ]]; then
+        hfs_va=""
+        hfs_end_va=""
+        # **The length is the END ALIAS MINUS THE BASE, not `nm -S`'s size column.** A first draft read
+        # the size column and got the empty string, because `.set g_stage90_root_hfs_end, .` makes the
+        # whole section's span belong to the END symbol: `nm -S` prints a size for
+        # `xnu_arm_entry_root_hfs.o`'s `g_stage90_root_hfs_end` (0x80000) and NONE for
+        # `g_stage90_root_hfs`. The refusal that followed printed an empty number, because
+        # `(( $hfs_size == 524288 ))` with `hfs_size` empty is a shell ARITHMETIC ERROR rather than a
+        # comparison - a check whose failure mode is a syntax error in its own message reads, to anyone
+        # scanning the log, as the check that ran. Reading the difference is also the stronger
+        # statement: it is 862's own shape (`end == base + size`), and it cannot be satisfied by a size
+        # column that describes a different symbol.
+        hfs_va=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
+                 awk '$3 == "g_stage90_root_hfs" { print "0x"$1; found = 1 } END { exit(found ? 0 : 1) }') ||
+            layout_fail "STAGE90_XNU_HFS_ROOT_MEDIA=1 but the linked image does not carry g_stage90_root_hfs - the strategy's medium is not in the image, so every read would serve whatever the linker put there"
+        hfs_end_va=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
+                     awk '$3 == "g_stage90_root_hfs_end" { print "0x"$1; found = 1 } END { exit(found ? 0 : 1) }') ||
+            layout_fail "the HFS+ root volume's .S wrapper defines g_stage90_root_hfs_end and the linked image does not carry it"
+        hfs_size=$(( $(printf '%d' "$hfs_end_va") - $(printf '%d' "$hfs_va") ))
+        (( hfs_va % 4096 == 0 )) ||
+            layout_fail "g_stage90_root_hfs is at 0x$hfs_va, not 4096-aligned. The strategy serves 'base + b_blkno * 512' and the volume's header is at byte 1024, so a misaligned base serves the volume's byte -N as its byte 0 and the first mount read lands 1024 bytes early - see the wrapper's .align 12"
+        (( hfs_size == 524288 )) ||
+            layout_fail "the linked HFS+ root volume is $hfs_size bytes ($hfs_va..$hfs_end_va), not the 524288 (128 blocks of 4096) that tools/build_hfs_root_image.sh makes and check_hfs_root_blob.py asserts. A short array is a volume whose extents run past the medium, and st_media_strategy TRIMS a read at the end rather than refusing it"
+        (( $(printf '%d' "$hfs_end_va") == hfs_va + hfs_size )) ||
+            layout_fail "g_stage90_root_hfs_end is 0x$hfs_end_va but the array ends at 0x$(printf '%x' $(( $(printf '%d' "$hfs_va") + hfs_size ))) - the alias in the wrapper is not this array's end, so the module's medium length would be wrong with every other check still green"
+        (( $(printf '%d' "$hfs_va") + hfs_size <= bss_start )) ||
+            layout_fail "the HFS+ root volume reaches into .bss (which starts at 0x$bss_start): the payload zeroes exactly that range after copying the image in, so the volume would be erased before the mount reads it"
+        (( $(printf '%d' "$hfs_va") + hfs_size <= ENTRY_BASE + bin_size )) ||
+            layout_fail "the HFS+ root volume is above the end of the image objcopy produces (0x$(printf '%x' $((ENTRY_BASE + bin_size)))) - it is not file-backed, so the strategy would serve whatever the copy left"
+        (( $(printf '%d' "$hfs_va") + hfs_size <= ENTRY_BASE + ENTRY_ARGS_OFFSET )) ||
+            layout_fail "the HFS+ root volume reaches the boot_args page at +$ENTRY_ARGS_OFFSET, which _start reads"
+        (( $(printf '%d' "$hfs_va") + hfs_size <= ENTRY_BASE + ENTRY_DATA_LIMIT )) ||
+            layout_fail "the HFS+ root volume is above topOfKernelData at +$ENTRY_DATA_LIMIT, where XNU hands memory out"
+        say "  xnu_entry_882: the HFS+ root volume is $hfs_va +$hfs_size - 4096-aligned, the committed 128 blocks, inside the copied image and below .bss, the boot_args page and topOfKernelData"
+    fi
+
     # **And the bytes themselves**, in the image that goes to the device rather than in the object
     # checked at compile time: the section they landed in is what the two address checks above are
     # about, and whether they are still a Mach-O after the link is a separate question from whether
@@ -35995,6 +36151,10 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # what turns forgetting this line into a build refusal rather than a commit (the first link of this
     # step was refused on exactly that, which is the check earning its place).
     echo "STAGE90_XNU_MOUNT=$MOUNT"
+    # 882: which disk-0 medium the strategy serves - the HFS+ volume or the Mach-O. An arm key for the
+    # same reason MOUNT is: it changes what the SAME device answers to the same read, so an image
+    # carrying it is a different experiment and a record that omitted it would describe the other one.
+    echo "STAGE90_XNU_HFS_ROOT_MEDIA=$HFS_ROOT_MEDIA"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways

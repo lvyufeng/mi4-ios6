@@ -651,19 +651,31 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 # wait has a bound this gate can see, and with it absent the arm's `_wait_*` cells would be read as a
 # handshake that either completed or did not, with no way to tell a poll that SPENT its bound from one that
 # was never given a budget - which is the shape this project's oldest silent defect has.
+# 882: the twenty-first name, and it is the same class a fifth time - one more name this gate PRINTS and no
+# clause moved. `STAGE90_XNU_HFS_ROOT_MEDIA` is the HFS+ root arm's switch and it is 862's `STAGE90_XNU_MOUNT`
+# taken one step further, so the two are read as a PAIR and neither alone names the arm. With `MOUNT=1` the
+# medium answers the OS's reads from the payload's own strategy at disk 0; with `HFS_ROOT_MEDIA=1` the SAME
+# disk 0 answers TWO readers with different bytes - `DKIOCGETMEMDEVINFO` and the `spec_open` block count keep
+# the Mach-O (`g_stage90_ramdisk`), so a failed HFS mount's mockfs fall-through still reaches an exec, while
+# `st_media_strategy` serves the HFS+ volume (`g_stage90_root_hfs`). With it at 0 the split is absent and
+# mockfs keeps the Mach-O on both paths. **A record without this key would let a run go out with the volume
+# mapped where the exec image was expected, which is the one failure this arm was built to avoid and the only
+# one its own log could not distinguish afterwards** - the two arms' `xnu_live_storage_*` cells agree. The
+# variant subset counts move from fourteen to fifteen, and the pair of counts in the converse check below
+# moves with them.
 ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_TRACE
                 STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT_NULL STAGE90_XNU_EXIT_POC_FLUSH
                 STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK
                 STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE STAGE90_XNU_SEAM_END_RUN
                 STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS STAGE90_XNU_STORAGE_PROBE
-                STAGE90_XNU_PWR_WAIT_TICKS STAGE90_XNU_MOUNT
+                STAGE90_XNU_PWR_WAIT_TICKS STAGE90_XNU_MOUNT STAGE90_XNU_HFS_ROOT_MEDIA
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP)
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
   [[ -n $_v ]] \
-    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The fourteen variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, POST_END_RUN, POST_END_TICKS, STORAGE_PROBE, PWR_WAIT_TICKS, MOUNT, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence"
+    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The fifteen variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, POST_END_RUN, POST_END_TICKS, STORAGE_PROBE, PWR_WAIT_TICKS, MOUNT, HFS_ROOT_MEDIA, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence"
   printf '  %s=%s\n' "$_k" "$_v"
 done
 # And the converse, so a key the list above does not name cannot arrive unshown (a *tenth* when the list

@@ -7,6 +7,13 @@ xiaomi4-cancro-backup-*/
 *.dtbo
 *.cpio
 *.cpio.gz
+# ...except the root volume, which is an ARTIFACT this repository OWNS and must carry: the HFS+ root
+# arm's whole safety claim is that a FAILED HFS mount falls through to mockfs, and a build that
+# silently embedded nothing would make the fall-through the only path, so the bytes are committed
+# rather than generated into the ignored `out/`. `src/entry/blob/xnu_arm_entry_root_hfs.S` states
+# this and `tools/check_hfs_root_blob.py` (in `make check`) re-derives the fields a stale blob would
+# get wrong - the claim in that file and the rule here disagreed until now, and nothing refused.
+!src/entry/blob/*.img
 
 # External source checkouts (large, reproducible)
 external/

@@ -142,8 +142,36 @@ else
   add_failure 0x00000004
 fi
 
+# 882: the 4570 tree is STAGED, and a staged tree is dirty by that tree's own definition.
+#
+# The rule below is experiment 155's - "a checkout under `external/` is never written" - and the HFS+
+# port (868-879) changes it on purpose through a tracked, re-appliable generator. The replacement is
+# NOT "the tree may be dirty": it is that the tree must hold EXACTLY what `tools/stage_hfs.sh` wrote,
+# which is what distinguishes the stager's output from a translator overwriting Apple's source (155's
+# defect) or a stray hand edit. The stager writes its own `git status` to the record below whenever it
+# runs, so the string is a fresh write and not a self-written expectation: a tree that has moved since
+# the stager ran no longer compares equal. `--untracked-files=all` because the default collapses the
+# 36 files under `bsd/hfs/` to one line. `scripts/xnu_compile_graph_scan.py` makes the same comparison
+# for its own bit, against the same record.
+#
+# `xnu-upstream` (2050) is READ ONLY for this port - it is the source every staged file is copied FROM
+# - so it keeps 155's rule unchanged.
 external_clean=1
-for ext in $REPO_ROOT/external/xnu-upstream $REPO_ROOT/external/xnu-4570.1.46; do
+STAGED_TREE=$REPO_ROOT/external/xnu-4570.1.46
+STAGED_RECORD=$REPO_ROOT/src/supply/hfs_tree_status.txt
+if [[ -d "$STAGED_TREE/.git" ]]; then
+  if [[ ! -f $STAGED_RECORD ]]; then
+    printf 'no staged-tree record %s (tools/stage_hfs.sh writes it)\n' "$STAGED_RECORD" >> "$MANIFEST_TXT"
+    external_clean=0
+  elif ! diff -u "$STAGED_RECORD" \
+        <(git -C "$STAGED_TREE" status --short --untracked-files=all) >> "$MANIFEST_TXT" 2>&1; then
+    printf 'staged tree %s does not hold what tools/stage_hfs.sh recorded\n' "$STAGED_TREE" >> "$MANIFEST_TXT"
+    external_clean=0
+  else
+    printf 'staged external %s matches %s\n' "$STAGED_TREE" "${STAGED_RECORD##*/}" >> "$MANIFEST_TXT"
+  fi
+fi
+for ext in $REPO_ROOT/external/xnu-upstream; do
   if [[ -d "$ext/.git" ]]; then
     if [[ -n "$(git -C "$ext" status --short)" ]]; then
       printf 'dirty external %s\n' "$ext" >> "$MANIFEST_TXT"

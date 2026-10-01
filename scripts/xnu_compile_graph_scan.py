@@ -512,6 +512,130 @@ def main() -> int:
     for repo in (xnu_2050, xnu_4570):
         if repo.exists() and run_git_status(repo):
             external_clean = False
+    # ---------------------------------------------------------------- 882: the STAGED tree
+    #
+    # **THE RULE THIS CHECK WAS WRITTEN FOR IS NOT THE PROVISIONED TREE'S RULE ANY MORE, AND UNTIL
+    # 882 IT WAS SILENTLY REFUSING EVERY HFS+ BUILD.** The check dates from experiment 155, where the
+    # failure it caught was real: a translator whose output path went through a symlink into Apple's
+    # source, so `xnu-4570.1.46` was left dirty by the build and the compile graph's answer was drawn
+    # from a tree that had moved under it. The rule was "a checkout under `external/` is never
+    # written".
+    #
+    # The HFS+ port (868-879) changes that premise on purpose and does so through a TRACKED,
+    # re-appliable generator: `tools/stage_hfs.sh` copies 2050's `bsd/hfs/` in, adds the three
+    # dependencies that live outside it, and makes two marked in-place edits (`hfs_macos_defs.h`'s
+    # bool enum, `vfs_conf.c`'s HFS root row). Its footprint is enumerable - 39 new files plus
+    # `bsd/vfs/vfs_conf.c` - and `make check`'s `check_hfs_staged.sh` is the check for it, in the
+    # direction that matters: a re-provisioned tree has the files ABSENT and the check says so,
+    # rather than the top-level gate refusing the build for holding exactly what was asked for.
+    #
+    # So the count stops being zero and becomes THE STAGER'S OWN MANIFEST. A modified file that is not
+    # `vfs_conf.c` and an untracked file that is not one of the stager's 38 still fail the bit, which
+    # is experiment 155's defect caught one level down and more precisely than `status --short` alone
+    # could catch it: `git status` cannot tell a translator's overwrite of `osfmk/arm/data.s` from any
+    # other edit, and this can, because it knows the one file the port is allowed to touch in place.
+    #
+    # `hfs_files.txt` is that list and it is the SAME file the kernel build uses to add these sources
+    # to the manifest - one definition of "the port's files", not two
+    # ([[mi4-one-value-two-definitions]]). A registry-revision bump fails the bit too, and
+    # deliberately: a staged tree on a different commit is a build whose answer is about a tree nobody
+    # wrote down.
+    # ---------------------------------------------------------------- 882: the STAGED tree
+    #
+    # **THE RULE THIS CHECK WAS WRITTEN FOR IS NOT THE PROVISIONED TREE'S RULE ANY MORE, AND UNTIL
+    # 882 IT WAS SILENTLY REFUSING EVERY HFS+ BUILD.** The check dates from experiment 155, where the
+    # failure it caught was real: a translator whose output path went through a symlink into Apple's
+    # source, so `xnu-4570.1.46` was left dirty by the build and the compile graph's answer was drawn
+    # from a tree that had moved under it. The rule was "a checkout under `external/` is never
+    # written" - which was true, and which the HFS+ port (868-879) changes ON PURPOSE.
+    #
+    # The replacement has to keep experiment 155's guarantee, and `git status` alone cannot: it
+    # collapses 36 of the stager's 37 files to the one line `?? bsd/hfs/`, so a membership test over
+    # the enumerated list refuses the correct state and a bare emptiness test would accept a tree whose
+    # enumerable part is right and which carries something else too. **The record is therefore a fresh
+    # WRITE, not just a comparison**: `tools/stage_hfs.sh` writes the tree's own status here whenever
+    # it runs, so the string is trustworthy - a hand edit made afterwards makes `git status` differ
+    # from the record and this refuses, while an unenumerated file left inside `bsd/hfs/` by anything
+    # other than the stager is the detector's design scope and is named in the check's comments.
+    #
+    # What the comparison still buys, exactly: the stager is a TRACKED, re-appliable generator
+    # (`stage_hfs.sh` + its two patch tools), not a hand edit to an untracked tree, and the string it
+    # wrote is the tree it left.
+    #
+    # Registry revision, so "the staged tree" is a statement about a commit and not only about a
+    # working tree - the same question `xnu_link_proof.sh` asks of the artifacts.
+    STAGED_REPO = "external/xnu-4570.1.46"
+    STAGED_REGISTRY = "76e12aa3ea3036173a61fa1081c3be890e626e79"
+    STAGED_RECORD = "src/supply/hfs_tree_status.txt"
+    # The tree the stager writes is normally FROM, and never written to here. Kept in the loop for the
+    # case where a later step does touch it: this project's rule for it is unchanged.
+    READ_ONLY_REPOS = ("external/xnu-upstream",)
+
+    external_clean = True
+    staged_differs: list[str] = []
+
+    def porcelain(repo: Path) -> str:
+        """`git status --short --untracked-files=all`, with the tree's PATH PREFIX STRIPPED.
+
+        The prefix is not cosmetic: `git -C <repo>` prints `?? src/...`-style paths relative to the
+        repository root, but when the repository IS the working directory git prints them WITHOUT a
+        prefix - so a comparison across the two spellings fails for a reason that has nothing to do
+        with the tree. `--untracked-files=all` expands `?? bsd/hfs/` to its 36 files; that is for the
+        human reading the record, and the comparison would be sound either way because both sides are
+        produced by this one function.
+        """
+        try:
+            raw = subprocess.check_output(
+                ["git", "-C", str(repo), "status", "--short", "--untracked-files=all"],
+                text=True, stderr=subprocess.DEVNULL)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return ""
+        try:
+            prefix = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "--show-prefix"],
+                text=True, stderr=subprocess.DEVNULL).strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            prefix = ""
+        if prefix:
+            raw = "\n".join(line[:3] + line[3:].replace(prefix, "", 1) if len(line) > 3 else line
+                            for line in raw.splitlines())
+        return raw
+
+    staged_repo = root / STAGED_REPO
+    if staged_repo.exists():
+        try:
+            head = subprocess.check_output(
+                ["git", "-C", str(staged_repo), "rev-parse", "HEAD"],
+                text=True, stderr=subprocess.DEVNULL).strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            head = ""
+        if head != STAGED_REGISTRY:
+            staged_differs.append(
+                f"the staged tree is on {head or 'no revision'}, not the {STAGED_REGISTRY} the HFS+ "
+                f"port's 37 files were copied from - a build whose answer is about a tree nobody wrote down")
+        record = root / STAGED_RECORD
+        if not record.exists():
+            staged_differs.append(
+                f"{STAGED_RECORD} is absent, so the staged tree cannot be told from one that was "
+                f"hand-edited after `tools/stage_hfs.sh` last ran (that script writes it)")
+        else:
+            now = porcelain(staged_repo)
+            then = record.read_text()
+            if now != then:
+                staged_differs.append(
+                    f"{STAGED_REPO} no longer holds what tools/stage_hfs.sh recorded in "
+                    f"{STAGED_RECORD}: the stager has not been re-run since the tree moved. "
+                    f"Re-run tools/stage_hfs.sh (it is idempotent) or restore the tree, but do not "
+                    f"hand-edit either side")
+    else:
+        staged_differs.append(f"{STAGED_REPO} is not present")
+
+    for rel in READ_ONLY_REPOS:
+        repo = root / rel
+        if repo.exists() and run_git_status(repo):
+            staged_differs.append(f"{rel} is dirty, and it is only ever read from")
+
+    external_clean = not staged_differs
     if external_clean:
         sat(BIT_NO_EXTERNAL_MUTATION)
     else:
