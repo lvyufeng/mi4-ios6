@@ -189,6 +189,15 @@ int entry_root_media_hfs_root_arm_on(void)  { return 1; }
 int entry_root_media_hfs_root_arm_off(void) { return 0; }
 #endif
 
+/* 888: the same marker shape for the CARD unit, so `build_entry.sh` can refuse an image that turns
+ * the card switch on while the ladder's own door (887) is not in it, and can WIDEN the strategy's
+ * "never reach the device" refusal only on the arm that deliberately reaches it. */
+#if STAGE90_XNU_EMMC_STRATEGY
+int entry_root_media_card_arm_on(void)  { return 1; }
+#else
+int entry_root_media_card_arm_off(void) { return 0; }
+#endif
+
 #if STAGE90_XNU_HFS_ROOT_MEDIA
 /* Defined by `src/entry/blob/xnu_arm_entry_root_hfs.S` (`.incbin` of the committed HFS+ volume).
  * Only declared here, and only on this arm: with the switch off the section the object carries is
@@ -210,8 +219,26 @@ extern char g_stage90_root_hfs_end[];
  * memory-backed device's size is a fact about the memory it maps, not a knob. */
 #define ST_MEDIA_BLOCKSIZE 512u
 
-/* Two disks' worth of identity, so the selection is a device and not a constant. */
+/*
+ * 888's switch is declared HERE, above the geometry it sizes, because it decides how many units this
+ * device has. With it off the table is two entries and the object is the rung-60 arm's byte for byte;
+ * with it on there is a third. (Its long-form rationale is with the card unit's state below, where
+ * the reader meets the branch it guards.)
+ */
+#ifndef STAGE90_XNU_EMMC_STRATEGY
+#define STAGE90_XNU_EMMC_STRATEGY 0
+#endif
+
+/* The units: the RAM disk (0), the one staged sector (1), and - 888 - the CARD-BACKED unit (2) whose
+ * blocks the ladder's own door fetches from the medium. The card unit is a unit of its own because
+ * disk 0 serves the Mach-O the root is exec'd from (866 section 4) and disk 1 serves the ONE staged
+ * sector; replacing either of those would lose the exec. */
+#if STAGE90_XNU_EMMC_STRATEGY
+#define ST_MEDIA_DISKS      3
+#else
 #define ST_MEDIA_DISKS      2
+#endif
+#define ST_MEDIA_DRIVER     2u
 
 /*
  * The flags this device answers `DKIOCGETMEMDEVINFO` from: ON `mdInited` (a non-inited device
@@ -230,6 +257,11 @@ extern char g_stage90_root_hfs_end[];
 /* 864: this device's medium is the STAGED sector, not the RAM disk - so `st_media_memdev_info`
  * answers with the staged array's address and the handler below is the one that filled it. */
 #define ST_MEDIA_STAGED    0x4u
+/* 888: this device's medium is the CARD, reached a block at a time through the ladder's own door
+ * (`entry_storage_driver_read`). Unlike the staged unit it holds no copy - the bytes are fetched
+ * when the strategy is called - so it has no `st_medium_virt` and its base accessor returns 0 to
+ * say "not addressable as one array" rather than an address it cannot honour. */
+#define ST_MEDIA_CARD      0x8u
 
 static int     st_media_major[ST_MEDIA_DISKS];
 static unsigned st_media_blocksize[ST_MEDIA_DISKS];
@@ -266,6 +298,53 @@ static uint32_t st_medium_virt[ST_MEDIA_SECTOR_WORDS] __attribute__((aligned(64)
 static uint32_t st_medium_sector;        /* the medium sector the staged bytes came from */
 static uint32_t st_medium_pages;         /* the disk's page count, for `DKIOCGETMEMDEVINFO`   */
 static uint32_t st_medium_staged;        /* 0 until `entry_root_media_stage` has run          */
+
+/*
+ * ===================================================================================================
+ * 888 - THE DRIVER UNIT (unit 2): THE STRATEGY THAT MOVES A BYTE OFF THE CARD.
+ *
+ * This is the join 867 section 3 mapped and 887 built the ladder half of: `st_media_strategy` is given
+ * the ladder's own read (`entry_storage_driver_read`) and fetches the block it was handed from the
+ * MEDIUM. 887 found why it is a UNIT OF ITS OWN rather than a change to disk 0's strategy: disk 0
+ * serves `g_stage90_ramdisk` - the Mach-O the root is exec'd from - `precisely` so `exec_mach_imgact`
+ * sees a valid `MH_MAGIC` (866 section 4). A disk-0 strategy that read the card would serve the
+ * selected partition's bytes where the exec expects the Mach-O, and the run would lose the exec - the
+ * one thing the whole mount track protects. Disk 1 (the staged unit) is likewise one sector. So the
+ * card-backed medium is a THIRD unit and neither of the first two moves.
+ *
+ * **IT CANNOT USE `st_medium_disk_base`, AND THAT IS THE STRUCTURAL DIFFERENCE FROM UNITS 0 AND 1.**
+ * Those two media are contiguous arrays in this kernel's own mapping, so the strategy copies
+ * `size` bytes from `base + blkno*512` in one `bcopy`. The card is not addressable as one array: the
+ * strategy may be handed a block anywhere in a multi-hundred-megabyte partition, and the only way to
+ * get those bytes is to ask the ladder for THAT block. So this unit serves the strategy a block at a
+ * time - `entry_storage_driver_read(lba)` -> the ladder's `st_read_block` - and `st_medium_disk_base`
+ * returns 0 for it (the "not one array" answer) so `DKIOCGETMEMDEVINFO` and the accessor tell a reader
+ * the truth about a medium that is not memory.
+ *
+ * **THE SWITCH IS OFF BY DEFAULT, AND IT IS A SEPARATE DIMENSION FROM `STAGE90_XNU_MOUNT`.** With it
+ * off the shipped image is byte-for-byte the rung-60 arm's: unit 2 is not registered, and the two
+ * accessors answer exactly as they did. It is a `#ifndef` switch and not `STAGE90_XNU_STORAGE_PROBE`
+ * because this file is compiled by the KERNEL build, whose environment does not carry the ladder's
+ * probe value - a value this file read out of the environment would be `mi4-build-variant-comes-from-
+ * an-env-default` in its most direct form. `src/entry/build_entry.sh` refuses a build that turns it on
+ * while the ladder's own door is not in the image (see `xnu_entry_888`), so the two stay in step.
+ */
+#ifndef STAGE90_XNU_EMMC_STRATEGY
+#define STAGE90_XNU_EMMC_STRATEGY 0
+#endif
+
+#if STAGE90_XNU_EMMC_STRATEGY
+/* The ladder's door and its two addressing accessors - 887's exported half, in the SAME image when
+ * this switch is on (the entry image links `entry_storage.c` and this object together; see
+ * `xnu_entry_888`). Declared here rather than in a header because the ladder's own header
+ * (`entry_storage.h`) is in the entry component's include set and this file is in the BSD one; the
+ * names are the interface, and `build_entry.sh` refuses a build where they do not resolve. */
+extern const uint32_t *entry_storage_driver_read(uint32_t lba);
+extern uint32_t        entry_storage_selected_lba(void);
+extern uint32_t        entry_storage_selected_count(void);
+/* Defined beside `entry_root_media_stage` (which calls it), so the declaration precedes that body. */
+int entry_root_media_register_card(void);
+#endif
 
 /* The two `.bss` cells the strategy's refusals are counted in, so a served read and a refused one
  * are told apart by a number in the log rather than by the absence of a log line. */
@@ -333,6 +412,14 @@ st_media_strategy_bytes(void)
 static const uint8_t *
 st_medium_disk_base(uint32_t unit)
 {
+#if STAGE90_XNU_EMMC_STRATEGY
+    /* 888: the card unit is NOT one array - the strategy fetches it block by block - so there is no
+     * base to return and 0 says exactly that. It is the same "no medium at all" answer a unit past
+     * the table gets, and the strategy treats both identically, because neither can be served from
+     * `base + offset`. */
+    if (unit == ST_MEDIA_DRIVER)
+        return 0;
+#endif
     if (unit == 1u && st_medium_staged != 0u)
         return (const uint8_t *)st_medium_virt;
 #if STAGE90_XNU_HFS_ROOT_MEDIA
@@ -347,6 +434,15 @@ st_medium_disk_bytes(uint32_t unit)
 {
     if (unit >= ST_MEDIA_DISKS)
         return 0u;
+#if STAGE90_XNU_EMMC_STRATEGY
+    /* 888: the card unit's byte length is the SELECTED partition's - `selected_count` sectors of
+     * `ST_MEDIA_BLOCKSIZE` bytes each. Deriving it from the ladder's own selection (rather than a
+     * second constant) keeps the device's length and the ladder's addressing the same number, which
+     * is the "one value, two definitions" rule this file keeps re-learning: a strategy whose length
+     * and whose addressing disagreed would serve a byte range that is not what was selected. */
+    if (unit == ST_MEDIA_DRIVER)
+        return (unsigned)((uint64_t)entry_storage_selected_count() * ST_MEDIA_BLOCKSIZE);
+#endif
     if (unit == 1u && st_medium_staged != 0u)
         return ST_MEDIA_BLOCKSIZE;        /* the ONE sector 864 handed over */
     return st_media_strategy_bytes();     /* 882: the volume on the HFS arm, the Mach-O without it */
@@ -460,11 +556,26 @@ st_media_strategy(struct buf *bp)
     }
     len  = st_medium_disk_bytes(unit);
     base = st_medium_disk_base(unit);
+#if STAGE90_XNU_EMMC_STRATEGY
+    /* **`len == 0` IS THE "NO MEDIUM" TEST, AND IT IS THE ONLY ONE.** Before 888 this guard also
+     * refused `base == 0`, which was true of every unit that had a medium. The card unit breaks that
+     * equivalence on purpose: it HAS a medium (the selected partition) and no base, because its bytes
+     * are fetched a block at a time rather than copied from one array. So the base test moves BELOW
+     * the card branch, where it is again exactly what it says - "a unit with a medium this body cannot
+     * serve from one array". **With the switch off this whole restructure is not compiled**, so the
+     * shipped object is the rung-60 arm's byte for byte (the build's clause checks exactly that). */
+    if (len == 0u) {                              /* no medium: disk 1 before the ladder staged */
+        buf_seterror(bp, ENXIO);
+        buf_biodone(bp);
+        return;
+    }
+#else
     if (len == 0u || base == 0) {                 /* no medium: disk 1 before the ladder staged */
         buf_seterror(bp, ENXIO);
         buf_biodone(bp);
         return;
     }
+#endif
     if ((buf_flags(bp) & B_READ) == 0) {          /* neither medium is this image's to write */
         buf_seterror(bp, EROFS);
         buf_biodone(bp);
@@ -487,6 +598,65 @@ st_media_strategy(struct buf *bp)
     }
     if (off + (uint64_t)count > (uint64_t)len)
         count = (uint32_t)((uint64_t)len - off);   /* trim to the end rather than refuse whole */
+
+#if STAGE90_XNU_EMMC_STRATEGY
+    /*
+     * **888: THE CARD UNIT IS SERVED BLOCK BY BLOCK, AND THAT IS THE WHOLE OF THE JOIN.** Units 0 and
+     * 1 are arrays in this kernel's mapping, so one `bcopy` answers any request; the card is not. The
+     * strategy may be handed a block anywhere in the selected partition, so each 512-byte block is
+     * fetched by ITS OWN LBA through the ladder's door, `entry_storage_driver_read`, and copied into
+     * the caller's map.
+     *
+     * **THE COUNT CAN EXCEED ONE BLOCK AND THAT IS WHY THIS IS A LOOP RATHER THAN ONE CALL.** A
+     * filesystem reads a cluster at a time; the ladder's door moves exactly one 512-byte block (its
+     * `st_read_single_block(1u)`), so a request for N blocks is N door calls, the dest advancing by a
+     * block and the LBA by one each time. `off / ST_MEDIA_BLOCKSIZE` is the requesting block's number
+     * *on this disk*; the block's LBA on the MEDIUM is that plus the selected partition's base, and
+     * the base-plus-number sum is computed in 64 bits because the sum, not either addend, is what a
+     * multi-hundred-megabyte partition's LBA can overflow a 32-bit cell with.
+     *
+     * **THE MAP IS TAKEN ONCE, BEFORE THE FIRST FETCH.** `buf_map` is not free and re-mapping per
+     * block would be a second place for the transfer to fail; the door returns `st_read_block`, whose
+     * contents are overwritten by the NEXT call, so each block MUST be copied out before the next door
+     * call - which the loop's order makes true by construction (copy, then advance, then fetch again).
+     */
+    if (unit == ST_MEDIA_DRIVER) {
+        uint32_t nblk, i;
+
+        off = (uint64_t)(uint32_t)buf_blkno(bp) * ST_MEDIA_BLOCKSIZE;
+        entry_live_write("xnu_live_rootmedia_card_off", (unsigned)off);
+        if (buf_map(bp, &vaddr) != 0) {
+            buf_seterror(bp, EFAULT);
+            buf_biodone(bp);
+            return;
+        }
+        nblk = count / ST_MEDIA_BLOCKSIZE;              /* whole blocks in the (already trimmed) count */
+        for (i = 0u; i < nblk; i++) {
+            uint32_t lba = (uint32_t)((uint64_t)entry_storage_selected_lba()
+                                      + (off / ST_MEDIA_BLOCKSIZE) + i);
+            const uint32_t *w = entry_storage_driver_read(lba);
+            bcopy((const void *)w, (void *)(vaddr + i * ST_MEDIA_BLOCKSIZE), ST_MEDIA_BLOCKSIZE);
+        }
+        buf_unmap(bp);
+        buf_setresid(bp, (uint32_t)buf_count(bp) - count);
+        buf_biodone(bp);
+        entry_live_write("xnu_live_rootmedia_card_blocks", nblk);
+        entry_live_write("xnu_live_rootmedia_card_last_lba",
+                         (uint32_t)((uint64_t)entry_storage_selected_lba()
+                                    + (off / ST_MEDIA_BLOCKSIZE) + ((nblk != 0u) ? (nblk - 1u) : 0u)));
+        st_medium_refused--;
+        st_medium_served++;
+        entry_live_write("xnu_live_rootmedia_served", st_medium_served);
+        entry_live_write("xnu_live_rootmedia_refused", st_medium_refused);
+        return;
+    }
+#endif
+
+    if (base == 0) {                              /* a unit with a medium but no array to serve it from */
+        buf_seterror(bp, ENXIO);
+        buf_biodone(bp);
+        return;
+    }
 
     if (buf_map(bp, &vaddr) != 0) {               /* memdev panics here; this arm must not */
         buf_seterror(bp, EFAULT);
@@ -829,5 +999,67 @@ entry_root_media_stage(uint32_t sector, uint32_t pages, const uint32_t *words, u
                      (unsigned)((uintptr_t)st_medium_virt >> ST_MEDIA_PAGE_SHIFT));
     entry_live_write("xnu_live_rootmedia_stage_w0", st_medium_virt[0]);
     entry_live_write("xnu_live_rootmedia_stage_w1", st_medium_virt[1]);
+#if STAGE90_XNU_EMMC_STRATEGY
+    /* 888: the same handover registers the CARD unit - the medium the strategy fetches block by
+     * block. It is done HERE and not from `entry_storage.c` on purpose: the module owns the whole
+     * card-arm registration, so the entry side needs no edit at all, and the two units are created
+     * at the one moment the ladder has both read the medium and published its selection. */
+    (void)entry_root_media_register_card();
+#endif
     return 0;
 }
+
+#if STAGE90_XNU_EMMC_STRATEGY
+/*
+ * **888: THE CARD UNIT'S REGISTRATION - THE SELECTED PARTITION, ADDRESSED BY THE LADDER'S OWN NUMBERS.**
+ *
+ * This mirrors `entry_root_media_stage`'s use of `entry_root_media_register(1)`, one unit up. The
+ * geometry is NOT the RAM disk's (which is what `entry_root_media_register` would set): the device's
+ * size is `entry_storage_selected_count()` sectors - the extent the GPT walk selected by - and its
+ * base is not an array. `DKIOCGETBLOCKCOUNT` answering the real sector count is what lets a
+ * filesystem know how large this disk is; the staged unit's intentional `1` (one sector) does not
+ * apply here, because this unit is meant to be mounted, not merely probed.
+ *
+ * **THE SELECTION'S ZERO IS A REFUSAL, TAKEN BEFORE ANY REGISTRATION.** `entry_storage_selected_count`
+ * returns 0 when the walk selected nothing (no GPT, no extent, no sector count); a device registered
+ * over that would have zero blocks and serve nothing, so this refuses with a visible return instead -
+ * the same "a zero is a refusal" rule `entry_root_media_mount_disk` follows one level up.
+ *
+ * **ITS KEYS ARE ITS OWN (`_card_*`), AND THAT IS THE POINT.** Disk 0's four numbers ("major", "dev",
+ * "blocks", "pages") describe the RAM-disk device and a run reads them as that device's geometry;
+ * writing them a second time for unit 2 would silently re-point published numbers at a different disk
+ * - the "one value, two definitions" defect the staged unit's `_stage_*` names already avoid.
+ */
+int
+entry_root_media_register_card(void)
+{
+    dev_t dev;
+    uint32_t count = entry_storage_selected_count();
+    uint32_t lba   = entry_storage_selected_lba();
+
+    if (count == 0u) {
+        entry_live_write("xnu_live_rootmedia_card_refused", 1u);
+        return EINVAL;
+    }
+
+    dev = entry_root_media_register((int)ST_MEDIA_DRIVER);
+    if ((int)dev < 0) {
+        entry_live_write("xnu_live_rootmedia_card_err", (unsigned)dev);
+        return (int)dev;
+    }
+
+    /* The registration's file-scope geometry is the RAM disk's; this device's is the selection's. */
+    st_media_blocksize[ST_MEDIA_DRIVER]  = ST_MEDIA_BLOCKSIZE;
+    st_media_blockcount[ST_MEDIA_DRIVER] = count;           /* the selected extent, in sectors */
+    st_media_flags[ST_MEDIA_DRIVER]      = ST_MEDIA_MDINITED | ST_MEDIA_CARD;
+
+    entry_live_write("xnu_live_rootmedia_card_refused", 0u);
+    entry_live_write("xnu_live_rootmedia_card_registered", 1u);
+    entry_live_write("xnu_live_rootmedia_card_dev", (unsigned)dev);
+    entry_live_write("xnu_live_rootmedia_card_lba", lba);
+    entry_live_write("xnu_live_rootmedia_card_blocks", count);
+    entry_live_write("xnu_live_rootmedia_card_bytes",
+                     (unsigned)((uint64_t)count * ST_MEDIA_BLOCKSIZE));
+    return 0;
+}
+#endif

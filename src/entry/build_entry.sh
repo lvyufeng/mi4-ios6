@@ -686,6 +686,22 @@ case "$HFS_ROOT_MEDIA" in
     *) echo "REFUSING: STAGE90_XNU_HFS_ROOT_MEDIA='$HFS_ROOT_MEDIA' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **888: the eMMC-strategy arm.** With `STAGE90_XNU_EMMC_STRATEGY=1` the root-media module grows a
+# THIRD disk unit (`ST_MEDIA_DRIVER`) whose `strategy` fetches each block from the card through
+# `entry_storage_driver_read` at `entry_storage_selected_lba() + blkno` - the ladder's own read, at a
+# caller's LBA. It is the *integration* half of the driver clause 887 built the door for.
+#
+# **THE MODULE AND THIS BUILD MUST AGREE ABOUT THIS SWITCH, EXACTLY AS FOR THE HFS ARM.** The module is
+# compiled by `tools/build_xnu_arm_kernel.sh` via `XNU_KERNEL_EXTRA_DEFINES`; it defines exactly ONE of
+# `entry_root_media_card_arm_on` / `entry_root_media_card_arm_off`, unconditionally, so the OBJECT says
+# which arm it was built for and the two command lines cannot drift by accident. That check is 888's own
+# `nm` clause below (`entry_root_media_card_arm_*`), the same shape 882 uses for the HFS arm.
+EMMC_STRATEGY=${STAGE90_XNU_EMMC_STRATEGY:-0}
+case "$EMMC_STRATEGY" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_EMMC_STRATEGY='$EMMC_STRATEGY' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **The allowed rungs are the LADDER'S OWN BOUND, read out of the source it guards - not a list here.**
 # Until 732 this was a hand-typed `case` naming `0` through `13`, and raising the ladder to 14 in
 # `entry_storage.c` therefore did not raise it here: the two readings of one quantity disagreed, and the
@@ -859,6 +875,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_STORAGE_PROBE
                 STAGE90_XNU_MOUNT
                 STAGE90_XNU_HFS_ROOT_MEDIA
+                STAGE90_XNU_EMMC_STRATEGY
                 STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_XNU_IDLE_NO_SLEEP)
 #
@@ -957,6 +974,7 @@ do
         STAGE90_XNU_STORAGE_PROBE)    _v=$STORAGE_PROBE ;;
         STAGE90_XNU_MOUNT)            _v=$MOUNT ;;
         STAGE90_XNU_HFS_ROOT_MEDIA)   _v=$HFS_ROOT_MEDIA ;;
+        STAGE90_XNU_EMMC_STRATEGY)    _v=$EMMC_STRATEGY ;;
         STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
@@ -27177,6 +27195,49 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         exit 2
     fi
     say "  xnu_entry_882: the root-media module was compiled for the HFS-root arm this build links (STAGE90_XNU_HFS_ROOT_MEDIA=$media_arm)"
+    # **888: the same two-script agreement, now for the eMMC-strategy arm - and it carries ONE more
+    # check the HFS arm did not need.** The module's third unit (`ST_MEDIA_DRIVER`) is the integration
+    # half of the driver clause; the LADDER half is `entry_storage_driver_read`, which lives in
+    # `src/entry/entry_storage.c` and is linked into THIS image. The two halves meet BY SYMBOL across
+    # two source files compiled by two different scripts, so a card-ON build whose entry image lacks the
+    # door would link (the module's undefined symbol resolves to a STUB) and would then serve the root
+    # from a read that moves no byte - the mount-and-cannot-exec shape [[mi4-one-value-two-definitions]]
+    # is named for. So: (1) the object says which arm it is, and it must equal this build's switch; and
+    # (2) when the arm is ON, the DOOR must be a real definition in the linked image, not a stub.
+    card_arm=""
+    if arm-none-eabi-nm "$STAGE90_ROOT_MEDIA_OBJ" 2>/dev/null | grep -q 'T entry_root_media_card_arm_on'; then
+        card_arm=1
+    elif arm-none-eabi-nm "$STAGE90_ROOT_MEDIA_OBJ" 2>/dev/null | grep -q 'T entry_root_media_card_arm_off'; then
+        card_arm=0
+    else
+        say "REFUSING: $STAGE90_ROOT_MEDIA_OBJ carries neither entry_root_media_card_arm_on nor" >&2
+        say "          entry_root_media_card_arm_off, so this build cannot tell whether its third disk" >&2
+        say "          unit reads the card or does not exist. The module defines exactly one of the two" >&2
+        say "          unconditionally; their absence means the object predates 888. Rebuild it:" >&2
+        say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    fi
+    if [[ $card_arm != "$EMMC_STRATEGY" ]]; then
+        say "REFUSING: the platform block compiled stage90_root_media.c with STAGE90_XNU_EMMC_STRATEGY=" >&2
+        say "          '$card_arm' and this build's STAGE90_XNU_EMMC_STRATEGY is '$EMMC_STRATEGY'." >&2
+        say "          The module would $([[ $card_arm == 1 ]] && echo 'serve the root from a card read' || echo 'have no card unit')" >&2
+        say "          under a build that believes $([[ $EMMC_STRATEGY == 1 ]] && echo 'it serves the root from a card read' || echo 'there is no card unit')." >&2
+        say "          One object, two scripts, and the switch has to reach both. Rebuild the module with" >&2
+        say "          the same value this script was given:" >&2
+        say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+        say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_EMMC_STRATEGY=$EMMC_STRATEGY' \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    fi
+    if [[ $EMMC_STRATEGY -eq 1 ]]; then
+        say "  xnu_entry_888: the root-media module and this build agree about the eMMC-strategy arm (STAGE90_XNU_EMMC_STRATEGY=$card_arm); the ladder door entry_storage_driver_read is checked against the LINKED image below, once it exists"
+    else
+        say "  xnu_entry_888: the root-media module and this build agree about the eMMC-strategy arm (STAGE90_XNU_EMMC_STRATEGY=$card_arm); the card unit is compiled out"
+    fi
+    # **The DOOR half of 888's check is the NEXT block's business, not this one's** - see the
+    # `entry_storage_driver_read` clause the link block carries after `xnu_arm_entry.elf` exists. A
+    # check placed HERE would read the PREVIOUS arm's elf (the link below has not run yet), which is
+    # the stale-artifact defect [[mi4-a-status-is-a-verdict-only-if-its-producer-delivered-one]] names.
     platform_obj_fresh "$REPO_ROOT/out/xnu_platform_obj/stage90_platform_config_tables.o" \
                        "$REPO_ROOT/src/platform/stage90_platform_config_tables.c"
     # **What this rule does not cover, said rather than left to look complete.** The other three
@@ -27952,6 +28013,20 @@ ramdisk_va=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="g_stage90_ram
 ramdisk_size=$(arm-none-eabi-nm -S "$OUT/xnu_arm_entry.elf" | awk '$4=="g_stage90_ramdisk"{print "0x"$2}')
 [[ -n $ramdisk_va && -n $ramdisk_size ]] ||
     layout_fail "the linked image has no g_stage90_ramdisk - the root device's memory (entry_stubs.c) is not in this link"
+
+# **888: THE DOOR MUST BE A DEFINITION IN THE LINKED IMAGE, NOT AN UNDEFINED SYMBOL THE LINKER STUBBED.**
+# The card unit's strategy (`st_media_strategy`, `src/platform/stage90_root_media.c`) calls
+# `entry_storage_driver_read` to fetch each block; the door lives in `src/entry/entry_storage.c`. The two
+# are compiled by two different scripts and meet only at this link. If the door is absent, the linker's
+# stub set covers it and the strategy calls a body that moves no byte - the root would mount and every
+# file read would serve nothing, which is 862's mount-and-cannot-exec shape wearing a green build
+# ([[mi4-one-value-two-definitions]]). Read the LINKED artifact, not the source, per
+# [[mi4-a-claim-in-a-comment-is-not-a-check]] - this check is AFTER the link on purpose, so it can see it.
+if [[ $EMMC_STRATEGY -eq 1 ]]; then
+    arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_storage_driver_read" && $2 == "T" { found = 1 } END { exit(found ? 0 : 1) }' ||
+        layout_fail "STAGE90_XNU_EMMC_STRATEGY=1 but \`entry_storage_driver_read\` is not a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the card unit's strategy would call a linker stub that moves no byte, so the root would mount and read nothing. The door is built by 887's entry_storage.c change (tools/rung61-driver-door.patch); apply it before a card-ON build. Nothing is rebuilt by this refusal"
+    say "  xnu_entry_888: the ladder door entry_storage_driver_read ($(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_storage_driver_read" { print "0x" $1 }')) is a real definition in the linked image - the card unit's strategy meets it there"
+fi
 
 run arm-none-eabi-objcopy -O binary "$OUT/xnu_arm_entry.elf" "$OUT/xnu_arm_entry.bin"
 
@@ -32669,6 +32744,17 @@ verify_trace_symbols() {
                     # addition and no rung below 54 has it, so it enters the allow-list only here.
                     blk43_img_want="$blk43_img_want st_read_count"
                 fi
+                if [[ $STORAGE_PROBE -ge 60 ]]; then
+                    # **887/888: the driver's door adds THREE image objects to this body, and this is
+                    # where they are allow-listed.** `st_read_single_block` now consumes a caller-supplied
+                    # LBA when `st_driver_lba_set` is set: it READS `st_driver_lba_set` and `st_driver_lba`
+                    # and WRITES `st_driver_lba_set` and `st_driver_get`. All four are the door's own and
+                    # no rung below 60 has one, so they enter only here - the same rule the `>= 53` block
+                    # above follows for `st_read_count`. The consume is gated at `>= 60` in the source, so
+                    # a value-53..59 build never reaches them and this widening cannot silently cover a
+                    # lower rung that did.
+                    blk43_img_want="$blk43_img_want st_driver_lba st_driver_lba_set st_driver_get"
+                fi
                 for _s in $blk43_img_got; do
                     case " $blk43_img_want " in
                         *" $_s "*) ;;
@@ -33506,7 +33592,8 @@ verify_trace_symbols() {
                         layout_fail "st_media_strategy (at $sm_addr) does not call \`${_s}\` - the strategy must use the kernel's own buf accessors (\`memdev.c\`'s shape) and \`bcopy\` for the transfer, and a body missing one is either reading a field directly (a second definition of the layout) or not moving the bytes at all ([[mi4-one-value-two-definitions]]). Nothing is rebuilt by this refusal"
                 done
                 grep -qE "bl.*<st_read_single_block>" <<<"$sm_body" &&
-                    layout_fail "st_media_strategy (at $sm_addr) calls the ladder's \`st_read_single_block\`. **The strategy must serve the ALREADY-STAGED bytes and never reach the device**: a strategy that read the card would be a transfer on the OS's own schedule, with the card left in whatever state that transfer ends in - the reading the whole storage ladder exists to keep OFF the boot path ([[mi4-hardware-run-safety-gate]]). Nothing is rebuilt by this refusal"
+                    [[ $EMMC_STRATEGY -eq 0 ]] &&
+                    layout_fail "st_media_strategy (at $sm_addr) calls the ladder's \`st_read_single_block\`. **The strategy must serve the ALREADY-STAGED bytes and never reach the device**: a strategy that read the card would be a transfer on the OS's own schedule, with the card left in whatever state that transfer ends in - the reading the whole storage ladder exists to keep OFF the boot path ([[mi4-hardware-run-safety-gate]]). Nothing is rebuilt by this refusal. **888 WIDENED THIS, AND ONLY FOR THE CARD ARM**: under STAGE90_XNU_EMMC_STRATEGY=1 the third unit (ST_MEDIA_DRIVER) DOES reach the device on purpose - that unit IS the driver clause - while the two RAM-backed units keep this invariant untouched, which is exactly why the widened build must be a NEW rung's arm and not a re-record of this one"
                 sm_stage=$(grep -cE 'bl.*<entry_root_media_stage>' <<<"$sm_body" || true)
                 [[ "$sm_stage" == "0" ]] ||
                     layout_fail "st_media_strategy (at $sm_addr) calls \`entry_root_media_stage\` $sm_stage time(s): the strategy SERVES, it does not STAGE. Staging is the ladder's act, once, before the OS reaches the mount path (that is what makes the bytes and the sector one entry by construction). Nothing is rebuilt by this refusal"
@@ -33600,7 +33687,8 @@ verify_trace_symbols() {
                     END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
                 sm60_body=$(arm-none-eabi-objdump -d --start-address="$sm60_addr" --stop-address="$sm60_next" "$OUT/xnu_arm_entry.elf")
                 grep -qE "bl.*<st_read_single_block>" <<<"$sm60_body" &&
-                    layout_fail "st_media_strategy (at $sm60_addr) calls the ladder's \`st_read_single_block\`. **Rung 60 makes this body REACHABLE, so this refusal is now about a path the OS will actually take**: a strategy that read the card would be a transfer on the kernel's own schedule, with the card left in whatever state that transfer ends in - the reading the whole storage ladder exists to keep OFF the boot path ([[mi4-hardware-run-safety-gate]]). This is the same negative rung 59's clause makes, and it is the one that matters most now that the body runs. Nothing is rebuilt by this refusal"
+                    [[ $EMMC_STRATEGY -eq 0 ]] &&
+                    layout_fail "st_media_strategy (at $sm60_addr) calls the ladder's \`st_read_single_block\`. **Rung 60 makes this body REACHABLE, so this refusal is now about a path the OS will actually take**: a strategy that read the card would be a transfer on the kernel's own schedule, with the card left in whatever state that transfer ends in - the reading the whole storage ladder exists to keep OFF the boot path ([[mi4-hardware-run-safety-gate]]). This is the same negative rung 59's clause makes, and it is the one that matters most now that the body runs. Nothing is rebuilt by this refusal. **888 WIDENED THIS, AND ONLY FOR THE CARD ARM** (STAGE90_XNU_EMMC_STRATEGY=1): the third unit's read IS the driver clause; the RAM-backed units are unaffected"
                 grep -qE "bl.*<eno_strat>" <<<"$sm60_body" &&
                     layout_fail "st_media_strategy (at $sm60_addr) calls \`eno_strat\` - the ENOTTY strategy that moves no byte. That is the body a device which does NOT answer \`DKIOCGETMEMDEVINFO\` would fall through to, so a link from here means the two shapes were merged: the strategy both declines memory-backing AND refuses to serve, which mounts and cannot exec ([[mi4-one-value-two-definitions]]). Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_866: rung 60's arm is read out of the linked image - st_media_memdev_info (at $mi_addr) stores ZERO to the FIRST field of its answer ($mi_zero offset-0 store(s), $mi_mov0 \`mov rX, #0\`, and the store's OWN source register set to zero) while the base at offset #8 is still carried ($mi_b8 store(s), $mi_mem aggregate move(s)) - so the device still ANSWERS \`DKIOCGETMEMDEVINFO\` and only DECLINES the memory-backed branch, which is what makes this one word different from 865 section 4's unsafe shape. st_media_strategy (at $sm60_addr) is still linked and calls NEITHER \`st_read_single_block\` NOR \`eno_strat\`: **it serves the bytes the pager would have mapped, out of the same arrays \`mi_base\` names, so the branch mockfs now takes cannot lose the exec.** No byte of the medium moves, no register is written, and the medium is not touched at all by this arm beyond the one read rung 57 already made"
@@ -36155,6 +36243,12 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # same reason MOUNT is: it changes what the SAME device answers to the same read, so an image
     # carrying it is a different experiment and a record that omitted it would describe the other one.
     echo "STAGE90_XNU_HFS_ROOT_MEDIA=$HFS_ROOT_MEDIA"
+    # 888: whether the root-media module grew its THIRD disk unit, whose strategy reads the card. An arm
+    # key for the same reason HFS_ROOT_MEDIA is - the same image answers the mount path from a card read
+    # instead of memory, so it is a different experiment and a record that omitted it would describe the
+    # other one. Written as the RESOLVED `$EMMC_STRATEGY`, not `${STAGE90_XNU_EMMC_STRATEGY}`, for 882's
+    # reason: a defaulted switch and an unset one are the same image and two different records.
+    echo "STAGE90_XNU_EMMC_STRATEGY=$EMMC_STRATEGY"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways

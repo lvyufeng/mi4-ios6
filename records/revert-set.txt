@@ -12030,3 +12030,17 @@ set=armed-storage-5936b246 sha256=5936b246cf04123f008016fc5665cc0abf5511d33b556a
 set=armed-storage-5936b246 sha256=0ea7b8ec1f1cfa753a8fd1b7d87ad56b3009971675534eff94251891888230a4 bytes=6767852 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-STAGE90_XNU_SEAM_LR-0x8004d2dc-UNCHANGED-from-rung-53
 set=armed-storage-5936b246 sha256=fce458d8c4f5077dc8eaba2b2db4b8280f63ebd15e55bc91e35faea2d030bb0f bytes=949 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=57-plus-STAGE90_XNU_MOUNT=0-and-STAGE90_XNU_HFS_ROOT_MEDIA=0-so-this-arm-is-the-storage-ladder-does-NOT-stack-on-862-s-mount-park-and-does-NOT-carry-882-s-split
 set=armed-storage-5936b246 sha256=56ad446d2bcb3c368447fc15f0b6c4e9fe575133e65d97002ac61807b989d797 bytes=2335 file=xnu_arm_entry-sources.txt
+
+#
+# armed-storage-5c440167 - rung 61, the card unit (STAGE90_XNU_STORAGE_PROBE=60, EMMC_STRATEGY=1)
+set=armed-storage-5c440167 sha256=ba04e0da6c31f5579a78509d73c618c011dcde6cf3fb688dc1e4bff4a7492258 bytes=9129984 file=stage90-qcdt.img role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
+set=armed-storage-5c440167 sha256=434c1dfa803291514c9a8cb90103c23a91fa788f1f35be40a60e873639d61e0f bytes=6605348 file=stage90.bin role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
+set=armed-storage-5c440167 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
+set=armed-storage-5c440167 sha256=15e7eecf9c1529adc0e02d92749bb21df9dd547f23086361210faecf47e25cd4 bytes=6667420 file=stage90.elf role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
+set=armed-storage-5c440167 sha256=26dc179eb4f57ffda348aa339f359b4b53d426507f6142710fbe47d4bac3d26a bytes=6608896 file=stage90.img role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
+set=armed-storage-5c440167 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
+set=armed-storage-5c440167 sha256=14c8d557fd00d87ec73a0afb5e169e86e90ad7332147924aedad3067e2d5ef29 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-5c440167 sha256=5c440167928fe0e0d33ea38e10acf4bc8eea435bb057dd9ea4e15e193e31c2ed bytes=6109852 file=xnu_arm_entry.bin role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
+set=armed-storage-5c440167 sha256=80cc0748b4b659c14eb632ec539b6b83bf9efd943b6f4222c1eac02cdc94d7d1 bytes=7292692 file=xnu_arm_entry.elf role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
+set=armed-storage-5c440167 sha256=86a34c81ae89b235c8b4855119f758af0c062c70e803dbb7f47c843365804854 bytes=977 file=xnu_arm_entry-config.txt role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
+set=armed-storage-5c440167 sha256=fbf5bf2ad0d9b35b8992c70ed2a56e5546d8343e268b99f7ef16732560c0fada bytes=2335 file=xnu_arm_entry-sources.txt role=PROBE-60-EMMC-STRATEGY-1-rung-61-card-unit
