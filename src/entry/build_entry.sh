@@ -33160,27 +33160,44 @@ verify_trace_symbols() {
                     layout_fail "st_part_geom's disassembly holds $pg_magic of the halves of the two filesystem magics - ext2/3/4's \`s_magic\` = 0xEF53 is movw #61267 and f2fs's \`magic\` = 0xF2F52010 is movw #8208 + movt #62197. **Both must be present**: the family this rung decodes for is derived from a comparison of those two words, so a body without them published \`_pg_which\` as a number nothing computed and every guarded cell below it name the wrong namespace. Nothing is rebuilt by this refusal"
                 grep -qE -- '#61267([^0-9]|$)' <<<"$pg_body" ||
                     layout_fail "st_part_geom does not materialize ext2/3/4's \`s_magic\` = 0xEF53 (movw #61267), so \`_pg_which\` cannot select the ext half. Nothing is rebuilt by this refusal"
-                # **THE DUAL-MEANING WORD IS THE WHOLE RUNG AND IT MUST BE READ - BOUND TO THE WORD
-                # THE MAGIC COMPARE ALREADY READS, WHICH IS WHY IT IS *RELATIVE*.** The first draft of
-                # this clause grepped for the absolute immediates #96/#100/#104 and refused a CORRECT
-                # body: the compiler reaches `st_read_block`\'s words as `ldr rX, [rBase, #off]` against
-                # a base it materializes with a movw/movt pair, so the superblock byte offsets appear as
-                # NO immediate in the linked image at all - the same wrong-artifact class rung 55\'s own
-                # clause was repaired for ([[mi4-a-claim-in-a-comment-is-not-a-check]]). The binding is
-                # instead RELATIVE TO WORD 14, whose load is identifiable because it feeds the ext2/3/4
-                # `s_magic` compare (the `ldr`, then `movw rX, #61267`, then a `uxth`): word 24 is 40
-                # bytes past word 14, word 25 44, word 26 48 (96 = 56 + 40, and 100/104 follow).
-                pg_o14=$(awk '
-                    /ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #[0-9]+\]/ { if (match($0, /#[0-9]+/)) last = substr($0, RSTART + 1, RLENGTH - 1) }
-                    /#61267/ { print last; exit }
+                # **THE ANCHOR MUST MATCH THE HALFWORD LOAD, AND EVERY CHECK IS BOUND TO THE ANCHOR\'S
+                # OWN BASE REGISTER, NOT TO AN ABSOLUTE THE LINKER CHOSE.**
+                #
+                # Two drafts of this clause refused a CORRECT body, and both read the LINK rather than
+                # the BODY. The first grepped for the absolute immediates #96/#100/#104: the compiler
+                # reaches `st_read_block`\'s words as `ldr rX, [rBase, #off]` against a base it
+                # materializes with a movw/movt pair, so a superblock byte offset appears as NO
+                # immediate in the linked image at all. The second took the absolute `#off` of the load
+                # it could identify as word 14 - the `ldr` before the `movw #61267` that is the
+                # ext2/3/4 magic - and added 40/44/48. **864 exposed both of that draft\'s defects at
+                # once.** (a) The anchor regex was `ldr[[:space:]]`, which cannot match `ldrh` - and 864
+                # perturbed `.bss` enough that the compiler read the 16-bit `s_magic` with `ldrh`, so
+                # the anchor silently fell back to the f2fs word-0 `ldr` (`0x2010/0xf2f5`) and the
+                # clause demanded loads at word 0 + 40/44/48. (b) The absolute offset of ANY load is a
+                # property of the link, not of the source: 864 removed dead storage and the word-0 load
+                # moved `#564 -> #68` and word 14 `#620 -> #124`, while the DELTAS between the loads
+                # stayed byte-identical in the 863 park and this image:
+                # `0 4 20 24 40 56 76 96 96 96 96 96 100 104`. That is the layout-vs-source class of
+                # rung 58\'s own repair ([[mi4-linked-code-order-is-not-source-order]]). The repair is
+                # to match every `ldr` width for the anchor and to bind each check to the SAME BASE
+                # REGISTER the anchor uses, so the clause is a property of one body and not of where
+                # the linker put it.
+                pg_anchor=$(awk '
+                    /ldr[bhs]?[[:space:]]+r[0-9]+, \[r[0-9]+, #[0-9]+\]/ {
+                        if (match($0, /#[0-9]+/)) off = substr($0, RSTART + 1, RLENGTH - 1)
+                        if (match($0, /\[r[0-9]+/)) base = substr($0, RSTART + 1, RLENGTH - 1)
+                    }
+                    /#61267/ { print base " " off; exit }
                 ' <<<"$pg_body")
-                [[ -n "$pg_o14" ]] ||
-                    layout_fail "st_part_geom\'s disassembly holds no load of superblock word 14 followed by the ext2/3/4 magic #61267, so this clause cannot bind the geometry reads to the buffer the third read filled. **The word-14 load is the anchor**: it is the one load in this body whose offset is provable from its own comparison, and the three f2fs inode words are read 40/44/48 bytes past it. Nothing is rebuilt by this refusal"
+                pg_base=${pg_anchor%% *}
+                pg_o14=${pg_anchor##* }
+                [[ -n "$pg_base" && -n "$pg_o14" && "$pg_base" != "$pg_o14" ]] ||
+                    layout_fail "st_part_geom\'s disassembly holds no load of superblock word 14 followed by the ext2/3/4 magic #61267, so this clause cannot bind the geometry reads to the buffer the third read filled. **The word-14 load is the anchor**: it is the one load in this body whose offset is provable from its own comparison, and the three f2fs inode words are read 40/44/48 bytes past it. (863\'s anchor is \`ldr r3, [r4, #620]\` and 864\'s is \`ldrh r2, [r4, #124]\` - the same read of word 14; \`ldr\` vs \`ldrh\` is the compiler\'s choice for a 16-bit field and both must anchor.) Nothing is rebuilt by this refusal"
                 for _d in 40 44 48; do
                     _w=$(( (14 * 4 + _d) / 4 ))
                     _o=$(( pg_o14 + _d ))
-                    grep -qE "ldr[[:space:]]+r[0-9]+, \[r[0-9]+, #${_o}([^0-9]|$)" <<<"$pg_body" ||
-                        layout_fail "st_part_geom\'s disassembly holds no load at offset ${_o} from its buffer base, which is superblock word ${_w} = ${_o} bytes in (word 14\'s own offset ${pg_o14} plus ${_d}). **Word 24 is the field this rung exists to name twice**: ext2/3/4 read it as \`s_feature_incompat\` (the word \`ext4_feature_set_ok\`, super.c:2526, refuses a mount on) and f2fs read it as \`root_ino\` (fixed to 3 by \`sanity_check_raw_super\`, super.c:1054), with \`node_ino\`/\`meta_ino\` at 1/2 in words 25/26. A body that read one of the three at the wrong word is a decode of a neighbour and its guard selects the wrong namespace - which is the defect this whole body is built to avoid ([[mi4-one-value-two-definitions]]). Nothing is rebuilt by this refusal"
+                    grep -qE "ldr[bh]?[[:space:]]+r[0-9]+, \[${pg_base}, #${_o}([^0-9]|$)" <<<"$pg_body" ||
+                        layout_fail "st_part_geom\'s disassembly holds no load at offset ${_o} from its buffer base ${pg_base}, which is superblock word ${_w} = ${_o} bytes in (word 14\'s own offset ${pg_o14} plus ${_d}). **Word 24 is the field this rung exists to name twice**: ext2/3/4 read it as \`s_feature_incompat\` (the word \`ext4_feature_set_ok\`, super.c:2526, refuses a mount on) and f2fs read it as \`root_ino\` (fixed to 3 by \`sanity_check_raw_super\`, super.c:1054), with \`node_ino\`/\`meta_ino\` at 1/2 in words 25/26. A body that read one of the three at the wrong word is a decode of a neighbour and its guard selects the wrong namespace - which is the defect this whole body is built to avoid ([[mi4-one-value-two-definitions]]). Nothing is rebuilt by this refusal"
                 done
                 # THE BODY MUST BE CALLED, ONCE, AFTER st_part_parse - which is after the read that filled the buffer.
                 pg_calls=$(grep -c -- 'bl.*<st_part_geom>' <<<"$stb_path_body" || true)
@@ -33298,6 +33315,90 @@ verify_trace_symbols() {
                     layout_fail "st_cmd_path calls st_data_part on line $dp_call_ln, the last st_read_single_block on line $pt_rd3_ln and st_part_geom on line $pg_call_ln. **Rung 58 publishes the read's own sector (\`st_read_lba\`) and the carries the walk filled, so it MUST run after the read** - run above it, \`st_read_lba\` names an earlier sector and \`_dp_next_is_arg\` answers about someone else's transfer. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_857: rung 58's selected-partition identity decode is read out of the linked image: st_data_part (at $dp_addr) makes $dp_allbl call(s), ALL of them to entry_live_write ($dp_livebl) - **so it sends NO command, opens NO window, and touches NO device register** (0 controller-window references) - and it is called by st_cmd_path ONCE on line $dp_call_ln, AFTER the fourth \`st_read_single_block\` (line $pt_rd3_ln) and \`st_part_geom\` (line $pg_call_ln). **IT IS A THIRD READER OF CARRIES, NOT A NEW DEVICE ACTION**: rung 58 adds no read, no store, no window and no register - it publishes the SELECTED entry's 16-byte \`PartitionTypeGUID\` (\`st_gpt_data_type\`) and its UTF-16LE \`PartitionName\` (\`st_gpt_data_name\`, folded two characters per \`__le16\` word, \`$dp_mask\` low-half extraction(s) and \`$dp_orrs\` \`orr ..., lsl #16\`) that rung 58's \`extent > best\` branch captured on the SAME statement that set \`st_gpt_data_sector\`, so name, type and sector are one entry by construction. **AND IT CORRECTS RUNG 57's WITNESS**: \`_dp_next_is_arg\` compares the read's own sector \`st_read_lba\` against \`st_gpt_data_sector + ST_FS_SB_SECTOR_OFF\` - the SELECTED partition - where \`st_part_parse\`'s \`_pt_next_is_arg\` compares it against \`st_gpt_part_sector + ST_FS_SB_SECTOR_OFF\` (rung 55's FIRST partition). On this disk those two partitions differ (858), so a CORRECT rung-57 read logs \`_pt_next_is_arg = 0\` and \`_dp_next_is_arg = 1\` beside \`_dp_part_is_first = 0\`, which is the cell that makes the two-partition picture legible. No byte of the medium moves, no register is written, and the medium is not touched at all"
             fi
+            fi
+            if [[ $STORAGE_PROBE -ge 58 ]]; then
+                # **864: RUNG 59'S OWN CLAUSE - THE COUPLING. THIS IS THE FIRST CLAUSE IN THE WHOLE
+                # LADDER THAT ASSERTS A PATH WHERE THE LADDER'S SELECTION AND THE OS'S OWN `strategy`
+                # MEET, AND EVERY CLAIM IT MAKES IS A PROPERTY OF BYTES AND ACCESSES, NOT OF NAMES.**
+                #
+                # The block below is the second half of the coupling: it reads `entry_root_media_mount_disk`
+                # (the entry-side body the mount path enters) and `st_media_strategy` (the module-side body
+                # the OS's buffer cache enters) out of the LINKED image and holds them to each other. The
+                # FIRST half - that the two devices live at different `dev_t`s and that the root does not
+                # move - is checked by the names the call sites carry: `__wrap_mdevlookup`'s answer is
+                # `entry_root_media_register(devid)` unchanged (861), and the only new call is
+                # `entry_root_media_mount_disk()` BEFORE it. So the two bodies below are the arm.
+                md_addr=$(sym_addr entry_root_media_mount_disk) ||
+                    layout_fail "entry_root_media_mount_disk is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: rung 59's coupling is that body, and its declaration in entry_storage.c (guarded \`>= 58\`) is what keeps it one body rather than a call inlined into the mount wrapper. Nothing is rebuilt by this refusal"
+                md_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$md_addr" '
+                    { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bn[n] = $4; bb[n] = ($2 != "") ? 1 : 0 }
+                    BEGIN { t = strtonum(a) }
+                    END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+                [[ -n "$md_next" ]] ||
+                    layout_fail "entry_root_media_mount_disk (at $md_addr) has no size in the linked image, so this clause cannot bound its body. This refusal is about the SCAN and not about the arm. Nothing is rebuilt by this refusal"
+                md_body=$(arm-none-eabi-objdump -d --start-address="$md_addr" --stop-address="$md_next" "$OUT/xnu_arm_entry.elf")
+                # **THE COUPLING'S SHAPE: the ladder runs (idempotently), the selection is published, and
+                # the sector and its bytes are HANDED OVER.** Each of these is a call whose absence changes
+                # the meaning of every one below it: without `entry_storage_probe` the carries may be
+                # unfilled; without `st_sel_publish` the cells the arm's record names are absent from the
+                # log; without `st_read_selected` the transfer that fills the buffer never runs; without
+                # `entry_root_media_stage` the module's medium is never written and the strategy's three
+                # refusals would all fire. THE FIVE CALLS ARE THE WHOLE BODY, so this clause asserts the
+                # SET by symbol, which is a property of the binding and not of the layout (m828).
+                md_bad=0
+                for _s in entry_storage_probe st_sel_publish st_read_selected entry_root_media_stage; do
+                    grep -qE "bl.*<${_s}>" <<<"$md_body" || { md_bad=$((md_bad + 1)); echo "            missing call to ${_s} in entry_root_media_mount_disk" >&2; }
+                done
+                [[ "$md_bad" == "0" ]] ||
+                    layout_fail "entry_root_media_mount_disk (at $md_addr) does not make all four of its calls: it must call \`entry_storage_probe\` (run the ladder if the boot has not), \`st_sel_publish\` (publish the selection), \`st_read_selected\` (the transfer that fills the buffer) and \`entry_root_media_stage\` (hand the sector and its bytes to the module) - the four calls whose POST-CONDITIONS every cell this rung publishes names. A body missing one is a coupling that reads as complete and is not ([[mi4-a-claim-in-a-comment-is-not-a-check]]). Nothing is rebuilt by this refusal"
+                md_unexpected=$( { grep -oE "<[a-z_]+>" <<<"$md_body" | sed 's/[<>]//g' | LC_ALL=C sort -u | \
+                    grep -vE "^(entry_storage_probe|st_sel_publish|st_read_selected|entry_root_media_stage|entry_root_media_mount_disk|entry_live_write)$" | tr '\n' ' ' ; } || true )
+                [[ "$md_unexpected" == "" || "$md_unexpected" == " " ]] ||
+                    layout_fail "entry_root_media_mount_disk (at $md_addr) calls symbol(s) beyond its own body and the four calls above: [$md_unexpected]. Rung 59 couples EXACTLY that body - the transfer is inside \`st_read_selected\` (checked below) and nothing in THIS body reaches the device. **A new callee here is a device action the arm's record does not describe** (the SAME NEGATIVE rung 58's clause makes, and it is only as strong as the check that refuses its violation). Nothing is rebuilt by this refusal"
+                # **THE TRANSFER IS ONE READ, AND IT IS INSIDE `st_read_selected`.** The body that hands
+                # the bytes over must READ them first, and the read is the ladder's own pair - so the
+                # clause follows the call into that body and counts the transfer there. `st_read_selected`
+                # must call \`st_data_reset\` ONCE (rung 47's reset IS the prerequisite of the read - the
+                # 839 press proved the reset must precede the command) and \`st_read_single_block\` ONCE
+                # (rung 43's body, the one transfer). Two of either is a second device action on one boot.
+                sr_addr=$(sym_addr st_read_selected) ||
+                    layout_fail "st_read_selected is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: rung 59's transfer is that body. Nothing is rebuilt by this refusal"
+                sr_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$sr_addr" '
+                    { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bn[n] = $4; bb[n] = ($2 != "") ? 1 : 0 }
+                    BEGIN { t = strtonum(a) }
+                    END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+                sr_body=$(arm-none-eabi-objdump -d --start-address="$sr_addr" --stop-address="$sr_next" "$OUT/xnu_arm_entry.elf")
+                sr_reset=$(grep -cE 'bl.*<st_data_reset>' <<<"$sr_body" || true)
+                sr_read=$(grep -cE 'bl.*<st_read_single_block>' <<<"$sr_body" || true)
+                [[ "$sr_reset" == "1" && "$sr_read" == "1" ]] ||
+                    layout_fail "st_read_selected (at $sr_addr) makes $sr_reset call(s) to \`st_data_reset\` and $sr_read to \`st_read_single_block\`; rung 59's transfer is ONE reset and ONE read. **The reset must be present** (the 839 press measured that a read issued before the reset leaves the card held: \`_rd_inhibit_dat = 0x2\`, \`_rd_sent = 0\`) and there must be exactly one of each, because a second read on one boot is a device action the arm's record does not describe. Nothing is rebuilt by this refusal"
+                # **THE MOVE HALF: THE MODULE'S `strategy` IS A REAL BODY, AND ITS DATA TRANSFER IS A
+                # `bcopy` FROM THE STAGED BUFFER - NOT FROM THE LADDER'S.** The body must call the
+                # kernel's owns accessors (buf_map/buf_unmap/buf_biodone/buf_seterror/buf_setresid) and
+                # `bcopy`, and it must NOT call the ladder (`st_read_single_block`): if the strategy read
+                # the device it would be a SECOND, independent read of the medium on the OS's own
+                # schedule, which the arm's record does not describe and whose outcome (a card left in
+                # the middle of a transfer) is exactly what the fastboot-reachability interlock exists to
+                # prevent. Read from the LINKED image, so the property is the artifact's and not the file's.
+                sm_addr=$(sym_addr st_media_strategy) ||
+                    layout_fail "st_media_strategy is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: rung 59's move half is that body (the module's bdevsw strategy), and its absence means the staged bytes are never served. **This is the one place the payload's file (src/platform/stage90_root_media.c) and the entry image meet**, and it is the module that \`tools/build_xnu_arm_kernel.sh\` compiles. Nothing is rebuilt by this refusal"
+                sm_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$sm_addr" '
+                    { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bn[n] = $4; bb[n] = ($2 != "") ? 1 : 0 }
+                    BEGIN { t = strtonum(a) }
+                    END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+                [[ -n "$sm_next" ]] ||
+                    layout_fail "st_media_strategy (at $sm_addr) has no size in the linked image, so this clause cannot bound its body. This refusal is about the SCAN and not about the arm. Nothing is rebuilt by this refusal"
+                sm_body=$(arm-none-eabi-objdump -d --start-address="$sm_addr" --stop-address="$sm_next" "$OUT/xnu_arm_entry.elf")
+                for _s in buf_device buf_blkno buf_count buf_flags buf_map buf_unmap buf_setresid buf_seterror buf_biodone bcopy; do
+                    grep -qE "bl.*<${_s}>" <<<"$sm_body" ||
+                        layout_fail "st_media_strategy (at $sm_addr) does not call \`${_s}\` - the strategy must use the kernel's own buf accessors (\`memdev.c\`'s shape) and \`bcopy\` for the transfer, and a body missing one is either reading a field directly (a second definition of the layout) or not moving the bytes at all ([[mi4-one-value-two-definitions]]). Nothing is rebuilt by this refusal"
+                done
+                grep -qE "bl.*<st_read_single_block>" <<<"$sm_body" &&
+                    layout_fail "st_media_strategy (at $sm_addr) calls the ladder's \`st_read_single_block\`. **The strategy must serve the ALREADY-STAGED bytes and never reach the device**: a strategy that read the card would be a transfer on the OS's own schedule, with the card left in whatever state that transfer ends in - the reading the whole storage ladder exists to keep OFF the boot path ([[mi4-hardware-run-safety-gate]]). Nothing is rebuilt by this refusal"
+                sm_stage=$(grep -cE 'bl.*<entry_root_media_stage>' <<<"$sm_body" || true)
+                [[ "$sm_stage" == "0" ]] ||
+                    layout_fail "st_media_strategy (at $sm_addr) calls \`entry_root_media_stage\` $sm_stage time(s): the strategy SERVES, it does not STAGE. Staging is the ladder's act, once, before the OS reaches the mount path (that is what makes the bytes and the sector one entry by construction). Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_864: rung 59's coupling is read out of the linked image - entry_root_media_mount_disk (at $md_addr) makes its four calls [entry_storage_probe st_sel_publish st_read_selected entry_root_media_stage] and NO other callee, and the transfer it hands over is ONE reset and ONE read inside st_read_selected (at $sr_addr: $sr_reset \`st_data_reset\`, $sr_read \`st_read_single_block\` - the selected partition's superblock), and st_media_strategy (at $sm_addr) is a real body that calls the kernel's own buf accessors [buf_device buf_blkno buf_count buf_flags buf_map buf_unmap buf_setresid buf_seterror buf_biodone] and \`bcopy\` to MOVE THE STAGED BYTES - and calls NEITHER \`st_read_single_block\` NOR \`entry_root_media_stage\`. **THE ROOT DEVICE DOES NOT MOVE**: the mount path's answer is still \`entry_root_media_register(devid)\` (861), and the staged partition is an ADDITION at its own dev_t that the strategy serves and the next experiment reads. No byte of the medium moves, no register is written, and the medium is not touched at all by this arm beyond the one read rung 57 already made"
             fi
             if [[ $STORAGE_PROBE -ge 41 ]]; then
                 # **831: RUNG 42'S OWN CLAUSE - THE FIRST CLAUSE HERE THAT ASSERTS A COMMAND WHOSE

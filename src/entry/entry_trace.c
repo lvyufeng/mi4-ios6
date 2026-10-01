@@ -3985,6 +3985,7 @@ extern void entry_note_mdevlookup(uint32_t caller, uint32_t devid, uint32_t ret)
  * notes above are. `__wrap_mdevlookup` hands the mount path the number this returns; the symbol is
  * present in every configuration (the object is in `LINK_OBJS`), so the extern is unconditional. */
 extern int entry_root_media_register(int disk);
+extern int entry_root_media_mount_disk(void);
 extern void entry_note_dtwalk(uint32_t t1, uint32_t root, uint32_t count, uint32_t first,
                               uint32_t set, uint32_t kids, uint32_t class0, uint32_t class1,
                               uint32_t control);
@@ -4443,7 +4444,21 @@ int __wrap_mdevlookup(int devid)
      * geometry is used, which is the hook the storage ladder's rung 57 needs to point the root at the
      * partition it selected by extent rather than at partition 1. The real lookup is **not** called
      * on this arm: there is no RAM disk to look up, and calling it would only return `-1` again.
+     *
+     * **864: THE LADDER'S SELECTION IS HANDED TO THE MODULE BEFORE THE ROOT IS ANSWERED, AND THE ROOT
+     * IS STILL DISK `devid`.** `entry_root_media_mount_disk()` runs the storage ladder if the boot has
+     * not already, reads the SELECTED partition's superblock through the ladder's own read body, and
+     * stages those bytes as this module's second device (disk 1, its own `dev_t`, published under
+     * `xnu_live_rootmedia_stage_*`). **The answer below does not change**: the root stays the device
+     * `devid` names, which is the RAM-disk-backed one 862 proved keeps `/sbin/launchd` exec-able.
+     * Pointing the ROOT at the staged partition would replace a medium that can serve an executable
+     * with one that can serve 512 bytes of superblock, and that would be a regression, not a step -
+     * so the staged device is an ADDITION, and what reads it is the next experiment's question.
+     *
+     * Below the rung that fills the selection, `entry_root_media_mount_disk` is a one-line refusal, so
+     * this call is inert there and the arm behaves exactly as 862's did.
      */
+    (void)entry_root_media_mount_disk();
     r = entry_root_media_register(devid);
 #else
     r = __real_mdevlookup(devid);
