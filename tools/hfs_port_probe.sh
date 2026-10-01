@@ -41,6 +41,17 @@ VERBOSE=0
 
 TARGET=$(REPO_ROOT=$REPO_ROOT "$REPO_ROOT/tools/xnu_config/arm_target.sh")
 
+# TWO INVOCATIONS, because the project builds the kernel two ways and the port has to satisfy the one
+# it is built with.  The ELF target is this repository's own kernel-like compiler
+# (`arm_target.sh`, what the entry image and the object pool use); the APPLE target is what
+# `tools/build_xnu_arm_macho.sh --compile` actually compiles the 733-file manifest with -
+# `armv7-apple-darwin` plus `-mabi=aapcs` (which is load-bearing: without it XNU's own
+# `IF_DATA_REQUIRE_ALIGNED_64` assertion fails, see that script's comment) and `-DMACH_KERNEL=1`.
+# A port that compiles under one and not the other is a port that does not build.
+TARGET_ELF=(--target="$TARGET" -mcpu=cortex-a15 -marm -mfpu=neon-vfpv4 -mfloat-abi=softfp)
+TARGET_MACHO=(--target=armv7-apple-darwin -mabi=aapcs -mcpu=cortex-a15 -marm \
+              -mfpu=neon-vfpv4 -mfloat-abi=softfp)
+
 # ---------------------------------------------------------------------------------------------------
 # The sandbox.  Rebuilt from scratch every run: a stale copy of a header is exactly the failure mode
 # this measurement is least able to notice (an include that resolves to last run's shim still compiles).
@@ -290,17 +301,23 @@ CDEFS=(
 )
 
 run_configuration() {
-    local label=$1 protect=$2 ok=0 fail=0 hang=0 src key
+    local label=$1 protect=$2 tmode=$3 ok=0 fail=0 hang=0 src key
     local extra=(); [[ $protect == 0 ]] && extra=(-UCONFIG_PROTECT)
+    local tflags=(); case $tmode in macho) tflags=("${TARGET_MACHO[@]}") ;; *) tflags=("${TARGET_ELF[@]}") ;; esac
+    # The apple-target build carries MACH_KERNEL=1 globally (build_xnu_arm_macho.sh); the ELF
+    # invocation gets it per-component, and HFS is a BSD file so it does not.  Give the macho arm
+    # the same global list the macho build uses, minus what is already in CDEFS.
+    [[ $tmode == macho ]] && extra+=(-DMACH_KERNEL=1)
+    # Object dir: keep the ELF and Mach-O results apart.
+    local odir="$SANDBOX/obj"; [[ $tmode == macho ]] && odir="$SANDBOX/obj-macho"; mkdir -p "$odir"
     printf '\n== %s ==\n' "$label"
     while IFS= read -r src; do
         key=$(printf '%s' "${src#"$SANDBOX/tree/"}" | tr '/' '_')
         key=${key%.c}
-        if timeout 60 clang --target="$TARGET" -mcpu=cortex-a15 -marm \
-                -mfpu=neon-vfpv4 -mfloat-abi=softfp \
+        if timeout 60 clang "${tflags[@]}" \
                 -ffreestanding -fno-builtin -fno-common -fno-pic -O2 -w -ferror-limit=0 \
                 "${FORCE_INCLUDES[@]}" "${CDEFS[@]}" "${extra[@]}" "${INCLUDES[@]}" \
-                -c "$src" -o "$SANDBOX/obj/$protect-$key.o" 2>"$SANDBOX/obj/$protect-$key.log"; then
+                -c "$src" -o "$odir/$key.o" 2>"$odir/$key.log"; then
             ok=$((ok + 1))
             (( VERBOSE )) && printf '  OK    %s\n' "${src#"$SANDBOX/tree/"}"
         elif [[ $? -eq 124 ]]; then
@@ -309,8 +326,8 @@ run_configuration() {
         else
             fail=$((fail + 1))
             printf '  FAIL  %-24s errors=%-4s %s\n' "${src#"$SANDBOX/tree/"}" \
-                "$(grep -c 'error:' "$SANDBOX/obj/$protect-$key.log")" \
-                "$(grep -m1 'error:' "$SANDBOX/obj/$protect-$key.log" \
+                "$(grep -c 'error:' "$odir/$key.log")" \
+                "$(grep -m1 'error:' "$odir/$key.log" \
                     | sed "s|$SANDBOX/tree/||; s|.*/external/|external/|" | cut -c1-110)"
         fi
     done < <(find "$SANDBOX/tree" -name '*.c' | sort)
@@ -321,8 +338,12 @@ echo "hfs_port_probe: 2050's HFS+ ($(find "$SANDBOX/tree" -name '*.c' | wc -l) .
 echo "  sandbox:      $SANDBOX   (rebuilt; nothing in $REPO_ROOT was written)"
 echo "  clang:        --target=$TARGET -mcpu=cortex-a15, the stage90 kernel build's own invocation"
 
-run_configuration "CONFIG_PROTECT=0  (protection off - hfs_cprotect.c is then dead code)" 0
-run_configuration "CONFIG_PROTECT=1  (the stage90 configuration's own value)"             1
+run_configuration "CONFIG_PROTECT=0  (protection off - hfs_cprotect.c is then dead code)" 0 elf
+run_configuration "CONFIG_PROTECT=1  (the stage90 configuration's own value)"             1 elf
+# The same port under the invocation the kernel is ACTUALLY built with (tools/build_xnu_arm_macho.sh
+# --compile: armv7-apple-darwin -mabi=aapcs -DMACH_KERNEL=1).  A port that compiles under the ELF
+# target and not the apple one is a port that does not build.
+run_configuration "CONFIG_PROTECT=0, APPLE TARGET (build_xnu_arm_macho.sh --compile)"     0 macho
 
 # ---------------------------------------------------------------------------------------------------
 # THE LINK GAP.  A compile count is a floor on the work; 865 said so and left the link unmeasured.
@@ -401,7 +422,10 @@ WHAT THE TWO NUMBERS MEAN
   the journal it brings, and its ten shims) and the LINK GAP IS ZERO - nothing the port leaves undefined
   is unsupplied.  The journal (18 symbols, the largest single item 865 left open) is bought for three
   one-line shims; the ten 869 named are four empty bodies, three renames and three IOKit fall-backs.
-  What remains is NOT source: a `vfstbllist[]` row before mockfs, an `FT_HFS`, and the `HFS` option in
-  the build (experiment 870) - which a build sets, not this probe - plus, behind it, a medium to mount
-  (experiment 867).
+  AND IT IS NOT AN ARTIFACT OF THIS PROBE'S INVOCATION: the third block above recompiles all 38 under
+  the invocation the kernel is ACTUALLY built with (`tools/build_xnu_arm_macho.sh --compile`:
+  `armv7-apple-darwin -mabi=aapcs`, where `-mabi=aapcs` is load-bearing for XNU's own aligned-64
+  assertions), and it is ALSO 38/38.  What remains is NOT source: a root row (experiment 870, and its
+  carrier 872), an `FT_HFS`, and the `HFS` option in the build - which a build sets, not this probe -
+  plus, behind it, a medium to mount (experiment 867).
 EOF
