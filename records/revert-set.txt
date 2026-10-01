@@ -11811,3 +11811,64 @@ set=armed-storage-71b54d73 sha256=71b54d73f1f2ffd3b48ba0aaf8b76eb4b59204ce7834a5
 set=armed-storage-71b54d73 sha256=d672ff8ee5e745b3af893e84a15ec2e7e38257d4f8fd41f425b2be9f1b33b298 bytes=6766440 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-STAGE90_XNU_SEAM_LR-0x8004d2dc-UNCHANGED-from-rung-53
 set=armed-storage-71b54d73 sha256=ec55941b7eaf635200bdfb69c61a3262ed0cac35531a63dbb8a28ce2e6d78850 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=56-and-differing-from-the-rung-56-arm-s-in-the-artifact-s-own-hash-and-the-ladder-value
 set=armed-storage-71b54d73 sha256=b58c9c9a1d33990522b7aeea2df6001cfa5a0d9beb9d542b956cedf6435f97e5 bytes=2335 file=xnu_arm_entry-sources.txt
+#
+# ====================================================================================================
+# 862 (2026-10-01): THE MOUNT ARM, AND THE MEDIUM THAT KEEPS THE EXEC ALIVE.
+# ====================================================================================================
+#
+# **THIS IS THE FIRST ARM OF THE XNU-MOUNT TRACK, NOT A STORAGE-LADDER RUNG.** 861 built the medium
+# (`src/platform/stage90_root_media.c`, a payload-owned `bdevsw`); 862 makes it a root worth mounting
+# and parks the arm that hands it to `vfs_mountroot`. The switch is `STAGE90_XNU_MOUNT=1`
+# (`__wrap_mdevlookup` answers `entry_root_media_register(devid)` instead of `__real_mdevlookup`);
+# the ladder's `STAGE90_XNU_STORAGE_PROBE` is UNCHANGED at 56, so this arm carries rung 57 on top.
+#
+# **WHY `eno_strat` ALONE WOULD HAVE BEEN A REGRESSION, AND WHAT 862 ADDS.** `mockfs` is the root
+# filesystem (`STAGE90_XNU.local`; its `vfc_mountroot` is the only non-NULL one, so `vfs_mountroot`
+# mounts it over whatever `rootdev` names). `mockfs_mountroot` (`bsd/miscfs/mockfs/mockfs_vfsops.c:101`)
+# asks the root device `DKIOCGETMEMDEVINFO`; only a device that ANSWERS it becomes
+# `mockfs_memory_backed`, pointing its one file node straight at the memory
+# (`mockfs_fsnode.c:333-344`, `pager_map_to_phys_contiguous`). The memory-backed root today is
+# `/dev/md0`, made by `mdevadd` over `g_stage90_ramdisk` - the bytes of `/sbin/launchd` - and that is
+# why process 1 can be exec'd at all. A device answering `ENOTTY` there would still MOUNT, but its
+# file node's bytes would have to come through `cluster_pagein` -> the device's `strategy`, and
+# `eno_strat` moves no byte. So 862 does not invent a buffer: it maps the SAME `g_stage90_ramdisk` the
+# RAM disk does, and answers `DKIOCGETMEMDEVINFO` with `mi_phys = false` exactly as `mdevadd` is
+# called (`IOKitBSDInit.cpp:447`) - because mockfs SKIPS the memory-backed path when `mi_phys` is true
+# (`mockfs_vfsops.c:104-109`).
+#
+# **THE GEOMETRY IS DERIVED, NOT CHOSEN, AND ITS SOURCE IS A SYMBOL.** `mi_size` is a PAGE COUNT of
+# the RAM disk (a byte length >> 12; `mockfs_fsnode.c:342` shifts `mi_base` back the same way).
+# `entry_ramdisk.s` now exports `g_stage90_ramdisk_end`, an alias of the array's own end, and
+# `build_entry.sh` passes it to the module as `-DSTAGE90_ROOT_MEDIA_SIZE_SYM`; the module computes
+# `end - start` from the two symbols, so 0x2000 exists in exactly ONE place. `verify_root_device`
+# adds a clause the array's own `nm -S` size and the alias must agree on - a clause that reads the
+# ALIAS, which no earlier check did, because every earlier check read the array.
+#
+# **`build_entry.sh`'s new 862 clause** (`local ramdisk_end_va` beside the 468 RAM-disk block) refused
+# no build here: `g_stage90_ramdisk_end` is 0x80523000, exactly `0x80521000 + 0x2000`. The wrapper's
+# callee was read out of the LINKED image (`bl entry_root_media_register` at `__wrap_mdevlookup+0x14`,
+# not `bl __real_mdevlookup`), and `st_media_ioctl`'s `bl st_media_memdev_info` proves the two-arm
+# switch was not tail-merged away (the LINKED-ORDER defect that bit rung 57's build clause).
+#
+# **SIZE-NEUTRAL ONLY IN XNU_ENTRY; THE ENTRY IMAGE GREW 32 BYTES.** `STAGE90_XNU_ENTRY=1` (the payload
+# switch) is unchanged; `STAGE90_XNU_MOUNT=1` is an ENTRY switch, so it moves the entry image
+# (5585532 -> 5585564, the `__wrap_mdevlookup` pass-through body replaced by the callback) and the
+# payload record is byte-identical to every rung since 23 (`6c2b6038...`, MEASURED). The entry config
+# record grows by one line (`STAGE90_XNU_MOUNT=1`) and 20 bytes (900 -> 920).
+#
+# **READINESS 5 of 5, `make check` exit 0, and THE ENTRY-GROUP PAGE MOVE DID NOT FIRE** -
+# `STAGE90_XNU_SEAM_LR` stays `0x8004d2dc` (rung 53's value) in entry_trace.c and
+# `EXIT_POP_LR_LITERAL` in run_and_capture.sh. **THE PRESS IS THE OPERATOR'S - this arm is PARKED,
+# not armed. THE GOAL IS NOT MET: a mounted mockfs is not a filesystem on the eMMC.**
+#
+set=armed-storage-bf9408ca sha256=d9588e6592eb895df870edeb941baeb1200742c46b2411233cc39958de961524 bytes=8605696 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-WOULD-SEND-the-STAGE90_XNU_MOUNT-1-entry-rung-57-ladder-carried-plus-the-payload-owned-root-media-handed-to-vfs_mountroot-NOT-PRESSED
+set=armed-storage-bf9408ca sha256=4c5dcceab4e619448513d08280e46e439feaa937fc0315e9e2b97c9ec7d12916 bytes=6081060 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-MOUNT-1-entry-no-payload-switch-moved
+set=armed-storage-bf9408ca sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-56-s-MEASURED-no-payload-switch-moved
+set=armed-storage-bf9408ca sha256=a80e398f90da37417fa4e7e60b693db048d8aa6e15dd45fb73aae3b37f560faa bytes=6143132 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-bf9408ca sha256=7218ad9cf1ed9cbcfa30b5ee8f6dc17b9b0f3dcbbb0ef40c387eaf003c905f04 bytes=6084608 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-bf9408ca sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-bf9408ca sha256=e0d63324ff2e2c59f8bd9cd6bf3d44f6caeb2e131db6deb8752e8a57be06421a bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-bf9408ca sha256=bf9408cae2d72422d35492484c6f1de342cd9ce602c71c41c3526f05807a2878 bytes=5585564 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-bf9408ca-IS-THE-SETS-NAME-32-BYTES-LARGER-than-the-rung-57-arm-because-STAGE90_XNU_MOUNT-1-replaces-__wrap_mdevlookup-s-pass-through-body-with-a-call-to-entry_root_media_register
+set=armed-storage-bf9408ca sha256=c86a002aa0800cec3d330f0a25e4e20986d57d9c4209e82ff6898d927fb3547e bytes=6767024 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-STAGE90_XNU_SEAM_LR-0x8004d2dc-UNCHANGED-from-rung-53
+set=armed-storage-bf9408ca sha256=cc348efd98436777f2eef67edbfd99827821a052a7b677605cc005156cb9dd85 bytes=920 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=56-UNCHANGED-plus-STAGE90_XNU_MOUNT=1-the-one-entry-switch-this-arm-adds
+set=armed-storage-bf9408ca sha256=1139876c0e847d3b7b6bdd283f283671fed173cd124f2b2e2c0a7c923c5ebc52 bytes=2335 file=xnu_arm_entry-sources.txt

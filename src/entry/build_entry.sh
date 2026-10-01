@@ -35235,6 +35235,22 @@ verify_root_device() {
         layout_fail "g_stage90_ramdisk is above topOfKernelData at +$ENTRY_DATA_LIMIT, where XNU hands memory out"
     say "  xnu_entry_468: the RAM disk is $ramdisk_va +0x$(printf '%x' $ramdisk_size) - page aligned, a whole number of sectors, inside the copied image and below .bss, the boot_args page and topOfKernelData"
 
+    # --- 862: the END symbol the root-media module derives its geometry from ------------------------------
+    #
+    # `stage90_root_media.c` computes the device's size as `g_stage90_ramdisk_end - g_stage90_ramdisk`,
+    # and hands `mi_size` to mockfs as a page count. If that alias ever named a different address than
+    # the array's own end, the module would map the file node over the WRONG number of pages and every
+    # check above would still be green - they read the array, not the alias. So the alias is checked
+    # against the array's `nm -S` size here, in the one place that has both numbers. `nm -S` is what
+    # `ramdisk_size` already is, so this says the two derivations agree rather than re-deriving one.
+    local ramdisk_end_va
+    ramdisk_end_va=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
+                     awk '$3 == "g_stage90_ramdisk_end" { print "0x"$1; found = 1 } END { exit(found ? 0 : 1) }') ||
+        layout_fail "the root-media module names g_stage90_ramdisk_end (entry_ramdisk.s) and the linked image does not carry it - the module would not link, or would read a stale macro"
+    (( ramdisk_end_va == ramdisk_va + ramdisk_size )) ||
+        layout_fail "g_stage90_ramdisk_end is 0x$ramdisk_end_va but the array ends at 0x$(printf '%x' $((ramdisk_va + ramdisk_size))) - the alias entry_ramdisk.s defines is not this array's end, so 862's page count would be wrong with every other check still green"
+    say "  xnu_entry_862: g_stage90_ramdisk_end is 0x$ramdisk_end_va, exactly g_stage90_ramdisk + its size - the root media's page count is derived from the array, not from a second copy of 0x2000"
+
     # **And the bytes themselves**, in the image that goes to the device rather than in the object
     # checked at compile time: the section they landed in is what the two address checks above are
     # about, and whether they are still a Mach-O after the link is a separate question from whether

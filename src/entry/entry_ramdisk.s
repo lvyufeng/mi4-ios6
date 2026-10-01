@@ -1325,3 +1325,20 @@ paths_end:
  * device's size - which is the check `build_entry.sh` makes over the linked image. */
     .zero RAMDISK_BYTES - (. - g_stage90_ramdisk)
     .size g_stage90_ramdisk, . - g_stage90_ramdisk
+
+/*
+ * EXPERIMENT 862: the RAM disk's SIZE as a symbol, so nothing has to be told it twice.
+ *
+ * `stage90_root_media.c` has to hand `mockfs_mountroot` a `dk_memdev_info_t` whose `mi_size` is a
+ * PAGE COUNT of the region the file nodes are mapped onto (`mdevadd` stores `size >> 12`, and
+ * `mockfs` shifts it back with `mockfs_memdev_base << PAGE_SHIFT`, `mockfs_fsnode.c:342`). The
+ * entry image has exactly one number that can be that count - this object's own byte length - so it
+ * is read out of the LINK as `g_stage90_ramdisk_end`, an alias of the address the `.size` above
+ * already computes. `build_entry.sh` passes it to the module as `-DSTAGE90_ROOT_MEDIA_SIZE_SYM`, and
+ * a link-time assertion in `entry_stubs.c` (beside `verify_root_device`) refuses if the alias and the
+ * array's `nm -S` size ever disagree. An alias rather than a second `.zero` is deliberate: a second
+ * block would be a second definition of the same quantity, which is this project's oldest defect.
+ */
+    .global g_stage90_ramdisk_end
+    .type   g_stage90_ramdisk_end, %object
+    .set    g_stage90_ramdisk_end, .

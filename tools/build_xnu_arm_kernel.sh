@@ -1391,8 +1391,15 @@ done
 # same `-O2`, same force-include set - `-w` is in `CC_ARGS` for every file in this build.
 for _src in "${PLATFORM_BSD_SOURCES[@]}"; do
     _o="$PL_OUT/$(basename "${_src%.c}").o"
+    # 862: the root-media module has to name the RAM disk's END symbol, which only `entry_ramdisk.s`
+    # defines and only `build_entry.sh` links. The other two BSD sources do not name it, so it is
+    # added per file rather than to the whole loop; the module `#error`s if it is ever missing, so a
+    # future source that grows the same need fails loudly rather than reading an empty macro.
+    _bsd_defs=("${PL_BSD_COMP_DEFINES[@]}")
+    [[ ${_src##*/} == stage90_root_media.c ]] &&
+        _bsd_defs+=(-DSTAGE90_ROOT_MEDIA_SIZE_SYM=g_stage90_ramdisk_end)
     if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" \
-           "${PL_BSD_COMP_DEFINES[@]}" "${EXTRA_DEFINES[@]}" "${PL_BSD_INCLUDES[@]}" \
+           "${_bsd_defs[@]}" "${EXTRA_DEFINES[@]}" "${PL_BSD_INCLUDES[@]}" \
            -c "$_src" -o "$_o" 2>"$PL_OUT/$(basename "${_src%.c}").log"; then
         rm -f "$PL_OUT/$(basename "${_src%.c}").log"
     else
