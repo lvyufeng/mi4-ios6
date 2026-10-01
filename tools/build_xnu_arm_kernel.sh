@@ -83,6 +83,10 @@ MANIFEST=${MANIFEST:-$REPO_ROOT/out/xnu_arm_manifest.txt}
 # the measurement cannot disagree; `tools/check_hfs_staged.sh` (in `make check`) guards that.
 HFS_FILES=$REPO_ROOT/src/supply/hfs_files.txt
 HFS_FORCE=$REPO_ROOT/src/shims/hfs/hfs_port_force.h
+# The second force header: 2050's HFS-facing cprotect layer (the constants and structures 4570
+# replaced with an opaque kext API), restored for the HFS files only.  Included AFTER hfs_port_force.h
+# because it uses the macro-definition style of the first and reads nothing from it.  See the file.
+HFS_FORCE_CP=$REPO_ROOT/src/shims/hfs/hfs_cprotect_port.h
 
 # **And it is OFF by default, because the wiring is correct and the port is not yet complete** (877).
 # Measured through this very pipeline in that step: 32 of the port's 36 `.c` files compile, and the
@@ -1013,7 +1017,7 @@ while read -r src; do
     # `-include` rather than a flag because the additions are macros a 2050 source reads without
     # declaring (see the header's own comment): nothing in the port may be edited to add an #include.
     if [[ $HFS_PORT -eq 1 && ( ${src#"$XNU"/} == bsd/hfs/* || ${src#"$XNU"/} == bsd/vfs/vfs_journal.c ) ]]; then
-        BSD_FORCE+=(-include "$HFS_FORCE")
+        BSD_FORCE+=(-include "$HFS_FORCE" -include "$HFS_FORCE_CP")
     fi
 
     # `bsd/dev/unix_startup.c` includes `<netinet/tcp_var.h>`, which includes `<netinet/in_pcb.h>`,

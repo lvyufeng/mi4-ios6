@@ -151,16 +151,17 @@ restore:
 #                           the five ways the arithmetic goes wrong - and exits 2 for a failed selftest,
 #                           which is a different failure from the tree being wrong (experiment 810).
 #   check_hfs_staged.sh
-#                           the HFS+ port's tracked additions (src/shims/hfs/hfs_port_force.h and
-#                           src/supply/stage90_hfs_shims.c) are the ONE definition the host-only probe
-#                           AND tools/stage_hfs.sh both use; the untracked 4570 tree is a re-provisionable
-#                           checkout that can fall behind them. It refuses a force-header #define that
-#                           4570 already defines at a different value - the "one value, two definitions"
-#                           defect, silent when it happens - and a shims file that no longer defines the
-#                           ten symbols 871 measured the port at. It also checks src/supply/hfs_files.txt
-#                           (the manifest's HFS additions) against the staged tree, and SKIPS that part
-#                           with a printed note when the tree is not staged rather than passing quietly.
-#                           No compiler, no device. (874/875/876.)
+#                           the HFS+ port's tracked additions (src/shims/hfs/hfs_port_force.h,
+#                           src/shims/hfs/hfs_cprotect_port.h and src/supply/stage90_hfs_shims.c) are
+#                           the ONE definition the host-only probe AND tools/stage_hfs.sh both use; the
+#                           untracked 4570 tree is a re-provisionable checkout that can fall behind them.
+#                           It refuses a force-header #define that 4570 already defines at a different
+#                           value - the "one value, two definitions" defect, silent when it happens - and
+#                           a shims file that no longer defines the ten symbols 871 measured the port at.
+#                           It also checks that the build force-includes the cprotect header second (877),
+#                           and checks src/supply/hfs_files.txt (the manifest's HFS additions) against the
+#                           staged tree, SKIPPING that part with a printed note when the tree is not
+#                           staged rather than passing quietly. No compiler, no device. (874/875/876/877.)
 check:
 	@tools/check_stage_paths.sh
 	@tools/check_set_name_rule.sh

@@ -22,13 +22,25 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$HERE/.." && pwd)
 XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
 FORCE=$REPO_ROOT/src/shims/hfs/hfs_port_force.h
+FORCE_CP=$REPO_ROOT/src/shims/hfs/hfs_cprotect_port.h
 SHIMS=$REPO_ROOT/src/supply/stage90_hfs_shims.c
 
 fail=0
 refuse() { printf 'check_hfs_staged: %s\n' "$*" >&2; fail=1; }
 
 [[ -f $FORCE ]] || { printf 'check_hfs_staged: missing %s\n' "$FORCE" >&2; exit 1; }
+[[ -f $FORCE_CP ]] || { printf 'check_hfs_staged: missing %s\n' "$FORCE_CP" >&2; exit 1; }
 [[ -f $SHIMS ]] || { printf 'check_hfs_staged: missing %s\n' "$SHIMS" >&2; exit 1; }
+
+# --- 0. the second force header is force-included, and after the first ------------------------------
+# The cprotect port header (877) renames `cp_is_valid_class` and defines structs that read
+# `cp_wrap_func_t` and `aes_encrypt_ctx`; it MUST be -included second, after `hfs_port_force.h` and
+# after `sys/cprotect.h` (which it pulls).  If the build ever includes it alone, or first, the build
+# stops loudly - but this same check is the cheap statement of the order, in the one place a reader
+# looks for "what does the HFS port add".
+BUILD=$REPO_ROOT/tools/build_xnu_arm_kernel.sh
+grep -q -- '-include "\$HFS_FORCE" -include "\$HFS_FORCE_CP"' "$BUILD" \
+    || refuse "$BUILD no longer force-includes \$HFS_FORCE_CP second (877's cprotect port header)"
 
 # --- 1. the tracked shims define exactly the ten symbols 871 named ---------------------------------
 # A count, and the names, because "the ten are written" is the claim 871 makes and a file that grew a
@@ -78,7 +90,10 @@ if [[ -d $XNU/bsd ]]; then
             refuse "$name is already defined in 4570 as '$hit', force header says '$value'" \
                    " - one value, two definitions: pick one and cite the measurement"
         fi
-    done < <(grep -oE '^#define[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+[^/(].*' "$FORCE" \
+    # Every `#define NAME value` in BOTH force headers.  `cp_is_valid_class` is 877's deliberate
+    # rename (a valueless macro, dropped by the `[^/(]` value guard); the three exclusions are above.
+    done < <(grep -hoE '^#define[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+[^/(].*' \
+                 "$FORCE" "$FORCE_CP" \
              | sed -E 's/^#define[[:space:]]+//' | awk '{print $1, $2}')
 fi
 

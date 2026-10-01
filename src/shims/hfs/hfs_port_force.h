@@ -61,11 +61,13 @@
 #define kmem_alloc_kobject(map, addr, size) kmem_alloc_kobject((map), (addr), (size), VM_KERN_MEMORY_FILE)
 
 /* 4570's bsd/sys/cprotect.h dropped `cp_wrap_func_t` and `cp_register_wraps` (it restructured the
- * cprotect API).  At CONFIG_PROTECT=0 hfs_cprotect.c's body is a stub that IGNORES its argument, so
- * this placeholder is honest rather than a semantic claim; at CONFIG_PROTECT=1 the real port must
- * decide whether to call 4570's `cp_*` API or drop the call - which is the extra cost 865 named. */
+ * cprotect API).  This was a `void *` placeholder while the port compiled only at CONFIG_PROTECT=0;
+ * now that the HFS-facing cprotect layer is ported (`hfs_cprotect_port.h`, experiment 877),
+ * `cp_register_wraps` at `hfs_cprotect.c:97` dereferences it as `key_store_func->wrapper`, so the
+ * TYPE must be the port's `struct cp_wrap_func` and not `void *`.  The forward declaration is enough
+ * here; the definition follows in `hfs_cprotect_port.h`, which is force-included after this one. */
 #ifndef cp_wrap_func_t
-typedef void *cp_wrap_func_t;
+typedef struct cp_wrap_func *cp_wrap_func_t;
 #endif
 
 /* ------------------------------------------------------------------------------------------------
