@@ -183,6 +183,53 @@ typedef void *cp_wrap_func_t;
 print("sandbox ready")
 PY
 
+# --- the ten shims, as a FILE the port brings -------------------------------------------------------
+# 869 measured the link gap at ten symbols.  This writes the ten bodies, so the probe can show the gap
+# reaching ZERO rather than only naming what is owed.  Each is a one-line shim and each is honest about
+# WHY it is a shim (a body whose fields 4570 dropped is EMPTY, not invented).  Written into the tree so
+# the same compile loop builds it; nothing here edits an Apple source.
+cat >"$SANDBOX/tree/port_shims.c" <<'SHIMS'
+/*
+ * The ten symbols 2050's HFS+ needs and 4570 does not define (tools/hfs_port_probe.sh, experiment 869).
+ * Four are EMPTY BODIES because 4570 dropped the state they would write: fslog_fs_corrupt (4570 has no
+ * fslog API), proc_tbe (P_TBE became P_RESV6), vfs_markdependency (no mnt_dependent_process/pid), and
+ * proc_apply_thread_selfdiskacc (no thread->appliedstate.hw_disk).  Three are RENAMES.  Three are the
+ * BSD-side IOKit shims HFS uses for the media's serial/ejectability/journal-content, none of which a
+ * root filesystem needs - each returns the failure that makes HFS fall back.
+ */
+#include <mach/kern_return.h>
+#include <sys/types.h>
+#include <sys/param.h>
+#include <sys/vnode.h>
+#include <sys/vnode_internal.h>
+#include <sys/vfs_context.h>
+#include <sys/ubc.h>
+#include <sys/ubc_internal.h>
+#include <sys/proc.h>
+#include <sys/mount.h>
+#include <sys/mount_internal.h>
+#include <vm/vm_kern.h>
+
+/* renames */
+const char *vnode_name(vnode_t vp) { return vnode_getname(vp); }
+int is_suser(void) { return vfs_context_issuser(vfs_context_current()); }
+int ubc_create_upl(vnode_t vp, off_t off, int size, upl_t *uplp, upl_page_info_t **plp, int flags)
+{ return ubc_create_upl_kernel(vp, off, size, uplp, plp, flags, VM_KERN_MEMORY_FILE); }
+
+/* empty bodies - 4570 dropped the state */
+int  proc_tbe(proc_t p) { (void)p; return 0; }
+void vfs_markdependency(mount_t mp) { (void)mp; }
+int  proc_apply_thread_selfdiskacc(int policy) { (void)policy; return 0; }
+void fslog_fs_corrupt(mount_t mp) { (void)mp; }
+
+/* BSD-side IOKit shims - the failure that makes HFS fall back */
+kern_return_t IOBSDGetPlatformSerialNumber(char *s, u_int32_t len) { (void)s; (void)len; return KERN_FAILURE; }
+int IOBSDIsMediaEjectable(const char *cdev_name) { (void)cdev_name; return 0; }
+void IOBSDIterateMediaWithContent(const char *uuid_cstring,
+                                  int (*func)(const char *, const char *, void *), void *arg)
+{ (void)uuid_cstring; (void)func; (void)arg; }
+SHIMS
+
 # ---------------------------------------------------------------------------------------------------
 # The compile.  The same clang, the same flags, the same configuration defines and the same forced
 # headers the stage90 kernel build uses - a different harness would measure a different question.
@@ -298,7 +345,23 @@ LINK_GAP() {
 GAP=$(LINK_GAP)
 printf '\n== THE LINK GAP (CONFIG_PROTECT=0): symbols 4570 does not define and the port must bring ==\n'
 printf '%s\n' "$GAP" | sed 's/^/  /'
-printf '  -- %d symbol(s) of external debt, in these families:\n' "$(printf '%s\n' "$GAP" | grep -c .)"
+N_GAP=$(printf '%s\n' "$GAP" | grep -c .)
+if (( N_GAP == 0 )); then
+cat <<'EOF'
+  -- ZERO.  The port links: every symbol it leaves undefined, 4570's kernel or the
+     port itself supplies.  The ten 869 named are written in tree/port_shims.c:
+
+     renames (3)   vnode_name -> vnode_getname; is_suser() -> vfs_context_issuser();
+                   ubc_create_upl -> ubc_create_upl_kernel (+ a VM_KERN_MEMORY_FILE tag).
+     empty (4)     fslog_fs_corrupt, proc_tbe, vfs_markdependency, and
+                   proc_apply_thread_selfdiskacc.  Each is EMPTY because 4570 dropped the state it
+                   would write: no fslog API; P_TBE became P_RESV6; no mnt_dependent_process/pid; no
+                   thread->appliedstate.hw_disk.
+     IOKit (3)     IOBSDGetPlatformSerialNumber / IsMediaEjectable / IterateMediaWithContent - the
+                   BSD-side shims HFS uses for the media's serial, ejectability and journal content;
+                   a root filesystem needs none, so each returns the failure that makes HFS fall back.
+EOF
+else
 cat <<'EOF'
      fslog_fs_corrupt
      fslog_fs_corrupt               hfs_vfsops.c:7702's one call, on a corrupt volume.  2050 defines it
@@ -313,11 +376,13 @@ cat <<'EOF'
                                     dropped `thread->appliedstate.hw_disk` entirely - a no-op shim).
                                     One-line shims, not ports.
 EOF
+fi
+printf '  -- %d symbol(s) of external debt\n' "$N_GAP"
 
 cat <<'EOF'
 
 WHAT THE TWO NUMBERS MEAN
-  CONFIG_PROTECT=0   ALL 37 FILES COMPILE (the 36 of HFS proper plus the journal it brings with it).
+  CONFIG_PROTECT=0   ALL 38 FILES COMPILE (36 of HFS proper + the journal it brings + its ten shims).
                      Two of the eight "drifts" 865 named were not drifts at all:
                      (1) hfs_vfsutils.c:3140's `VTOCMP(vp)->cmp_type` read as `int` only because
                      `HFS_COMPRESSION` (2050's own bsd/conf/MASTER:193 option) was UNSET, so `VTOCMP`
@@ -332,11 +397,11 @@ WHAT THE TWO NUMBERS MEAN
                      restructured cprotect, so this is real work rather than a flag - the extra cost of
                      mounting a volume whose files carry protection.
 
-  So the compile half of the port is DONE at CONFIG_PROTECT=0, and the LINK GAP is 10 symbols, ALL of
-  them one-line shims: three IOBSD* calls, six renamed or dropped VFS/thread helpers, and ONE empty
-  body (fslog_fs_corrupt).  The journal - 18 symbols and the file that carried them, the largest single
-  item 865 left open - is closed: 2050's bsd/vfs/vfs_journal.c compiles here once its own options and
-  malloc types are supplied (M_JNL_JNL/M_JNL_TR, both free in 4570), and it no longer appears in the
-  gap.  The mount still needs a `vfstbllist[]` row before mockfs, an `FT_HFS`, and the `HFS` option -
-  which a build sets, not this probe.
+  So BOTH HALVES OF THE PORT ARE CLOSED AT CONFIG_PROTECT=0: 38 files compile (the 36 of HFS proper,
+  the journal it brings, and its ten shims) and the LINK GAP IS ZERO - nothing the port leaves undefined
+  is unsupplied.  The journal (18 symbols, the largest single item 865 left open) is bought for three
+  one-line shims; the ten 869 named are four empty bodies, three renames and three IOKit fall-backs.
+  What remains is NOT source: a `vfstbllist[]` row before mockfs, an `FT_HFS`, and the `HFS` option in
+  the build (experiment 870) - which a build sets, not this probe - plus, behind it, a medium to mount
+  (experiment 867).
 EOF

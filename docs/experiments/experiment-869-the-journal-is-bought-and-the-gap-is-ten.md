@@ -53,11 +53,12 @@ the 25 → 10. The remaining ten, each read:
 | `fslog_fs_corrupt` | `hfs_vfsops.c:7702`, one call on a corrupt volume. 2050 defines it in `bsd/vfs/vfs_fslog.c:343`, but its **whole body is one `fslog_err(...)` call**, and 4570 dropped the fslog API (`fslog.h` has no `fslog_err` and no `FSLOG_KEY_*`) | **empty shim** (or drop the one call) |
 | `IOBSDGetPlatformSerialNumber`, `IOBSDIsMediaEjectable`, `IOBSDIterateMediaWithContent` | 2050's `iokit/bsddev/IOKitBSDInit.cpp`; the BSD-side IOKit shims HFS uses for the media's identity/ejectability | three small functions or three stubs (a root fs needs none of them) |
 | `vnode_name` → `vnode_getname`, `is_suser()` → `vfs_context_issuser()`, `ubc_create_upl` → `ubc_create_upl_kernel` | **renames** — 4570 has the same function under a new name (the `ubc` sibling differs by one `vm_tag_t`) | one-line each |
-| `proc_tbe` | a thread-quantum helper; 2050 `kern_resource.c:1224` | small shim or stub |
-| `vfs_markdependency` | 4570 has **neither a declaration nor a definition** (only a comment in `proc.h`) — a genuine small addition | one small function |
+| `proc_tbe` | 4570 dropped the flag it reads — its `P_TBE` is `P_RESV6` *"used to be P_TBE"* (`proc.h:192`) — so 2050's `p->p_flag & P_TBE` has no flag | **no-op shim** (return 0) |
+| `vfs_markdependency` | 4570 has neither a declaration nor a definition (`proc.h` has only the comment), **and it dropped the fields the body writes** — no `mnt_dependent_process`/`mnt_dependent_pid` in 4570's `mount_internal.h` | **no-op shim** |
 | `proc_apply_thread_selfdiskacc` | 4570 dropped `thread->appliedstate.hw_disk` **entirely** (`grep hw_disk` over 4570's `osfmk/` is empty), so 2050's body (`task_policy.c:1287`, two field writes) has no fields to write | **no-op shim** |
 
-**So the port's external debt is ten one-line shims, one empty body, and (at most) three small IOKit
+**So the port's external debt is ten one-line shims, of which four are empty bodies (`fslog_fs_corrupt`,
+`proc_tbe`, `vfs_markdependency`, `proc_apply_thread_selfdiskacc`), and (at most) three small IOKit
 functions a root filesystem does not need.** The ~4,000-line journal — the item 868 named as the biggest —
 is bought for three lines.
 
