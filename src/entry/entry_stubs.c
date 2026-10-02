@@ -2252,8 +2252,19 @@ uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_before_out,
  * **The live channel's record cap, as one definition.** It was a literal `4096u` at the one place it
  * was compared and in four comments that named it; 500's measurement (498 wrote 3967 of it) is why it
  * moved, and the move is why it is a name. `xnu_live_cap` publishes it into the log.
+ *
+ * **904 doubled it, and again the reason is a measurement rather than a guess.** 903's run wrote 8206
+ * `xnu_live_` lines - the mount almost to the byte - and the launchd `__TEXT` page read (volume block
+ * 34 = offset `0x22000`, `blkno=0x110`) landed a handful of records PAST the 8192 cap, so the one read
+ * that would prove the exec came off the card is the one the instrument dropped. The failure mode is
+ * exactly 500's: the *instrument* losing the end of the trace. At ~50 bytes/record 16384 is ~800 KB,
+ * comfortably inside the 2 MB console minus the 128 KB OS-text block, and the runner's truncation
+ * detector reads `xnu_live_cap` from the log so it scales with this number instead of a literal.
+ * **16384 and not more, on purpose**: the console's own 2 MB bound is the hard ceiling, and a cap that
+ * approached it would recreate this same defect at a higher number - the trace would be cut by the
+ * silent `entry_write_kv` bound instead of by this named one, which is the harder failure to read.
  */
-#define ENTRY_LIVE_CAP 8192u
+#define ENTRY_LIVE_CAP 16384u
 
 static void entry_live_init(void)
 {
@@ -2392,16 +2403,19 @@ static void entry_live_init(void)
  *
  * The cap is a *bound*, not a budget: the ram console holds 2 MB and `entry_write_kv` refuses
  * silently past it, so a run that recorded without bound would lose the end of its own trace - the
- * part that says where it stopped. `ENTRY_LIVE_CAP` records at ~50 bytes each is ~400 KB, comfortably
+ * part that says where it stopped. `ENTRY_LIVE_CAP` records at ~50 bytes each is ~800 KB, comfortably
  * inside, and the one record written when the cap is reached says so, which is 441's rule about a
  * refusal having to be visible.
  *
- * **500 doubled it, and the reason is a measurement rather than a guess.** 498's run wrote 3967 of the
- * old 4096 - 97% - and 498's own check requires every key the image publishes to have a writer, so the
- * number of records grows with every step: the margin had become one step wide, and the failure mode is
- * the *instrument* dropping the end of the trace, which is the one reading this project cannot afford to
- * lose. The cap is published as `xnu_live_cap` so that the margin is a reading in every run rather than a
- * number in this comment, and `xnu_entry_live_records` in the pre-jump report carries what was used.
+ * **500 doubled it (4096 -> 8192), and 904 doubled it again (8192 -> 16384); every time the reason is a
+ * measurement rather than a guess.** 498's run wrote 3967 of the old 4096 - 97% - and 498's own check
+ * requires every key the image publishes to have a writer, so the number of records grows with every
+ * step: the margin had become one step wide. 903's run then wrote 8206 lines and the launchd `__TEXT`
+ * page read landed a few records past 8192 (see `ENTRY_LIVE_CAP`'s own block). The failure mode both
+ * times is the *instrument* dropping the end of the trace, which is the one reading this project cannot
+ * afford to lose. The cap is published as `xnu_live_cap` so that the margin is a reading in every run
+ * rather than a number in this comment, and `xnu_entry_live_records` in the pre-jump report carries what
+ * was used.
  *
  * A state of 0 means "not installed yet", and 452 keeps it that way for one case only: the live
  * table not being the one this address needs yet, which is what the very first calls of a boot can
@@ -5879,9 +5893,9 @@ void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr)
     /*
      * **The cadence is the whole reason this instrument does not blind the run it is measuring.**
      * `ml_get_timebase` is called once per *interrupt* - it is the first wrapper in this project on a
-     * per-interrupt path - and every `entry_live_write` spends one of `ENTRY_LIVE_CAP` (8192) records
+     * per-interrupt path - and every `entry_live_write` spends one of `ENTRY_LIVE_CAP` (16384) records
      * for the entire run. 516's log carries 4258 `xnu_live_*` records, so the channel is already about
-     * half spent when an XNU boot reaches the idle path; two writes per interrupt for the ~2500
+     * a quarter spent when an XNU boot reaches the idle path; two writes per interrupt for the ~2500
      * interrupts of a 25 s run would put the *tail* of that budget - the `wfi`, `pcx` and `pce` keys a
      * run stops in - behind a diagnostic that needs at most eight records of its own. That is 445's
      * and 461's defect ("the report path's buffer was the tracer's and was full when the report was
