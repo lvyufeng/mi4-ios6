@@ -181,6 +181,17 @@ extern void entry_note_read(uint32_t caller, uint32_t fd, uint32_t buf, uint32_t
                             uint32_t error, uint32_t lo, uint32_t hi,
                             uint32_t word_before, uint32_t word_after,
                             uint32_t copy_before, uint32_t copy_after);
+/* 905: **the write has NO wrapper, and the reason is checked rather than asserted.** The fixture writes
+ * through `svc #0x80`, which the kernel dispatches by number through its sysent table, not by a `bl
+ * write` - so the linker is never asked to resolve `write` and `--wrap=write` would produce a wrapper
+ * with no branch to it anywhere in the image. The entry build's own `--wrap` audit refused exactly that
+ * ("these --wrap'd symbols have no branch to their wrapper anywhere in the linked image, so the wrapper
+ * can never run: write - a same-object call is resolved by the linker and is invisible to --wrap"), so
+ * the flag and the wrapper are gone. **The write's success is a reading anyway**: the strategy's own
+ * `xnu_live_rootmedia_card_wr_*` says the card unit served a `B_WRITE` at LBA 0x400000+, and the
+ * persistence test's read-back of `/newfile` after a power cycle says the block reached the device.
+ * These two are the instrument (505's and 504's lesson: the record that matters is the one the kernel
+ * itself makes, not one a wrapper makes for it). */
 
 /* 505: three, and they are the step's whole instrument. `fork`'s is the pid the kernel made plus the
  * argument word it did *not* read; `exit`'s is published before the call because the call does not
@@ -1869,6 +1880,7 @@ int __wrap_read(void *proc, void *uap, void *retval)
     return error;
 }
 
+
 /* ---------------------------------------------- the second process, and the death that is not fatal (505) */
 /*
  * **504's four calls are all the kernel doing work for *one* process. These three are the kernel doing
@@ -2739,8 +2751,24 @@ void __wrap_platform_cache_idle_exit(void)
  * **rung 53's did not** - the partition-entry walk is a loop, and a loop is big enough to push the
  * group over. This is the same class as the six moves before it and the same one-clause cause: the
  * address is pinned in two entry-side files and moves whenever the entry group's own size crosses a
- * page, which is a property of the rung and not of the rung's meaning. */
-#define STAGE90_XNU_SEAM_LR       0x8004d2dcu
+ * page, which is a property of the rung and not of the rung's meaning.
+ *
+ * **AND RUNG B WAS FIRST DRAFTED WITH A `__wrap_write` IN THIS FILE, AND THAT IS WHAT MOVED IT - THEN
+ * THE WRAPPER WAS REMOVED AND THE CONSTANT CAME BACK.** The draft refused with `the exit's call to
+ * FlushPoU_Dcache is at 2147803864 and returns to 2147803868, while entry_trace.c's STAGE90_XNU_SEAM_LR
+ * is 0x8004d2dc` - the write *door* in this translation unit moved the entry group by +0x1000. But the
+ * entry build's `--wrap` audit then refused the wrapper itself (the fixture writes via `svc #0x80`, so
+ * no `bl write` exists for `--wrap=write` to redirect), the flag and the wrapper were removed, and the
+ * next build put the exit back at `0x8004d2dc` exactly. **This is the seventh move's value, and the
+ * eighth move is the PROGRAMMING WAIT.** 905's first pressed arm carried no wait and the exit returned
+ * to `0x8004d2dc`; the press proved a write with no completion wait corrupts the next read (the CMD24
+ * at LBA `0x400002` timed out the following CMD17 at the launchd page), so a bounded
+ * `DAT_LINE_ACTIVE` poll was added to `st_write_single_block` **in `entry_storage.c` - a file in this
+ * same entry group** - and being a loop it pushed the group over a page: the build refused with `the
+ * exit's call to FlushPoU_Dcache is at 2147803864 and returns to 2147803868, while entry_trace.c's
+ * STAGE90_XNU_SEAM_LR is 0x8004d2dc`. **The value below is re-derived from that refusal, and
+ * `scripts/run_and_capture.sh`'s literal follows it.** */
+#define STAGE90_XNU_SEAM_LR       0x8004e2dcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);

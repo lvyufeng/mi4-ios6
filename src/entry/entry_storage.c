@@ -157,6 +157,31 @@
 #endif
 
 /*
+ * **905: THE WRITE HALF OF THE LADDER.** With `STAGE90_XNU_HDD_WRITE=1` the ladder grows
+ * `entry_storage_driver_write` - the mirror of 887's read door - and the card unit's strategy calls it to
+ * serve a `B_WRITE` with CMD24. With it off, this whole body is not compiled and the ladder is exactly
+ * the read-only one 887 built.
+ *
+ * **IT IS THE FIRST CODE IN THIS IMAGE THAT MOVES A BYTE OF MEDIUM IN THE OS'S OWN DIRECTION**, so the
+ * command is the driver's own CMD24 (`MMC_WRITE_BLOCK` 24, `mmc.h:62` `adtc [31:0] data addr R1`) and
+ * the argument carries the SAME LBA the read half would send as CMD17's (`block.c:1776`'s
+ * `brq->cmd.arg = blk_rq_pos(req)`, unshifted on a sector-addressed card, which this one is -
+ * `_rd_shift = 0`). Every host register the write touches is one the read body already names, in the
+ * vendor's own order (`sdhci_prepare_data` then `sdhci_set_transfer_mode`, `sdhci.c:974-1015`), and the
+ * one bit that differs is the direction bit `SDHCI_TRNS_READ` - absent for a write, exactly as
+ * `sdhci_set_transfer_mode` (`sdhci.c:1006`) only ORs it for `MMC_DATA_READ`.
+ */
+#ifndef STAGE90_XNU_HDD_WRITE
+#define STAGE90_XNU_HDD_WRITE 0
+#endif
+#if STAGE90_XNU_HDD_WRITE != 0 && STAGE90_XNU_HDD_WRITE != 1
+#error "STAGE90_XNU_HDD_WRITE is 0 (the read-only ladder, as 887 built it) or 1 (the ladder grows the CMD24 write door). A second spelling for 'off' would make an image that carries the write path indistinguishable from one that does not."
+#endif
+#if STAGE90_XNU_HDD_WRITE && STAGE90_XNU_STORAGE_PROBE < 60
+#error "STAGE90_XNU_HDD_WRITE=1 needs STAGE90_XNU_STORAGE_PROBE>=60: the write body is the mirror of the read body 887 built at rung 61 (value 60), and it calls `st_data_reset` and reads `st_ext_csd`/`st_csd_words_valid`, none of which exist below that value. Building the write half on a ladder that has no read half would be a body calling names the file has not declared."
+#endif
+
+/*
  * **The declarations are outside the `#if`, and 692 measured why they have to be.** The no-op arm of
  * `ST_LIVE` below still evaluates its arguments, so an `extern` inside the `#if` is a name the untraced
  * build cannot see - and that is not hypothetical: `entry_gic.c` carried its five in the guarded arm
@@ -2339,6 +2364,28 @@ __attribute__((noinline)) static void st_pwr_wait(void)
                                                  * buffer is a sector read proved by its own content
                                                  * rather than by a state bit. */
 #endif /* STAGE90_XNU_STORAGE_PROBE >= 42 - one opcode, declared where it is used */
+#if STAGE90_XNU_HDD_WRITE
+#define ST_CMD_OP_WRITE_BLOCK 24u               /* mmc.h:62 - CMD24 `adtc [31:0] data addr R1`, and it is
+                                                 * **THE LADDER'S FIRST COMMAND THAT CARRIES DATA FROM
+                                                 * THE HOST TO THE MEDIUM**. The driver's own construction
+                                                 * is the same block.c:1770-1829 that builds CMD17:
+                                                 * `cmd.arg = blk_rq_pos(req)` unshifted on a
+                                                 * sector-addressed card (`:1776-1777` - this card IS
+                                                 * sector-addressed, `_rd_shift = 0`), and
+                                                 * `writecmd = MMC_WRITE_BLOCK` at `:1822` is taken on
+                                                 * the same `brq->data.blocks <= 1` branch (`:1810`) that
+                                                 * takes `readcmd = MMC_READ_SINGLE_BLOCK`. **THE ARGUMENT
+                                                 * IS THEREFORE THE SAME LBA CMD17 WOULD BE GIVEN** - the
+                                                 * one property that makes the write a mirror rather than a
+                                                 * new addressing scheme - and the flags are the same
+                                                 * `MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_ADTC`
+                                                 * (`:1779`), the same 48-bit R1 frame, differing only in
+                                                 * the data phase's direction, which is a property of the
+                                                 * BLOCK and not of the flag word (the flag word has no
+                                                 * direction bit at all: `sdhci_set_transfer_mode`,
+                                                 * `sdhci.c:1006`, takes the direction from `data->flags`,
+                                                 * not from `cmd->flags`). */
+#endif /* STAGE90_XNU_HDD_WRITE - one opcode, declared where it is used */
 #if STAGE90_XNU_STORAGE_PROBE == 19
 #define ST_MMC_RSP_NONE 0u                      /* core.h:50 - MMC_RSP_NONE, and it is ALSO the value
                                                  * CMD0 carries: `sdhci_cmd_to_flags`
@@ -2663,6 +2710,34 @@ _Static_assert(ST_SDHCI_CMD_WORD(ST_CMD_OP_SEND_STATUS, ST_MMC_RSP_R1_SPI) == 0x
 #define ST_SDHCI_BLOCK_SIZE_512 \
         ((uint32_t)ST_SDHCI_MAKE_BLKSZ(ST_SDHCI_DEFAULT_BOUNDARY_ARG, 512u))
 #define ST_SDHCI_TRNS_READ_1BLK ((uint32_t)(ST_SDHCI_TRNS_BLK_CNT_EN | ST_SDHCI_TRNS_READ))
+#if STAGE90_XNU_HDD_WRITE
+/* **905: the write half's two constants, each the read half's with one bit moved.** `SPACE_AVAILABLE`
+ * (PRESENT_STATE bit 10) is the write direction's analogue of `DATA_AVAILABLE` - the bit
+ * `sdhci_transfer_pio` (`sdhci.c:456-459`) waits on when `data->flags` is not `MMC_DATA_READ` - and it
+ * is the buffer-write-ready this image has never named. `TRNS_WRITE_1BLK` is `TRNS_READ_1BLK` with
+ * `SDHCI_TRNS_READ` taken OUT: the vendor ORs that bit only for a read (`sdhci.c:1006`), so a write
+ * sends `SDHCI_TRNS_BLK_CNT_EN` alone, `0x0002`. **The two constants are written as EXPRESSIONS of the
+ * read half's** so the one bit between them is visible here rather than resolved out of two literals -
+ * `mi4-one-value-two-definitions` in its cheapest form. */
+#define ST_SDHCI_SPACE_AVAILABLE   0x00000400u  /* sdhci.h:70 (vendor) - PRESENT_STATE bit 10 */
+/* **905 rung B: the bit the PROGRAMMING WAIT polls.** `DOING_WRITE` (PRESENT_STATE bit 8,
+ * `SDHCI_DOING_WRITE`) is the block's own statement that a write transfer is in flight - the exact
+ * mirror of rung 45's `DOING_READ` (bit 9). The 905 first-arm press measured it **still set** at the
+ * next command's entry (`_dr_ps_before = 0x01e80106`, bit 8 AND bit 2 `DAT_LINE_ACTIVE`), which is the
+ * whole defect: the write was handed to the card and never acknowledged as finished. Waiting on it (and
+ * on `DAT_LINE_ACTIVE`, whose momentary clear right after the last FIFO word is the race this closes)
+ * is what makes the write's end a reading rather than an assumption. */
+#define ST_SDHCI_DOING_WRITE       0x00000100u  /* sdhci.h:67 (the vendor names DOING_READ, not this) */
+#define ST_SDHCI_TRNS_WRITE_1BLK   ((uint32_t)(ST_SDHCI_TRNS_READ_1BLK & ~(uint32_t)ST_SDHCI_TRNS_READ))
+_Static_assert(ST_SDHCI_TRNS_WRITE_1BLK == ST_SDHCI_TRNS_BLK_CNT_EN,
+               "the write's transfer mode is BLK_CNT_EN alone: the read bit is the only difference "
+               "between the two directions, and this assertion is what refuses a write word that "
+               "carried SDHCI_TRNS_READ and would move the medium's bytes INTO the host");
+_Static_assert(ST_SDHCI_SPACE_AVAILABLE != ST_SDHCI_DATA_AVAILABLE,
+               "the write's ready bit is not the read's: waiting on DATA_AVAILABLE while writing would "
+               "spin on a bit the block sets when the CARD has data for the host, which on a write it "
+               "never does");
+#endif /* STAGE90_XNU_HDD_WRITE */
 #define ST_SDHCI_INT_PIO_IRQS   ((uint32_t)(ST_SDHCI_INT_DATA_AVAIL | ST_SDHCI_INT_SPACE_AVAIL))
 #define ST_SDHCI_INT_DATA_BITS  ((uint32_t)(ST_SDHCI_INT_DATA_END | ST_SDHCI_INT_DMA_END |        \
                                             ST_SDHCI_INT_SPACE_AVAIL | ST_SDHCI_INT_DATA_AVAIL | \
@@ -3075,6 +3150,14 @@ static uint32_t st_ext_csd[ST_EXT_CSD_WORDS];
 #if STAGE90_XNU_STORAGE_PROBE >= 42
 static uint32_t st_read_block[ST_EXT_CSD_WORDS];
 #endif /* STAGE90_XNU_STORAGE_PROBE >= 42 - one sector, its own array */
+#if STAGE90_XNU_HDD_WRITE
+/* **905: the write half's OWN array, and it is separate from `st_read_block` on purpose.** The write
+ * door copies the caller's 512 bytes here and fills `SDHCI_BUFFER 0x20` from it; keeping it separate
+ * from the read array means a read's evidence is never overwritten by a write's staging (the same
+ * reason `st_read_block` is separate from `st_ext_csd` above), so a log can hold "what was read at
+ * this LBA" beside "what was written to it" as two different arrays. Same 128 words, same `.bss`. */
+static uint32_t st_write_block[ST_EXT_CSD_WORDS];
+#endif /* STAGE90_XNU_HDD_WRITE - one sector, its own array */
 
 /* the vendor's own `ext_csd[off]` (`mmc.c:332`), over the word array above: byte `off` is byte
  * `off % 4` of word `off / 4`, little-endian, which is how a little-endian FIFO fills it */
@@ -7592,6 +7675,211 @@ entry_storage_driver_read(uint32_t lba)
     return st_read_block;
 }
 #endif
+
+#if STAGE90_XNU_HDD_WRITE
+/*
+ * **905: THE LADDER'S WRITE, THE MIRROR OF `st_read_single_block` AND THE FIRST BODY IN THIS IMAGE
+ * THAT HANDS THE MEDIUM A BYTE.** It is written as the read body is written - the same precondition,
+ * the same window, the same timeout computation, the same three-block-register arming, the same
+ * bounded data loop - with the direction reversed in exactly three places:
+ *
+ *   1. the command is **CMD24** (`ST_CMD_OP_WRITE_BLOCK` 24) where the read sends CMD17, at the SAME
+ *      LBA argument (this card is sector-addressed, so `block.c:1777`'s `<< 9` is not taken for either);
+ *   2. `TRANSFER_MODE` is `ST_SDHCI_TRNS_WRITE_1BLK` (0x0002) where the read sends `TRNS_READ_1BLK`
+ *      (0x0012) - `SDHCI_TRNS_READ` (bit 4) is the ONE bit between the two directions;
+ *   3. the data loop waits on **`SPACE_AVAILABLE`** (PRESENT_STATE bit 10) and WRITES `SDHCI_BUFFER`
+ *      where the read waits on `DATA_AVAILABLE` (bit 11) and READS it - which is `sdhci_transfer_pio`'s
+ *      own `mask` choice (`sdhci.c:456-459`).
+ *
+ * **THE CALLER'S WORD IS COPIED INTO `st_write_block` FIRST**, so the loop fills the FIFO from a
+ * kernel `.bss` array rather than from the caller's mapping, and so a log can hold the written sector
+ * beside the read one (`st_read_block`). 128 words are written, in order, each after its own
+ * `SPACE_AVAILABLE` poll bounded by the same 1.25 s budget the read's data loop uses.
+ *
+ * **NO NEW REGISTER CLASS.** Every address here is one `st_read_single_block` already reads or writes
+ * (`PRESENT_STATE`, `INT_STATUS`, `INT_ENABLE`, `TIMEOUT_CONTROL`, `BLOCK_SIZE`, `BLOCK_COUNT`,
+ * `TRANSFER_MODE`, `ARGUMENT`, `COMMAND`, `SOFTWARE_RESET`, `BUFFER`), and the only store the read
+ * body does not make is the one to `SDHCI_BUFFER 0x20` - the medium's own data port, which is the
+ * point of the rung.
+ *
+ * **THE PRECONDITION IS THE CARD'S OWN R1**, read from `RESPONSE 0x10` exactly as the read's is: the
+ * card must be in TRAN (`CURRENT_STATE == 4`) before a block is written, because a write to a card
+ * that is not in TRAN is a write the card will refuse or, worse, misplace.
+ *
+ * Returns `st_write_block` so the door's caller can read back what was put on the wire.
+ */
+static const uint32_t *
+st_write_single_block(uint32_t lba)
+{
+    struct st_cmd_result c24;
+    uint32_t pre, ps, i, gated, data_timeout, steps, was, count, count_max, step0, target_us, clks, tacc, m, e, word;
+    uint32_t prog_ticks, prog_ps, prog_polls;
+
+    ST_LIVE("xnu_live_storage_wr_calls", 1u);
+    ST_LIVE("xnu_live_storage_wr_lba", lba);
+
+    /* --- the precondition: the card's own R1, re-read from RESPONSE + 0, the same gate the read uses - */
+    pre = st_read32(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE);
+    ST_LIVE("xnu_live_storage_wr_gate_state", (pre & 0x00001E00u) >> 9);
+    if (((pre & 0x00001E00u) >> 9) != 4u) {
+        ST_LIVE("xnu_live_storage_wr_gated", 1u);
+        ST_LIVE("xnu_live_storage_wr_done", 0u);
+        return st_write_block;
+    }
+    ST_LIVE("xnu_live_storage_wr_gated", 0u);
+
+    /* --- the window opens, exactly as the read's does: the caller's enable PLUS the PIO pair ------- */
+    word = ST_SDHCI_INT_PIO_IRQS | (uint32_t)ST_SDHCI_INT_ENABLE_CMD;
+    word &= ~((uint32_t)ST_SDHCI_INT_DMA_END | (uint32_t)ST_SDHCI_INT_ADMA_ERROR);
+    ST_LIVE("xnu_live_storage_wr_ena_wrote", word);
+    st_write32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE, word);
+    ST_LIVE("xnu_live_storage_wr_ena_held", st_read32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE));
+
+    /* --- TIMEOUT_CONTROL, recomputed from the CSD the ladder carried, the read's own arithmetic ----- */
+    tacc = 0u;
+    clks = 0u;
+    count_max = 0xFu;
+    if (st_csd_words_valid != 0u) {
+        m = (st_csd_words[0] >> 16) & 0xFu;
+        e = (st_csd_words[0] >> 8) & 0x7u;
+        tacc = (st_tacc_exp[e] * st_tacc_mant[m] + 9u) / 10u;
+        clks = ((st_csd_words[0] >> 8) & 0xFFu) * 100u;
+    }
+    target_us = (tacc * (uint32_t)ST_EXT_MMC_MULT + clks + 999u) / 1000u;
+    step0 = (uint32_t)ST_SDHCI_TOUT_STEP0_NUMER /
+            ((uint32_t)ST_SET_INIT_CLOCK / (uint32_t)ST_SDHCI_TOUT_BASE_DIVISOR);
+    count = 0u;
+    while (step0 < target_us) {
+        count++;
+        step0 <<= 1;
+        if (count >= 0xFu)
+            break;
+    }
+    if (count >= 0xFu)
+        count = count_max;
+    ST_LIVE("xnu_live_storage_wr_tout_count", count);
+    was = (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_TIMEOUT_CONTROL);
+    st_write8(ST_HC_MEM_BASE + ST_SDHCI_TIMEOUT_CONTROL, (uint8_t)count);
+    ST_LIVE("xnu_live_storage_wr_tout_held",
+            (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_TIMEOUT_CONTROL));
+
+    /* --- BLOCK_SIZE, BLOCK_COUNT, TRANSFER_MODE (the write's mode: the read bit is CLEARED) -------- */
+    st_write16(ST_HC_MEM_BASE + ST_SDHCI_BLOCK_SIZE, (uint16_t)ST_SDHCI_BLOCK_SIZE_512);
+    st_write16(ST_HC_MEM_BASE + ST_SDHCI_BLOCK_COUNT, 1u);
+    ST_LIVE("xnu_live_storage_wr_blkcnt_held",
+            (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_BLOCK_COUNT));
+    ST_LIVE("xnu_live_storage_wr_trns", (uint32_t)ST_SDHCI_TRNS_WRITE_1BLK);
+    st_write16(ST_HC_MEM_BASE + ST_SDHCI_TRANSFER_MODE, (uint16_t)ST_SDHCI_TRNS_WRITE_1BLK);
+    ST_LIVE("xnu_live_storage_wr_trns_held",
+            (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_TRANSFER_MODE));
+
+    /* --- the command: CMD24 at the caller's LBA, the same flag word the read's CMD17 carries ------- */
+    ST_LIVE("xnu_live_storage_wr_arg", lba);
+    ST_LIVE("xnu_live_storage_wr_word",
+            (uint32_t)ST_SDHCI_CMD_WORD_DATA(ST_CMD_OP_WRITE_BLOCK, ST_MMC_RSP_R1_ADTC));
+    st_send_command(ST_CMD_OP_WRITE_BLOCK, lba, ST_MMC_RSP_R1_ADTC, &c24);
+    ST_LIVE("xnu_live_storage_wr_complete", c24.complete);
+    ST_LIVE("xnu_live_storage_wr_err", c24.err);
+    ST_LIVE("xnu_live_storage_wr_status_after", c24.status_after);
+    ST_LIVE("xnu_live_storage_wr_word_read", c24.word_read);
+
+    /* --- the PIO write: 128 words, each gated on SPACE_AVAILABLE, bounded ------------------------- */
+    gated = 0u;
+    data_timeout = 0u;
+    {
+        uint32_t t0_data = (uint32_t)stage90_cntvct_read();
+        for (i = 0u; i < (uint32_t)ST_EXT_CSD_WORDS; i++) {
+            steps = 0u;
+            for (;;) {
+                ps = st_read32(ST_HC_MEM_BASE + ST_SDHCI_PRESENT_STATE);
+                if ((ps & (uint32_t)ST_SDHCI_SPACE_AVAILABLE) != 0u)
+                    break;
+                if (++steps >= ST_EXT_DATA_INNER) {
+                    steps = 0u;
+                    if ((uint32_t)stage90_cntvct_read() - t0_data >= (uint32_t)ST_EXT_DATA_TICK_BUDGET) {
+                        data_timeout = 1u;
+                        break;
+                    }
+                }
+            }
+            if (data_timeout != 0u)
+                break;
+            st_write32(ST_HC_MEM_BASE + ST_SDHCI_BUFFER, st_write_block[i]);
+            gated++;
+        }
+    }
+    ST_LIVE("xnu_live_storage_wr_words_gated", gated);
+    ST_LIVE("xnu_live_storage_wr_data_wait_timeout", data_timeout);
+    ST_LIVE("xnu_live_storage_wr_int_status_end",
+            st_read32(ST_HC_MEM_BASE + ST_SDHCI_INT_STATUS));
+
+    /*
+     * **THE PROGRAMMING WAIT: THE WRITE IS NOT DONE WHEN THE LAST FIFO WORD LEAVES.** The 905 press
+     * (arm `armed-storage-bb2269bf`) proved this the only way it can be proved: every read but ONE of
+     * the 62-read boot was byte-identical to rung 904's, and the one that differed was **the first
+     * command after this body's single CMD24** - the launchd page at LBA `0x400110`, which came back
+     * `rd_complete = 0`, `rd_err = 0x00010000` (CMD TIMEOUT), `rd_status_after = 0x18000`, and data
+     * `0xffffffff` where 904 read `0xfeedface`. **The medium was intact** (`adb dd` read `feedface` at
+     * byte `0x22000`), so the fault is not a corrupted block: the card was still programming the block
+     * this body wrote, held DAT0 busy, and refused the next command. Reads LBA+1..LBA+7 - issued after
+     * the programming had finished - succeeded, which is the number that names the cause. The read
+     * half never met this because a read has no program cycle; a write does, and it is this body's
+     * whole new obligation.
+     *
+     * The wait is on **the card's own busy state read from the host**: `DOING_WRITE` (PRESENT_STATE
+     * bit 8) AND `DAT_LINE_ACTIVE` (bit 2). Both must clear - `DOING_WRITE` is the block's own "a write
+     * is in flight" statement, and `DAT_LINE_ACTIVE` the held line; the 905 first-arm press measured
+     * **both still set at the next command's entry** (`_dr_ps_before = 0x01e80106`). Waiting on
+     * `DAT_LINE_ACTIVE` alone would be racy, because the line can read clear in the instant after the
+     * last FIFO word is written while the card has not yet asserted its program-busy. It is bounded by
+     * the vendor's own data bound (1.25 s, `ST_EXT_DATA_TICK_BUDGET`) so a card that never releases
+     * cannot hang the boot, and it is published (`_wr_prog_polls`, `_wr_prog_ticks`, `_wr_prog_ps_end`,
+     * `_wr_prog_timeout`) so the press reads whether the wait was needed and what state it ended in.
+     */
+    prog_polls = 0u;
+    prog_ps = 0u;
+    {
+        uint32_t t0_prog = (uint32_t)stage90_cntvct_read();
+        for (;;) {
+            prog_ps = st_read32(ST_HC_MEM_BASE + ST_SDHCI_PRESENT_STATE);
+            prog_polls++;
+            if ((prog_ps & (uint32_t)(ST_SDHCI_DOING_WRITE | ST_SDHCI_DAT_LINE_ACTIVE)) == 0u)
+                break;
+            if ((uint32_t)stage90_cntvct_read() - t0_prog >= (uint32_t)ST_EXT_DATA_TICK_BUDGET)
+                break;
+        }
+        prog_ticks = (uint32_t)stage90_cntvct_read() - t0_prog;
+    }
+    ST_LIVE("xnu_live_storage_wr_prog_polls", prog_polls);
+    ST_LIVE("xnu_live_storage_wr_prog_ticks", prog_ticks);
+    ST_LIVE("xnu_live_storage_wr_prog_ps_end", prog_ps);
+    ST_LIVE("xnu_live_storage_wr_prog_timeout",
+            (prog_ps & (uint32_t)(ST_SDHCI_DOING_WRITE | ST_SDHCI_DAT_LINE_ACTIVE)) ? 1u : 0u);
+
+    /* --- the window's exit, the timeout restored -------------------------------------------------- */
+    st_write32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE, 0u);
+    st_write8(ST_HC_MEM_BASE + ST_SDHCI_TIMEOUT_CONTROL, (uint8_t)was);
+    ST_LIVE("xnu_live_storage_wr_done", 1u);
+    return st_write_block;
+}
+
+/* the write door, the mirror of `entry_storage_driver_read`: copy the caller's block in, issue CMD24,
+ * return the block that was written so the caller can read back what reached the port */
+const uint32_t *
+entry_storage_driver_write(uint32_t lba, const uint32_t *w)
+{
+    uint32_t k;
+    ST_LIVE("xnu_live_storage_drvw_calls", 1u);
+    ST_LIVE("xnu_live_storage_drvw_lba", lba);
+    for (k = 0u; k < (uint32_t)ST_EXT_CSD_WORDS; k++)
+        st_write_block[k] = w[k];
+    st_data_reset();
+    (void)st_write_single_block(lba);
+    ST_LIVE("xnu_live_storage_drvw_w0", st_write_block[0]);
+    ST_LIVE("xnu_live_storage_drvw_held", 1u);
+    return st_write_block;
+}
+#endif /* STAGE90_XNU_HDD_WRITE - the ladder's one write, and the door the card unit's strategy calls */
 
 #if STAGE90_XNU_STORAGE_PROBE >= 48
 /*

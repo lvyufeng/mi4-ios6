@@ -532,6 +532,16 @@ DEFINES=(
 # unaffected.
 [[ ${STAGE90_XNU_HFS_MARKERS:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_HFS_MOUNT_MARKERS=1)
 
+# **905 B2's read-write root.** The stager (`tools/hfs_patch_root_rw.py`) inserts a guarded
+# `vfs_clearflags(mp, MNT_RDONLY)` immediately before `hfs_mountroot`'s `hfs_mountfs` call, so the
+# root mount is not read-only and the card unit's write path is reachable.  The guard
+# `STAGE90_HFS_ROOT_RW` is DEFINED for the whole build exactly when the port is on AND the arm asks
+# for it, so `hfs_vfsops.c` (a bsd/hfs file compiled by this build) sees the switch the port files do.
+# Off by default: a normal port build compiles the `#if` false and the object is byte-for-byte the
+# port-off one.  It is added to the array rather than to `EXTRA_DEFINES` because it is a property of
+# this configuration's pool, like `STAGE90_HFS_ROOT` above.
+[[ ${HFS_PORT:-0} -eq 1 && ${STAGE90_XNU_HFS_ROOT_RW:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_HFS_ROOT_RW=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.

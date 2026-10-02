@@ -853,6 +853,26 @@
     .equ READ_BYTES,             4      /* one word: enough for the wrapper to publish the word the
                                          * driver copied, and no more than the page it lands in. The
                                          * check states both bounds rather than this number. */
+    .equ SYS_WRITE,              4      /* `4 AUE_NULL ALL { user_ssize_t write(int fd, user_addr_t
+                                         * cbuf, user_size_t nbyte); }` - `munge_www` like `read`'s,
+                                         * and the one call in this program that *changes the device*.
+                                         * It returns 64-bit (writing r1 as well as r0), like `read`. */
+    .equ OPEN_CREATE_WRITE,      0x201  /* `O_CREAT` (0x0200) | `O_WRONLY` (0x0001) in
+                                         * `bsd/sys/fcntl.h` - a NEW file, and the mode below is read
+                                         * only because O_CREAT is set. This is the flag word whose
+                                         * absence above (`OPEN_RDONLY`, 0) is the read half. (905's
+                                         * first value here was 0x601, which is O_CREAT|O_TRUNC|
+                                         * O_WRONLY - the check, reading the flags out of `fcntl.h`
+                                         * instead of trusting this comment, refused it: the `O_TRUNC`
+                                         * bit is not what the line above says and is meaningless for a
+                                         * file the same call creates.) */
+    .equ OPEN_MODE_0644,         0644   /* `S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH`: the mode `open` masks
+                                         * when O_CREAT makes a file. Any mode is legal here; the
+                                         * number is spelled the way the header spells it. */
+    .equ WRITE_BYTES,            4      /* one word, the page's own first word (the address `mmap`
+                                         * returned, written there at +68) - so the bytes HFS stores
+                                         * are this fixture's own, and a read-back proves the round
+                                         * trip rather than only that a write returned. */
     .equ SYS_FORK,               2      /* `2 AUE_FORK ALL { int fork(void) NO_SYSCALL_STUB; }` - and
                                          * the *empty* prototype is the argument the step rests on:
                                          * `sysent[2].sy_narg` is 0 and its munger word is NULL
@@ -1216,7 +1236,28 @@ entry_parent:
     mov     r3, #0                      /* +272 */
     mov     r12, #SYS_WAIT4             /* +276 */
     svc     #0x80                       /* +280: ECHILD, and the wrapper records that it was */
-    b       park                        /* +284: deliberately not a `bne entry_failed` */
+
+/* 905: the ask that makes the mount *write*. Every call above only read - `open`/`read`/`wait4` all
+ * take from the kernel - and a read-only mount would satisfy all of them. This is the one call in the
+ * program that changes the device: `open("/newfile", O_CREAT|O_WRONLY, 0644)` asks HFS to allocate a
+ * catalog entry and a file cnid, and `write` of the page's own first word (`mmap`'s address, written
+ * there at +68) gives the new file four bytes. Every one of those steps reaches the block device
+ * through `st_media_strategy`'s B_WRITE branch -> `entry_storage_driver_write` (CMD24) at the root's
+ * LBA 0x400000+, so a successful return is the ladder's first write to the device's own storage and
+ * the mount's first proof that it is read-write. None of it is branched on, for 503's reason: this
+ * program is `initproc`, and an `open` a read-write mount should satisfy, failing, is a fact about
+ * the filesystem to record rather than to `udf #1` on and end the boot 478's way. The wrapper records
+ * the open and the write's returns; the string below carries the name. */
+    adr     r0, path_new                /* +284: path = "/newfile", in this segment's own bytes */
+    movw    r1, #OPEN_CREATE_WRITE      /* +288: flags = O_CREAT|O_WRONLY, so a new file is made */
+    movw    r2, #OPEN_MODE_0644         /* +292: mode, read only because O_CREAT is set */
+    mov     r12, #SYS_OPEN              /* +296 */
+    svc     #0x80                       /* +300: HFS allocates the catalog entry and a cnid here */
+    mov     r1, r9                      /* +304: cbuf = the page, whose first word +68 wrote */
+    movw    r2, #WRITE_BYTES            /* +308: nbyte = 4 - one word, the page's own address */
+    mov     r12, #SYS_WRITE             /* +312 */
+    svc     #0x80                       /* +316: the write the mount's read-write state rests on */
+    b       park                        /* +320: deliberately not a `bne entry_failed` */
 
 /* **512: the process's last act is to stop asking and start waiting.** 479's loop called `getpid` and
  * branched on the answer, which is what made this process's liveness a *record* - and it is also why
@@ -1243,15 +1284,15 @@ entry_parent:
  * run's `xnu_live_poll_ticks` are the deadlines that really expired). A park that could not be woken
  * would be the same hang by another route, and the reading that it is not is the run's. */
 park:
-    mov     r0, #0                      /* +288: fds = NULL - no descriptor is waited on */
-    mov     r1, #0                      /* +292: nfds = 0 */
-    movw    r2, #PARK_MS                /* +296: so the timeout is the whole of the call */
-    mov     r12, #SYS_POLL              /* +300 */
-    svc     #0x80                       /* +304: the thread parks here and the CPU goes idle */
-    b       park                        /* +308: and if the timeout ever expires, park again */
+    mov     r0, #0                      /* +324: fds = NULL - no descriptor is waited on */
+    mov     r1, #0                      /* +328: nfds = 0 */
+    movw    r2, #PARK_MS                /* +332: so the timeout is the whole of the call */
+    mov     r12, #SYS_POLL              /* +336 */
+    svc     #0x80                       /* +340: the thread parks here and the CPU goes idle */
+    b       park                        /* +344: and if the timeout ever expires, park again */
 
 entry_failed:
-    udf     #1                          /* +312: the kernel answered something else */
+    udf     #1                          /* +348: the kernel answered something else */
 entry_code_end:
 
 /* The two paths, as *file* bytes inside `__TEXT`'s file range - so the mapping that carries the
@@ -1271,6 +1312,9 @@ path_rmd0:
     .zero 2
 path_missing:
     .asciz "/dev/nosuch"
+    .zero 2
+path_new:
+    .asciz "/newfile"
 paths_end:
 
     .equ sizeofcmds_value, (load_commands_end - g_stage90_ramdisk) - 28
@@ -1315,8 +1359,8 @@ paths_end:
  * 6 of 512's park with the `udf` behind it. **The count moves with the fixture and the tool's
  * `PROGRAM_WORDS` is the same number**: a change here that the tool did not follow would leave the
  * last word of the program unchecked. */
-    .if (entry_code_end - entry_code) != 316
-    .error "the program is not the seventy-nine instructions the header describes"
+    .if (entry_code_end - entry_code) != 352
+    .error "the program is not the eighty-eight instructions the header describes"
     .endif
 
 /* The rest of the segment is zeros, and they are *file* bytes rather than a `.bss` tail: the whole

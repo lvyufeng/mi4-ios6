@@ -360,8 +360,22 @@ unset _self _bad
 # is 0x8004c2dc`, `entry_trace.c`'s constant was re-derived there first, and this literal follows it.
 # **Both copies are `0x8004d2dc` from 853 on** - and the lesson is 822's, unchanged: the entry group's
 # size is what moves, so a rung that adds a loop is exactly the kind of rung that moves it, and the
-# pair of clauses is still what catches it rather than a run.
-EXIT_POP_LR_LITERAL=0x8004d2dc
+# pair of clauses is still what catches it rather than a run. **905's write door did NOT move it**:
+# the first build refused only because it carried `STAGE90_XNU_ISTACK_SEPARATE=1` (the script default)
+# where the arm has 0, and with the arm's own value the exit still returns to `0x8004d2dc`.
+# **905's `__wrap_write` moved it in a draft, and removing the wrapper moved it back.** The draft's
+# `__wrap_write` (in `entry_trace.c`) pushed the entry group by +0x1000 to `0x8004e2dc`, but the
+# `--wrap` audit refused that wrapper (the fixture writes via `svc`, so no `bl write` exists to
+# redirect); with the flag gone the exit returned to `0x8004d2dc` exactly. Rung B's real bodies - the
+# ladder's `st_write_single_block` (separate TU) and the HFS rw edit (kernel port) - move nothing.
+# **THE EIGHTH MOVE (905's PROGRAMMING WAIT).** The first pressed 905 arm carried no completion wait;
+# the press proved a write handed the medium a block and returned before the card finished programming
+# it, so the very next CMD17 (the launchd page) timed out (`rd_complete=0`, `rd_err=0x00010000`). The
+# repair adds a bounded `DAT_LINE_ACTIVE` poll to `st_write_single_block` **in `entry_storage.c`, a file
+# in the entry group** - a loop, so it crossed a page and the exit moved to `0x8004e2dc`. `entry_trace.c`'s
+# constant was re-derived from that build refusal, and this literal follows it. **Both copies are
+# `0x8004e2dc`.**
+EXIT_POP_LR_LITERAL=0x8004e2dc
 exit_pop_lr_addr() {
   local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
   local start size body ret

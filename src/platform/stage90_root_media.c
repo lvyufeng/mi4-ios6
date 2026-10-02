@@ -209,6 +209,15 @@ int entry_root_media_card_arm_on(void)  { return 1; }
 int entry_root_media_card_arm_off(void) { return 0; }
 #endif
 
+/* 905: the same marker shape for the WRITE arm (the card unit serves B_WRITE with CMD24 and
+ * DKIOCISWRITABLE answers 1 for it), so `build_entry.sh` can refuse a write image whose entry side does
+ * not name this contract, and so a build with the switch off is byte-for-byte the 904 arm. */
+#if STAGE90_XNU_HDD_WRITE
+int entry_root_media_write_arm_on(void)  { return 1; }
+#else
+int entry_root_media_write_arm_off(void) { return 0; }
+#endif
+
 #if STAGE90_XNU_HFS_ROOT_MEDIA
 /* Defined by `src/entry/blob/xnu_arm_entry_root_hfs.S` (`.incbin` of the committed HFS+ volume).
  * Only declared here, and only on this arm: with the switch off the section the object carries is
@@ -383,6 +392,18 @@ static uint32_t st_medium_staged;        /* 0 until `entry_root_media_stage` has
 #define STAGE90_XNU_ROOT_FROM_CARD 0
 #endif
 
+/* **905: THE WRITE HALF.** With `STAGE90_XNU_HDD_WRITE=1` the card unit accepts `B_WRITE` and serves it
+ * with a CMD24 through the ladder's write door (`entry_storage_driver_write`); with it off, every unit
+ * refuses a write with `EROFS`, exactly as 888's arm did. The switch is checked to be 0 or 1 by
+ * `build_entry.sh` (the same discipline ROOT_FROM_CARD gets) and REQUIRES the card strategy: a write
+ * onto a unit with no ladder beneath it would be a store to a `NULL`/absent path. */
+#ifndef STAGE90_XNU_HDD_WRITE
+#define STAGE90_XNU_HDD_WRITE 0
+#endif
+#if STAGE90_XNU_HDD_WRITE && !STAGE90_XNU_EMMC_STRATEGY
+#error "STAGE90_XNU_HDD_WRITE=1 needs STAGE90_XNU_EMMC_STRATEGY=1: the write path IS the card unit's, and a unit with no ladder beneath it has no write door to call."
+#endif
+
 #if STAGE90_XNU_EMMC_STRATEGY
 /* The ladder's door and its two addressing accessors - 887's exported half, in the SAME image when
  * this switch is on (the entry image links `entry_storage.c` and this object together; see
@@ -392,6 +413,14 @@ static uint32_t st_medium_staged;        /* 0 until `entry_root_media_stage` has
 extern const uint32_t *entry_storage_driver_read(uint32_t lba);
 extern uint32_t        entry_storage_selected_lba(void);
 extern uint32_t        entry_storage_selected_count(void);
+#if STAGE90_XNU_HDD_WRITE
+/* **905: the mirror door.** `entry_storage_driver_write(lba, w)` hands 128 words (one 512-byte block)
+ * to the card by CMD24; it returns the ladder's own `st_write_block` so the caller can read back what
+ * the command left. It is declared in the SAME block as the read door, for the same reason: the two
+ * doors are one interface, and a build that resolves one and not the other is refused by the linked-
+ * image clause `xnu_entry_905` rather than silently calling a linker stub. */
+extern const uint32_t *entry_storage_driver_write(uint32_t lba, const uint32_t *w);
+#endif
 /* Defined beside `entry_root_media_stage` (which calls it), so the declaration precedes that body. */
 int entry_root_media_register_card(void);
 #endif
@@ -400,6 +429,22 @@ int entry_root_media_register_card(void);
  * are told apart by a number in the log rather than by the absence of a log line. */
 static uint32_t st_medium_served;
 static uint32_t st_medium_refused;
+/* **905's two counters.** `st_medium_write_refused` counts the `EROFS` refusals the guard above
+ * issues (with HDD_WRITE=0 that is every write; with it on, every write to a RAM-backed unit);
+ * `st_medium_write_served` counts the writes the card unit actually handed to the ladder. Together
+ * they make "the arm refused" and "the write ran" two numbers in the log rather than an absence. */
+static uint32_t st_medium_write_refused;
+static uint32_t st_medium_write_served;
+#if STAGE90_XNU_HDD_WRITE
+/* **905: the one 512-byte staging buffer the write branch hands to the ladder.** The ladder's write
+ * door takes a `const uint32_t *` of exactly one block (128 words, its own `ST_EXT_CSD_WORDS`); this
+ * file does not include the ladder's header (see the extern block), so the word count is spelled HERE
+ * and the linked-image clause `xnu_entry_905` is what keeps the two in agreement - a staging array
+ * whose length did not match the door's would move fewer bytes than the block the caller named, and
+ * the mount would read back a partly-stale block and call it written. */
+#define ST_LADDER_WRITE_WORDS  128u                      /* 512 / 4 */
+static uint32_t st_write_stage[ST_LADDER_WRITE_WORDS];
+#endif
 
 static unsigned
 st_media_bytes(void)
@@ -626,10 +671,25 @@ st_media_strategy(struct buf *bp)
         return;
     }
 #endif
-    if ((buf_flags(bp) & B_READ) == 0) {          /* neither medium is this image's to write */
-        buf_seterror(bp, EROFS);
-        buf_biodone(bp);
-        return;
+    /* **905: THE WRITE REFUSAL IS NOW PER-UNIT.** 888's arm refused every `B_WRITE` with `EROFS`,
+     * because no unit was this image's to write. This rung makes the CARD unit (ST_MEDIA_DRIVER)
+     * writable and leaves the two RAM-backed units refusing exactly as before - so the guard tests the
+     * UNIT and not merely the direction. With `STAGE90_XNU_HDD_WRITE=0` the condition folds to the old
+     * one at compile time (`unit == ST_MEDIA_DRIVER` is still true, so a write to the card is refused
+     * too), and nothing about the shipped 903/904 arm moves. `st_medium_write_refused` counts the
+     * refusals so the log can tell "the arm refused" from "no write was attempted at all". */
+    if ((buf_flags(bp) & B_READ) == 0) {
+#if STAGE90_XNU_HDD_WRITE
+        if (unit != ST_MEDIA_DRIVER) {
+#endif
+            st_medium_write_refused++;
+            entry_live_write("xnu_live_rootmedia_write_refused", st_medium_write_refused);
+            buf_seterror(bp, EROFS);
+            buf_biodone(bp);
+            return;
+#if STAGE90_XNU_HDD_WRITE
+        }
+#endif
     }
 
     off = (uint64_t)(uint32_t)buf_blkno(bp) * ST_MEDIA_BLOCKSIZE;   /* mdSecsize's product */
@@ -681,6 +741,49 @@ st_media_strategy(struct buf *bp)
             return;
         }
         nblk = count / ST_MEDIA_BLOCKSIZE;              /* whole blocks in the (already trimmed) count */
+#if STAGE90_XNU_HDD_WRITE
+        /*
+         * **905: THE SAME LOOP, THE OTHER DIRECTION, AND THAT IS THE WHOLE OF THE WRITE BRANCH.**
+         * The read branch above fetches each LBA through `entry_storage_driver_read` and copies OUT of
+         * the ladder's buffer; this one copies the caller's map INTO a local block and hands it to
+         * `entry_storage_driver_write`, which issues CMD24 at the same LBA the read branch would have
+         * issued CMD17 at. **The destination LBA arithmetic is IDENTICAL - `selected_lba + blkno + i`
+         * - and that is not a coincidence to be trusted but a property to be read**: a write that
+         * landed at an LBA the read would not ask for is the one failure of this rung that a mount
+         * would not surface, because HFS+ would then read back its own stale bytes and call them
+         * clean. `st_media_ioctl`'s `DKIOCISWRITABLE` already answered 1 for this unit (943), which is
+         * the byte the mount reads to choose rw; with `HDD_WRITE=0` this arm is not compiled and the
+         * `EROFS` guard above refuses the write instead, so the two answers cannot disagree.
+         *
+         * **ONE LOCAL BUFFER, 128 words, refilled and handed over per block** - the ladder's write door
+         * returns ITS OWN buffer (`st_write_block`), so the caller's map must not be handed in directly
+         * (it is not necessarily 4-byte-aligned across the whole count, and the door writes words out
+         * one at a time). The copy is one 512-byte block, the same size the read branch copies.
+         */
+        if ((buf_flags(bp) & B_READ) == 0) {
+            for (i = 0u; i < nblk; i++) {
+                uint32_t lba = (uint32_t)((uint64_t)entry_storage_selected_lba()
+                                          + (off / ST_MEDIA_BLOCKSIZE) + i);
+                uint32_t j;
+                for (j = 0u; j < (uint32_t)ST_LADDER_WRITE_WORDS; j++)
+                    st_write_stage[j] = ((const uint32_t *)(void *)vaddr)[i * (uint32_t)ST_LADDER_WRITE_WORDS + j];
+                (void)entry_storage_driver_write(lba, st_write_stage);
+            }
+            buf_unmap(bp);
+            buf_setresid(bp, (uint32_t)buf_count(bp) - count);
+            buf_biodone(bp);
+            entry_live_write("xnu_live_rootmedia_card_wr_blocks", nblk);
+            entry_live_write("xnu_live_rootmedia_card_wr_first_lba",
+                             (uint32_t)((uint64_t)entry_storage_selected_lba()
+                                        + (off / ST_MEDIA_BLOCKSIZE)));
+            entry_live_write("xnu_live_rootmedia_card_wr_last_lba",
+                             (uint32_t)((uint64_t)entry_storage_selected_lba()
+                                        + (off / ST_MEDIA_BLOCKSIZE) + ((nblk != 0u) ? (nblk - 1u) : 0u)));
+            st_medium_write_served++;
+            entry_live_write("xnu_live_rootmedia_write_served", st_medium_write_served);
+            return;
+        }
+#endif
         for (i = 0u; i < nblk; i++) {
             uint32_t lba = (uint32_t)((uint64_t)entry_storage_selected_lba()
                                       + (off / ST_MEDIA_BLOCKSIZE) + i);
@@ -901,7 +1004,22 @@ st_media_ioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
         *(uint64_t *)data = st_media_blockcount[unit];
         break;
     case DKIOCISWRITABLE:
-        *(uint32_t *)data = 1u;
+        /* **905: the answer is now CONSISTENT with what the strategy will do.** Before this rung
+         * `DKIOCISWRITABLE` returned 1 for EVERY unit while `st_media_strategy` refused every `B_WRITE`
+         * with `EROFS` - a byte that promised a write the body would decline, and the one place a mount
+         * could have concluded rw on a unit that would then fail. Under `HDD_WRITE=1` the card unit
+         * (ST_MEDIA_DRIVER) IS writable, so 1 is honest for it, and the two RAM-backed units answer 0
+         * because their write is still refused. With the switch off every unit answers 0 and the old
+         * unconditional 1 is replaced by an answer the strategy agrees with.
+         *
+         * **THE PAIR IS THE CLAIM, AND IT IS CHECKED BY THE BUILD, NOT BY THIS COMMENT**: `xnu_entry_905`
+         * refuses an image in which `st_media_strategy` carries a write branch while this byte still
+         * answers 0 for the card, or vice versa - `mi4-a-claim-in-a-comment-is-not-a-check`. */
+#if STAGE90_XNU_HDD_WRITE
+        *(uint32_t *)data = (unit == ST_MEDIA_DRIVER) ? 1u : 0u;
+#else
+        *(uint32_t *)data = 0u;
+#endif
         break;
     default:
         return ENOTTY;

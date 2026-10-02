@@ -192,9 +192,29 @@ if [[ -f $MARKERS ]]; then
         || refuse "tools/stage_hfs.sh no longer applies the 899 mount-path markers"
 fi
 
+# --- 4d. the read-write root clear (905 B2) is present, guarded, and the stager applies it ----------
+# 905 adds a FIFTH tracked edit to the untracked tree: a guarded `vfs_clearflags(mp, MNT_RDONLY)` before
+# `hfs_mountroot`'s `hfs_mountfs` call, applied by `tools/hfs_patch_root_rw.py` and guarded by
+# `STAGE90_HFS_ROOT_RW` so it is inert unless a read-write-root build asks for it.  The root mount is
+# read-only by construction (`vfs_subr.c` hard-codes MNT_RDONLY | MNT_ROOTFS), so a re-provision that
+# drops the clear leaves the write path built but unreachable - the arm's whole claim, silently gone.
+# The guard is what keeps it inert in a normal build; an unguarded clear would flip EVERY port build to
+# read-write root.
+RW=$REPO_ROOT/tools/hfs_patch_root_rw.py
+if [[ -f $RW && -f $XNU/bsd/hfs/hfs_vfsops.c ]]; then
+    grep -q "STAGE90_HFS_ROOT_RW" "$XNU/bsd/hfs/hfs_vfsops.c" \
+        || refuse "bsd/hfs/hfs_vfsops.c carries no STAGE90_HFS_ROOT_RW clear (run tools/stage_hfs.sh)"
+    grep -q "#if STAGE90_HFS_ROOT_RW" "$XNU/bsd/hfs/hfs_vfsops.c" \
+        || refuse "bsd/hfs/hfs_vfsops.c carries the read-write clear but no STAGE90_HFS_ROOT_RW guard"
+    grep -q "vfs_clearflags(mp, (u_int64_t)MNT_RDONLY)" "$XNU/bsd/hfs/hfs_vfsops.c" \
+        || refuse "bsd/hfs/hfs_vfsops.c's STAGE90_HFS_ROOT_RW block carries no vfs_clearflags(mp, MNT_RDONLY)"
+    grep -q "hfs_patch_root_rw.py" "$REPO_ROOT/tools/stage_hfs.sh" \
+        || refuse "tools/stage_hfs.sh no longer applies the 905 read-write root clear"
+fi
+
 if (( fail )); then
     printf 'check_hfs_staged: FAIL - the HFS+ port'\''s tracked artifacts drifted from what they claim\n' >&2
     exit 1
 fi
-printf 'check_hfs_staged: ok - %d shim symbol(s) present; force-header additions do not collide with 4570; 874 root row guarded and before mockfs; 902 vnode-op descriptors in vfs_opv_descs; 899 mount markers present and guarded\n' \
+printf 'check_hfs_staged: ok - %d shim symbol(s) present; force-header additions do not collide with 4570; 874 root row guarded and before mockfs; 902 vnode-op descriptors in vfs_opv_descs; 899 mount markers present and guarded; 905 read-write root clear guarded\n' \
     "$(printf '%s\n' $WANT | grep -c .)"

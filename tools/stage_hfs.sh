@@ -68,6 +68,14 @@ say "stage_hfs: applying the vfs_conf.c HFS root row"
 say "stage_hfs: applying the HFS+ mount-path live step markers"
 "$HERE/hfs_patch_mount_markers.py" "$DST"
 
+# --- 4c. the read-write root clear (905 B2) ------------------------------------------------------
+# Like the row and the markers above: a tracked patch to the untracked tree, guarded by
+# `STAGE90_HFS_ROOT_RW` so it is inert unless a build asks for the read-write root.  The root mount is
+# read-only by construction (`vfs_subr.c` hard-codes MNT_RDONLY | MNT_ROOTFS); this clears it in the
+# one place before `hfs_mountfs` latches HFS_READ_ONLY, so the card unit's write path is reachable.
+say "stage_hfs: applying the HFS+ read-write root clear"
+"$HERE/hfs_patch_root_rw.py" "$DST"
+
 N=$(find "$DST/bsd/hfs" -name '*.c' | wc -l)
 say "stage_hfs: staged $N .c file(s) under $DST/bsd/hfs (plus vfs_journal.c, spl.h, the root row)"
 # --- 5. the record, for the one gate that cannot see the enumerated files -------------------------

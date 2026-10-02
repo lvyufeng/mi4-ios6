@@ -722,6 +722,32 @@ if [[ $ROOT_FROM_CARD -eq 1 && $EMMC_STRATEGY -ne 1 ]]; then
     echo "          no device answers. Build both together." >&2
     exit 1
 fi
+# **905: the write-through arm.** With `STAGE90_XNU_HDD_WRITE=1` the card unit's `st_media_strategy`
+# serves `B_WRITE` with CMD24 (through the ladder's new `entry_storage_driver_write`) and
+# `DKIOCISWRITABLE` answers 1 for that unit; the ladder grows `st_write_single_block` and the write door.
+# It REQUIRES the card unit (there is no writable medium without it) and the card-root arm it modifies, so
+# this build refuses the impossible combinations rather than shipping an arm whose write path has no
+# strategy to call it or whose root device nobody named.
+HDD_WRITE=${STAGE90_XNU_HDD_WRITE:-0}
+case "$HDD_WRITE" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_HDD_WRITE='$HDD_WRITE' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $HDD_WRITE -eq 1 && $EMMC_STRATEGY -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_HDD_WRITE=1 needs STAGE90_XNU_EMMC_STRATEGY=1." >&2
+    echo "          The write path IS the card unit's: without the unit there is no strategy to serve" >&2
+    echo "          a B_WRITE and no medium for the ladder to write to. Build both together." >&2
+    exit 1
+fi
+if [[ $HDD_WRITE -eq 1 && $ROOT_FROM_CARD -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_HDD_WRITE=1 needs STAGE90_XNU_ROOT_FROM_CARD=1." >&2
+    echo "          The write rung makes the MOUNTED root writable - the HFS+ root off the card - so it" >&2
+    echo "          is only meaningful when the card IS the root. Without the card-root arm the mounted" >&2
+    echo "          root is the RAM blob and a write to the card would be a write to a device nothing" >&2
+    echo "          mounts. Build the card-root arm first." >&2
+    exit 1
+fi
 # **The allowed rungs are the LADDER'S OWN BOUND, read out of the source it guards - not a list here.**
 # Until 732 this was a hand-typed `case` naming `0` through `13`, and raising the ladder to 14 in
 # `entry_storage.c` therefore did not raise it here: the two readings of one quantity disagreed, and the
@@ -897,6 +923,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_HFS_ROOT_MEDIA
                 STAGE90_XNU_EMMC_STRATEGY
                 STAGE90_XNU_ROOT_FROM_CARD
+                STAGE90_XNU_HDD_WRITE
                 STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_XNU_IDLE_NO_SLEEP)
 #
@@ -997,6 +1024,7 @@ do
         STAGE90_XNU_HFS_ROOT_MEDIA)   _v=$HFS_ROOT_MEDIA ;;
         STAGE90_XNU_EMMC_STRATEGY)    _v=$EMMC_STRATEGY ;;
         STAGE90_XNU_ROOT_FROM_CARD)   _v=$ROOT_FROM_CARD ;;
+        STAGE90_XNU_HDD_WRITE)        _v=$HDD_WRITE ;;
         STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
@@ -1195,6 +1223,7 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
     -DSTAGE90_XNU_STORAGE_PROBE="$STORAGE_PROBE" \
     -DSTAGE90_XNU_PWR_WAIT_TICKS="$PWR_WAIT_TICKS" \
+    -DSTAGE90_XNU_HDD_WRITE="$HDD_WRITE" \
     -c "$BOOT_DIR/entry_storage.c" -o "$OUT/xnu_arm_entry_storage.o"
 # **AND THE SAME LINE AGAIN AS A SYNTAX-ONLY PASS.** `-Werror` above only refuses what the COMPILER
 # objects to; the ladder's own encoded invariants - the eighteen `_Static_assert`s that hold CMD8's two
@@ -1207,6 +1236,7 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
     -DSTAGE90_XNU_STORAGE_PROBE="$STORAGE_PROBE" \
     -DSTAGE90_XNU_PWR_WAIT_TICKS="$PWR_WAIT_TICKS" \
+    -DSTAGE90_XNU_HDD_WRITE="$HDD_WRITE" \
     -fsyntax-only "$BOOT_DIR/entry_storage.c"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
@@ -27293,6 +27323,40 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     else
         say "  xnu_entry_903: the root-media module and this build agree about the card-ROOT arm (STAGE90_XNU_ROOT_FROM_CARD=$cardroot_arm); the root device is disk 0 (the RAM blob), as in 902"
     fi
+    # **905: the WRITE arm, the same `nm` shape.** The module defines exactly one of
+    # `entry_root_media_write_arm_on` / `..._off`, so the OBJECT says whether its strategy serves
+    # `B_WRITE` with CMD24 and `DKIOCISWRITABLE` answers 1 for the card unit. A build whose record says
+    # HDD_WRITE=1 while the module compiled the arm OFF would promise a writable root over a strategy
+    # that still refuses every write with EROFS - the pair this rung exists to keep from disagreeing.
+    if arm-none-eabi-nm "$STAGE90_ROOT_MEDIA_OBJ" 2>/dev/null | grep -q 'T entry_root_media_write_arm_on'; then
+        write_arm=1
+    elif arm-none-eabi-nm "$STAGE90_ROOT_MEDIA_OBJ" 2>/dev/null | grep -q 'T entry_root_media_write_arm_off'; then
+        write_arm=0
+    else
+        say "REFUSING: $STAGE90_ROOT_MEDIA_OBJ carries neither entry_root_media_write_arm_on nor" >&2
+        say "          entry_root_media_write_arm_off, so this build cannot tell whether the module" >&2
+        say "          was compiled for the write arm. The module defines exactly one of the two" >&2
+        say "          unconditionally; their absence means the object predates 905. Rebuild it:" >&2
+        say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+        say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_HDD_WRITE=$HDD_WRITE' \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    fi
+    if [[ $write_arm != "$HDD_WRITE" ]]; then
+        say "REFUSING: the platform block compiled stage90_root_media.c with STAGE90_XNU_HDD_WRITE=" >&2
+        say "          '$write_arm' and this build's STAGE90_XNU_HDD_WRITE is '$HDD_WRITE'." >&2
+        say "          One object, two scripts, and the switch has to reach both. Rebuild the module with" >&2
+        say "          the same value this script was given:" >&2
+        say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+        say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_HDD_WRITE=$HDD_WRITE' \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    fi
+    if [[ $HDD_WRITE -eq 1 ]]; then
+        say "  xnu_entry_905: the root-media module and this build agree about the WRITE arm (STAGE90_XNU_HDD_WRITE=$write_arm); the card unit's strategy serves B_WRITE with CMD24 and DKIOCISWRITABLE answers 1 for it, and the linked image is checked for the write door below"
+    else
+        say "  xnu_entry_905: the root-media module and this build agree about the WRITE arm (STAGE90_XNU_HDD_WRITE=$write_arm); every unit refuses a write with EROFS, as in 888"
+    fi
     # **The DOOR half of 888's check is the NEXT block's business, not this one's** - see the
     # `entry_storage_driver_read` clause the link block carries after `xnu_arm_entry.elf` exists. A
     # check placed HERE would read the PREVIOUS arm's elf (the link below has not run yet), which is
@@ -28126,6 +28190,46 @@ if [[ $ROOT_FROM_CARD -eq 1 ]]; then
         exit 1
     fi
     say "  xnu_entry_903: the card-root redirection is in the linked image - __wrap_mdevlookup (at $ml_addr) calls entry_root_media_register_card (T, 0x$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_root_media_register_card" { print $1 }')) and NOT entry_root_media_register, so the mount path's root device is the card unit"
+fi
+
+# **905: THE WRITE DOOR AND THE TWO-WAY SPLIT, READ OUT OF THE LINKED IMAGE, BOTH DIRECTIONS.**
+# (a) With HDD_WRITE=1: `entry_storage_driver_write` must be a defined (T) symbol (the write door's own
+# 862-in-888 shape), and `st_media_strategy`'s body must CALL it AND carry CMD24 (opcode 24) - a strategy
+# that still refused every write with EROFS while the record said HDD_WRITE=1 is the pair this rung keeps
+# from disagreeing, and the disassembly is read BY VALUE, bound to the anchor's base register, per
+# [[mi4-linked-code-order-is-not-source-order]].
+# (b) With HDD_WRITE=0: `entry_storage_driver_write` must be ABSENT (the ladder is byte-for-byte the
+# read-only one) - the negative clause mi4-a-lower-rungs-side-effect names, in both directions.
+if [[ $HDD_WRITE -eq 1 ]]; then
+    if ! arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_storage_driver_write" && $2 == "T" { found = 1 } END { exit(found ? 0 : 1) }'; then
+        say "FAIL: STAGE90_XNU_HDD_WRITE=1 but \`entry_storage_driver_write\` is not a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the card unit's strategy would call a linker stub that moves no byte, so a write would be acknowledged and never reach the medium. The door is built by 905's entry_storage.c change under STAGE90_XNU_HDD_WRITE; build the ladder with it. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    sm_addr=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "st_media_strategy" { print "0x" $1 }')
+    if [[ -z "$sm_addr" ]]; then
+        say "FAIL: STAGE90_XNU_HDD_WRITE=1 but st_media_strategy is not in the linked image; the card unit's strategy this arm modifies does not exist. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    sm_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$sm_addr" '
+        { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bb[n] = ($2 != "") ? 1 : 0 }
+        BEGIN { t = strtonum(a) }
+        END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+    if [[ -z "$sm_next" ]]; then
+        say "FAIL: st_media_strategy (at $sm_addr) has no size in the linked image, so this clause cannot bound its body. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    sm_body=$(arm-none-eabi-objdump -d --start-address="$sm_addr" --stop-address="$sm_next" "$OUT/xnu_arm_entry.elf")
+    if ! grep -qE 'bl.*<entry_storage_driver_write>' <<<"$sm_body"; then
+        say "FAIL: st_media_strategy (at $sm_addr) does not CALL entry_storage_driver_write, so the card unit's write branch is not in the linked body even though STAGE90_XNU_HDD_WRITE=1: the write path did not reach the strategy, and the root would mount rw over a strategy that still refuses every write. This is the one join 905 turns on. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    say "  xnu_entry_905: the write door is in the linked image - entry_storage_driver_write (T, 0x$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_storage_driver_write" { print $1 }')) is called from st_media_strategy (at $sm_addr), so the card unit's B_WRITE branch reaches the ladder"
+else
+    if arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_storage_driver_write" && $2 == "T" { found = 1 } END { exit(found ? 0 : 1) }'; then
+        say "FAIL: STAGE90_XNU_HDD_WRITE=0 but \`entry_storage_driver_write\` IS a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the read-only ladder must not carry the write door, or an image whose record says read-only is indistinguishable from one that can write the medium. The ladder-side switch did not reach this build. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    say "  xnu_entry_905: STAGE90_XNU_HDD_WRITE=0 - the linked image carries no entry_storage_driver_write, so the ladder is the read-only one and every unit refuses a write with EROFS"
 fi
 
 run arm-none-eabi-objcopy -O binary "$OUT/xnu_arm_entry.elf" "$OUT/xnu_arm_entry.bin"
@@ -36403,6 +36507,12 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # medium and a record that omitted it would describe the other experiment. Written as the RESOLVED
     # `$ROOT_FROM_CARD`, not `${STAGE90_XNU_ROOT_FROM_CARD}`, for 882's reason.
     echo "STAGE90_XNU_ROOT_FROM_CARD=$ROOT_FROM_CARD"
+    # 905: whether the card unit's strategy serves B_WRITE with CMD24 (the ladder's write door) and
+    # DKIOCISWRITABLE answers 1 for that unit. An arm key for MOUNT's reason: it is the one switch that
+    # makes the mounted root writable, and a record that omitted it would describe a read-only image
+    # whose log carried `xnu_live_rootmedia_card_wr_*` keys the read-only image cannot produce. Written
+    # as the RESOLVED `$HDD_WRITE`, not `${STAGE90_XNU_HDD_WRITE}`, for 882's reason.
+    echo "STAGE90_XNU_HDD_WRITE=$HDD_WRITE"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways

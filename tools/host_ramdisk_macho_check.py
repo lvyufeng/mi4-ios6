@@ -479,6 +479,23 @@ def park_timeout(decoded):
     return None
 
 
+def write_length(decoded):
+    """905's write byte count, or `None` when that word is not the `movw r2, #imm16` it has to be.
+
+    The fifth of this file's five *read* numbers, and the reason is the fourth's and third's: the count
+    is the fixture's own choice and its property is a *bound* - at least one word, so the file the mount
+    creates holds a number this process chose, and no more than the page the buffer is the start of, or
+    the write would run off the end of the mapping in the one process whose death panics the boot - so
+    `check_program` states the bound and this reads the value back. `None` is what makes a length in
+    another register fail the word-by-word comparison with `movw r2, #None` beside the word that is
+    really there, rather than being accepted because the number is right.
+    """
+    ins = decoded[WRITE_LEN_WORD]
+    if ins[0] == "movw" and len(ins[1]) == 3 and ins[1][0] == 2 and isinstance(ins[1][1], int):
+        return ins[1][1]
+    return None
+
+
 def park_threshold():
     """`ENTRY_PARK_MIN_MS` as the number the C wrapper really uses, read out of the wrapper's own file.
 
@@ -571,7 +588,7 @@ def sign24(word):
 # How many instructions the program at the entry point is. `entry_ramdisk.s` asserts the same length
 # in an `.if` over its own labels, so the two are a pair: a program that grew would fail to assemble
 # and a program that shrank would fail here.
-PROGRAM_WORDS = 79
+PROGRAM_WORDS = 88
 
 # Where the two `poll` calls' timeouts are, and where the two calls start. The word numbers are the
 # program's own layout - `entry_ramdisk.s`'s listing counts the same offsets - and they are named here
@@ -583,8 +600,25 @@ POLL_CALL_WORDS = (22, 27)          # the first word of each ask: `mov r0, #0`
 # word `PARK_BACK_WORD` branches to - which is the first and not the ask, because a syscall's return
 # writes r0 and a loop that did not reload it would ask with a stale argument. `PARK_MS_WORD` is the
 # timeout, and like the two asks' it is read rather than fixed: the property is that it is nonzero.
-PARK_WORD, PARK_MS_WORD, PARK_ASK_WORD, PARK_SVC_WORD, PARK_BACK_WORD = 72, 74, 75, 76, 77
-FAILED_WORD = 78                    # the `udf #1` every check in the program shares
+# 905: the write door (see `WRITE_*` below) was inserted between the second `wait4`'s `svc` and the
+# park, and it is NINE words - the `adr`, two `movw`, two `mov`, two more `mov`, and their two `svc` -
+# with no branch of its own: the block falls through into 508's own `b park`, which was word 71 and is
+# word `WAIT_BACK_WORD` (80) after the insertion. So every word from the park on moved by exactly nine.
+PARK_WORD, PARK_MS_WORD, PARK_ASK_WORD, PARK_SVC_WORD, PARK_BACK_WORD = 81, 83, 84, 85, 86
+FAILED_WORD = 87                    # the `udf #1` every check in the program shares
+
+# And the nine words 905 adds: the one sequence in this program that *changes* the device rather than
+# reading it. `WRITE_PATH_WORD` is the `adr` to `/newfile` and is checked for its *target* in
+# `check_program` the same way the two `/dev/` paths are (its operand is a file offset and not a value);
+# `WRITE_FLAGS_WORD` and `WRITE_MODE_WORD` are the two arguments `open` reads only when `O_CREAT` is
+# set, and both are read out of `bsd/sys/fcntl.h` rather than restated here; `WRITE_PAGE_WORD` is the
+# `mov r1, r9` that hands the buffer back to the kernel; and `WRITE_LEN_WORD`, `WRITE_CALL_WORD` and
+# `WRITE_SVC_WORD` are the second half - the call that writes those bytes through the block device.
+WRITE_PATH_WORD = 71                 # `adr r0, path_new` - the file the mount must be able to create
+WRITE_FLAGS_WORD, WRITE_MODE_WORD = 72, 73   # `O_CREAT|O_WRONLY` and `0644`
+WRITE_OPEN_CALL_WORD, WRITE_OPEN_SVC_WORD = 74, 75
+WRITE_PAGE_WORD, WRITE_LEN_WORD = 76, 77     # `mov r1, r9` and the byte count
+WRITE_CALL_WORD, WRITE_SVC_WORD = 78, 79     # the `write` call and the `svc` the device answers
 
 # The words 504 adds, named for the same reason: `PAGE_WORD` keeps 480's mapping in r9, the two `adr`s
 # are the paths the two opens pass, and the read's three words are the call the driver answers.
@@ -616,7 +650,7 @@ WAIT_STATUS_TEST_WORD = 63               # `cmp r3, #EXIT_STATUS`
 WAIT_PID_TEST_WORD = 60                  # `cmp r0, #WAIT_PID` - the pid the kernel answered with
 WAIT_CALL_WORD, WAIT_SVC_WORD = 58, 59   # the first call: `mov r12, #SYS_WAIT4` and its `svc`
 WAIT2_ARG_WORD = 65                      # the second call's `mov r0, #WAIT_PID`
-WAIT2_CALL_WORD, WAIT2_SVC_WORD, WAIT_BACK_WORD = 69, 70, 71
+WAIT2_CALL_WORD, WAIT2_SVC_WORD, WAIT_BACK_WORD = 69, 70, 80
 
 # The ARM condition codes the program's branches use, by name: `bne`, `bcs` and `b`. The names are what
 # the *reading* rests on for one of them - `unix_syscall`'s error convention is the carry bit
@@ -758,15 +792,16 @@ def describe(instruction):
 
 
 def program_expectations(decoded, K, adr_targets):
-    """What each of the program's 78 words must decode to, in the order they are loaded.
+    """What each of the program's 88 words must decode to, in the order they are loaded.
 
     The values come from the headers and from Apple's source (`K`), never from a literal here: the pids
     from `bsd_init.c`'s `initproc = proc_find(N)`, the syscall numbers from `syscalls.master`, the
     page length from the kernel's own `ARM_PGSHIFT`, and `prot`/`flags` from `bsd/sys/mman.h`'s
-    `PROT_READ|PROT_WRITE` and `MAP_PRIVATE|MAP_ANON`. **Four words are deliberately not fixed as
-    values** - see the marker, the two timeouts and the read's length below - because the properties
-    they have to have are properties and not numbers in a header. `adr_targets` is the exception to the
-    exception: the two `adr`s' operands are *offsets into this file*, so their expected values are
+    `PROT_READ|PROT_WRITE` and `MAP_PRIVATE|MAP_ANON`. **Five words are deliberately not fixed as
+    values** - see the marker, the two timeouts, the read's length and 905's write length below -
+    because the properties they have to have are properties and not numbers in a header. `adr_targets`
+    is the exception to the
+    exception: the three `adr`s' operands are *offsets into this file*, so their expected values are
     computed by `check_program` from where the path strings really are and passed in here, rather than
     being left free - a free operand would make the two most important addresses in this program the
     only two the check does not compare.
@@ -826,11 +861,21 @@ def program_expectations(decoded, K, adr_targets):
         again on the same pid, whose answer (`ECHILD`) is deliberately not tested: word 71 is the
         unconditional `b` into the park and nothing between 70 and the failure marker is allowed to be a
         conditional branch, which is a property `check_program` states as an absence below.
-      - 72..78 are **512's park and the failure marker**: `poll(NULL, 0, PARK_MS)` with its three
+      - **71..79 are 905's write door**, inserted between the second `wait4`'s `svc` and the park:
+        `open("/newfile", O_CREAT|O_WRONLY, 0644)` - the `adr` at 71 points at the string below and the
+        two numbers are `bsd/sys/fcntl.h`'s flags and mode, not literals - and then `write(fd, page, N)`,
+        whose buffer is the page `mmap` gave in r9 and whose count is the fixture's own bound. This is
+        the only block in the program that changes the device, and it is why the mount has to be
+        read-write: HFS allocates a catalog entry and a file cnid, and every one of those block writes
+        reaches `st_media_strategy`'s `B_WRITE` branch. The block has **no branch of its own**: it falls
+        through into 508's second-`wait4` `b park` at word 80, which is deliberate - neither call's
+        answer is tested, for 503's reason, because a failure here is a fact about the filesystem to
+        record and not a reason to `udf #1` and kill `initproc`.
+      - 81..87 are **512's park and the failure marker**: `poll(NULL, 0, PARK_MS)` with its three
         arguments reloaded on every turn, an unconditional branch back to the first of them, and the
-        `udf #1` behind it. The `b` at 71 lands on 72, so 508's parent goes straight from its second
-        `wait4` into the park - and from 479 until this step those five words were a `getpid` loop,
-        which is why every run before this one ended with the CPU busy and the kernel never idle.
+        `udf #1` behind it. The park's first word is 81, so 905's `b park` and 508's `b park` both land
+        on it - and from 479 until this step those five words were a `getpid` loop, which is why every
+        run before this one ended with the CPU busy and the kernel never idle.
     """
     # The one value this check does not fix: the word the program puts in r5. It has to be a marker -
     # nonzero, and different from every argument the program loads - because its whole job is to be
@@ -864,6 +909,10 @@ def program_expectations(decoded, K, adr_targets):
     # process has to still be parked when the watchdog fires, and the loop has to re-park if the
     # timeout ever expires - so the value is the fixture's and the clause is `check_program`'s.
     park_ms = park_timeout(decoded)
+    # And the fifth: 905's write length, read the same way a third time. It is the fixture's own choice
+    # and its property is a *bound* - big enough to be a real write and no larger than the page the
+    # buffer is the start of - so the value is read here and the bound is stated in `check_program`.
+    write_bytes = write_length(decoded)
 
     return [
         (0, ("svc", (0x80,))),
@@ -994,6 +1043,29 @@ def program_expectations(decoded, K, adr_targets):
         (WAIT2_CALL_WORD, ("mov", (12, K["SYSCALL_WAIT4"], 0))),
         (WAIT2_SVC_WORD, ("svc", (0x80,))),
         (WAIT_BACK_WORD, ("b", (COND["al"], PARK_WORD))),
+        # **905's write door, the only block in this program that changes the device.** Every word the
+        # check pins above only ever *reads* - `getpid`/`mmap`/`poll`/`open`/`read`/`wait4` all take from
+        # the kernel - so a read-only mount satisfies all of them and the mount's writability is not
+        # measured anywhere above. These ten are the file creation: the `adr` at `WRITE_PATH_WORD` names
+        # `/newfile` (its operand is an offset into this file and is checked against the string's bytes by
+        # `check_program`, like the two `/dev/` paths, rather than being compared with a number here), the
+        # two arguments are the flags `O_CREAT|O_WRONLY` and the mode `0644` - both read out of
+        # `bsd/sys/fcntl.h`, never written as literals here - and the load is the page `mmap` gave and the
+        # fixture's own store renamed. The write's buffer is that same page in r9, whose first word is the
+        # address `str r0, [r0]` wrote at +68 - so the four bytes the new file holds are a number this
+        # process chose - its count is the fixture's own bound, and the call is `write`'s number. **None of
+        # `open`'s or `write`'s answers is tested**: the `b` at `WRITE_BACK_WORD` is unconditional, for
+        # 503's reason - an `open` a read-write mount should satisfy, failing, is a fact about the
+        # filesystem to record and not to `udf #1` on and end the boot with.
+        (WRITE_PATH_WORD, ("adr", (0, adr_targets.get(WRITE_PATH_WORD), 0, 1))),
+        (WRITE_FLAGS_WORD, ("movw", (1, K["OPEN_CREATE_WRITE"], 0))),
+        (WRITE_MODE_WORD, ("movw", (2, K["OPEN_MODE_0644"], 0))),
+        (WRITE_OPEN_CALL_WORD, ("mov", (12, K["SYSCALL_OPEN"], 0))),
+        (WRITE_OPEN_SVC_WORD, ("svc", (0x80,))),
+        (WRITE_PAGE_WORD, ("mov_r", (1, 9))),
+        (WRITE_LEN_WORD, ("movw", (2, write_bytes, 0))),
+        (WRITE_CALL_WORD, ("mov", (12, K["SYSCALL_WRITE"], 0))),
+        (WRITE_SVC_WORD, ("svc", (0x80,))),
         # **512's park, and the three arguments are written out rather than inherited.** `poll(NULL, 0,
         # PARK_MS)` is the same call the two asks above make; what makes this one different is that it
         # is a *loop*, so every turn has to be the call the listing says. A syscall's return writes r0,
@@ -1003,7 +1075,7 @@ def program_expectations(decoded, K, adr_targets):
         # `PARK_WORD` and not as a number (see the clause in `check_program`), and the timeout is read
         # out of the instruction like the two asks' (`park_timeout`) because its property is a bound.
         (PARK_WORD, ("mov", (0, 0, 0))),
-        (73, ("mov", (1, 0, 0))),
+        (PARK_WORD + 1, ("mov", (1, 0, 0))),
         (PARK_MS_WORD, ("movw", (2, park_ms, 0))),
         (PARK_ASK_WORD, ("mov", (12, K["SYSCALL_POLL"], 0))),
         (PARK_SVC_WORD, ("svc", (0x80,))),
@@ -1094,10 +1166,10 @@ def check_device_paths(blob, fpc, decoded, K, p):
 
 
 def check_program(blob, fpc, pc, reg, K):
-    """The 79 words of `entry_ramdisk.s`'s program, decoded against what they are for.
+    """The 88 words of `entry_ramdisk.s`'s program, decoded against what they are for.
 
     This is the assertion experiment 468 wrote for one word, applied to the program 479 replaced it
-    with and 480, 503, 504, 505, 506, 508 and 512 grew: the one-word version asked "is the entry point
+    with and 480, 503, 504, 505, 506, 508, 512 and 905 grew: the one-word version asked "is the entry point
     a `udf #0`", which measured only that the user's mapping was where the file said it was. Every word
     of a program this size is a way to be wrong - a `cmp` against the wrong register or the wrong pid,
     a branch that lands one instruction away, a syscall number in the wrong register, an argument in
@@ -1105,7 +1177,7 @@ def check_program(blob, fpc, pc, reg, K):
     difference whose only symptom on the device would be a process that runs when it should have
     stopped, or an init death where 478 already had one.
 
-    Nine of the program's properties are not word-for-word comparisons and are checked here because
+    Eleven of the program's properties are not word-for-word comparisons and are checked here because
     no single word holds them: the marker's (that word 8 is nonzero and unlike every argument), the
     branch targets' (that each lands on another instruction of the program), 503's ratio (that word 29
     is larger than word 24 and neither is zero), 504's two paths (`check_device_paths`: that the file
@@ -1136,6 +1208,34 @@ def check_program(blob, fpc, pc, reg, K):
     decoded = [decode_arm(word, i) for i, word in enumerate(words)]
 
     adr_targets = check_device_paths(blob, fpc, decoded, K, p)
+
+    # **And 905's write path, which is not a `/dev/` string and so is not found by `dev_path_strings`.**
+    # The third `adr` in this program points at `/newfile`, the file the mount has to be able to create.
+    # Its operand is a file offset like the two above, so it gets the same treatment: the string is found
+    # by scanning the bytes, the `adr` at `WRITE_PATH_WORD` has to be the shape `adr r0, <label>`, and the
+    # address it computes has to be exactly where the string begins. A target written as a number, or one
+    # that points four bytes off the string - the mistake a reader counting from the wrong label makes -
+    # is refused here rather than handed to `open` as an address this file does not use for that name.
+    write_target = blob.find(b"/newfile\0")
+    if write_target < 0:
+        fail(f"{p}the RAM disk holds no `/newfile` string: 905's write door creates that file, and the "
+             f"`adr` at word {WRITE_PATH_WORD} has to point at its bytes in this segment - a write whose "
+             f"path is missing is a program that does not do what this step claims")
+    else:
+        ins = decoded[WRITE_PATH_WORD]
+        if ins[0] != "adr" or len(ins[1]) != 4 or ins[1][0] != 0 or ins[1][2] != 0:
+            fail(f"{p}word {WRITE_PATH_WORD} is {describe(ins)}, and 905's write path has to be "
+                 f"`adr r0, <label>` for the same reason the two device paths are: the instruction's own "
+                 f"target is the address of the string, and an address written as a number would be a "
+                 f"second definition of it")
+        else:
+            target = fpc + WRITE_PATH_WORD * 4 + 8 + ins[1][3] * ins[1][1]
+            if target != write_target:
+                fail(f"{p}the `adr` at word {WRITE_PATH_WORD} points at file offset 0x{target:x} and the "
+                     f"`/newfile` string is at 0x{write_target:x}: the address the device hands `open` is "
+                     f"not this file's own bytes for that name")
+            else:
+                adr_targets[WRITE_PATH_WORD] = write_target - (fpc + WRITE_PATH_WORD * 4 + 8)
 
     for index, expect in program_expectations(decoded, K, adr_targets):
         if decoded[index] != expect:
@@ -1174,6 +1274,7 @@ def check_program(blob, fpc, pc, reg, K):
     short_ms, long_ms = poll_timeouts(decoded)
     read_bytes = read_length(decoded)
     park_ms = park_timeout(decoded)
+    write_bytes = write_length(decoded)
     if short_ms is not None and long_ms is not None:
         if min(short_ms, long_ms) == 0:
             fail(f"{p}one of the two `poll` timeouts is 0 ({short_ms} and {long_ms}): a zero timeout "
@@ -1212,6 +1313,25 @@ def check_program(blob, fpc, pc, reg, K):
             fail(f"{p}the read asks for {read_bytes} bytes and the buffer is one {K['MMAP_LENGTH']:#x}"
                  f"-byte mapping: everything past it is unmapped, so the driver's copy would run off "
                  f"the end of this process's own page and fault in the middle of a copyout")
+
+    # **And 905's write length, which is the same kind of bound for the same reason** - the count has to
+    # be at least one word, so the file the mount creates holds a number this process *chose* rather than
+    # the filesystem's own zeros, and no more than the page the buffer is the start of, because the write
+    # reads from that mapping and a longer count would run off its end in the one process whose death
+    # panics the boot. The value is read out of the instruction stream (`write_length`) the way the two
+    # timeouts and the read's own count are, so a write length that moved to another register fails the
+    # word-by-word comparison above instead of passing here because the number is right.
+    if write_bytes is not None:
+        if write_bytes < 4:
+            fail(f"{p}905's write asks for {write_bytes} bytes: the fixture means to give the new file a "
+                 f"word it chose - the address `mmap` returned, which the store at +68 wrote into the "
+                 f"page - and a count below four would write part of that word and leave the rest as the "
+                 f"filesystem left it, so the file's first bytes would be a mixture rather than a reading")
+        if write_bytes > K["MMAP_LENGTH"]:
+            fail(f"{p}905's write asks for {write_bytes} bytes and the buffer is one "
+                 f"{K['MMAP_LENGTH']:#x}-byte mapping: everything past it is unmapped, so the write's "
+                 f"copy would run off the end of this process's own page and fault in the middle of the "
+                 f"kernel's copyin")
 
     # **And 512's park, which is three claims about a loop rather than about a word.** The table pins
     # its five instructions, and a program can satisfy every one of those rows and still never park the
@@ -1881,6 +2001,16 @@ def main():
         "SYSCALL_READ": syscall_three_words("AUE_NULL", "read"),
         "SYSCALL_OPEN": syscall_three_words("AUE_OPEN_RWTC", "open"),
         "OPEN_RDONLY": hdr_define(FCNTL, "O_RDONLY"),
+        # 905: the call that changes the device, and the two `open` arguments the file creation needs.
+        # The number comes from `syscalls.master` through the same reader shape as the other six, and the
+        # flags and mode are read out of `bsd/sys/fcntl.h` - `O_CREAT|O_WRONLY` for the flags (a file
+        # that does not exist has to be created, and it is opened for writing) and the mode the fixture
+        # chose for it. The mode is a value this file picks rather than a header's - 0644 is the ordinary
+        # owner-write/everyone-read - so it is written here, and `program_expectations` compares the word
+        # against it; the flags are the header's, not this file's.
+        "SYSCALL_WRITE": syscall_three_words("AUE_NULL", "write"),
+        "OPEN_CREATE_WRITE": hdr_define(FCNTL, "O_CREAT") | hdr_define(FCNTL, "O_WRONLY"),
+        "OPEN_MODE_0644": 0o644,
         "DEV_MOUNT": devfs_mount_point(),
         "BLOCK_DEV_NAME": mdev_node_names()[0],
         "CHAR_DEV_NAME": mdev_node_names()[1],
@@ -2002,7 +2132,7 @@ def main():
             # `entry_ramdisk.s`'s `.if` fixes the program's length, so this list cannot silently stop
             # covering the program.
             #
-            # **Five words are left out on purpose, and they are the places this list is not
+            # **Six words are left out on purpose, and they are the places this list is not
             # complete.** Word 8 is the marker in r5, whose value the check deliberately leaves free (a
             # nonzero `movw` into r5 that repeats no argument - properties, not a value), so a low-bit
             # flip there changes only the property that is free and *should* be accepted (see
@@ -2020,9 +2150,13 @@ def main():
             # and 40000 ms are both programs this check has no business refusing, and what has to be
             # refused is a park below the threshold or a *conditional branch* on its answer. The first
             # of those is a mutation below; the second is an absence no single-word change can build.
+            # `WRITE_LEN_WORD` is 905's write count, free for `READ_LEN_WORD`'s reason one step on: 4,
+            # 8 and 512 bytes are all writes whose first word the new file will hold, and the bounds are
+            # the two mutations below.
             *[(f"program word {i}", 0xE0 + i * 4, u32(blob, 0xE0 + i * 4) ^ 1)
               for i in range(PROGRAM_WORDS)
-              if i not in (8, POLL_SHORT_WORD, POLL_LONG_WORD, READ_LEN_WORD, PARK_MS_WORD)],
+              if i not in (8, POLL_SHORT_WORD, POLL_LONG_WORD, READ_LEN_WORD, PARK_MS_WORD,
+                           WRITE_LEN_WORD)],
             # And the mutations that are about a *shape* rather than a value, each a plausible way to
             # write the same intent wrongly. The first is the one this step exists for:
             # `arm_prepare_u32_syscall_return` reports an error by setting the carry bit
@@ -2103,6 +2237,28 @@ def main():
             ("the control path names the device too", strings[1][0], b"/dev/rmd0\0"),
             ("the path names the block device", strings[0][0], b"/dev/md0\0\0"),
             ("the path is not terminated", strings[0][0], b"/dev/rmd0X"),
+            # **905's write door, and its mutations are of the same three kinds.** The `write` call
+            # replaced by the *read*'s number is the one this step exists to refuse - the block would
+            # still reach `st_media_strategy`, but as a read, so the log would show a read at the root's
+            # LBA and no write at all, which is exactly the state before this arm; the open made
+            # read-only drops `O_CREAT`, so HFS would not allocate a catalog entry and the file the mount
+            # is supposed to create would never exist; the length's two ends are the bound's - nothing
+            # written (no bytes reach the device) and more than the mapping the buffer is the start of -
+            # and the buffer in the wrong register would give the kernel an address this process does not
+            # own. The last two are about the *path*: a target four bytes off the string (what counting
+            # from the wrong label gives) and the string itself renamed. The block's own `b park` is 508's,
+            # already mutated above; the absence after the second `wait4`'s `svc` now covers the write
+            # block too, since `FAILED_WORD` moved to 87.
+            ("the write is the read's syscall number", 0xE0 + WRITE_CALL_WORD * 4,
+             0xE3A0C000 | K["SYSCALL_READ"]),
+            ("the open drops O_CREAT", 0xE0 + WRITE_FLAGS_WORD * 4, 0xE3A01000),
+            ("the create mode is wrong", 0xE0 + WRITE_MODE_WORD * 4, 0xE3002180),
+            ("the write asks for nothing", 0xE0 + WRITE_LEN_WORD * 4, 0xE3002000),
+            ("the write runs past the page", 0xE0 + WRITE_LEN_WORD * 4, 0xE3012001),
+            ("the write buffer is not the page", 0xE0 + WRITE_PAGE_WORD * 4, 0xE1A01008),
+            ("the write path is four bytes off", 0xE0 + WRITE_PATH_WORD * 4,
+             0xE28F0000 | (((blob.find(b"/newfile\0") - 4) - (0xE0 + WRITE_PATH_WORD * 4 + 8)) & 0xFFF)),
+            ("the write names another file", blob.find(b"/newfile\0"), b"/oldfile\0"),
         ]
         survived = []
         for name, off, value in mutations:
