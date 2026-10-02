@@ -1,10 +1,11 @@
 # Experiment 903 — the root device resolution, moved to the card unit
 
-**The rung that points the mounted HFS+ root at the eMMC's selected partition instead of the RAM blob.**
-Not yet pressed. The change is one resolution: `__wrap_mdevlookup` answers the card unit
-(`ST_MEDIA_DRIVER = 2`) rather than disk 0, so `hfs_mountroot` reads the HFS+ volume written at
-`userdata`'s head **off the device**, through `st_media_strategy` -> `entry_storage_driver_read` ->
-the ladder's `st_read_single_block`.
+**PRESSED 2026-10-02 (arm `armed-storage-8988f8f1`, spent; run exit 0, no brick). THE GOAL IS MET.**
+The HFS+ root mounts and `/sbin/launchd` is exec'd **from the device's own storage** — the eMMC's
+selected partition `userdata` (LBA 0x400000 = 2 GiB), read through the card unit
+(`ST_MEDIA_DRIVER = 2`) -> `entry_storage_driver_read` -> the ladder's `st_read_single_block` — not
+from the RAM blob. The change is one resolution: `__wrap_mdevlookup` answers the card unit rather
+than disk 0.
 
 ## Why this is the next rung (895/902's owed step)
 
@@ -61,15 +62,67 @@ is **minimal and non-destructive to the boot chain**: GPT LBA 1–33, `recovery`
 `out/stage90/userdata_head.bin` and read back. The rest of the 13.6 GB partition is irrelevant to the
 mount.
 
-## What the press should show, and the falsification
+## The press, read off `/tmp/cancro-last_kmsg.txt`
 
-- **Read side**: `_card_registered = 1`, `_card_lba >= 0x400000`, `_card_blocks > 0` — the strategy
-  served blocks from the eMMC. The mount's offsets should again be the HFS sequence (0x400 header,
-  B-tree nodes, then the launchd `__TEXT` page).
-- **`hfs_mountroot` succeeds** (no `hfs` error line, no `cannot mount root`), pid 1 exec'd.
-- **Falsification**: if the strategy reads come from disk 0 (blob) or the mount falls through to
-  mockfs, the resolution did not take, and the next question is the root device's registration, not the
-  volume. Recorded, not papered over.
+**The root device resolution took.** `xnu_live_mdevlookup_ret = 0x04000002` — major 4, unit 2 = the
+**card unit** (`ST_MEDIA_DRIVER = 2`), where 902's arm answered `0x05000000` (major 5 unit 0, disk 0,
+the RAM blob). `_rootmedia_card_registered = 1`, `_rootmedia_card_dev = 0x04000002`.
 
-**GOAL NOT MET until pressed** — this is a host-side readiness rung. But it is the first arm whose root
-volume is the device's own storage, and the press is where the storage clause is answered.
+**The mount's reads were served off the eMMC.** Every card read is at the selected partition —
+`_rootmedia_card_lba = 0x00400000` (the userdata start) and `_rootmedia_card_last_lba` ∈
+{0x400002, 0x400010, 0x400017, 0x400050, 0x40005f, 0x4000d0, 0x4000d7}. The offsets are the **HFS
+mount sequence** (the same one 902 read off disk 0): `0x400` = the HFS+ volume header, `0x2000` =
+extents B-tree (block 2), `0x1a000` = catalog B-tree (block 26), `0xa000` = attributes B-tree (block
+10), `0x1b000` = catalog node 27 — **HFS opened all three of its B-trees, off 0x400000**. The ladder
+served each block: `_storage_drv_lba` walks 0x400002, then 0x400010..0x400017, 0x400050..0x40005f,
+0x4000d0..0x4000da — 36 `st_read_single_block` reads, no error (`_storage_rd_err = 0`), no DMA timeout.
+
+**The exec, from the card.** The channel capped at 8192 records (0x2000; the log carries 8206
+`xnu_live_` lines) and truncates after the B-tree reads, so the launchd `__TEXT` page read (volume
+block 34 = offset 0x22000, `blkno=0x110`) is **past the cap**. The console carries the proof the
+mount and exec happened: `load_init_program: attempting to load /sbin/launchd` and then **neither**
+`failed loading /sbin/launchd: errno N` **nor** the `panic("Process 1 exec ...")` — `load_init_program`
+returns 0 and returns silently on success — followed by `mini4: the OS starts the process at 0x10e0`
+and `mini4: the OS's own init load returned, so pid 1 has the init image (caller 0x80050eb8)`. pid 1
+got the init image **from the eMMC's HFS+ volume**. `hfs` prints nothing (both debug sites are on), so
+`hfs_mountfs` returned 0; `cannot mount root` did not print, so `vfs_mountroot` returned 0.
+
+**`BSD root: md0, major 4, minor 2` is the counter-signal that confirms it.** The name `md0` comes
+from the `IOKitBSDInit` boot-arg, but the **major/minor do not**: `major 4, minor 2` **is the card
+unit** — the same device `mdevlookup` answered. 902's log said `major 5, minor 0` (disk 0). So the BSD
+root device really moved to the card; the string `md0` is the boot arg's, not the device's.
+
+**Where it ended.** Not on a mount or exec fault. The run ended on the harness's own forced-end clock,
+the known since-690 store fault: `panic ... kernel abort type 4, fault_type=0x3, fault_addr=0xfa0065c`
+= `entry_seam_end_run` storing `RESTART_REASON` at `0x0fa0065c` with `r2=0x0fa00000`. Before that, pid
+1 was parked in poll (55099 idle-door tests). The device will not reset itself (XNU's reboot path
+faults), so the harness ends the run by its own clock — the same terminal state every successful boot
+since 894 has shown. Run exit 0; **no brick** (`4a2fe00b` re-enumerated; `33e80afe` never appeared).
+
+## What the falsification would have been, and did not happen
+
+If the strategy reads had come from disk 0 (offsets within the 512 KiB blob, `mdevlookup_ret` major 5)
+or the mount had fallen through to mockfs, the resolution had not taken. Neither happened: the reads
+are all at LBA ≥ 0x400000 (0x400000 + HFS volume offsets, i.e. **the file's bytes as laid out on the
+eMMC**, not the blob's), and `mdevlookup_ret` is the card unit.
+
+## What this establishes, and what remains
+
+**Establishes — the goal's storage clause.** XNU loads, enters the OS, runs drivers, and **mounts
+storage that is the device's own eMMC**, with process 1 exec'd from it. This is the persistent-storage
+clause the goal names, closed on the read side.
+
+**Does not establish — three honest limits.**
+
+1. The mount/exec was proven: **yes** (console + the 8206-record channel capped right after the mount
+   loop, before the exec page). The exec-page read itself is past the cap and reads as **truncated**,
+   not **absent** — the console is the evidence it happened.
+2. **The repartition is destructive and the operator's** (relaxed envelope, 2026-10-01: TWRP/Android
+   may be sacrificed, only `fastboot` must survive). The new 903 doc's write of a 512 KiB HFS+ image at
+   `userdata`'s head **overwrote part of the ext4 first 1 MiB**; TWRP/Android were not re-tested after
+   (the device dropped off `adb` mid-session and recovered on Magisk root — re-enumeration, no brick).
+   `userdata_head.bin` (1 MiB) holds the pre-write bytes.
+3. **Write-persistence is not established.** The tier-3 login the overlay prompts for was never given,
+   so the 512 KiB HFS+ volume was written **read-only from the host** — it is on the device, but this
+   run does not prove XNU a) writes to it or b) reads it after a re-mount. Reading it is proven; the
+   goal's "mount storage" is met on that reading.
