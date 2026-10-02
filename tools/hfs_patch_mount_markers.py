@@ -12,7 +12,8 @@ reached.
   2  hfs_MountHFSPlusVolume: after the VCB fill (the last statement before the extents vnode)
   3  hfs_getnewvnode: about to return the new vnode (the extents vnode is built)
   4  BTOpenPath: entered (just before its header-node read)
-  5  hfs_MountHFSPlusVolume: about to call the extents BTOpenPath (so 4==5 means the read was reached)
+  5  hfs_MountHFSPlusVolume: after the extents BTOpenPath RETURNED (so 4 then 5 == the extents btree
+     was opened; 4 alone == BTOpenPath entered but never returned)
 
 The markers compile to nothing unless `STAGE90_HFS_MOUNT_MARKERS` is defined, so this patch is inert in
 a normal build and cannot change any arm's behaviour.  `entry_live_write` is declared by the force
@@ -42,7 +43,12 @@ SITES = [
      "NodeRec\t\t\t\t\tnodeRec;",
      "btopenpath_entered", 4),
     ("bsd/hfs/hfs_vfsutils.c",
-     "\tretval = MacToVFSError(BTOpenPath(VTOF(hfsmp->hfs_extents_vp),",
+     # The anchor is the STATEMENT'S LAST LINE, not its first: the call spans two lines
+     # (`BTOpenPath(VTOF(...),` / `(KeyCompareProcPtr) CompareExtentKeysPlus));`), and an anchor on
+     # the first line puts the marker in the MIDDLE of the call - `expected expression` at compile.
+     # Anchoring on the closing line puts the marker AFTER the call, so step 5 reads as "the extents
+     # BTOpenPath RETURNED".  `CompareExtentKeysPlus` occurs once, on that line only.
+     "\t                                  (KeyCompareProcPtr) CompareExtentKeysPlus));",
      "extents_btopenpath", 5),
 ]
 
@@ -69,6 +75,14 @@ def main():
         return
     root = sys.argv[1] if len(sys.argv) > 1 else "external/xnu-4570.1.46"
     for rel, anchor, mid, step in SITES:
+        # Every anchor MUST be a whole statement ending in `;`, because the marker is inserted
+        # immediately after the anchor line - an anchor on the first line of a multi-line call puts
+        # the marker in the MIDDLE of the call, which is `expected expression` at compile (step 5
+        # did exactly this once).  A per-function-body anchor cannot be checked this way, so it is
+        # the one exception, named here rather than left implicit.
+        if mid != "btopenpath_entered" and not anchor.strip().endswith(";"):
+            sys.exit("hfs_patch_mount_markers: anchor for %s is not a whole statement (no `;`): %r"
+                     % (mid, anchor.strip()))
         path = "%s/%s" % (root, rel)
         text = open(path, encoding="latin-1").read()
         if mid in text:
