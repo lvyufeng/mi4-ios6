@@ -147,4 +147,46 @@ typedef struct cp_wrap_func *cp_wrap_func_t;
 #define JOURNALING 1
 #endif
 
+/* ------------------------------------------------------------------------------------------------
+ * 3. The HFS malloc TYPES must be served by the malloc path, not the zone path.
+ *
+ * THE DEFECT THIS FIXES (900).  `MALLOC_ZONE(space, cast, size, type, flags)` expands to
+ * `__MALLOC_ZONE(size, type, flags, ...)`, and 4570's `__MALLOC_ZONE` (bsd/kern/kern_malloc.c:692)
+ * **panics** when `kmzones[type].kz_zalloczone == KMZ_MALLOC`:
+ *
+ *     kmz = &kmzones[type];
+ *     if (kmz->kz_zalloczone == KMZ_MALLOC) panic("_malloc_zone ZONE: type = %d", type);
+ *
+ * 2050 makes the five HFS rows ZONES by giving its `kern_malloc.c` the HFS structs
+ * (`#include <hfs/hfs_cnode.h>`, 2050 kern_malloc.c:99) and rows
+ * `{SOS(cnode), KMZ_CREATEZONE, TRUE}` / `{SOS(filefork), KMZ_CREATEZONE, TRUE}` for M_HFSNODE(76) /
+ * M_HFSFORK(77).  This port's force header reaches ONLY the HFS translation units
+ * (`build_xnu_arm_kernel.sh` force-includes it for `bsd/hfs/*` + `vfs_journal.c`), never
+ * `kern_malloc.c`, so 4570's rows 75/76/77/91/92/95 stay the literal `{0, KMZ_MALLOC, FALSE}`
+ * initializer (no `struct cnode`, no conditional).  The first `hfs_chash_getcnode` cnode allocation
+ * therefore reaches `__MALLOC_ZONE(type = M_HFSNODE)` and **panics at `kern_malloc.c:706`** - inside
+ * `hfs_chash_getcnode`, AFTER the mount's VCB fill (marker 2) and BEFORE its `return cp` (step 6),
+ * which is exactly where 899's mount stops (`xnu_live_hfs_stage = 2`, one strategy read, no
+ * `thread_block`, no data abort, no stub).
+ *
+ * THE FIX.  Redirect the HFS `MALLOC_ZONE`/`FREE_ZONE` onto the MALLOC path.  `__MALLOC` (the same
+ * file, :571) does the same `type >= M_LAST` check and then `kalloc_canblock` - it never reads
+ * `kmzones[]` - so it serves **any** type, including a `KMZ_MALLOC` row, without allocating an
+ * entry size from a zone that does not exist.  `_FREE` :621 is the matching free.  The behaviour is
+ * 2050's (2050's own `__MALLOC_ZONE` handles a `KMZ_LOOKUPZONE` row for M_HFSMNT by falling through
+ * to `kalloc_zone`), so this is not a placeholder: an HFS cnode/filefork is kalloc'd and kfree'd
+ * rather than drawn from a dedicated zone, which is the only correct answer when the zone table this
+ * build links cannot be taught the HFS struct types.
+ *
+ * The redefine is safe where malloc.h has ALREADY been processed: those TUs expand the real macro at
+ * their `MALLOC_ZONE(...)` site before this header's tail runs, so this only reaches TUs that first
+ * pull malloc.h after the forced header (e.g. hfs_cnode.c, which includes it itself).  A TU that
+ * expanded the zone path before this edit existed is recompiled by the same build. */
+
+#include <sys/malloc.h>
+#undef  MALLOC_ZONE
+#undef  FREE_ZONE
+#define MALLOC_ZONE(space, cast, size, type, flags)  ((space) = (cast)__MALLOC((size), (type), (flags), NULL))
+#define FREE_ZONE(addr, size, type)                  _FREE((void *)(addr), (type))
+
 #endif /* _HFS_PORT_FORCE_H_ */
