@@ -15,6 +15,14 @@ reached.
   5  hfs_MountHFSPlusVolume: after the extents BTOpenPath RETURNED (so 4 then 5 == the extents btree
      was opened; 4 alone == BTOpenPath entered but never returned)
 
+899's press showed the mount reaches step 2 and then NEVER reaches step 3, spinning inside the extents
+`hfs_getnewvnode` (`xnu_live_hfs_stage=2`, no `=3`).  The extents path through `hfs_getnewvnode` is
+short - the system-file short-circuit makes `hfs_valid_cnode` instant, and there is no read before
+`vnode_create` - so three finer markers split it: 6 after `hfs_chash_getcnode` returns, 7 just before
+`vnode_create`, 8 just after `vp = *cvpp`.  A run whose last step is 6 spins in the cnode-init/copy
+block; 7 spins in `vnode_create`; 8 spans `vnode_settag`..`hfs_chashwakeup`.  These are the SAME
+mechanism as 1-5 (same guard, same key), so the last `xnu_live_hfs_stage` still names the farthest.
+
 The markers compile to nothing unless `STAGE90_HFS_MOUNT_MARKERS` is defined, so this patch is inert in
 a normal build and cannot change any arm's behaviour.  `entry_live_write` is declared by the force
 header (`src/shims/hfs/hfs_port_force.h`, force-included into every HFS translation unit), so every
@@ -50,6 +58,17 @@ SITES = [
      # BTOpenPath RETURNED".  `CompareExtentKeysPlus` occurs once, on that line only.
      "\t                                  (KeyCompareProcPtr) CompareExtentKeysPlus));",
      "extents_btopenpath", 5),
+    # The three finer split of the extents hfs_getnewvnode (899's spin site).  Anchors are whole
+    # statements and unique in hfs_cnode.c (checked by grep -F before adding).
+    ("bsd/hfs/hfs_cnode.c",
+     "(flags & GNV_SKIPLOCK), out_flags, &hflags);",
+     "gnv_after_getcnode", 6),
+    ("bsd/hfs/hfs_cnode.c",
+     "vfsp.vnfs_markroot = 0;",
+     "gnv_before_vnode_create", 7),
+    ("bsd/hfs/hfs_cnode.c",
+     "vp = *cvpp;",
+     "gnv_after_vnode_create", 8),
 ]
 
 PROV = "PORT SHIM (hfs_patch_mount_markers.py, exp 899)"
