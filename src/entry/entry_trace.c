@@ -3986,6 +3986,10 @@ extern void entry_note_mdevlookup(uint32_t caller, uint32_t devid, uint32_t ret)
  * present in every configuration (the object is in `LINK_OBJS`), so the extern is unconditional. */
 extern int entry_root_media_register(int disk);
 extern int entry_root_media_mount_disk(void);
+/* 903: the card unit's registration-and-return. Present only when the module compiled the card unit
+ * (`STAGE90_XNU_EMMC_STRATEGY`), which the card-root arm requires; the entry build refuses a
+ * card-root image whose module lacks it (`entry_root_media_cardroot_arm_on`). */
+extern int entry_root_media_register_card(void);
 extern void entry_note_dtwalk(uint32_t t1, uint32_t root, uint32_t count, uint32_t first,
                               uint32_t set, uint32_t kids, uint32_t class0, uint32_t class1,
                               uint32_t control);
@@ -4459,7 +4463,24 @@ int __wrap_mdevlookup(int devid)
      * this call is inert there and the arm behaves exactly as 862's did.
      */
     (void)entry_root_media_mount_disk();
+#if STAGE90_XNU_ROOT_FROM_CARD
+    /*
+     * **903: THE ROOT DEVICE IS THE CARD, NOT THE RAM BLOB.** `entry_root_media_mount_disk()` above
+     * has already run the ladder and registered the card unit (disk `ST_MEDIA_DRIVER`) over the
+     * SELECTED partition; `entry_root_media_register_card()` returns that unit's `dev_t` (it is
+     * idempotent - a second call returns the same number rather than `bdevsw_add`-ing again). Answering
+     * the mount path with it makes `vfs_mountroot` read the root off the device's own storage through
+     * the card strategy's `lba = selected_lba + off/512 + i`. `devid` (the RAM-disk index the boot
+     * chose) is deliberately NOT registered as disk 0 on this arm: the strategy still serves disk 0
+     * from `g_stage90_root_hfs`, which is what the HFS mount would read were the root the blob - but
+     * the root is the card, so disk 0's registration is not needed and adding it would publish a second
+     * device. `mi_mdev` on the card unit's answer is 1 (the 902 fall-through), so if HFS declines,
+     * `vfs_mountroot`'s next row - mockfs - memory-backs `g_stage90_ramdisk` and the exec still lands.
+     */
+    r = entry_root_media_register_card();
+#else
     r = entry_root_media_register(devid);
+#endif
 #else
     r = __real_mdevlookup(devid);
 #endif

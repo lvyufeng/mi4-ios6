@@ -702,6 +702,26 @@ case "$EMMC_STRATEGY" in
     *) echo "REFUSING: STAGE90_XNU_EMMC_STRATEGY='$EMMC_STRATEGY' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **903: the card-ROOT arm.** With `STAGE90_XNU_ROOT_FROM_CARD=1` the mount path's root device is the
+# CARD unit (disk `ST_MEDIA_DRIVER`, `entry_root_media_register_card()`) instead of the RAM blob
+# (`entry_root_media_register(devid)`, disk 0). It is a ONE-LINE redirection of `__wrap_mdevlookup`'s
+# answer, because the card unit - proven by 892's `_card_lba=0x400000` - already serves the selected
+# partition block-by-block. It REQUIRES the card unit (there is nothing to root from without it) and the
+# HFS volume it needs to mount, so this build refuses the impossible combinations below rather than
+# shipping an arm whose root device has no medium.
+ROOT_FROM_CARD=${STAGE90_XNU_ROOT_FROM_CARD:-0}
+case "$ROOT_FROM_CARD" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_ROOT_FROM_CARD='$ROOT_FROM_CARD' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $ROOT_FROM_CARD -eq 1 && $EMMC_STRATEGY -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_ROOT_FROM_CARD=1 needs STAGE90_XNU_EMMC_STRATEGY=1." >&2
+    echo "          The card-root arm answers the mount path with the card unit's dev_t, and that" >&2
+    echo "          unit is compiled out without the eMMC-strategy switch - the root would be a number" >&2
+    echo "          no device answers. Build both together." >&2
+    exit 1
+fi
 # **The allowed rungs are the LADDER'S OWN BOUND, read out of the source it guards - not a list here.**
 # Until 732 this was a hand-typed `case` naming `0` through `13`, and raising the ladder to 14 in
 # `entry_storage.c` therefore did not raise it here: the two readings of one quantity disagreed, and the
@@ -876,6 +896,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_MOUNT
                 STAGE90_XNU_HFS_ROOT_MEDIA
                 STAGE90_XNU_EMMC_STRATEGY
+                STAGE90_XNU_ROOT_FROM_CARD
                 STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_XNU_IDLE_NO_SLEEP)
 #
@@ -975,6 +996,7 @@ do
         STAGE90_XNU_MOUNT)            _v=$MOUNT ;;
         STAGE90_XNU_HFS_ROOT_MEDIA)   _v=$HFS_ROOT_MEDIA ;;
         STAGE90_XNU_EMMC_STRATEGY)    _v=$EMMC_STRATEGY ;;
+        STAGE90_XNU_ROOT_FROM_CARD)   _v=$ROOT_FROM_CARD ;;
         STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
@@ -1322,6 +1344,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_POST_END_TICKS="$SEAM_POST_END_TICKS" \
         -DSTAGE90_XNU_STORAGE_PROBE="$STORAGE_PROBE" \
         -DSTAGE90_XNU_MOUNT="$MOUNT" \
+        -DSTAGE90_XNU_ROOT_FROM_CARD="$ROOT_FROM_CARD" \
         -DSTAGE90_XNU_IDLE_NO_SLEEP="$IDLE_NO_SLEEP" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
@@ -27234,6 +27257,42 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     else
         say "  xnu_entry_888: the root-media module and this build agree about the eMMC-strategy arm (STAGE90_XNU_EMMC_STRATEGY=$card_arm); the card unit is compiled out"
     fi
+    # **903: the card-root arm, the same `nm` shape as the HFS and card arms above.** The module
+    # defines exactly one of `entry_root_media_cardroot_arm_on` / `..._off`, so the OBJECT says whether
+    # its `entry_root_media_register_card` returns the card unit's `dev_t` to the mount path. A build
+    # whose `__wrap_mdevlookup` answers the root with the card while the module compiled the arm OFF
+    # would call a registration that registers nothing this image roots from - or, on an object that
+    # predates 903, a symbol that does not resolve. This refuses that before the link, on the same
+    # "the object says which arm it is" rule 882 and 888 use.
+    if arm-none-eabi-nm "$STAGE90_ROOT_MEDIA_OBJ" 2>/dev/null | grep -q 'T entry_root_media_cardroot_arm_on'; then
+        cardroot_arm=1
+    elif arm-none-eabi-nm "$STAGE90_ROOT_MEDIA_OBJ" 2>/dev/null | grep -q 'T entry_root_media_cardroot_arm_off'; then
+        cardroot_arm=0
+    else
+        say "REFUSING: $STAGE90_ROOT_MEDIA_OBJ carries neither entry_root_media_cardroot_arm_on nor" >&2
+        say "          entry_root_media_cardroot_arm_off, so this build cannot tell whether the module" >&2
+        say "          was compiled for the card-root arm. The module defines exactly one of the two" >&2
+        say "          unconditionally; their absence means the object predates 903. Rebuild it:" >&2
+        say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+        say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_ROOT_FROM_CARD=$ROOT_FROM_CARD' \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    fi
+    if [[ $cardroot_arm != "$ROOT_FROM_CARD" ]]; then
+        say "REFUSING: the platform block compiled stage90_root_media.c with STAGE90_XNU_ROOT_FROM_CARD=" >&2
+        say "          '$cardroot_arm' and this build's STAGE90_XNU_ROOT_FROM_CARD is '$ROOT_FROM_CARD'." >&2
+        say "          One object, two scripts, and the switch has to reach both. Rebuild the module with" >&2
+        say "          the same value this script was given:" >&2
+        say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+        say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_ROOT_FROM_CARD=$ROOT_FROM_CARD' \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    fi
+    if [[ $ROOT_FROM_CARD -eq 1 ]]; then
+        say "  xnu_entry_903: the root-media module and this build agree about the card-ROOT arm (STAGE90_XNU_ROOT_FROM_CARD=$cardroot_arm); the mount path's root device is the card unit (disk ST_MEDIA_DRIVER), and the linked image is checked for the redirection below"
+    else
+        say "  xnu_entry_903: the root-media module and this build agree about the card-ROOT arm (STAGE90_XNU_ROOT_FROM_CARD=$cardroot_arm); the root device is disk 0 (the RAM blob), as in 902"
+    fi
     # **The DOOR half of 888's check is the NEXT block's business, not this one's** - see the
     # `entry_storage_driver_read` clause the link block carries after `xnu_arm_entry.elf` exists. A
     # check placed HERE would read the PREVIOUS arm's elf (the link below has not run yet), which is
@@ -28026,6 +28085,47 @@ if [[ $EMMC_STRATEGY -eq 1 ]]; then
     arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_storage_driver_read" && $2 == "T" { found = 1 } END { exit(found ? 0 : 1) }' ||
         layout_fail "STAGE90_XNU_EMMC_STRATEGY=1 but \`entry_storage_driver_read\` is not a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the card unit's strategy would call a linker stub that moves no byte, so the root would mount and read nothing. The door is built by 887's entry_storage.c change (tools/rung61-driver-door.patch); apply it before a card-ON build. Nothing is rebuilt by this refusal"
     say "  xnu_entry_888: the ladder door entry_storage_driver_read ($(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_storage_driver_read" { print "0x" $1 }')) is a real definition in the linked image - the card unit's strategy meets it there"
+fi
+
+# **903: THE CARD-ROOT REDIRECTION, READ OUT OF THE LINKED IMAGE.** Two things are checked, both against
+# the link rather than the source: (a) `entry_root_media_register_card` is a `T` definition (not a
+# linker stub - the same 862-in-888 shape the door clause above reads), and (b) `__wrap_mdevlookup`'s
+# body actually CALLS it and does NOT call `entry_root_media_register` - i.e. the one-line redirection
+# is in the image the run will boot, not merely in the source. The second is the load-bearing reading:
+# a build that set the switch but whose wrapper still answered `entry_root_media_register(devid)` would
+# report the card-root arm in its record and root the RAM blob, which is
+# [[mi4-a-claim-in-a-comment-is-not-a-check]] on the exact line this experiment turns on.
+if [[ $ROOT_FROM_CARD -eq 1 ]]; then
+    if ! arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_root_media_register_card" && $2 == "T" { found = 1 } END { exit(found ? 0 : 1) }'; then
+        say "FAIL: STAGE90_XNU_ROOT_FROM_CARD=1 but entry_root_media_register_card is not a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the mount path's root answer would call a linker stub, so the root device would be a number no device answers. The card unit is compiled by 888's STAGE90_XNU_EMMC_STRATEGY; build the module with it. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    ml_addr=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "__wrap_mdevlookup" { print "0x" $1 }')
+    if [[ -z "$ml_addr" ]]; then
+        say "FAIL: STAGE90_XNU_ROOT_FROM_CARD=1 but __wrap_mdevlookup is not in the linked image: the root answer this arm redirects does not exist. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    ml_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$ml_addr" '
+        { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bb[n] = ($2 != "") ? 1 : 0 }
+        BEGIN { t = strtonum(a) }
+        END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+    if [[ -z "$ml_next" ]]; then
+        say "FAIL: __wrap_mdevlookup (at $ml_addr) has no size in the linked image, so this clause cannot bound its body. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    ml_body=$(arm-none-eabi-objdump -d --start-address="$ml_addr" --stop-address="$ml_next" "$OUT/xnu_arm_entry.elf")
+    if ! grep -qE 'bl.*<entry_root_media_register_card>' <<<"$ml_body"; then
+        say "FAIL: __wrap_mdevlookup (at $ml_addr) does not CALL entry_root_media_register_card, so the root device is not the card even though STAGE90_XNU_ROOT_FROM_CARD=1: the redirection did not reach the linked body. This is the one line 903 turns on. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    # `if`, not `A && B`: with `set -e`, a `grep ... && exit` whose grep FAILS (the good case - the
+    # disk-0 call is absent) returns non-zero and would abort the build on the CORRECT image. The
+    # negative direction has to be spelled so that "not found" is success.
+    if grep -qE 'bl.*<entry_root_media_register>' <<<"$ml_body"; then
+        say "FAIL: __wrap_mdevlookup (at $ml_addr) CALLS entry_root_media_register (the disk-0 RAM-blob registration) as well as entry_root_media_register_card: on the card-root arm the root must be the card unit ONLY. The two calls would make the arm's record and its behavior disagree. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    say "  xnu_entry_903: the card-root redirection is in the linked image - __wrap_mdevlookup (at $ml_addr) calls entry_root_media_register_card (T, 0x$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_root_media_register_card" { print $1 }')) and NOT entry_root_media_register, so the mount path's root device is the card unit"
 fi
 
 run arm-none-eabi-objcopy -O binary "$OUT/xnu_arm_entry.elf" "$OUT/xnu_arm_entry.bin"
@@ -36298,6 +36398,11 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # other one. Written as the RESOLVED `$EMMC_STRATEGY`, not `${STAGE90_XNU_EMMC_STRATEGY}`, for 882's
     # reason: a defaulted switch and an unset one are the same image and two different records.
     echo "STAGE90_XNU_EMMC_STRATEGY=$EMMC_STRATEGY"
+    # 903: whether the mount path's ROOT device is the card (disk 2) or the RAM blob (disk 0). An arm key
+    # for MOUNT's reason - it changes `__wrap_mdevlookup`'s answer, so the same image roots a different
+    # medium and a record that omitted it would describe the other experiment. Written as the RESOLVED
+    # `$ROOT_FROM_CARD`, not `${STAGE90_XNU_ROOT_FROM_CARD}`, for 882's reason.
+    echo "STAGE90_XNU_ROOT_FROM_CARD=$ROOT_FROM_CARD"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways

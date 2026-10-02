@@ -189,6 +189,17 @@ int entry_root_media_hfs_root_arm_on(void)  { return 1; }
 int entry_root_media_hfs_root_arm_off(void) { return 0; }
 #endif
 
+/* 903: the same marker shape for the CARD-ROOT arm (root served from the CARD unit,
+ * ST_MEDIA_DRIVER), so `build_entry.sh` can refuse a card-root image whose entry side does not name
+ * this contract, and so a build with the switch off is byte-for-byte the 902 arm. It depends on the
+ * card unit existing (STAGE90_XNU_EMMC_STRATEGY) and on the HFS arm (the volume the card carries is
+ * HFS+); the entry build refuses the impossible combinations where they would otherwise be silent. */
+#if STAGE90_XNU_ROOT_FROM_CARD
+int entry_root_media_cardroot_arm_on(void)  { return 1; }
+#else
+int entry_root_media_cardroot_arm_off(void) { return 0; }
+#endif
+
 /* 888: the same marker shape for the CARD unit, so `build_entry.sh` can refuse an image that turns
  * the card switch on while the ladder's own door (887) is not in it, and can WIDEN the strategy's
  * "never reach the device" refusal only on the arm that deliberately reaches it. */
@@ -331,6 +342,45 @@ static uint32_t st_medium_staged;        /* 0 until `entry_root_media_stage` has
  */
 #ifndef STAGE90_XNU_EMMC_STRATEGY
 #define STAGE90_XNU_EMMC_STRATEGY 0
+#endif
+
+/*
+ * ===================================================================================================
+ * 903 - THE CARD-ROOT ARM: THE ROOT DEVICE IS THE CARD UNIT, NOT THE RAM BLOB.
+ *
+ * 902 closed "the HFS+ port mounts and execs process 1" but its volume was the committed RAM blob
+ * `g_stage90_root_hfs` linked into the payload. This switch points the root at what the device's own
+ * storage holds. It is a ONE-LINE redirection of `__wrap_mdevlookup`'s answer (from
+ * `entry_root_media_register(devid)`, disk 0 = the blob, to `entry_root_media_register_card()`, disk 2
+ * = the selected partition served block-by-block from the card), because EVERYTHING ELSE IS ALREADY IN
+ * PLACE: the card unit exists (888, proven by 892's `_card_lba=0x400000`), its geometry is the
+ * selection's, and its strategy already computes `lba = selected_lba + off/512 + i` and fetches each
+ * block through `entry_storage_driver_read`.
+ *
+ * **WHY THE FALL-THROUGH SURVIVES WITHOUT TOUCHING `mi_mdev`.** `mockfs_mountroot` (mockfs_vfsops.c)
+ * does not decline a non-memory device: it reads `DKIOCGETMEMDEVINFO` and sets
+ * `mockfs_memory_backed = mi_mdev`, then mounts either way. So `st_media_memdev_info` keeps its 902
+ * answer (`mi_mdev = 1` on the HFS arm, from the FILE-SCOPE geometry, which the blob/disk-0
+ * registration set) and mockfs memory-backs `g_stage90_ramdisk` - while DISK 2 (the card, which this
+ * arm returns) is served by `st_media_strategy`'s card branch, since only `mi_mdev` from the card
+ * unit's own `DKIOCGETMEMDEVINFO` would memory-back the card and that call never happens for the root
+ * device here (mockfs gets the FILE-SCOPE answer). HFS reads the card's volume by block; if it fails,
+ * `vfs_mountroot`'s next row is mockfs, which maps the Mach-O - both paths exec.
+ *
+ * **THE MEDIUM MUST BE HFS+.** XNU 4570 has no ext2/3/4 client (only HFS+ is ported: 885), and the
+ * selected partition (`userdata`) carries ext4 today (884/890), so this arm mounts only once an HFS+
+ * volume exists at the partition's start. Building that volume (the 903 host tool) and writing it
+ * (the one destructive step, the operator's) are separate acts; with no HFS+ there HFS's `BTOpenPath`
+ * fails, the row falls through to mockfs, and the run is the 902 arm - a mount that reads no card block
+ * and the RAM-blob root, not a brick.
+ *
+ * The switch is a `#ifndef` for `STAGE90_XNU_EMMC_STRATEGY`'s reason (this file is compiled by the
+ * KERNEL build, whose environment does not carry the entry build's resolved value). `build_entry.sh`
+ * refuses a card-root image whose module did not compile this arm (a `nm` marker, 882's shape) and an
+ * arm that is on without the card unit and the HFS volume it needs.
+ */
+#ifndef STAGE90_XNU_ROOT_FROM_CARD
+#define STAGE90_XNU_ROOT_FROM_CARD 0
 #endif
 
 #if STAGE90_XNU_EMMC_STRATEGY
@@ -1057,6 +1107,15 @@ entry_root_media_register_card(void)
     uint32_t count = entry_storage_selected_count();
     uint32_t lba   = entry_storage_selected_lba();
 
+    /* 903: the card unit is registered ONCE. The root answer (`__wrap_mdevlookup`) is asked on every
+     * boot, and `entry_root_media_stage` also asks for the unit at the same mount; a second
+     * `entry_root_media_register` would `bdevsw_add` a SECOND major for the same medium and the root
+     * would hold a `dev_t` whose strategy is a different registration than the one 892 measured. A
+     * zero `st_media_major` is "not yet registered" (the array is `.bss`, and a real major is a small
+     * positive integer `bdevsw_add` returns). */
+    if (st_media_major[ST_MEDIA_DRIVER] != 0u)
+        return (int)makedev(st_media_major[ST_MEDIA_DRIVER], ST_MEDIA_DRIVER);
+
     if (count == 0u) {
         entry_live_write("xnu_live_rootmedia_card_refused", 1u);
         return EINVAL;
@@ -1080,6 +1139,6 @@ entry_root_media_register_card(void)
     entry_live_write("xnu_live_rootmedia_card_blocks", count);
     entry_live_write("xnu_live_rootmedia_card_bytes",
                      (unsigned)((uint64_t)count * ST_MEDIA_BLOCKSIZE));
-    return 0;
+    return (int)dev;               /* 903: the dev_t, so the mount path can answer the root with it */
 }
 #endif

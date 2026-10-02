@@ -669,7 +669,7 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE STAGE90_XNU_SEAM_END_RUN
                 STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS STAGE90_XNU_STORAGE_PROBE
                 STAGE90_XNU_PWR_WAIT_TICKS STAGE90_XNU_MOUNT STAGE90_XNU_HFS_ROOT_MEDIA
-                STAGE90_XNU_EMMC_STRATEGY
+                STAGE90_XNU_EMMC_STRATEGY STAGE90_XNU_ROOT_FROM_CARD
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
@@ -691,11 +691,26 @@ if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/
      | grep -q 'entry_root_media_hfs_root_arm_on'; then
   _entry_hfs_arm=on
 fi
+# **903: `STAGE90_XNU_ROOT_FROM_CARD` gets the same ARTIFACT-grounded treatment as HFS_ROOT_MEDIA.** A
+# record written before 903 cannot carry the key, and demanding it would make every pre-903 park
+# unpressable (882's own defect). The entry image carries `entry_root_media_cardroot_arm_on` / `..._off`
+# unconditionally, so the ELF says whether the key is owed; an image that carries the card-root arm MUST
+# record it (a record without it could send a run whose root device nobody named), and one that cannot
+# carry the arm has no such value to record.
+_entry_cardroot_arm=""
+if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/dev/null \
+     | grep -q 'entry_root_media_cardroot_arm_on'; then
+  _entry_cardroot_arm=on
+fi
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
   if [[ -z $_v && $_k == STAGE90_XNU_HFS_ROOT_MEDIA && -z $_entry_hfs_arm ]]; then
     printf '  %s=(absent, and this entry image carries no HFS root arm to name - the key is N/A here)\n' "$_k"
+    continue
+  fi
+  if [[ -z $_v && $_k == STAGE90_XNU_ROOT_FROM_CARD && -z $_entry_cardroot_arm ]]; then
+    printf '  %s=(absent, and this entry image carries no card-root arm to name - the key is N/A here)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \
