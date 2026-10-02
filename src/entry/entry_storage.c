@@ -7856,6 +7856,31 @@ st_write_single_block(uint32_t lba)
     ST_LIVE("xnu_live_storage_wr_prog_timeout",
             (prog_ps & (uint32_t)(ST_SDHCI_DOING_WRITE | ST_SDHCI_DAT_LINE_ACTIVE)) ? 1u : 0u);
 
+    /*
+     * **THE WRITE'S OWN VERDICT, AND WHY THE WAIT ABOVE IS NOT ONE.** The programming wait says the
+     * card eventually let the data lines go; it does NOT say the block was accepted. A card can end a
+     * write in an error the host has to READ OUT OF INT_STATUS - a DATA timeout, a CRC, or a bad
+     * end-bit - and before this block the write body left every one of those bits unread, so a
+     * rejected write would have been published as `_wr_complete = 1` and the rung would have called it
+     * a success. The read body has published exactly this verdict since rung 42
+     * (`_rd_int_status_end` and `_rd_int_data_err`); this is the write half of the same two cells, and
+     * `_wr_int_data_end` is the positive completion the vendor's own `sdhci_finish_data` waits on
+     * (`SDHCI_INT_DATA_END`, sdhci.h:122). Read AFTER the wait so the bits are the transfer's own -
+     * not the PIO loop's intermediate `_wr_int_status_end`, which is sampled mid-transfer. Read-only:
+     * this block stores nothing and issues no command, so the next press can carry it over the arm
+     * that already hung without adding a device action.
+     */
+    {
+        uint32_t wend = st_read32(ST_HC_MEM_BASE + ST_SDHCI_INT_STATUS);
+        ST_LIVE("xnu_live_storage_wr_int_status_final", wend);
+        ST_LIVE("xnu_live_storage_wr_int_data_end",
+                (wend & (uint32_t)ST_SDHCI_INT_DATA_END) ? 1u : 0u);
+        ST_LIVE("xnu_live_storage_wr_data_err",
+                wend & (uint32_t)((uint32_t)ST_SDHCI_INT_DATA_TIMEOUT |
+                                  (uint32_t)ST_SDHCI_INT_DATA_CRC |
+                                  (uint32_t)ST_SDHCI_INT_DATA_END_BIT));
+    }
+
     /* --- the window's exit, the timeout restored -------------------------------------------------- */
     st_write32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE, 0u);
     st_write8(ST_HC_MEM_BASE + ST_SDHCI_TIMEOUT_CONTROL, (uint8_t)was);

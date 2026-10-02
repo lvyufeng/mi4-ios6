@@ -670,6 +670,7 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS STAGE90_XNU_STORAGE_PROBE
                 STAGE90_XNU_PWR_WAIT_TICKS STAGE90_XNU_MOUNT STAGE90_XNU_HFS_ROOT_MEDIA
                 STAGE90_XNU_EMMC_STRATEGY STAGE90_XNU_ROOT_FROM_CARD STAGE90_XNU_HDD_WRITE
+                STAGE90_XNU_HFS_ROOT_RW
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
@@ -713,6 +714,18 @@ if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/
      | grep -q 'entry_root_media_write_arm_on'; then
   _entry_write_arm=on
 fi
+# **905 B2: `STAGE90_XNU_HFS_ROOT_RW` - the rw-root clear - gets the same ARTIFACT-grounded treatment.** A
+# record written before 905 cannot carry the key, and demanding it would make every pre-905 park
+# unpressable (882's own defect, thrice repaired). The entry image carries the write arm's marker
+# `entry_root_media_write_arm_on` / `..._off` UNCONDITIONALLY (905 section 8), and the rw clear is the
+# write arm's other half - so an image that carries the write arm MUST record this key (a record without
+# it could send a run whose root mounts read-only while the record names a write arm), and one that
+# cannot carry the arm has no such value to record.
+_entry_root_rw=""
+if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/dev/null \
+     | grep -q 'entry_root_media_write_arm_on'; then
+  _entry_root_rw=on
+fi
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
@@ -726,6 +739,10 @@ do
   fi
   if [[ -z $_v && $_k == STAGE90_XNU_HDD_WRITE && -z $_entry_write_arm ]]; then
     printf '  %s=(absent, and this entry image carries no eMMC-write arm to name - the key is N/A here)\n' "$_k"
+    continue
+  fi
+  if [[ -z $_v && $_k == STAGE90_XNU_HFS_ROOT_RW && -z $_entry_root_rw ]]; then
+    printf '  %s=(absent, and this entry image carries no eMMC-write arm whose rw clear it would name - the key is N/A here)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \

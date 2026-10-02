@@ -748,6 +748,32 @@ if [[ $HDD_WRITE -eq 1 && $ROOT_FROM_CARD -ne 1 ]]; then
     echo "          mounts. Build the card-root arm first." >&2
     exit 1
 fi
+# **905 B2's read-write root clear: THE OTHER HALF OF THE WRITE ARM, AND A RECORDED KEY.** The clear is
+# `tools/hfs_patch_root_rw.py`'s guarded `vfs_clearflags(mp, MNT_RDONLY)` in `hfs_mountroot`, compiled
+# into the POOL's HFS objects under `STAGE90_XNU_HFS_ROOT_RW` (`build_xnu_arm_kernel.sh`). But until now
+# that switch lived in NO record: the arm's `xnu_arm_entry-config.txt` named `HDD_WRITE=1` while the byte
+# that actually decides rw-ness - the guard the pool's `hfs_vfsops.o` was compiled with - was invisible
+# to every record and every gate. It is resolved from the SAME env name the kernel build reads, recorded
+# as an arm key, and REQUIRED by the write arm: a `HDD_WRITE=1` whose pool had the clear compiled out
+# would mount the root `MNT_RDONLY`, never issue a `B_WRITE`, and ship an arm whose own subject is
+# absent - `mi4-off-option-two-spellings` (the macro a file sees is a property of the component, not of
+# the arm that links it). The record is then checked against the LINKED image below, both directions.
+HFS_ROOT_RW=${STAGE90_XNU_HFS_ROOT_RW:-0}
+case "$HFS_ROOT_RW" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_HFS_ROOT_RW='$HFS_ROOT_RW' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $HDD_WRITE -eq 1 && $HFS_ROOT_RW -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_HDD_WRITE=1 needs STAGE90_XNU_HFS_ROOT_RW=1." >&2
+    echo "          The write rung's whole point is that the HFS+ root mounts READ-WRITE; the one edit" >&2
+    echo "          that makes it so (905 B2's vfs_clearflags in hfs_mountroot) is compiled into the pool" >&2
+    echo "          only under STAGE90_XNU_HFS_ROOT_RW. Without it the root mounts MNT_RDONLY, the card" >&2
+    echo "          unit's B_WRITE branch is never reached, and the arm promises a write it cannot make." >&2
+    echo "          Run tools/stage_hfs.sh, then STAGE90_XNU_HFS_ROOT_RW=1 tools/build_xnu_arm_kernel.sh," >&2
+    echo "          then rebuild this entry image under the write arm." >&2
+    exit 1
+fi
 # **The allowed rungs are the LADDER'S OWN BOUND, read out of the source it guards - not a list here.**
 # Until 732 this was a hand-typed `case` naming `0` through `13`, and raising the ladder to 14 in
 # `entry_storage.c` therefore did not raise it here: the two readings of one quantity disagreed, and the
@@ -924,6 +950,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_EMMC_STRATEGY
                 STAGE90_XNU_ROOT_FROM_CARD
                 STAGE90_XNU_HDD_WRITE
+                STAGE90_XNU_HFS_ROOT_RW
                 STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_XNU_IDLE_NO_SLEEP)
 #
@@ -1025,6 +1052,7 @@ do
         STAGE90_XNU_EMMC_STRATEGY)    _v=$EMMC_STRATEGY ;;
         STAGE90_XNU_ROOT_FROM_CARD)   _v=$ROOT_FROM_CARD ;;
         STAGE90_XNU_HDD_WRITE)        _v=$HDD_WRITE ;;
+        STAGE90_XNU_HFS_ROOT_RW)      _v=$HFS_ROOT_RW ;;
         STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
@@ -28145,6 +28173,45 @@ ramdisk_size=$(arm-none-eabi-nm -S "$OUT/xnu_arm_entry.elf" | awk '$4=="g_stage9
 # file read would serve nothing, which is 862's mount-and-cannot-exec shape wearing a green build
 # ([[mi4-one-value-two-definitions]]). Read the LINKED artifact, not the source, per
 # [[mi4-a-claim-in-a-comment-is-not-a-check]] - this check is AFTER the link on purpose, so it can see it.
+# **905 B3: THE READ-WRITE ROOT CLEAR, READ OUT OF THE LINKED IMAGE.** 905 B2's whole point is that the
+# HFS+ root mounts READ-WRITE, and the one edit that makes it so is `tools/hfs_patch_root_rw.py`'s
+# guarded `vfs_clearflags(mp, MNT_RDONLY)` immediately before `hfs_mountroot`'s `hfs_mountfs` call. But
+# that clear is compiled into the pooled HFS objects under a SEPARATE switch (`STAGE90_XNU_HFS_ROOT_RW`,
+# a `build_xnu_arm_kernel.sh` env default), so `HDD_WRITE=1` could be recorded - promising a writable
+# root, `st_write_single_block` and all - while the pooled `hfs_vfsops.o` came from an ordinary build
+# with the clear compiled out. The strategy's write branch would then never be reached: the root mounts
+# `MNT_RDONLY`, no B_WRITE is ever issued, and the rung's subject is absent from the image while its
+# record names it. That is `mi4-off-option-two-spellings` in its 905 form - the macro a file sees is a
+# property of the component that compiled it, not of the arm that links it - and
+# `mi4-a-claim-in-a-comment-is-not-a-check` says make it structural: the clear's presence is a property
+# of the LINKED image, so it is read back here, by value, out of `hfs_mountroot`'s own body. A REFUSAL on
+# the write arm; a NOTE otherwise (an image may carry the clear without the write arm - the clear alone
+# merely admits the mount to rw - but the write arm cannot work without it).
+if [[ $HDD_WRITE -eq 1 || $HFS_ROOT_RW -eq 1 ]]; then
+    hmr_addr=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "hfs_mountroot" && $2 == "T" { print "0x" $1 }')
+    if [[ -z "$hmr_addr" ]]; then
+        layout_fail "STAGE90_XNU_HFS_ROOT_RW=1 (or HDD_WRITE=1) but \`hfs_mountroot\` is not a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the rw arm makes the MOUNTED root writable, and there is no root-mount body to make writable - the HFS port (STAGE90_HFS_ROOT) is not linked. Nothing is rebuilt by this refusal"
+    fi
+    hmr_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$hmr_addr" '
+        { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bb[n] = ($2 != "") ? 1 : 0 }
+        BEGIN { t = strtonum(a) }
+        END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+    if [[ -z "$hmr_next" ]]; then
+        layout_fail "hfs_mountroot (at $hmr_addr) has no size in the linked image, so this clause cannot bound its body. Nothing is rebuilt by this refusal"
+    fi
+    hmr_body=$(arm-none-eabi-objdump -d --start-address="$hmr_addr" --stop-address="$hmr_next" "$OUT/xnu_arm_entry.elf")
+    if grep -qE 'bl.*<vfs_clearflags>' <<<"$hmr_body"; then hmr_has=1; else hmr_has=0; fi
+    if [[ $HFS_ROOT_RW -eq 1 && $hmr_has -ne 1 ]]; then
+        layout_fail "STAGE90_XNU_HFS_ROOT_RW=1 is RECORDED but the linked image's hfs_mountroot (at $hmr_addr) does NOT call vfs_clearflags, so the root mounts MNT_RDONLY and the card unit's B_WRITE branch is never reached - the arm would promise a writable root it cannot deliver. The pool's hfs_vfsops.o predates 905 B2's clear, or it was built without STAGE90_XNU_HFS_ROOT_RW=1. Apply it, then rebuild the pool and this entry image TOGETHER: tools/stage_hfs.sh; STAGE90_XNU_HFS_ROOT_RW=1 tools/build_xnu_arm_kernel.sh; then src/entry/build_entry.sh under this arm. Nothing is rebuilt by this refusal"
+    fi
+    if [[ $HFS_ROOT_RW -eq 0 && $hmr_has -eq 1 ]]; then
+        layout_fail "STAGE90_XNU_HFS_ROOT_RW=0 (or unset) is RECORDED but the linked image's hfs_mountroot (at $hmr_addr) DOES call vfs_clearflags: the image mounts the HFS+ root read-write while its record says the clear is off, so an arm whose record says read-only is indistinguishable from one that writes the root - mi4-off-option-two-spellings in both directions. The pool was built with STAGE90_XNU_HFS_ROOT_RW=1 and this entry link recorded 0; rebuild the pool with the clear OFF, or record it ON. Nothing is rebuilt by this refusal"
+    fi
+    if [[ $HFS_ROOT_RW -eq 1 ]]; then
+        say "  xnu_entry_905: the rw-root clear is in the linked image - hfs_mountroot (at $hmr_addr) CALLS vfs_clearflags before hfs_mountfs, so the mounted HFS+ root is not MNT_RDONLY and the card unit's write branch is reachable"
+    fi
+fi
+
 if [[ $EMMC_STRATEGY -eq 1 ]]; then
     arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_storage_driver_read" && $2 == "T" { found = 1 } END { exit(found ? 0 : 1) }' ||
         layout_fail "STAGE90_XNU_EMMC_STRATEGY=1 but \`entry_storage_driver_read\` is not a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the card unit's strategy would call a linker stub that moves no byte, so the root would mount and read nothing. The door is built by 887's entry_storage.c change (tools/rung61-driver-door.patch); apply it before a card-ON build. Nothing is rebuilt by this refusal"
@@ -36513,6 +36580,10 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # whose log carried `xnu_live_rootmedia_card_wr_*` keys the read-only image cannot produce. Written
     # as the RESOLVED `$HDD_WRITE`, not `${STAGE90_XNU_HDD_WRITE}`, for 882's reason.
     echo "STAGE90_XNU_HDD_WRITE=$HDD_WRITE"
+    # **905 B2's rw-root clear, as the RESOLVED `$HFS_ROOT_RW`** - the guard the POOL compiled
+    # `hfs_mountroot` with, recorded so a record that names the write arm also names the clear that makes
+    # it reachable (the linked image is checked against this below, both directions).
+    echo "STAGE90_XNU_HFS_ROOT_RW=$HFS_ROOT_RW"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways
