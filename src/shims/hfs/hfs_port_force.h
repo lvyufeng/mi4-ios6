@@ -23,12 +23,19 @@
  * --------------------------------------------------------------------------------------------- */
 
 /* The five malloc types 2050's bsd/sys/malloc.h declares and 4570's does not.  At 2050's own numbers:
- * 4570's highest M_* is 128 and 75/76/77/95/96 are all free, so no other type moves. */
+ * is not merely unused: 4570's kmzones[75/76/77/95] are KMZ_MALLOC rows, and NO visible row is 96 at
+ * all (see the note below it). */
 #define M_HFSMNT      75   /* 2050 bsd/sys/malloc.h:168 */
 #define M_HFSNODE     76   /* 2050 bsd/sys/malloc.h:169 */
 #define M_HFSFORK     77   /* 2050 bsd/sys/malloc.h:170 */
 #define M_HFSDIRHINT  95   /* 2050 bsd/sys/malloc.h:188 */
-#define M_HFSBITMAP   96   /* 2050 bsd/sys/malloc.h:189 */
+/* M_HFSBITMAP was declared here as 96 and is REMOVED (experiment 898).  4570's kmzones[96] is
+ * `SOS(cl_readahead)` + KMZ_CREATEZONE - i.e. 4570 defines M_CLRDAHEAD = 96 (bsd/sys/malloc.h:189,
+ * verified), so 2050's :189 citation is false and 96 is NOT free.  Nothing in the staged HFS tree
+ * reads M_HFSBITMAP (grep: zero call sites; 2050's malloc.h never declares it either), so the define
+ * allocated nothing and its removal is behaviour-preserving - it only stops a future MALLOC from
+ * landing in the wrong kmzone.  This is the port's own "one value, two definitions" rule applied to
+ * its own file. */
 
 /* Two more of the same kind, owed by the JOURNAL (2050 bsd/vfs/vfs_journal.c, `#if JOURNALING`):
  * the port brings that file, so its malloc types come with it.  Also free in 4570. */
