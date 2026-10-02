@@ -524,6 +524,14 @@ DEFINES=(
 # of the configuration the pool is, and the pool's external `hfs_mountroot` lives in the HFS objects.
 [[ ${HFS_PORT:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_HFS_ROOT=1)
 
+# **899's mount-path live step markers.** The stager (`tools/hfs_patch_mount_markers.py`) inserts an
+# `entry_live_write("xnu_live_hfs_stage", N)` at the five steps of the HFS+ mount, each guarded by
+# `STAGE90_HFS_MOUNT_MARKERS`.  `STAGE90_XNU_HFS_MARKERS=1` defines the guard for the whole build, so
+# the next press reports the last step the mount reached (897 served one read and the mount never
+# returned).  Off by default, so a normal arm compiles the markers to nothing and is byte-for-byte
+# unaffected.
+[[ ${STAGE90_XNU_HFS_MARKERS:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_HFS_MOUNT_MARKERS=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.

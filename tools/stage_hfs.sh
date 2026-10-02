@@ -61,6 +61,13 @@ say "stage_hfs: applying the hfs_macos_defs.h substitution"
 say "stage_hfs: applying the vfs_conf.c HFS root row"
 "$HERE/patch_vfs_conf_hfs_row.py" "$DST/bsd/vfs/vfs_conf.c"
 
+# --- 4b. the mount-path live step markers (899) ---------------------------------------------------
+# Like the row above: a tracked patch to the untracked tree, guarded by `STAGE90_HFS_MOUNT_MARKERS`
+# so it is inert unless a marker build asks for it. 897 served one read and the mount never
+# returned; these markers name the last step the mount reached.
+say "stage_hfs: applying the HFS+ mount-path live step markers"
+"$HERE/hfs_patch_mount_markers.py" "$DST"
+
 N=$(find "$DST/bsd/hfs" -name '*.c' | wc -l)
 say "stage_hfs: staged $N .c file(s) under $DST/bsd/hfs (plus vfs_journal.c, spl.h, the root row)"
 # --- 5. the record, for the one gate that cannot see the enumerated files -------------------------

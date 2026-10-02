@@ -140,9 +140,46 @@ if [[ -d $XNU/bsd ]]; then
     fi
 fi
 
+# --- 4c. the mount-path live step markers (899) are present, guarded, and match the tracked patch -----
+# 899 adds a FOURTH tracked edit to the untracked tree: five `entry_live_write("xnu_live_hfs_stage", N)`
+# markers, applied by `tools/hfs_patch_mount_markers.py` and guarded by `STAGE90_HFS_MOUNT_MARKERS` so
+# they are inert unless a marker build asks for them.  897 served ONE strategy read and the mount never
+# returned; 898 bounded the block to `hfs_MountHFSPlusVolume` but could not tell WHICH step blocked.  A
+# re-provision drops all five and the next press would again read "one read, then silence", so the drift
+# is refused in the same direction as the other three edits.  Two things are checked: the marker ids the
+# patcher declares are the ones in the tree (a source rename cannot silently drop one), and each marker
+# sits inside its `#if STAGE90_HFS_MOUNT_MARKERS` guard (an unguarded marker would emit a live record in
+# a normal build).  The patcher is idempotent by construction (a site whose id is already present is
+# left alone), and re-running `stage_hfs.sh` is the re-derivation - `make check` cannot re-run it without
+# mutating the tree, so this reads the RESULT the stager was told to produce.
+MARKERS=$REPO_ROOT/tools/hfs_patch_mount_markers.py
+if [[ -f $MARKERS && -d $XNU/bsd/hfs ]]; then
+    grep -q "M_HFSBITMAP" "$MARKERS" && refuse "$MARKERS still references the removed M_HFSBITMAP (898)"
+    # read the declared (marker id, source file) pairs FROM the patcher's own `--list-sites`, not a
+    # second hand-written list that could drift away from the one the stager applies.
+    while read -r rel mid; do
+        [[ -n $rel ]] || continue
+        # The marker comment names it: `marker `<id>`.`  A tree that lost the patch, or a source
+        # update that moved the anchor, both surface here - neither can silently drop a step.
+        if grep -q "marker \`$mid\`" "$XNU/$rel"; then
+            # The guard is what keeps a marker inert in a normal build; a marker without it would
+            # emit a live record the moment the port is on, the one thing these must never do.
+            grep -q "#if STAGE90_HFS_MOUNT_MARKERS" "$XNU/$rel" \
+                || refuse "$XNU/$rel carries the \`$mid\` marker but no STAGE90_HFS_MOUNT_MARKERS guard"
+        else
+            refuse "$XNU/$rel carries no \`$mid\` step marker (run tools/stage_hfs.sh)"
+        fi
+    done < <(python3 "$MARKERS" --list-sites)
+fi
+# The stager must still call it, or a fresh stage silently loses the markers.
+if [[ -f $MARKERS ]]; then
+    grep -q "hfs_patch_mount_markers.py" "$REPO_ROOT/tools/stage_hfs.sh" \
+        || refuse "tools/stage_hfs.sh no longer applies the 899 mount-path markers"
+fi
+
 if (( fail )); then
     printf 'check_hfs_staged: FAIL - the HFS+ port'\''s tracked artifacts drifted from what they claim\n' >&2
     exit 1
 fi
-printf 'check_hfs_staged: ok - %d shim symbol(s) present; force-header additions do not collide with 4570; 874 root row guarded and before mockfs\n' \
+printf 'check_hfs_staged: ok - %d shim symbol(s) present; force-header additions do not collide with 4570; 874 root row guarded and before mockfs; 899 mount markers present and guarded\n' \
     "$(printf '%s\n' $WANT | grep -c .)"
