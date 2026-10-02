@@ -137,6 +137,21 @@ if [[ -d $XNU/bsd ]]; then
         #     says WHICH patch produced it, and it is the shape a hand-edit produced once already).
         n=$(grep -c 'FT_HFS     = 17' "$CONF")
         [[ $n -eq 1 ]] || refuse "$CONF declares FT_HFS $n time(s), must be exactly one (874's row adds it)"
+        # (d) 902: the HFS vnode-op descriptors must be in `vfs_opv_descs[]`, or `hfs_vnodeop_p` is
+        #     never allocated and every HFS vnode's `v_op` is NULL.  The FIRST B-tree read dereferences
+        #     it (`VNOP_STRATEGY`, `v_op[1]`) exactly as 901's press measured (`fault_addr=0x4`).  The
+        #     root row alone links and mounts but faults on its first node read, so this is checked the
+        #     same way: the marker, then the rows, each present and named in the port's own comment.
+        grep -q "HFS vnode-op descriptors" "$CONF" \
+            || refuse "$CONF carries no 902 marker comment for the HFS vnode-op descriptors (run tools/stage_hfs.sh)"
+        for d in hfs_vnodeop_opv_desc hfs_std_vnodeop_opv_desc hfs_specop_opv_desc; do
+            m=$(grep -c "&$d," "$CONF")
+            [[ $m -eq 1 ]] || refuse "$CONF names &$d, in vfs_opv_descs[] $m time(s), must be exactly one - without it vfs_opv_init never allocates the vector and every HFS vnode's v_op is NULL (902)"
+        done
+        # The rows must sit inside the port's STAGE90_HFS_ROOT guard, i.e. between its two markers.
+        awk '/#if STAGE90_HFS_ROOT/{g=1} /#endif \/\* STAGE90_HFS_ROOT \*\//{g=0}
+             g && /&hfs_vnodeop_opv_desc,/{f=1} END{exit f?0:1}' "$CONF" \
+            || refuse "$CONF carries &hfs_vnodeop_opv_desc, OUTSIDE a STAGE90_HFS_ROOT guard - the port's edits must be inert when the port is off"
     fi
 fi
 
@@ -181,5 +196,5 @@ if (( fail )); then
     printf 'check_hfs_staged: FAIL - the HFS+ port'\''s tracked artifacts drifted from what they claim\n' >&2
     exit 1
 fi
-printf 'check_hfs_staged: ok - %d shim symbol(s) present; force-header additions do not collide with 4570; 874 root row guarded and before mockfs; 899 mount markers present and guarded\n' \
+printf 'check_hfs_staged: ok - %d shim symbol(s) present; force-header additions do not collide with 4570; 874 root row guarded and before mockfs; 902 vnode-op descriptors in vfs_opv_descs; 899 mount markers present and guarded\n' \
     "$(printf '%s\n' $WANT | grep -c .)"

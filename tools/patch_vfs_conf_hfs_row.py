@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Put 2050's HFS row into 4570's STATIC `vfstbllist[]`, before `mockfs`.
+"""Put 2050's HFS row into 4570's STATIC `vfstbllist[]`, before `mockfs` - and the HFS vnode-op
+descriptors into `vfs_opv_descs[]`.
 
     tools/patch_vfs_conf_hfs_row.py PATH/TO/bsd/vfs/vfs_conf.c
 
@@ -27,16 +28,68 @@ free).  `VFS_THREAD_SAFE_FLAG` is DROPPED: it is a 2050-local macro (`VFC_VFSTHR
 name - `MNT_LOCAL`, `MNT_DOVOLFS`, `VFC_VFSLOCALARGS`, `VFC_VFSREADDIR_EXTENDED`, `VFC_VFS64BITREADY`,
 `VFC_VFSVNOP_PAGEINV2`, `VFC_VFSVNOP_PAGEOUTV2` - is present in 4570 with the same value.
 
+WHY THE VNODE-OP DESCRIPTORS ARE PART OF THIS ROW (experiment 902).  The root row alone is not enough
+to use the filesystem: `hfs_getnewvnode` builds each vnode with `vfsp.vnfs_vops = hfs_vnodeop_p`, and
+`hfs_vnodeop_p` is a BSS global the ONLY writer of which is `vfs_opv_init()` walking the static
+`vfs_opv_descs[]` table and allocating each descriptor's vector.  4570's table carries no HFS rows
+(it has no HFS), so `hfs_vnodeop_p` stays NULL, the vnode's `v_op` is NULL, and the mount's first
+B-tree node read (`BTOpenPath` -> the buffer cache -> `VNOP_STRATEGY`) dereferences `v_op[1]` at
+address 4 - the 901 press's `fault_addr=0x4`, `pc` in `VNOP_STRATEGY+0x24`.  So the descriptors are
+as load-bearing as the row, and they are patched HERE, in the one tracked place, for the same reason:
+`external/` is re-provisionable.  2050's table has these four rows under `#if HFS`; the port takes
+the three that are always present and the FIFO one under its own `#if FIFO`, both exactly as 2050
+wrote them, guarded by the port's own `STAGE90_HFS_ROOT`.
+
 Idempotent: a file that already carries the marker is left alone.  Refuses (exit 2) if neither the
 marker nor the anchor `#if MOCKFS` block is found, because that means the tree moved under it.
 """
 import sys
 
 MARK = "vfs_conf.c HFS root row (tools/patch_vfs_conf_hfs_row.py)"
+OPV_MARK = "vfs_conf.c HFS vnode-op descriptors (tools/patch_vfs_conf_hfs_row.py)"
 
 # The anchor is the `mockfs` block's own preprocessor line, which is unique in the file and sits
 # exactly where the new row must go (immediately before it).
 ANCHOR = "#if MOCKFS\n\t/* If we are configured for it, mockfs should always be the last standard entry"
+
+# The vnode-op descriptors: their `extern` block and their rows in `vfs_opv_descs[]`.  Both anchors are
+# the existing MOCKFS sibling, which is unique in the file (measured).
+OPV_ANCHOR = ("#if MOCKFS\n"
+              "extern struct vnodeopv_desc mockfs_vnodeop_opv_desc;\n"
+              "#endif /* MOCKFS */")
+OPV_TBL_ANCHOR = ("#if MOCKFS\n"
+                  "\t&mockfs_vnodeop_opv_desc,\n"
+                  "#endif /* MOCKFS */")
+
+OPV_ADD = """
+#if STAGE90_HFS_ROOT
+/* PORT SHIM (%s): 2050's HFS vnode-op descriptors (xnu-2050.18.24/bsd/vfs/vfs_conf.c, the `#if HFS`
+ * block of vfs_opv_descs[]).  Without these rows `vfs_opv_init` never allocates hfs_vnodeop_p, so
+ * `hfs_getnewvnode`'s `vnfs_vops = hfs_vnodeop_p` is NULL and the first B-tree read faults (902). */
+extern struct vnodeopv_desc hfs_vnodeop_opv_desc;
+extern struct vnodeopv_desc hfs_std_vnodeop_opv_desc;
+extern struct vnodeopv_desc hfs_specop_opv_desc;
+#if FIFO
+extern struct vnodeopv_desc hfs_fifoop_opv_desc;
+#endif /* FIFO */
+#endif /* STAGE90_HFS_ROOT */
+""" % OPV_MARK
+
+OPV_TBL_ADD = """#if STAGE90_HFS_ROOT
+	/* PORT SHIM (%s).  2050's own `#if HFS` rows, before mockfs like the root row.  Order among the
+	 * op-vector descriptors does not affect the root choice (the root comes from vfstbllist[]); they
+	 * are placed beside mockfs so the port's two additions read as one diff.  Without them
+	 * `hfs_vnodeop_p` is never allocated and every HFS vnode's `v_op` is NULL (experiment 902). */
+	&hfs_vnodeop_opv_desc,
+	&hfs_std_vnodeop_opv_desc,
+	&hfs_specop_opv_desc,
+#if FIFO
+	&hfs_fifoop_opv_desc,
+#endif
+#endif /* STAGE90_HFS_ROOT */
+#if MOCKFS
+	&mockfs_vnodeop_opv_desc,
+#endif /* MOCKFS */""" % OPV_MARK
 
 # 1. The `extern` declarations, inserted after the MOCKFS extern block (so `mockfs_vfsops` still
 #    reads first).  Anchored on that block's full text: `#endif /* MOCKFS */` alone appears FOUR times
@@ -85,26 +138,49 @@ def main():
         sys.stderr.write("patch_vfs_conf_hfs_row: cannot read %s: %s\n" % (path, e))
         return 2
 
+    changed = []
+
+    # Group A - the root row (874): the FT_HFS number, its externs, and the row in vfstbllist[].
+    # Applied only when its marker is absent, because a tree can carry this group and not the opv one.
     if MARK in text:
         print("patch_vfs_conf_hfs_row: %s already carries the HFS root row; left alone" % path)
-        return 0
+    else:
+        for anchor, what in ((ANCHOR, "the mockfs table block"),
+                             (EXTERN_ANCHOR, "the MOCKFS extern block"),
+                             (FT_ANCHOR, "the FT_MOCKFS type number")):
+            if text.count(anchor) != 1:
+                sys.stderr.write(
+                    "patch_vfs_conf_hfs_row: %s does not contain exactly one %s (found %d) - the tree "
+                    "moved under this patch; inspect it before re-running\n"
+                    % (path, what, text.count(anchor)))
+                return 2
+        text = text.replace(EXTERN_ANCHOR, EXTERN_ANCHOR + EXTERN_ADD, 1)
+        text = text.replace(FT_ANCHOR, FT_REPLACE, 1)
+        text = text.replace(ANCHOR, ROW_ADD, 1)
+        changed.append("FT_HFS and the HFS root row")
+        print("patch_vfs_conf_hfs_row: put FT_HFS and the HFS root row into %s (marker: %s)" % (path, MARK))
 
-    for anchor, what in ((ANCHOR, "the mockfs table block"),
-                         (EXTERN_ANCHOR, "the MOCKFS extern block"),
-                         (FT_ANCHOR, "the FT_MOCKFS type number")):
-        if text.count(anchor) != 1:
-            sys.stderr.write(
-                "patch_vfs_conf_hfs_row: %s does not contain exactly one %s (found %d) - the tree "
-                "moved under this patch; inspect it before re-running\n"
-                % (path, what, text.count(anchor)))
-            return 2
+    # Group B - the vnode-op descriptors (902): their externs and their rows in vfs_opv_descs[].
+    # Separate marker so a tree patched by the root-row-only version (before 902) still receives it.
+    if OPV_MARK in text:
+        print("patch_vfs_conf_hfs_row: %s already carries the HFS vnode-op descriptors; left alone" % path)
+    else:
+        for anchor, what in ((OPV_ANCHOR, "the MOCKFS vnodeopv extern block"),
+                             (OPV_TBL_ANCHOR, "the MOCKFS row in vfs_opv_descs[]")):
+            if text.count(anchor) != 1:
+                sys.stderr.write(
+                    "patch_vfs_conf_hfs_row: %s does not contain exactly one %s (found %d) - the tree "
+                    "moved under this patch; inspect it before re-running\n"
+                    % (path, what, text.count(anchor)))
+                return 2
+        text = text.replace(OPV_ANCHOR, OPV_ANCHOR + OPV_ADD, 1)
+        text = text.replace(OPV_TBL_ANCHOR, OPV_TBL_ADD, 1)
+        changed.append("the HFS vnode-op descriptors")
+        print("patch_vfs_conf_hfs_row: put the HFS vnode-op descriptors into %s (marker: %s)" % (path, OPV_MARK))
 
-    text = text.replace(EXTERN_ANCHOR, EXTERN_ANCHOR + EXTERN_ADD, 1)
-    text = text.replace(FT_ANCHOR, FT_REPLACE, 1)
-    text = text.replace(ANCHOR, ROW_ADD, 1)
-
-    open(path, "w", encoding="utf-8").write(text)
-    print("patch_vfs_conf_hfs_row: put FT_HFS and the HFS root row into %s (marker: %s)" % (path, MARK))
+    if changed:
+        open(path, "w", encoding="utf-8").write(text)
+        print("patch_vfs_conf_hfs_row: %s now carries %s" % (path, " and ".join(changed)))
     return 0
 
 
