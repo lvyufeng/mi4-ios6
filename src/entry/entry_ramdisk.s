@@ -857,6 +857,18 @@
                                          * cbuf, user_size_t nbyte); }` - `munge_www` like `read`'s,
                                          * and the one call in this program that *changes the device*.
                                          * It returns 64-bit (writing r1 as well as r0), like `read`. */
+    .equ SYS_FSYNC,              95     /* `95 AUE_FSYNC ALL { int fsync(int fd); }` - one 4-byte
+                                         * argument, so `munge_w` with fd in r0, and its whole job here
+                                         * is to make the create's catalog node reach the card. HFS+
+                                         * writes a B-tree node with `bdwrite_internal(bp, 1)` - the
+                                         * block is marked dirty in the buffer cache, not written - so
+                                         * an `open`+`write` that never syncs leaves the new file's
+                                         * catalog record in RAM and it dies with the run. `fsync(fd)`
+                                         * reaches `hfs_vnop_fsync` -> `hfs_fsync(vp, waitfor, 0, ...)`,
+                                         * whose `hfs_metasync(hfsmp, cp->c_hint, ...)` is the call that
+                                         * `VNOP_BWRITE`s that very node (`hfs_vnops.c:2380`). This is
+                                         * the fixture's fourth *write* and the one that makes the mount
+                                         * a *persisted* one rather than one that changed only RAM. */
     .equ OPEN_CREATE_WRITE,      0x201  /* `O_CREAT` (0x0200) | `O_WRONLY` (0x0001) in
                                          * `bsd/sys/fcntl.h` - a NEW file, and the mode below is read
                                          * only because O_CREAT is set. This is the flag word whose
@@ -1247,7 +1259,17 @@ entry_parent:
  * the mount's first proof that it is read-write. None of it is branched on, for 503's reason: this
  * program is `initproc`, and an `open` a read-write mount should satisfy, failing, is a fact about
  * the filesystem to record rather than to `udf #1` on and end the boot 478's way. The wrapper records
- * the open and the write's returns; the string below carries the name. */
+ * the open and the write's returns; the string below carries the name.
+ *
+ * **906's `fsync(fd)` closes a gap 905 left open.** The 905 press wrote the volume header and the card
+ * accepted every block, but the new file's *name* never appeared: HFS+ a B-tree node with
+ * `bdwrite_internal(bp, 1)`, which marks it dirty in the buffer cache instead of writing it, and this
+ * program went straight from `write` to the park without ever giving HFS the call that flushes it -
+ * so the catalog record the create made died with the run and only the blocks HFS syncs on its own
+ * (the volume header, the private directory) survived. `fsync(0)` is the flush: it reaches
+ * `hfs_fsync`, whose `hfs_metasync(hfsmp, cp->c_hint, ...)` is the `VNOP_BWRITE` of that node. Its
+ * fd is the literal 0 because that is what `open` returned in 905's run (`xnu_live_open_fd = 0`), and
+ * like every other answer in this block its return is not tested. */
     adr     r0, path_new                /* +284: path = "/newfile", in this segment's own bytes */
     movw    r1, #OPEN_CREATE_WRITE      /* +288: flags = O_CREAT|O_WRONLY, so a new file is made */
     movw    r2, #OPEN_MODE_0644         /* +292: mode, read only because O_CREAT is set */
@@ -1257,7 +1279,10 @@ entry_parent:
     movw    r2, #WRITE_BYTES            /* +308: nbyte = 4 - one word, the page's own address */
     mov     r12, #SYS_WRITE             /* +312 */
     svc     #0x80                       /* +316: the write the mount's read-write state rests on */
-    b       park                        /* +320: deliberately not a `bne entry_failed` */
+    mov     r0, #0                      /* +320: fd = 0 - the descriptor `open` returned */
+    mov     r12, #SYS_FSYNC             /* +324: 95, the call that flushes the delayed catalog */
+    svc     #0x80                       /* +328: and the node the create left dirty reaches the card */
+    b       park                        /* +332: deliberately not a `bne entry_failed` */
 
 /* **512: the process's last act is to stop asking and start waiting.** 479's loop called `getpid` and
  * branched on the answer, which is what made this process's liveness a *record* - and it is also why
@@ -1284,15 +1309,15 @@ entry_parent:
  * run's `xnu_live_poll_ticks` are the deadlines that really expired). A park that could not be woken
  * would be the same hang by another route, and the reading that it is not is the run's. */
 park:
-    mov     r0, #0                      /* +324: fds = NULL - no descriptor is waited on */
-    mov     r1, #0                      /* +328: nfds = 0 */
-    movw    r2, #PARK_MS                /* +332: so the timeout is the whole of the call */
-    mov     r12, #SYS_POLL              /* +336 */
-    svc     #0x80                       /* +340: the thread parks here and the CPU goes idle */
-    b       park                        /* +344: and if the timeout ever expires, park again */
+    mov     r0, #0                      /* +336: fds = NULL - no descriptor is waited on */
+    mov     r1, #0                      /* +340: nfds = 0 */
+    movw    r2, #PARK_MS                /* +344: so the timeout is the whole of the call */
+    mov     r12, #SYS_POLL              /* +348 */
+    svc     #0x80                       /* +352: the thread parks here and the CPU goes idle */
+    b       park                        /* +356: and if the timeout ever expires, park again */
 
 entry_failed:
-    udf     #1                          /* +348: the kernel answered something else */
+    udf     #1                          /* +360: the kernel answered something else */
 entry_code_end:
 
 /* The two paths, as *file* bytes inside `__TEXT`'s file range - so the mapping that carries the
@@ -1351,16 +1376,16 @@ paths_end:
     .error "the entry point is outside the segment it is loaded from"
     .endif
 /* And what the program's length is, because every branch in it is relative: a `b` that left the file
- * range would raise a fault instead of making a syscall, and the check tool decodes all 79 words by
- * offset. 79 words is the 3 of the getpid call, the 11 of the mmap call and its argument registers,
- * the 7 of the two faults, the 1 that keeps the page for 504, the 10 of the two timed asks, the 16 of
- * the two opens and the read between them, the 9 of the fork and the child's exit and its entry
- * label, the 17 of 508's two `wait4`s with the two checks and the two answers between them, and the
- * 6 of 512's park with the `udf` behind it. **The count moves with the fixture and the tool's
+ * range would raise a fault instead of making a syscall, and the check tool decodes every word by
+ * offset. 91 words is the getpid call, the mmap call and its argument registers, the two faults, the
+ * word that keeps the page for 504, the two timed asks, the two opens and the read between them, the
+ * fork and the child's exit and its entry label, 508's two `wait4`s with the two checks and the two
+ * answers between them, **905's nine-word create-and-write, 906's three-word `fsync` of the file it
+ * made**, and 512's park with the `udf` behind it. **The count moves with the fixture and the tool's
  * `PROGRAM_WORDS` is the same number**: a change here that the tool did not follow would leave the
  * last word of the program unchecked. */
-    .if (entry_code_end - entry_code) != 352
-    .error "the program is not the eighty-eight instructions the header describes"
+    .if (entry_code_end - entry_code) != 364
+    .error "the program is not the ninety-one instructions the header describes"
     .endif
 
 /* The rest of the segment is zeros, and they are *file* bytes rather than a `.bss` tail: the whole

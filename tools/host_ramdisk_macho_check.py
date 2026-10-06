@@ -262,6 +262,37 @@ def syscall_three_words(audit, name):
     return number
 
 
+def syscall_sync_family(name):
+    """906's `fsync`, from `syscalls.master`'s own line.
+
+    `95 AUE_FSYNC ALL { int fsync(int fd); }` - one 4-byte argument, so the fixture's `mv r0, #FD` is
+    the whole of the call and the syscall's munger is `munge_w`. The *return* is not part of the shape
+    this reader checks: like the fixture's other calls it is deliberately untested (`mi4`'s 503 rule),
+    so the only thing that matters here is that the number is the master's and that the prototype is
+    the one-word form this fixture's single register assumes. A two-argument `fsync` would put a second
+    argument somewhere the fixture does not write, and the run would show the wrong word.
+    """
+    master = open(os.path.join(XNU, "bsd/kern/syscalls.master"), encoding="utf-8",
+                  errors="replace").read()
+    m = re.search(r"^(\d+)\s+AUE_\w+\s+ALL\s+\{\s*int\s+%s\s*\(([^)]*)\)" % re.escape(name),
+                  master, re.M)
+    if not m:
+        sys.exit(f"bsd/kern/syscalls.master no longer has an `int {name}(...)` entry - the fixture's "
+                 f"flush cannot be checked against the master")
+    number = int(m.group(1))
+    if number <= 0:
+        sys.exit(f"syscalls.master puts {name} at {number}: with a non-positive number `fleh_swi` "
+                 f"routes it to the mach path, so the fixture would not be calling a BSD syscall")
+    args = m.group(2)
+    params = [q.strip() for q in args.split(",") if q.strip()]
+    if params != ["int fd"]:
+        sys.exit(f"syscalls.master's {name} takes `{args}`, and the armv7k reading this check encodes "
+                 f"- one 4-byte `int fd` in r0, so `munge_w` - is derived from a one-word prototype. "
+                 f"A second argument, or an 8-byte one, would put a word in a register the fixture "
+                 f"does not write")
+    return number
+
+
 def syscall_fork_and_exit():
     """505's pair, from `syscalls.master`'s own lines - and the *shapes* are what the step rests on.
 
@@ -588,7 +619,7 @@ def sign24(word):
 # How many instructions the program at the entry point is. `entry_ramdisk.s` asserts the same length
 # in an `.if` over its own labels, so the two are a pair: a program that grew would fail to assemble
 # and a program that shrank would fail here.
-PROGRAM_WORDS = 88
+PROGRAM_WORDS = 91
 
 # Where the two `poll` calls' timeouts are, and where the two calls start. The word numbers are the
 # program's own layout - `entry_ramdisk.s`'s listing counts the same offsets - and they are named here
@@ -602,10 +633,13 @@ POLL_CALL_WORDS = (22, 27)          # the first word of each ask: `mov r0, #0`
 # timeout, and like the two asks' it is read rather than fixed: the property is that it is nonzero.
 # 905: the write door (see `WRITE_*` below) was inserted between the second `wait4`'s `svc` and the
 # park, and it is NINE words - the `adr`, two `movw`, two `mov`, two more `mov`, and their two `svc` -
-# with no branch of its own: the block falls through into 508's own `b park`, which was word 71 and is
-# word `WAIT_BACK_WORD` (80) after the insertion. So every word from the park on moved by exactly nine.
-PARK_WORD, PARK_MS_WORD, PARK_ASK_WORD, PARK_SVC_WORD, PARK_BACK_WORD = 81, 83, 84, 85, 86
-FAILED_WORD = 87                    # the `udf #1` every check in the program shares
+# with no branch of its own: the block falls through into 508's own `b park`, which was word 71. 906's
+# `fsync` (see `FSYNC_*` below) is THREE more - a `mov`, a `mov`, and their `svc` - inserted at the end
+# of that block, immediately before the same `b park`, which is now `WAIT_BACK_WORD` (83). So every
+# word from the `b park` on moved by exactly NINE (905) and then THREE (906): the park itself was word
+# 71, became 80, and is now `PARK_WORD` (84).
+PARK_WORD, PARK_MS_WORD, PARK_ASK_WORD, PARK_SVC_WORD, PARK_BACK_WORD = 84, 86, 87, 88, 89
+FAILED_WORD = 90                    # the `udf #1` every check in the program shares
 
 # And the nine words 905 adds: the one sequence in this program that *changes* the device rather than
 # reading it. `WRITE_PATH_WORD` is the `adr` to `/newfile` and is checked for its *target* in
@@ -619,6 +653,18 @@ WRITE_FLAGS_WORD, WRITE_MODE_WORD = 72, 73   # `O_CREAT|O_WRONLY` and `0644`
 WRITE_OPEN_CALL_WORD, WRITE_OPEN_SVC_WORD = 74, 75
 WRITE_PAGE_WORD, WRITE_LEN_WORD = 76, 77     # `mov r1, r9` and the byte count
 WRITE_CALL_WORD, WRITE_SVC_WORD = 78, 79     # the `write` call and the `svc` the device answers
+
+# And 906's three, and they are what makes 905's write *persist*. 905 proved the ladder writes the
+# device (the volume header changed on the medium, the card accepted every block) but the new file's
+# name never appeared: HFS+ marks a B-tree node dirty with `bdwrite_internal(bp, 1)` and writes it
+# later, and a program that goes straight from `write` to the park never gives HFS the call that
+# flushes it - so the create's catalog record died with the run. `fsync(fd)` is that call. Its fd is
+# the *literal* `FSYNC_FD_WORD`'s 0 because that is what `open` returned in 905's run (the wrapper's
+# `xnu_live_open_fd = 0`), and the register it is in (r0) is the one `fsync`'s single `int` argument
+# uses (`munge_w`). `FSYNC_CALL_WORD` is `fsync`'s number, read out of the master like every other
+# syscall here rather than written down; the return is not tested, for the same reason `open`'s and
+# `write`'s are not.
+FSYNC_FD_WORD, FSYNC_CALL_WORD, FSYNC_SVC_WORD = 80, 81, 82
 
 # The words 504 adds, named for the same reason: `PAGE_WORD` keeps 480's mapping in r9, the two `adr`s
 # are the paths the two opens pass, and the read's three words are the call the driver answers.
@@ -650,7 +696,7 @@ WAIT_STATUS_TEST_WORD = 63               # `cmp r3, #EXIT_STATUS`
 WAIT_PID_TEST_WORD = 60                  # `cmp r0, #WAIT_PID` - the pid the kernel answered with
 WAIT_CALL_WORD, WAIT_SVC_WORD = 58, 59   # the first call: `mov r12, #SYS_WAIT4` and its `svc`
 WAIT2_ARG_WORD = 65                      # the second call's `mov r0, #WAIT_PID`
-WAIT2_CALL_WORD, WAIT2_SVC_WORD, WAIT_BACK_WORD = 69, 70, 80
+WAIT2_CALL_WORD, WAIT2_SVC_WORD, WAIT_BACK_WORD = 69, 70, 83
 
 # The ARM condition codes the program's branches use, by name: `bne`, `bcs` and `b`. The names are what
 # the *reading* rests on for one of them - `unix_syscall`'s error convention is the carry bit
@@ -792,7 +838,7 @@ def describe(instruction):
 
 
 def program_expectations(decoded, K, adr_targets):
-    """What each of the program's 88 words must decode to, in the order they are loaded.
+    """What each of the program's 91 words must decode to, in the order they are loaded.
 
     The values come from the headers and from Apple's source (`K`), never from a literal here: the pids
     from `bsd_init.c`'s `initproc = proc_find(N)`, the syscall numbers from `syscalls.master`, the
@@ -1054,7 +1100,7 @@ def program_expectations(decoded, K, adr_targets):
         # fixture's own store renamed. The write's buffer is that same page in r9, whose first word is the
         # address `str r0, [r0]` wrote at +68 - so the four bytes the new file holds are a number this
         # process chose - its count is the fixture's own bound, and the call is `write`'s number. **None of
-        # `open`'s or `write`'s answers is tested**: the `b` at `WRITE_BACK_WORD` is unconditional, for
+        # `open`'s or `write`'s answers is tested**: the `b` at `WAIT_BACK_WORD` is unconditional, for
         # 503's reason - an `open` a read-write mount should satisfy, failing, is a fact about the
         # filesystem to record and not to `udf #1` on and end the boot with.
         (WRITE_PATH_WORD, ("adr", (0, adr_targets.get(WRITE_PATH_WORD), 0, 1))),
@@ -1066,6 +1112,17 @@ def program_expectations(decoded, K, adr_targets):
         (WRITE_LEN_WORD, ("movw", (2, write_bytes, 0))),
         (WRITE_CALL_WORD, ("mov", (12, K["SYSCALL_WRITE"], 0))),
         (WRITE_SVC_WORD, ("svc", (0x80,))),
+        # **906's `fsync`, the three words that make the create above persist.** 905's write reached
+        # the device but the new file's *name* did not: HFS+ writes a B-tree node with
+        # `bdwrite_internal(bp, 1)`, which marks it dirty in the buffer cache, and this program used to
+        # go straight from the write to the park without ever giving HFS the call that flushes it. The
+        # fd is the literal 0 - what `open` returned in 905's own run - placed in r0, the register
+        # `fsync`'s single `int` argument uses; the call number is `syscalls.master`'s; and its return
+        # is not tested, for the same reason `open`'s and `write`'s are not: a flush that failed is a
+        # fact about the filesystem to record, not to `udf #1` on and end the boot with.
+        (FSYNC_FD_WORD, ("mov", (0, K["FSYNC_FD"], 0))),
+        (FSYNC_CALL_WORD, ("mov", (12, K["SYSCALL_FSYNC"], 0))),
+        (FSYNC_SVC_WORD, ("svc", (0x80,))),
         # **512's park, and the three arguments are written out rather than inherited.** `poll(NULL, 0,
         # PARK_MS)` is the same call the two asks above make; what makes this one different is that it
         # is a *loop*, so every turn has to be the call the listing says. A syscall's return writes r0,
@@ -1166,7 +1223,7 @@ def check_device_paths(blob, fpc, decoded, K, p):
 
 
 def check_program(blob, fpc, pc, reg, K):
-    """The 88 words of `entry_ramdisk.s`'s program, decoded against what they are for.
+    """The 91 words of `entry_ramdisk.s`'s program, decoded against what they are for.
 
     This is the assertion experiment 468 wrote for one word, applied to the program 479 replaced it
     with and 480, 503, 504, 505, 506, 508, 512 and 905 grew: the one-word version asked "is the entry point
@@ -2011,6 +2068,14 @@ def main():
         "SYSCALL_WRITE": syscall_three_words("AUE_NULL", "write"),
         "OPEN_CREATE_WRITE": hdr_define(FCNTL, "O_CREAT") | hdr_define(FCNTL, "O_WRONLY"),
         "OPEN_MODE_0644": 0o644,
+        # 906: the call that makes 905's write *persist*. The number comes from `syscalls.master`
+        # through the same reader shape as the rest, with its single 4-byte `int fd` checked by that
+        # reader (`munge_w`, r0). `FSYNC_FD` is the literal the fixture puts in r0 - 0, the descriptor
+        # `open` returned in 905's own run (`xnu_live_open_fd = 0`) - and it is written here rather than
+        # read from a header because it is a *run's reading*, the one number in this dict that is not a
+        # property of Apple's source.
+        "SYSCALL_FSYNC": syscall_sync_family("fsync"),
+        "FSYNC_FD": 0,
         "DEV_MOUNT": devfs_mount_point(),
         "BLOCK_DEV_NAME": mdev_node_names()[0],
         "CHAR_DEV_NAME": mdev_node_names()[1],
@@ -2064,7 +2129,12 @@ def main():
                  "SYSCALL_WAIT4=%(SYSCALL_WAIT4)d (bsd/kern/syscalls.master, whose `wait4(int pid, "
                  "user_addr_t status, int options, user_addr_t rusage)` line is the four registers "
                  "r0..r3 in that order) "
-                 "WAIT_PID=%(WAIT_PID)d (INIT_PID + 1: the first pid a user request can be given)" % K)
+                 "WAIT_PID=%(WAIT_PID)d (INIT_PID + 1: the first pid a user request can be given) "
+                 "SYSCALL_WRITE=%(SYSCALL_WRITE)d (bsd/kern/syscalls.master) "
+                 "OPEN_CREATE_WRITE=0x%(OPEN_CREATE_WRITE)x OPEN_MODE_0644=0o%(OPEN_MODE_0644)o "
+                 "(bsd/sys/fcntl.h and the fixture's own mode) "
+                 "SYSCALL_FSYNC=%(SYSCALL_FSYNC)d FSYNC_FD=%(FSYNC_FD)d "
+                 "(bsd/kern/syscalls.master, and the descriptor 905's run measured)" % K)
 
     blob, size = load(args.elf)
     if blob is None:
@@ -2248,7 +2318,7 @@ def main():
             # own. The last two are about the *path*: a target four bytes off the string (what counting
             # from the wrong label gives) and the string itself renamed. The block's own `b park` is 508's,
             # already mutated above; the absence after the second `wait4`'s `svc` now covers the write
-            # block too, since `FAILED_WORD` moved to 87.
+            # block (and 906's flush behind it) too, since `FAILED_WORD` moved to 90.
             ("the write is the read's syscall number", 0xE0 + WRITE_CALL_WORD * 4,
              0xE3A0C000 | K["SYSCALL_READ"]),
             ("the open drops O_CREAT", 0xE0 + WRITE_FLAGS_WORD * 4, 0xE3A01000),
@@ -2259,6 +2329,17 @@ def main():
             ("the write path is four bytes off", 0xE0 + WRITE_PATH_WORD * 4,
              0xE28F0000 | (((blob.find(b"/newfile\0") - 4) - (0xE0 + WRITE_PATH_WORD * 4 + 8)) & 0xFFF)),
             ("the write names another file", blob.find(b"/newfile\0"), b"/oldfile\0"),
+            # **906's three, and each is a way the create stops persisting.** The flush dropped for a
+            # call that is not `fsync` (the fixture's own `getpid`, whose number is the next thing a
+            # wrong constant would land on) leaves the catalog node dirty in the buffer cache, which is
+            # exactly the state 905 measured; the flush replaced by the read's number would reach the
+            # buffers as a *read* and never write the node; and the descriptor moved off 0 names a
+            # descriptor this process does not hold, so `fsync` would return EBADF and flush nothing -
+            # the one mutation that leaves the program's *shape* intact and its effect absent.
+            ("the fsync is a nop", 0xE0 + FSYNC_SVC_WORD * 4, 0xE1A00000),
+            ("the fsync is not fsync's syscall", 0xE0 + FSYNC_CALL_WORD * 4,
+             0xE3A0C000 | K["SYSCALL_READ"]),
+            ("the fsync has the wrong descriptor", 0xE0 + FSYNC_FD_WORD * 4, 0xE3A00001),
         ]
         survived = []
         for name, off, value in mutations:
