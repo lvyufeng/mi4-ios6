@@ -95,12 +95,16 @@ HFS root: `HDD_WRITE=0`, `HFS_ROOT_RW=0`, and consistently rebuilt HFS/platform
 objects. That does not retract 906's write-persistence result; it isolates the
 normal-slot boot question while avoiding a dirty-root loop.
 
-A host-side prerequisite is being fixed separately: the linked `hfs_mountroot`
-OFF check was enclosed in `HDD_WRITE || HFS_ROOT_RW`, so valid 0/0 arms skipped
-it and could accept a stale writable pool. A record naming 0/0 is not proof of a
-read-only image. The revised guard must inspect every real linked HFS root body
-in both directions and reject tool/bounds failures rather than treating them as
-an absent clear.
+**Fixed.** The linked `hfs_mountroot` OFF check was enclosed in
+`HDD_WRITE || HFS_ROOT_RW`, so valid 0/0 arms skipped it and could accept a
+stale writable pool (`build_entry.sh:28190`; the OFF refusal at `:28207` was
+unreachable because `:767` already requires `HDD_WRITE=>HFS_ROOT_RW`). Commit
+`1f4b6bc` makes the clause read the real linked body **in both directions**: an
+exact defined-symbol parse, a bounded disassembly of that symbol's own
+address+size, a `bl ... <vfs_clearflags>` call test (not a mere reference), and
+fail-closed on unreadable/malformed tool output. `tools/test_hfs_root_rw_guard.py`
+extracts and runs the actual clause against fake ARM tools (24 cases). A record
+naming 0/0 is still not proof by itself; the guard is what makes it one.
 
 ## First-boot evidence and escape requirements
 
@@ -140,6 +144,43 @@ Implementation/review/test outcomes are pending. No new p19 boot or restoration
 has been run through that tool. Existing `restore_recovery_from_xnu.sh` is not a
 substitute for a guarded p19 rollback; its stock/Android-fallback/one-shot comments
 are stale, and its fastboot path does not perform full restoration verification.
+
+## Independent review of the 908 sequence (judge: NO-GO on the sequence)
+
+A read-only judge reviewed the plan above and returned **NO-GO on the sequence as
+written** — parts are individually sound, but the middle steps destroy the
+fallback the plan relies on. Adopted corrections:
+
+- **p25 is Android `/data` (ext4).** Clearing its first 512 KiB removes the ext4
+  superblock at offset 1024; vold then refuses `/data` at the next Android boot
+  and only a `/data` reformat recovers it. This already happened once (903 wrote
+  the 512 KiB HFS+ image at p25's head). So the dirty-volume reset is **not** a
+  free pre-step: a writable non-journaled HFS root clears the clean bit every
+  boot, and repeatedly resetting p25's head is itself a destructive, Android-
+  losing operation. **Consequence: repeatable root mounting cannot rely on
+  pre-clearing p25. It is either a dirty-mount bypass (a new, separately
+  recorded switch) or a full 13.3 GB p25 image captured first.**
+- Write p25 **relative to its own byte zero** (`dd ... of=...p25 bs=512 seek=0`,
+  as `scripts/press_906.sh` does), never partition+absolute `0x400000`.
+- **`misc_now.img` is not a clean BCB template** — it reads `bootonce-bootloader`.
+  aboot's image contains `boot-recovery`, `misc`, `continue`, `fastboot`, but
+  **no `bootonce` literal**; a host-set `bootonce-bootloader` surviving an
+  `adb reboot` is unproven and may be inert. The calibration must use a value
+  the evidence shows is honored (`boot-recovery`), and a p9 readback does **not**
+  identify the writer that zeroed p9 — that writer is still unknown.
+- **The 906 "safe ending" is unexplained.** Its epilogue store faulted
+  (`fault_addr=0xfa0065c`), and rec2 logs the SoC watchdog armed and counting,
+  never petted across the jump (~28 s). The returning 906 run is consistent with
+  a watchdog reset, not a clean self-end — yet the resident run that should have
+  been reset by that same watchdog stayed dark for 19 minutes. **This
+  contradiction is on the critical path and must be resolved before any
+  "self-ending" run is trusted.**
+- Restoring p20 removes the Android fallback and yields **TWRP**, not Android
+  recovery. The fallback is `adb reboot bootloader` / VolDown+Power → fastboot →
+  `fastboot boot` verified TWRP → guarded p19 rollback. Restore verification is a
+  **full-partition** readback hash, not a 512-byte prefix.
+- Because p19 already holds `fc956eae`, re-writing it is a no-op; a "single
+  variable" claim must either restore p19 to `b2119252` for staging or be dropped.
 
 ## Completion bar
 
