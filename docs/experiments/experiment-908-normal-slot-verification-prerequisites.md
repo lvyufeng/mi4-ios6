@@ -132,6 +132,27 @@ naming 0/0 is still not proof by itself; the guard is what makes it one.
 - Physical rescue remains VolDown + Power + USB, verified nonpersistent TWRP,
   then a guarded full-p19 rollback. Firmware p1/p2/p3/p7 and GPT stay untouched.
 
+## Live state re-measured 2026-10-06 (read-only, host-side)
+
+- p19 **still holds the staged XNU**: its first 9,519,104 bytes hash exactly to
+  `fc956eaea370f769c4e7852b47e75be5d035492c3e4339a2f0e551addbaa4bca`. (The
+  partition's byte-0 is the payload's own `ANDROID!` wrapper, which does not make
+  p19 an Android boot image.) Unbooted.
+- The running OS is **MoKee** Android 10 (`mokee_cancro-userdebug ... QQ3A.200805.001`),
+  **degraded**: `ro.bootmode=unknown`, `vold.decrypt=trigger_restart_min_framework`,
+  and `/data` is a 512 MB **tmpfs**, because 903's HFS+ volume overwrote p25's
+  real ext4 `/data` head. So "return to Android" is not a usable fallback — the
+  Android return state is a half-booted phone with a volatile `/data`.
+- p25's head still holds a **clean** HFS+ header (`482b 0004 ...`, volume header
+  `attributes = 0x80000100` — unmounted bit set). A **read-only** HFS mount never
+  clears that bit, so the RO p19 test does **not** dirty the volume and is
+  safe to repeat; it leaves p25, p9, p20 and p19 untouched.
+- The guarded rollback tool passes its **dry-run against the real device**
+  (`scripts/restore_boot_from_xnu.sh`, exit 0 — root shell, by-name, geometry all
+  validated on hardware; no write). Its author's "device-shell primitives are
+  unmeasured" caveat is now closed for the read-only path; the `--execute` write
+  path is still unexercised on hardware.
+
 ## Host rollback stage
 
 A separate workflow is implementing `scripts/restore_boot_from_xnu.sh` with
@@ -168,13 +189,17 @@ fallback the plan relies on. Adopted corrections:
   `adb reboot` is unproven and may be inert. The calibration must use a value
   the evidence shows is honored (`boot-recovery`), and a p9 readback does **not**
   identify the writer that zeroed p9 — that writer is still unknown.
-- **The 906 "safe ending" is unexplained.** Its epilogue store faulted
-  (`fault_addr=0xfa0065c`), and rec2 logs the SoC watchdog armed and counting,
-  never petted across the jump (~28 s). The returning 906 run is consistent with
-  a watchdog reset, not a clean self-end — yet the resident run that should have
-  been reset by that same watchdog stayed dark for 19 minutes. **This
-  contradiction is on the critical path and must be resolved before any
-  "self-ending" run is trusted.**
+- **The 906 "safe ending" is resolved: it is a watchdog bite.** Re-reading
+  `/tmp/kmsg_rec2.txt` shows the arm is still armed across the jump
+  (`disarm_hw_watchdog_en=0x1`, watchdog timeout 25 s + 3 s bite), and the
+  epilogue's `RESTART_REASON` store **faults** —
+  `panic(cpu 0 caller ...): kernel abort type 4: fault_type=0x3, fault_addr=0xfa0065c`
+  with `r2=0x0fa00000` in the register dump, then `xnu_entry_panic_entered=1`.
+  XNU's own reboot path cannot reset this device, so the phone is returned by the
+  armed SoC watchdog, not by a clean self-end. **Consequence: a bounded p19 test
+  may rely on the watchdog as its escape hatch, but must not claim a working
+  self-end.** The resident run's 19-minute darkness remains unexplained (if the
+  watchdog were armed there it should also have bitten).
 - Restoring p20 removes the Android fallback and yields **TWRP**, not Android
   recovery. The fallback is `adb reboot bootloader` / VolDown+Power → fastboot →
   `fastboot boot` verified TWRP → guarded p19 rollback. Restore verification is a
