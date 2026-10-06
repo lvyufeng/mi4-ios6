@@ -28184,31 +28184,92 @@ ramdisk_size=$(arm-none-eabi-nm -S "$OUT/xnu_arm_entry.elf" | awk '$4=="g_stage9
 # record names it. That is `mi4-off-option-two-spellings` in its 905 form - the macro a file sees is a
 # property of the component that compiled it, not of the arm that links it - and
 # `mi4-a-claim-in-a-comment-is-not-a-check` says make it structural: the clear's presence is a property
-# of the LINKED image, so it is read back here, by value, out of `hfs_mountroot`'s own body. A REFUSAL on
-# the write arm; a NOTE otherwise (an image may carry the clear without the write arm - the clear alone
-# merely admits the mount to rw - but the write arm cannot work without it).
-if [[ $HDD_WRITE -eq 1 || $HFS_ROOT_RW -eq 1 ]]; then
-    hmr_addr=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "hfs_mountroot" && $2 == "T" { print "0x" $1 }')
-    if [[ -z "$hmr_addr" ]]; then
-        layout_fail "STAGE90_XNU_HFS_ROOT_RW=1 (or HDD_WRITE=1) but \`hfs_mountroot\` is not a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the rw arm makes the MOUNTED root writable, and there is no root-mount body to make writable - the HFS port (STAGE90_HFS_ROOT) is not linked. Nothing is rebuilt by this refusal"
+# of the LINKED image, so it is read back here, by value, out of `hfs_mountroot`'s own body, in BOTH
+# directions even when HDD_WRITE=0 and HFS_ROOT_RW=0. Otherwise a stale rw pool can pass an ordinary
+# read-only record without this clause ever running. Only a legacy link with NO defined HFS body and
+# both switches OFF skips the body check; an unreadable symbol table or unbounded body is not that case.
+# Read the exact definition's OWN size, not another symbol whose range happens to contain its address.
+if ! hmr_nm=$(LC_ALL=C arm-none-eabi-nm -S -n --defined-only "$OUT/xnu_arm_entry.elf"); then
+    say "FAIL: cannot read the linked $OUT/xnu_arm_entry.elf symbol table for the hfs_mountroot rw-root check. Nothing is rebuilt by this refusal" >&2
+    exit 1
+fi
+if ! hmr_def=$(awk '
+    NF == 0 { next }
+    (NF == 3 && $1 ~ /^[[:xdigit:]]+$/ && length($1) <= 8 && $2 ~ /^[[:alpha:]?]$/) ||
+    (NF == 4 && $1 ~ /^[[:xdigit:]]+$/ && length($1) <= 8 &&
+     $2 ~ /^[[:xdigit:]]+$/ && length($2) <= 8 && $3 ~ /^[[:alpha:]?]$/) {
+        seen++
+        if ($NF == "hfs_mountroot" && $(NF - 1) == "T") {
+            n++; a = $1; s = (NF == 4) ? "0x" $2 : "-"
+        }
+        next
+    }
+    { bad = 1 }
+    END {
+        if (bad || !seen || n > 1) exit 1
+        if (n) print "0x" a, s; else print "absent"
+    }' <<<"$hmr_nm"); then
+    say "FAIL: malformed or empty linked symbol table for hfs_mountroot - its defined body cannot be identified uniquely. Nothing is rebuilt by this refusal" >&2
+    exit 1
+fi
+if [[ $hmr_def == absent ]]; then
+    if [[ $HDD_WRITE -eq 1 || $HFS_ROOT_RW -eq 1 ]]; then
+        say "FAIL: STAGE90_XNU_HFS_ROOT_RW=1 (or HDD_WRITE=1) but \`hfs_mountroot\` is not a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the rw arm makes the MOUNTED root writable, and there is no root-mount body to make writable - the HFS port (STAGE90_HFS_ROOT) is not linked. Nothing is rebuilt by this refusal" >&2
+        exit 1
     fi
-    hmr_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$hmr_addr" '
-        { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bb[n] = ($2 != "") ? 1 : 0 }
-        BEGIN { t = strtonum(a) }
-        END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
-    if [[ -z "$hmr_next" ]]; then
-        layout_fail "hfs_mountroot (at $hmr_addr) has no size in the linked image, so this clause cannot bound its body. Nothing is rebuilt by this refusal"
+    say "  xnu_entry_905: no defined hfs_mountroot in the linked image and both rw switches are OFF - the HFS body check is not applicable to this legacy no-HFS link"
+else
+    read -r hmr_addr hmr_size <<<"$hmr_def"
+    if [[ ! $hmr_size =~ ^0x[[:xdigit:]]+$ ]] || (( hmr_size == 0 || hmr_addr + hmr_size > 0x100000000 )); then
+        say "FAIL: hfs_mountroot (at $hmr_addr) has no valid positive size in the linked image, so this clause cannot bound its body. Nothing is rebuilt by this refusal" >&2
+        exit 1
     fi
-    hmr_body=$(arm-none-eabi-objdump -d --start-address="$hmr_addr" --stop-address="$hmr_next" "$OUT/xnu_arm_entry.elf")
-    if grep -qE 'bl.*<vfs_clearflags>' <<<"$hmr_body"; then hmr_has=1; else hmr_has=0; fi
+    hmr_next=$((hmr_addr + hmr_size))
+    if ! hmr_body=$(LC_ALL=C arm-none-eabi-objdump -d -z --start-address="$hmr_addr" --stop-address="$hmr_next" "$OUT/xnu_arm_entry.elf"); then
+        say "FAIL: cannot disassemble the linked hfs_mountroot body [$hmr_addr, $hmr_next) for the rw-root check. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    # ARM words must cover the named range completely: an empty, truncated or malformed dump is NOT
+    # evidence that the clear is OFF. -z above prevents objdump from eliding runs of zero words.
+    if ! awk -v a="$hmr_addr" -v e="$hmr_next" '
+        BEGIN { lo = strtonum(a); hi = strtonum(e); p = lo }
+        /^[[:xdigit:]]+ <hfs_mountroot>:$/ {
+            if (body || strtonum("0x" $1) != lo) bad = 1
+            body = 1; next
+        }
+        body && NF {
+            if (NF < 3 || $1 !~ /^[[:xdigit:]]+:$/ || $2 !~ /^[[:xdigit:]]{8}$/ ||
+                $3 !~ /^[[:alpha:].][[:alnum:].]*$/) { bad = 1; next }
+            v = strtonum("0x" substr($1, 1, length($1) - 1))
+            if (v != p || v >= hi) bad = 1
+            p = v + 4; words++
+        }
+        END { exit (body && words && !bad && p == hi) ? 0 : 1 }' <<<"$hmr_body"; then
+        say "FAIL: incomplete or malformed linked hfs_mountroot disassembly [$hmr_addr, $hmr_next) - an unread body cannot prove the rw-root clear OFF. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    if grep -qE '^[[:space:]]*[[:xdigit:]]+:[[:space:]]+[[:xdigit:]]+[[:space:]]+bl[a-z]*[[:space:]].*<vfs_clearflags>' <<<"$hmr_body"; then
+        hmr_has=1
+    else
+        hmr_status=$?
+        if [[ $hmr_status -ne 1 ]]; then
+            say "FAIL: cannot test the linked hfs_mountroot calls for vfs_clearflags. Nothing is rebuilt by this refusal" >&2
+            exit 1
+        fi
+        hmr_has=0
+    fi
     if [[ $HFS_ROOT_RW -eq 1 && $hmr_has -ne 1 ]]; then
-        layout_fail "STAGE90_XNU_HFS_ROOT_RW=1 is RECORDED but the linked image's hfs_mountroot (at $hmr_addr) does NOT call vfs_clearflags, so the root mounts MNT_RDONLY and the card unit's B_WRITE branch is never reached - the arm would promise a writable root it cannot deliver. The pool's hfs_vfsops.o predates 905 B2's clear, or it was built without STAGE90_XNU_HFS_ROOT_RW=1. Apply it, then rebuild the pool and this entry image TOGETHER: tools/stage_hfs.sh; STAGE90_XNU_HFS_ROOT_RW=1 tools/build_xnu_arm_kernel.sh; then src/entry/build_entry.sh under this arm. Nothing is rebuilt by this refusal"
+        say "FAIL: STAGE90_XNU_HFS_ROOT_RW=1 is RECORDED but the linked image's hfs_mountroot (at $hmr_addr) does NOT call vfs_clearflags, so the root mounts MNT_RDONLY and the card unit's B_WRITE branch is never reached - the arm would promise a writable root it cannot deliver. The pool's hfs_vfsops.o predates 905 B2's clear, or it was built without STAGE90_XNU_HFS_ROOT_RW=1. Apply it, then rebuild the pool and this entry image TOGETHER: tools/stage_hfs.sh; STAGE90_XNU_HFS_ROOT_RW=1 tools/build_xnu_arm_kernel.sh; then src/entry/build_entry.sh under this arm. Nothing is rebuilt by this refusal" >&2
+        exit 1
     fi
     if [[ $HFS_ROOT_RW -eq 0 && $hmr_has -eq 1 ]]; then
-        layout_fail "STAGE90_XNU_HFS_ROOT_RW=0 (or unset) is RECORDED but the linked image's hfs_mountroot (at $hmr_addr) DOES call vfs_clearflags: the image mounts the HFS+ root read-write while its record says the clear is off, so an arm whose record says read-only is indistinguishable from one that writes the root - mi4-off-option-two-spellings in both directions. The pool was built with STAGE90_XNU_HFS_ROOT_RW=1 and this entry link recorded 0; rebuild the pool with the clear OFF, or record it ON. Nothing is rebuilt by this refusal"
+        say "FAIL: STAGE90_XNU_HFS_ROOT_RW=0 (or unset) is RECORDED but the linked image's hfs_mountroot (at $hmr_addr) DOES call vfs_clearflags: the image mounts the HFS+ root read-write while its record says the clear is off, so an arm whose record says read-only is indistinguishable from one that writes the root - mi4-off-option-two-spellings in both directions. The pool was built with STAGE90_XNU_HFS_ROOT_RW=1 and this entry link recorded 0; rebuild the pool with the clear OFF, or record it ON. Nothing is rebuilt by this refusal" >&2
+        exit 1
     fi
     if [[ $HFS_ROOT_RW -eq 1 ]]; then
-        say "  xnu_entry_905: the rw-root clear is in the linked image - hfs_mountroot (at $hmr_addr) CALLS vfs_clearflags before hfs_mountfs, so the mounted HFS+ root is not MNT_RDONLY and the card unit's write branch is reachable"
+        say "  xnu_entry_905: STAGE90_XNU_HFS_ROOT_RW=1 agrees with the linked image - hfs_mountroot (at $hmr_addr) CALLS vfs_clearflags, so its rw-root clear is present"
+    else
+        say "  xnu_entry_905: STAGE90_XNU_HFS_ROOT_RW=0 agrees with the linked image - hfs_mountroot (at $hmr_addr) has NO call to vfs_clearflags, so its rw-root clear is absent"
     fi
 fi
 
