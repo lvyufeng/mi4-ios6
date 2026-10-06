@@ -61,7 +61,7 @@ wait), the recorded rw-root switch (`STAGE90_XNU_HFS_ROOT_RW = 1`, checked again
   image's hash, **ok**.
 - **Gate accepts the tree:** `verify_press_ready.sh` — **5/5 ok** (all four tree checks green; the device
   reads back as `4a2fe00b`, so `the press would be caught` is green too). `make check` **exit 0**.
-- **Not pressed.** Nothing here was run against hardware.
+- **PRESSED 2026-10-06, run exit 0, device returned in 28 s, no brick.** See *The press* below.
 
 ## How to press
 
@@ -78,3 +78,69 @@ with `xnu_live_storage_wr_data_err = 0` (the write was accepted — the cell 905
 `_wr_data_err != 0` is the falsification that the write path is right.
 
 **GOAL: not yet established (write side).** The rung is built and parked, not proven.
+
+## The press — 2026-10-06 (arm `armed-storage-0e6eb4b4-spent`)
+
+**The self-ending restore worked and the write reached the card, and both survived a return.** Run
+**exit 0**, device back in **28 s**, `4a2fe00b` re-enumerated, no brick.
+
+### The self-ending fired — the 905b/905c hang is closed
+
+`xnu_live_post_end_calls = 0x4` (was absent on 905b/905c). `xnu_live_slot_post_calls` 1→4 with
+`xnu_live_post_elapsed` reaching `0x06e632c9`. **The run ended on its own clock and returned** — the
+reading the whole lineage was missing. This is the falsification-side confirmation of the diagnosis: the
+write rungs' black screen was the compiled-out ending, not the write code.
+
+### The write path ran and the card accepted every block
+
+- **`xnu_live_storage_wr_calls = 1`**, `_wr_complete = 1`, **`_wr_err = 0`**, **`_wr_data_err = 0`**
+  (`DATA_TIMEOUT|CRC|END_BIT` clear), `_wr_data_wait_timeout = 0`, `_wr_prog_timeout = 0`. The
+  programming wait ran and the card released in time (`_wr_prog_polls` in the 0xc635–0xe54c range).
+- **17 blocks issued and accepted** through the ladder (`xnu_live_storage_writes` 0→…→17), with
+  `xnu_live_storage_wr_lba` covering `0x00400002` (the volume header) and `0x004000d0`–`0x004000df`
+  (the catalog file's B-tree node block, at partition offset `0x400000 + d0*512` = `0x1a000`).
+- The card unit's own counters: `xnu_live_rootmedia_write_served` = 1, 2, 3;
+  `xnu_live_rootmedia_card_wr_first_lba`/`_last_lba` in the `0x00400002`–`0x004000df` range.
+
+### The write persisted on the device — read back off the eMMC, host-side
+
+The `userdata` head (LBA `0x400000`, `seek=0`) was pulled with `adb dd` after the run and compared to the
+clean pre-image (`b321db0d…`). **375 bytes differ**, in exactly the two regions the log named:
+
+| HFS volume header (offset `0x400`) | clean | after |
+| --- | --- | --- |
+| `lastMountedVersion` | `H+Lx` | **`10.0`** (Darwin mounted it) |
+| `modifyDate` | `3873765233` | **rewritten** |
+| `attributes` | `0x80000100` | **`0x80000000`** (`kHFSVolumeUnmountedBit` cleared — dirty) |
+| `folderCount` | `2` | **`3`** |
+| `nextCatalogID` | `19` | **`20`** |
+| `writeCount` | `1` | **`2`** |
+
+So XNU **wrote HFS+ metadata to the device's own eMMC and it is on the medium now** — the goal's write
+half is measured on the device, not inferred from a return.
+
+### What is NOT yet established, and it is now a specific question
+
+**The `/newfile` name is not in the catalog.** The fixture's `open("/newfile", O_CREAT|O_WRONLY, 0644)`
+**succeeded** — `xnu_live_open_seq = 3`, `_open_error = 0`, `_open_flags = 0x201`, `_open_mode = 0x1a4` —
+so the mount is genuinely read-write and the create returned 0. But parsing the catalog B-tree leaf
+(`0x1b000`) shows the **AFTER** state is not clean:
+
+- **Two records appeared** where clean had none: the driver's startup dot-underscore entry
+  `\x00\x00\x00\x00HFS+ Private Data` → `.HFS+ Private Directory Data\r`, and a new **`parentCNID = 19`**
+  record — **19 is exactly the file cnid the fixture's create would have been assigned**
+  (`nextCatalogID` 19→20). A file record under `/` whose name is not `newfile` **should not be there**,
+  and neither should a rename of the startup entry.
+- **The leaf's own `numRecords` field still reads 8** while 10 records are present — the leaf's parity is
+  broken. A half-broken catalog is the classic signature of a **partially-flushed B-tree write**: the
+  volume header's `nextCatalogID`/`folderCount`/`writeCount` advanced (16 384-byte writes to a 4096-byte
+  block region), but not every dirty catalog block reached the 17-block budget.
+
+**So the verdict is: the WRITE path is proven (the C1 cell is measured, the volume changed and persisted)
+and the FIXTURE's file is not cleanly present.** Why the two extra directory records are there, and why
+the leaf's `numRecords` field is stale, is the next experiment — either a write-ordering/replay budget
+question, or a defect in how the fixture's create walks the catalog. Recorded here as the specific
+falsifier, not papered over.
+
+**Arm spent:** renamed to `armed-storage-0e6eb4b4-spent` (dir + record). Next: press a fresh arm (or read
+the medium back after a power cycle) to take the `/newfile` read-back under a cleanly-parsed catalog.
