@@ -375,7 +375,15 @@ unset _self _bad
 # in the entry group** - a loop, so it crossed a page and the exit moved to `0x8004e2dc`. `entry_trace.c`'s
 # constant was re-derived from that build refusal, and this literal follows it. **Both copies are
 # `0x8004e2dc`.**
-EXIT_POP_LR_LITERAL=0x8004e2dc
+# **THE NINTH MOVE (908's READ-ONLY ARM), AND IT MOVED BACK ONE PAGE.** The RO arm rebuilds the HFS
+# platform objects with `STAGE90_XNU_HFS_ROOT_RW=0`/`HDD_WRITE=0`; those objects are members of the
+# entry group, so the exit's `bl FlushPoU_Dcache` moved from `0x8004e2d8` back to `0x8004d2d8`,
+# returning to **`0x8004d2dc`**. The entry build's own clause refused first with `... returns to
+# 2147799772 while entry_trace.c's STAGE90_XNU_SEAM_LR is 0x8004e2dc`; `entry_trace.c` was re-derived
+# to `0x8004d2dc` there, `arm-none-eabi-objdump -d out/stage90/xnu_arm_entry.elf` puts the `bl` at
+# `0x8004d2d8` (`__wrap_FlushPoU_Dcache` at `0x804d2044`), and this literal follows it. **Both copies
+# are `0x8004d2dc` for armed-storage-54d5c585.**
+EXIT_POP_LR_LITERAL=0x8004d2dc
 exit_pop_lr_addr() {
   local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
   local start size body ret

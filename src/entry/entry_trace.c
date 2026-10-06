@@ -2768,7 +2768,7 @@ void __wrap_platform_cache_idle_exit(void)
  * exit's call to FlushPoU_Dcache is at 2147803864 and returns to 2147803868, while entry_trace.c's
  * STAGE90_XNU_SEAM_LR is 0x8004d2dc`. **The value below is re-derived from that refusal, and
  * `scripts/run_and_capture.sh`'s literal follows it.** */
-#define STAGE90_XNU_SEAM_LR       0x8004e2dcu
+#define STAGE90_XNU_SEAM_LR       0x8004d2dcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);
