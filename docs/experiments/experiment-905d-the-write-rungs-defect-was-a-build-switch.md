@@ -123,24 +123,33 @@ half is measured on the device, not inferred from a return.
 
 **The `/newfile` name is not in the catalog.** The fixture's `open("/newfile", O_CREAT|O_WRONLY, 0644)`
 **succeeded** — `xnu_live_open_seq = 3`, `_open_error = 0`, `_open_flags = 0x201`, `_open_mode = 0x1a4` —
-so the mount is genuinely read-write and the create returned 0. But parsing the catalog B-tree leaf
-(`0x1b000`) shows the **AFTER** state is not clean:
+so the mount is genuinely read-write and the create returned 0. But the catalog B-tree leaf (`0x1b000`),
+parsed cleanly (descriptor `numRecords` and the node's offset table **agree**), shows the create left
+**two** new records and neither is called `newfile`:
 
-- **Two records appeared** where clean had none: the driver's startup dot-underscore entry
-  `\x00\x00\x00\x00HFS+ Private Data` → `.HFS+ Private Directory Data\r`, and a new **`parentCNID = 19`**
-  record — **19 is exactly the file cnid the fixture's create would have been assigned**
-  (`nextCatalogID` 19→20). A file record under `/` whose name is not `newfile` **should not be there**,
-  and neither should a rename of the startup entry.
-- **The leaf's own `numRecords` field still reads 8** while 10 records are present — the leaf's parity is
-  broken. A half-broken catalog is the classic signature of a **partially-flushed B-tree write**: the
-  volume header's `nextCatalogID`/`folderCount`/`writeCount` advanced (16 384-byte writes to a 4096-byte
-  block region), but not every dirty catalog block reached the 17-block budget.
+| | CLEAN (8 records) | AFTER (10 records) |
+| --- | --- | --- |
+| root children | `sbin`, `HFS+ Private Data` | `sbin`, `HFS+ Private Data`, **`.HFS+ Private Directory Data\r`**, *(new object 19's thread)* |
+| new folder cnid | — | **19** (`nextCatalogID` 19→20; `folderCount` 2→3) |
 
-**So the verdict is: the WRITE path is proven (the C1 cell is measured, the volume changed and persisted)
-and the FIXTURE's file is not cleanly present.** Why the two extra directory records are there, and why
-the leaf's `numRecords` field is stale, is the next experiment — either a write-ordering/replay budget
-question, or a defect in how the fixture's create walks the catalog. Recorded here as the specific
-falsifier, not papered over.
+- The two new records are **internally consistent and are one folder**: a new child of the root named
+  `.HFS+ Private Directory Data` and a **thread record for cnid 19** — i.e. HFS+ materialised its
+  **private directory** (a lazily-created folder a read-write mount needs) under cnid 19, and the volume
+  header agrees (`folderCount` +1, `nextCatalogID` +1, `writeCount` +1).
+- **No record named `newfile` is anywhere on the medium** (both ASCII and UTF-16-BE searches over the
+  whole 512 KB head are negative) — yet the create returned 0.
+
+**So the verdict is: the WRITE path is proven (the C1 cell is measured, the volume changed and persisted
+across the run) and the FIXTURE's file did not appear.** The next experiment is *why a create that
+returned 0 left the private directory but not the file* — a write-ordering / dirty-block-budget question
+(`WRITE_BLKS` 16 vs the two new records' block), or a defect in how the fixture's create walks the
+catalog. Recorded as the specific falsifier, not papered over.
+
+> **Correction.** An earlier draft of this section claimed the leaf's `numRecords` field "still reads 8
+> while 10 records are present — a half-flushed B-tree". That was a **parser artifact**: the first parse
+> mis-read the node's trailing fields and produced a bogus count of 14. Re-parsed against the node's own
+> offset table, the descriptor is **8 → 10** and the leaf is **consistent**. No stale-count defect
+> exists; the claim is retracted here rather than left standing. (`mi4-measurement-defects`.)
 
 **Arm spent:** renamed to `armed-storage-0e6eb4b4-spent` (dir + record). Next: press a fresh arm (or read
 the medium back after a power cycle) to take the `/newfile` read-back under a cleanly-parsed catalog.
