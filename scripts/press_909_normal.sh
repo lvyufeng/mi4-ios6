@@ -3,12 +3,18 @@
 # read whether XNU STAYS. Same staging and escape as 908 (scripts/press_908_normal.sh); what is
 # new is what the arm does and therefore what the operator must do.
 #
-# WHY 908 NEEDED A 909. 908 proved a plain power-on ENTERS the OS — XNU, `BSD root: md0`, pid 1
-# parked in poll — and then ENDED: the image's own deliberate ending (`entry_seam_end_run`,
-# `xnu_live_post_end_calls=4`) stored `RESTART_REASON` and faulted at `0xfa0065c`. This arm
-# REMOVES that ending (`STAGE90_XNU_RESIDENT=1` => POST_END_TICKS/POST_END_RUN/SEAM_END_RUN all 0)
-# and PETS the armed SoC watchdog (`entry_wdt_pet`, once per idle pass), so the run does not end on
-# its own clock either. It is the rung that makes 「彻底能直接开机就运行xnu」 a boot that STAYS.
+# WHY 908 NEEDED A 909, AND WHY 909's FIRST ARM NEEDED A FIX. 908 proved a plain power-on ENTERS the
+# OS — XNU, `BSD root: md0`, pid 1 parked in poll — and then ENDED: the image's own deliberate
+# ending (`entry_seam_end_run`, `xnu_live_post_end_calls=4`) stored `RESTART_REASON` and faulted at
+# `0xfa0065c`. 909 REMOVES that ending (`STAGE90_XNU_RESIDENT=1` => POST_END_TICKS/POST_END_RUN/
+# SEAM_END_RUN all 0) and PETS the armed SoC watchdog (`entry_wdt_pet`, once per idle pass), so the
+# run does not end on its own clock either — it is the rung that makes 「彻底能直接开机就运行xnu」 a
+# boot that STAYS. **Its first arm, `armed-storage-e61ce673`, was PRESSED and faulted at the pet on
+# the pet's first idle pass** (`fault_addr=0x0, pc=entry_mmio_section+0x94, r1=0xf9017000`) because
+# the pet passed `0, 0` to `entry_mmio_section` and `entry_section_install` stores `*slot_before_out`
+# BEFORE its refusal test — so no `xnu_live_wdt_*` key was ever published. **This script names the
+# FIXED arm `armed-storage-104b10ce`** (the pet now passes two real outputs); the fix, the guard's
+# three new clauses and the press are record d622e7f and experiment-909's R7/R8.
 #
 # THE HAZARD, AND WHY 909 IS THE FIRST RUNG THAT CAN STRAND THE PHONE. A resident XNU runs no adbd
 # and does not re-init USB, so once it is up the ONLY exit is a physical press. Nothing here writes
@@ -32,7 +38,7 @@ set -Eeuo pipefail
 SERIAL="4a2fe00b"
 FORBIDDEN_SERIAL="33e80afe"
 CARGO="out/stage90/stage90-qcdt.img"
-EXPECT_ARM="armed-storage-e61ce673"
+EXPECT_ARM="armed-storage-104b10ce"
 CAPTURE="out/stage90/captures/909-resident-$(date -u '+%Y%m%d-%H%M%S')-last_kmsg.txt"
 CALL_TIMEOUT=120
 DO_STAGE=1
@@ -97,7 +103,7 @@ fi
 # --- 2. the bytes in out/ are the arm this press names, checked BEFORE anything is written -------
 # The staging step below writes whatever is in out/. `verify_press_ready.sh` is the project's own
 # answer to "are these bytes the recorded arm, and does the gate accept the tree" - five checks,
-# and it refuses if the live set is not `armed-storage-e61ce673` (the arm this script names). It is
+# and it refuses if the live set is not `armed-storage-104b10ce` (the arm this script names). It is
 # run here so a stale out/ is caught before p19 is overwritten, not after.
 if (( ! DRY_RUN )); then
     bash tools/verify_press_ready.sh >/tmp/press_909_readiness.log 2>&1 \
