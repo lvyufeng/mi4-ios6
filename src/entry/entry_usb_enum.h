@@ -191,4 +191,14 @@
  */
 void entry_usb_enum_poll(void);
 
+/*
+ * **910c: the handover.** When the stream arm is ON (`STAGE90_XNU_USB_STREAM=1`) the enum arm arms EP1's
+ * endpoint-control register but does NOT prime it (nor re-prime it); the stream arm owns EP1's qh and dTD
+ * from the first stream prime on. The hardware has ONE endpoint list, so the qh array cannot be split -
+ * this accessor is how the stream arm reaches qh[IN1] without a second, editable copy of `g_usb_qh`
+ * ([[mi4-one-value-two-definitions]]). It is exported from the enum file because the enum file owns the
+ * array, and its caller is `entry_usb_stream.c` (a build refusal pins that).
+ */
+volatile uint32_t *entry_usb_enum_qh_in1(void);
+
 #endif /* STAGE90_ENTRY_USB_ENUM_H */

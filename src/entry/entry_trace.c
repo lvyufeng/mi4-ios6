@@ -141,6 +141,7 @@
 #include "entry_usb.h"
 #include "entry_usb_dev.h"
 #include "entry_usb_enum.h"
+#include "entry_usb_stream.h"
 
 /* entry_stubs.c. Records into `g_kv_buf`, which only an epilogue writes out - see above. */
 extern void entry_kv(const char *key, uint32_t value);
@@ -2178,6 +2179,23 @@ void __wrap_Idle_load_context(void)
 #endif
 #if STAGE90_XNU_USB_ENUM
     entry_usb_enum_poll();
+#endif
+
+/*
+ * **910c: the stream arm's poll, at the same site and after the enum poll.** `entry_usb_stream_poll`
+ * (the bytes of the RAM console ring out the one bulk IN endpoint, `entry_usb_stream.c`) must run AFTER
+ * `entry_usb_enum_poll` above: the endpoint it streams is ENABLED by the enum arm on `SET_CONFIGURATION`,
+ * so before the enumeration state machine has configured the device there is no armed endpoint and the
+ * stream file itself refuses (it gates on the endpoint's `ENDPTCTRL` TXE bit, and publishes why once).
+ * The ordering is a belt to that file's own braces. The build refuses it being called from anywhere but
+ * this wrapper, the way it does the three USB probes above - the same dead-code defect
+ * ([[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]]).
+ */
+#ifndef STAGE90_XNU_USB_STREAM
+#define STAGE90_XNU_USB_STREAM 0
+#endif
+#if STAGE90_XNU_USB_STREAM
+    entry_usb_stream_poll();
 #endif
 
 #if STAGE90_XNU_RESIDENT && STAGE90_XNU_IDLE_NO_SLEEP

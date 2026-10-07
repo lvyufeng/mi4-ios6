@@ -149,3 +149,48 @@ arm wires `kdp_register_send_receive`); `adbd` (910d); and the OS-text source (`
 **Not deferred, because it is not optional:** the dTD-`token` (not `qh.curr`) read, the `ACTIVE`-bit guard
 before reading it, and the no-overwrite-while-primed rule (§3.3). Each is the kind of thing that works in a
 first read and corrupts a second — the failure mode this project keeps being bitten by.
+
+## 7. The first arm as built (arm `77a51d33`, 2026-10-07)
+
+The first arm **is** exactly this design: `entry_usb_stream.c`/`.h`, a page-aligned 4 KiB buffer, a
+forward-only cursor over the RAM console ring read through the `+0x01000000` alias, a completion path that
+reads the dTD `token`'s arrived count (with the `TD_STATUS_ACTIVE` guard and the `FlushPoC_DcacheRegion`
+invalidate), and NAK back-pressure via an unprimed endpoint. It is 910b's `880a3568` plus ONE entry key,
+`STAGE90_XNU_USB_STREAM=1`; the payload's own switch set is byte-identical (`6c2b6038` — `USB_STREAM` is an
+*entry* switch). Entry bin 6,498,612 bytes, **length unchanged**.
+
+**One build correction, and it is the class this project keeps paying for.** The first payload build ran
+`scripts/build.sh` bare and produced a *different* payload variant — `STAGE90_XNU_ENTRY` unset (0) instead
+of the arm's 1 — so its `stage90-build-config.txt` was `c0fb2eba…`, not 910b's `6c2b6038…`. The arm's
+entry image was correct (that switch is the payload's, not the entry's) but the payload was a variant no
+prior arm sent. The rebuild with `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'` reproduces `6c2b6038…`
+exactly, confirming the arm added no payload switch ([[mi4-build-variant-comes-from-an-env-default]]).
+
+**The handover, and why the endpoint has ONE owner.** The hardware has one endpoint list, so `g_usb_qh`
+cannot be split between files. When the stream switch is ON the enum arm still *enables* EP1 on
+`SET_CONFIGURATION` (its `ENDPTCTRL` half) but does **not** prime it and does **not** re-prime it on
+completion — both primes are under `#if !STAGE90_XNU_USB_STREAM` in `entry_usb_enum.c` — and it exports
+`entry_usb_enum_qh_in1()` so the stream arm reaches qh[IN1] without a second, editable copy of the array
+([[mi4-one-value-two-definitions]]). The stream arm, for its part, writes only `ENDPTPRIME` and
+`ENDPTCOMPLETE`; a store to `ENDPTCTRL`, `USBCMD` or `DEVICEADDR` is a build refusal. The pair is what
+makes "who owns EP1-IN" a structural fact and not a comment ([[mi4-a-claim-in-comment-is-not-a-check]]).
+
+**The seam did NOT move this time.** `STAGE90_XNU_SEAM_LR` stays `0x8004f2dc`: the stream arm's ON body
+(a 4 KiB buffer + a 28-byte dTD) fits inside the page 910b already crossed, so the entry group's exit path
+is unmoved and both copies of the constant are unchanged. The bin's *length* is unchanged too — but that is
+not the claim that nothing moved; the claim is the seam clause, which the build ran and passed.
+
+**The guard is new for this class.** `tools/check_usb_stream.py` cross-checks the RAM console ring's layout
+against its OWNER (`entry_stubs.c`: the `'DBGC'` sig, offsets 0/8/12, the 2 MB-12 bound, the
+`+0x01000000` alias) rather than trusting this arm's transcription — the first USB guard whose owner is
+*this* image rather than the Android tree. It refuses a completion that reads `qh.curr` for the arrived
+count, refuses a store to `ENDPTCTRL`/`USBCMD`/`DEVICEADDR`, proves the ENUM arm's two EP1-IN primes are
+each under `#if !STAGE90_XNU_USB_STREAM`, and reads the switch out of the linked ELF both ways. A
+6-mutation falsification battery (all refused), including "the stream writes `ENDPTCTRL`" and "the enum
+handover guard is removed". `make check` 0; the arm is parked at
+`out/stage90/frozen/armed-storage-77a51d33/`, 11 members, verified against `records/revert-set.txt`.
+
+**GOAL NOT MET by this arm.** It builds the pipe; a host `read()` returning the boot's own `xnu_live_*`
+lines is the *rung's* verdict, and the goal's clause — XNU resident and *debuggable* over USB — needs a
+consumer on top: KDP (`kdp_register_send_receive`) or `adbd` (910d). Each is a press, and THE PRESS IS THE
+OPERATOR'S.

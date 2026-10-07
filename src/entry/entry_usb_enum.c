@@ -71,6 +71,11 @@
 #ifndef STAGE90_XNU_USB_ENUM
 #define STAGE90_XNU_USB_ENUM 0
 #endif
+/* 910c: when the stream arm is ON, EP1-IN is handed over (this file enables the endpoint but does not
+ * prime it; the stream file owns the qh/dTD and the first prime). Default 0 keeps 910b's behavior. */
+#ifndef STAGE90_XNU_USB_STREAM
+#define STAGE90_XNU_USB_STREAM 0
+#endif
 #ifndef STAGE90_XNU_USB_DEV_FORCE
 #define STAGE90_XNU_USB_DEV_FORCE 0
 #endif
@@ -159,6 +164,18 @@ static volatile uint32_t *usb_enum_td(uint32_t idx, uint32_t off)
 static uint32_t usb_enum_pa(const void *p)
 {
     return (uint32_t)(uintptr_t)p;
+}
+
+/*
+ * **910c handover.** The hardware has ONE endpoint list, so `g_usb_qh` cannot be split between this file
+ * and the stream file. This accessor is the stream arm's only handle on qh[IN1]: exported here because
+ * this file owns the array, callable only from `entry_usb_stream.c` (a build refusal pins the caller - a
+ * second caller would be two writers of one qh, [[mi4-one-value-two-definitions]]).
+ */
+volatile uint32_t *entry_usb_enum_qh_in1(void)
+{
+    return (volatile uint32_t *)(uintptr_t)((uintptr_t)g_usb_qh
+                                            + (uintptr_t)STAGE90_USB_ENUM_QH_IN1 * STAGE90_USB_ENUM_QH_STRIDE);
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -350,11 +367,16 @@ static void usb_enum_arm_ep_in(void)
     usb_enum_write32(STAGE90_USB_ENDPTCTRL(STAGE90_USB_ENUM_EP_IN),
                      STAGE90_USB_ENUM_ENDPTCTRL1_VALUE);
     usb_enum_nuke(STAGE90_USB_ENUM_QH_IN1);
+#if !STAGE90_XNU_USB_STREAM
+    /* 910b alone: publish the fixed magic and prime it. With the stream arm ON (910c) EP1-IN is handed
+     * over - the endpoint is enabled above, but the stream arm owns the qh/dTD and the first prime, so
+     * priming here would be a second writer of one qh ([[mi4-one-value-two-definitions]]). */
     g_usb_in_buf[0] = (uint8_t)(STAGE90_USB_ENUM_IN_MAGIC & 0xffu);
     g_usb_in_buf[1] = (uint8_t)((STAGE90_USB_ENUM_IN_MAGIC >> 8) & 0xffu);
     g_usb_in_buf[2] = (uint8_t)((STAGE90_USB_ENUM_IN_MAGIC >> 16) & 0xffu);
     g_usb_in_buf[3] = (uint8_t)((STAGE90_USB_ENUM_IN_MAGIC >> 24) & 0xffu);
     usb_enum_prime(STAGE90_USB_ENUM_QH_IN1, USB_ENUM_TD_IN1, g_usb_in_buf, 4u, 1u);
+#endif
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -487,12 +509,16 @@ static void usb_enum_ui(void)
         g_usb_enum_state = USB_ENUM_ST_ARMED;
     }
 
-    /* EP1-IN completion: the host read the IN endpoint's payload; re-prime (the magic again). */
+    /* EP1-IN completion: the host read the IN endpoint's payload; re-prime (the magic again).
+     * With the stream arm ON (910c) EP1-IN is the stream's - it reads and clears its own completion, so
+     * this file must not also clear it (a double clear would drop the stream's next completion). */
+#if !STAGE90_XNU_USB_STREAM
     if ((usb_enum_read32(STAGE90_USB_ENDPTCOMPLETE) & STAGE90_USB_ENUM_EPBIT(STAGE90_USB_ENUM_EP_IN, 1u)) != 0u) {
         usb_enum_complete_clear(STAGE90_USB_ENUM_EPBIT(STAGE90_USB_ENUM_EP_IN, 1u));
         g_usb_enum_in_reads++;
         usb_enum_prime(STAGE90_USB_ENUM_QH_IN1, USB_ENUM_TD_IN1, g_usb_in_buf, 4u, 1u);
     }
+#endif
 }
 
 /* ------------------------------------------------------------------------------------------------

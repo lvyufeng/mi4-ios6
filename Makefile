@@ -211,6 +211,12 @@ check:
 # switch-independent, so it runs here with no build and no device.
 	@tools/check_usb_enum.py --selftest >/dev/null
 	@tools/check_usb_enum.py
+# 910c: the bulk stream arm. `check_usb_stream.py` cross-checks the RAM console ring's layout against its
+# owner (`entry_stubs.c`), refuses a completion that reads `qh.curr` instead of the dTD `token`, refuses a
+# stream that enables the endpoint itself, and proves the EP1-IN handover both ways. Source half is
+# switch-independent, so it runs here with no build and no device.
+	@tools/check_usb_stream.py --selftest >/dev/null
+	@tools/check_usb_stream.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not

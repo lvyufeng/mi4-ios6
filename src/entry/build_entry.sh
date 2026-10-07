@@ -830,6 +830,26 @@ case "$USB_ENUM" in
     *) echo "REFUSING: STAGE90_XNU_USB_ENUM='$USB_ENUM' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **910c: the bulk STREAM - the one IN endpoint's payload becomes a cursor over the RAM console ring,
+# instead of the fixed 4-byte magic 910b sends.** `STAGE90_XNU_USB_STREAM=1` (in `entry_usb_stream.c`, its
+# own file so 910b's "sends only the magic" property stays a property of 910b's source) hands EP1-IN over:
+# the enum arm still ENABLES the endpoint on SET_CONFIGURATION, but it does not prime it and does not
+# re-prime it on completion, and the stream arm owns qh[IN1] and its dTD from the first stream prime on.
+# **The stream arm REQUIRES the enum arm** - EP1-IN is armed by the enum arm alone, and a stream with no
+# enumeration has no host to read it - so `STREAM=1 ENUM=0` is REFUSED below. Defaults to 0.
+USB_STREAM=${STAGE90_XNU_USB_STREAM:-0}
+case "$USB_STREAM" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_USB_STREAM='$USB_STREAM' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $USB_STREAM -eq 1 && $USB_ENUM -eq 0 ]]; then
+    echo "REFUSING: STAGE90_XNU_USB_STREAM=1 with STAGE90_XNU_USB_ENUM=0." >&2
+    echo "          The stream reads the one bulk IN endpoint the ENUM arm enables on SET_CONFIGURATION;" >&2
+    echo "          with the enum arm off there is no host-facing device and no armed endpoint, so the" >&2
+    echo "          stream would have nowhere to send and the switch would be a record that says otherwise." >&2
+    exit 1
+fi
 # **909: the RESIDENCE arm, and the first switch that REMOVES this image's own ending.** 908 proved a
 # plain power-on enters the OS; it ended because the image ended it - the deliberate deadline/pass-count
 # called `entry_seam_end_run`, whose first store (`RESTART_REASON` at `0x0fa0065c`) faults under XNU's
@@ -1068,7 +1088,8 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_USB_PROBE
                 STAGE90_XNU_USB_DEV
                 STAGE90_XNU_USB_DEV_FORCE
-                STAGE90_XNU_USB_ENUM)
+                STAGE90_XNU_USB_ENUM
+                STAGE90_XNU_USB_STREAM)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
 # the case statement below against the script's own environment reads - `grep -o '${STAGE90_[A-Z0-9_]*:-'`
@@ -1176,6 +1197,7 @@ do
         STAGE90_XNU_USB_DEV)          _v=$USB_DEV ;;
         STAGE90_XNU_USB_DEV_FORCE)    _v=$USB_DEV_FORCE ;;
         STAGE90_XNU_USB_ENUM)         _v=$USB_ENUM ;;
+        STAGE90_XNU_USB_STREAM)       _v=$USB_STREAM ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_SKIP) _v=${STAGE90_ENTRY_CHECKPOINT_SKIP:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_AFTER) _v=${STAGE90_ENTRY_CHECKPOINT_AFTER:-(unset)} ;;
@@ -1422,8 +1444,22 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
     -DSTAGE90_ENTRY_USB_TRACED="$ENTRY_TRACE" \
     -DSTAGE90_XNU_USB_ENUM="$USB_ENUM" \
+    -DSTAGE90_XNU_USB_STREAM="$USB_STREAM" \
     -DSTAGE90_XNU_USB_DEV_FORCE="$USB_DEV_FORCE" \
     -c "$BOOT_DIR/entry_usb_enum.c" -o "$OUT/xnu_arm_entry_usb_enum.o"
+# **910c: the bulk stream arm, in its own object.** It includes `entry_usb_enum.h` (the qh/dTD graph and
+# the endpoint bits) and names `entry_usb_enum_qh_in1` (the handover accessor the enum object exports),
+# `entry_live_write`, and the two cache primitives - so it must come after BOTH the enum object and the
+# ARM cache layer in the link list. It carries both switches: `STAGE90_XNU_USB_STREAM` arms it, and the
+# enum switch is read by its own file (and by `entry_usb_enum.c`) to place EP1-IN's single owner. A build
+# that left it out while the call site in `entry_trace.c` is unconditional is a link error, not a quiet
+# difference.
+run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
+    -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
+    -DSTAGE90_ENTRY_USB_TRACED="$ENTRY_TRACE" \
+    -DSTAGE90_XNU_USB_STREAM="$USB_STREAM" \
+    -DSTAGE90_XNU_USB_ENUM="$USB_ENUM" \
+    -c "$BOOT_DIR/entry_usb_stream.c" -o "$OUT/xnu_arm_entry_usb_stream.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
 
@@ -1567,6 +1603,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_USB_DEV="$USB_DEV" \
         -DSTAGE90_XNU_USB_DEV_FORCE="$USB_DEV_FORCE" \
         -DSTAGE90_XNU_USB_ENUM="$USB_ENUM" \
+        -DSTAGE90_XNU_USB_STREAM="$USB_STREAM" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
 fi
@@ -1672,6 +1709,11 @@ LINK_OBJS=(
 # layer, `caches_internal.h`), so it must come after the objects that define them - a build that left it
 # out while the call site in `entry_trace.c` is unconditional is a link error, not a quiet difference.
 [[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_usb_enum.o")
+
+# 910c: the stream arm, after the enum object (it calls `entry_usb_enum_qh_in1`) and after the ARM cache
+# layer (it calls `CleanPoU_DcacheRegion`/`FlushPoC_DcacheRegion`). A build that left it out while the
+# call site in `entry_trace.c` is unconditional is a link error, not a quiet difference.
+[[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_usb_stream.o")
 
 if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # --- XNU's own objects, and a generated stub for everything they still need -------------------
@@ -36887,6 +36929,8 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # site a name-keyed diff does not visit and the only site the gate ever reads, so a switch that
     # reached the compiler and the arm-key list but not here would be a run whose arm nobody read.
     echo "STAGE90_XNU_USB_ENUM=$USB_ENUM"
+    # **910c's switch, written here for the same reason as the three lines above.**
+    echo "STAGE90_XNU_USB_STREAM=$USB_STREAM"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways
@@ -36949,6 +36993,17 @@ run python3 "$REPO_ROOT/tools/check_usb_dev.py" --selftest || exit 1
 run python3 "$REPO_ROOT/tools/check_usb_enum.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
 run python3 "$REPO_ROOT/tools/check_usb_enum.py" --selftest || exit 1
 
+# **910c: the stream arm's guard, on the same condition and at the same late position.** It reads
+# `STAGE90_XNU_USB_STREAM` out of `xnu_arm_entry-config.txt` and the linked ELF, so it MUST run after the
+# record writer. Its source half cross-checks the RAM console ring's layout (sig, offsets, size bound,
+# the alias) against the OWNER (`entry_stubs.c`) rather than trusting this arm's transcription, refuses a
+# completion that reads `qh.curr` for the arrived count instead of the dTD `token`, refuses a store to
+# `ENDPTCTRL` (the enum arm owns the endpoint enable), and proves the EP1-IN handover both ways - so a
+# stream that armed the endpoint itself, or an enum arm that kept priming it, is refused at build time
+# ([[mi4-one-value-two-definitions]]).
+run python3 "$REPO_ROOT/tools/check_usb_stream.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
+run python3 "$REPO_ROOT/tools/check_usb_stream.py" --selftest || exit 1
+
 # ------------------------------------------------- 910a/910a2: the USB probes' CALL SITE is a build refusal
 #
 # **The defect this clause exists for, found 2026-10-07 before either USB arm was pressed.** Both USB
@@ -36974,6 +37029,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     _want_probe=0; [[ $USB_PROBE -eq 1 ]] && _want_probe=1
     _want_dev=0;   [[ $USB_DEV   -eq 1 ]] && _want_dev=1
     _want_enum=0;  [[ $USB_ENUM  -eq 1 ]] && _want_enum=1
+    _want_stream=0; [[ $USB_STREAM -eq 1 ]] && _want_stream=1
     # **And it must match a TAIL call (`b`), not only a call (`bl`), because `377fb57a` - the already
     # pushed 910a arm - carries the probe as a tail call.** The probe returns void and nothing follows
     # it, so the compiler emits `b <entry_usb_probe>`; a `bl`-only matcher read that arm as having no
@@ -36988,11 +37044,13 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_probe>"    || $5=="<entry_usb_probe>")    { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_probe:%s\n", sym; nprobe++ }
         ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_dev_init>" || $5=="<entry_usb_dev_init>") { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_dev_init:%s\n", sym; ndev++ }
         ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_enum_poll>" || $5=="<entry_usb_enum_poll>") { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_enum_poll:%s\n", sym; nenum++ }
-        END { printf "N:%d:%d:%d\n", nprobe+0, ndev+0, nenum+0 }')
+        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_stream_poll>" || $5=="<entry_usb_stream_poll>") { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_stream_poll:%s\n", sym; nstream++ }
+        END { printf "N:%d:%d:%d:%d\n", nprobe+0, ndev+0, nenum+0, nstream+0 }')
     _cs_bad=$(printf "%s\n" "$_cs_out" | sed -n 's/^BAD:\([a-z_]*\):\(.*\)$/\1 from \2 /p')
     _cs_probe=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:\([0-9]*\):.*/\1/p')
     _cs_dev=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:[0-9]*:\([0-9]*\):.*/\1/p')
-    _cs_enum=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:[0-9]*:[0-9]*:\([0-9]*\)/\1/p')
+    _cs_enum=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:[0-9]*:[0-9]*:\([0-9]*\):.*/\1/p')
+    _cs_stream=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:[0-9]*:[0-9]*:[0-9]*:\([0-9]*\)/\1/p')
     if [[ -n ${_cs_bad// /} ]]; then
         layout_fail "the linked image calls a USB probe from a site that is not \`__wrap_Idle_load_context\`: [${_cs_bad}]. Both USB arms carry STAGE90_XNU_IDLE_NO_SLEEP=1, on which \`cpu_idle\` leaves by its first door on every pass and \`__wrap_platform_cache_idle_exit\` is NEVER entered - so a probe called from there is dead code and a press logs zero \`xnu_live_usb_*\` keys. The probes belong in \`__wrap_Idle_load_context\`, the one wrapper every pass reaches on every arm (xnu_entry_513 pins it to machine_idle plus cpu_idle's two first-door bodies). This is [[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]]: a lower arm's switch must not make an upper arm's site unreachable"
     fi
@@ -37002,6 +37060,23 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         || layout_fail "STAGE90_XNU_USB_DEV=$USB_DEV says the write arm should be called ${_want_dev} time(s) from the idle-load wrapper but the linked image calls it ${_cs_dev} time(s): the switch and the body disagree about whether this arm runs the PHY sequence"
     [[ $_want_enum -eq $_cs_enum ]] \
         || layout_fail "STAGE90_XNU_USB_ENUM=$USB_ENUM says the enumeration arm should be called ${_want_enum} time(s) from the idle-load wrapper but the linked image calls it ${_cs_enum} time(s): the switch and the body disagree about whether this arm polls the USB core"
+    [[ $_want_stream -eq $_cs_stream ]] \
+        || layout_fail "STAGE90_XNU_USB_STREAM=$USB_STREAM says the stream arm should be called ${_want_stream} time(s) from the idle-load wrapper but the linked image calls it ${_cs_stream} time(s): the switch and the body disagree about whether this arm streams the bulk IN endpoint"
+    # **910c's own boundary, made a refusal: the stream arm must never ENABLE the endpoint itself, and the
+    # enum arm must hand EP1-IN over rather than prime it.** The stream requires the enum arm (refused
+    # above), and EP1-IN has one owner of its qh at a time - the enum arm enables it, the stream owns it
+    # from the first stream prime on. If the stream arm wrote `ENDPTCTRL` it would be a second, silent
+    # definition of who arms the endpoint; if the enum arm still primed it with the stream on, both files
+    # would write qh[IN1] and the magic and the stream would interleave on the wire
+    # ([[mi4-one-value-two-definitions]]). Read from the SOURCE, the way 910b's RST refusal is.
+    if [[ $_want_stream -eq 1 ]]; then
+        if grep -qE 'usb_stream_write32\([^)]*ENDPTCTRL' "$BOOT_DIR/entry_usb_stream.c"; then
+            layout_fail "entry_usb_stream.c writes \`ENDPTCTRL\` - the stream arm must NOT enable the endpoint itself. The enum arm enables EP1 on \`SET_CONFIGURATION\`; the stream arm only primes and re-primes. A second writer of the endpoint-control register is two definitions of who owns EP1-IN"
+        fi
+        if ! grep -q 'STAGE90_XNU_USB_STREAM' "$BOOT_DIR/entry_usb_enum.c"; then
+            layout_fail "entry_usb_enum.c does not guard EP1-IN on \`STAGE90_XNU_USB_STREAM\` - with the stream arm ON the enum arm must NOT prime or re-prime EP1-IN (it hands the endpoint over), or both files write qh[IN1] and the magic interleaves with the stream"
+        fi
+    fi
     # **910b's own hazard, made a refusal: this arm must never write `USBCMD.RST`.** 910a2 owns the ONE
     # link reset (its `_dev_rst_count = 1`); a reset in the poll would fight the running device - the
     # host enumerates, then the next pass resets the controller under it, which is worse than no arm at
@@ -37013,7 +37088,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     if [[ $_want_enum -eq 1 ]] && grep -qE 'usb_enum_write32\([^)]*USBCMD[^)]*USBCMD_RST' "$BOOT_DIR/entry_usb_enum.c"; then
         layout_fail "entry_usb_enum.c stores \`USBCMD.RST\` - the 910b enumeration arm must NEVER re-run the link reset. 910a2 owns the ONE reset (its \`_dev_rst_count = 1\`); a reset in the once-per-pass poll fights the running device: the host enumerates, then the next pass resets the controller under it. The arm writes the endpoint set, \`USBINTR\`, and \`DEVICEADDR\`, and nothing that resets the link"
     fi
-    say "  xnu_entry_910: the USB probes are called from \`__wrap_Idle_load_context\` and nowhere else (read_probe=${_cs_probe}, write_arm=${_cs_dev}, enum=${_cs_enum}), which is the one idle site every pass reaches on BOTH the SLEEP and the IDLE_NO_SLEEP arms - so a USB key in the log means the probe ran and its absence is not a site this arm never enters"
+    say "  xnu_entry_910: the USB probes are called from \`__wrap_Idle_load_context\` and nowhere else (read_probe=${_cs_probe}, write_arm=${_cs_dev}, enum=${_cs_enum}, stream=${_cs_stream}), which is the one idle site every pass reaches on BOTH the SLEEP and the IDLE_NO_SLEEP arms - so a USB key in the log means the probe ran and its absence is not a site this arm never enters"
 fi
 
 # ------------------------------------------------- 533: **the sources of this image, by content**
