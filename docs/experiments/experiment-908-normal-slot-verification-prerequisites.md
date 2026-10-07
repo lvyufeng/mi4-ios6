@@ -250,6 +250,33 @@ capture, and a `--normal-boot` mode for `run_and_capture.sh`, do not exist yet; 
 runner cannot read a log from a boot-looped device. That is the next step, not something the
 current press path can fake.
 
+## The first normal-slot press: staged, plain-booted, and DARK (2026-10-07)
+
+The RO arm was staged into p19 and booted with a **plain `adb reboot`** — the goal's own
+sentence (「直接开机就运行xnu」) is now what was tested, not `fastboot boot`.
+
+- **Staged** with `scripts/stage_boot_p19.sh --expect-sha256=046219ad… --execute`, exit 0.
+  p19's first 9,519,104 bytes read back `046219adf489936b9348c3ec77288e6cac2536715a3fca04669ce41e34466417`.
+  Full 32 MiB before image retained:
+  `3cf1cf61296a28e179072375726e3a37a08a24509c0a896f482175ef92f325a1`
+  (`out/stage90/backups/boot-p19-stage-20261007T021045Z-NbHqhVE1`).
+- **Pressed** with `adb reboot` at `2026-10-07T02:10:56Z`. The device x**never re-enumerated**:
+  0/12 five-second adb probes over 60 s, `fastboot devices` empty, `lsusb` shows no phone USB id
+  for 90 s, and `sudo dmesg` attributes no USB event to the phone across the whole window. The
+  phone is **DARK**.
+- **Reading the darkness correctly.** This is the two-outcome-equivalent signature §"gives dark"
+  predicted: XNU runs no `adbd` and the entry image never re-initializes the USB controller, so
+  **a resident run, a faulted run, and a boot-loop are all equally dark host-side.** No host
+  statement about *what XNU did* follows from the darkness alone, and none is made here.
+- **Evidence is in the RAM console**, which survives a warm reset into verified TWRP. That read
+  requires a **physical** VolDown + Power + USB reset (the operator's action), then
+  `scripts/press_908_normal.sh --rescue`. The outcome note is
+  `out/stage90/captures/908-normal-20261007-021056-outcome.txt`.
+
+**p19 was not restored.** The arm stays staged because the goal requires p19 to hold XNU for a
+plain power-on; restoring it would undo the step just taken. The bridge back is the retained
+before-image + `scripts/restore_boot_from_xnu.sh --execute`.
+
 ## Completion bar
 
 Preparation and a verified write are not the goal. A completed normal-boot stage
