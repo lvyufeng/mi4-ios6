@@ -5440,6 +5440,40 @@ void entry_note_repair(uint32_t caller, uint32_t before, uint32_t after)
  * this writer cannot be re-entered, and it is the reason the record is written *after* the halt rather
  * than around it: a record published before the `wfi` would be a claim about an outcome.
  */
+
+/* --- 909 arm 5: widen the idle path's publish gates so the 5th idle pass is visible in EVERY site ---
+ *
+ * Arm 4 widened only `entry_slot_publish`, so its press can say `slot_post_calls=5` vs `4` -- the
+ * death is before the exit, or at it -- and no more. The finer question is where in the 5th pass:
+ * inside the enter *window*, at the `wfi`, at the exit's *entry*, or in the exit's tail. Every one of
+ * those has its own site already in the image (514-522's instruments), and every one of them is
+ * silent on the 5th pass for the same reason `slot_post` was: **the idle path's gates are powers of
+ * two, and 5 is not one**. So this arm widens them too, and one press then reads, in file order:
+ *
+ *     idlestack_calls=5            (enter wrapper, unconditional -- always present)
+ *     pce_seq / pce_after_seq = 5  (the 5th enter, and its far side with the cache off)
+ *     wfi_seq = 5                  (the 5th halt: `before`/`after` are the whole window)
+ *     pcx_seq = 5                  (the exit wrapper's first act: the real exit returned)
+ *     slot_post_calls = 5          (the exit wrapper's post site: the far side of the `pop`)
+ *
+ * The LAST of these that appears names where the pass died. `after - before` on a present `wfi` is
+ * also the *time* the CPU spent stopped, so a death at the halt reads as a `before` with no `after`.
+ *
+ * **Why a macro and not `entry_slot_publish`.** `entry_slot_publish` is defined a hundred lines *below*
+ * these functions, so calling it here would need a forward declaration of a `static` -- one more thing
+ * between the arm and the linked image -- and the threshold is one value whatever name it carries, so
+ * it is named once here and used by all four gates.
+ *
+ * **Why the *threshold* and not the gate's shape.** `n` is `g_*_calls + 1`, incremented in these same
+ * bodies; a stale-late publish miss (the cache-off window's known stale-line hazard) can only make `n`
+ * look SMALLER than the truth, never larger. A record reading 5 therefore proves a real 5th pass
+ * reached that site, and a death that leaves the last record at 4 beside a hard ceiling of 5 elsewhere
+ * (`idlestack`) cannot be a missed publish, because the true count reached 5.
+ */
+#define STAGE90_IDLE_PATH_LIVE_MAX   8u
+#define STAGE90_IDLE_PATH_PUBLISH(n) \
+    ((n) <= STAGE90_IDLE_PATH_LIVE_MAX || ((n) & ((n) - 1u)) == 0u)
+
 void entry_note_wfi(uint32_t fast, uint32_t inst, uint32_t before, uint32_t after, uint32_t ticks)
 {
     uint32_t n = g_wfi_calls + 1u;
@@ -5459,7 +5493,7 @@ void entry_note_wfi(uint32_t fast, uint32_t inst, uint32_t before, uint32_t afte
     g_wfi_last_before = before;
     g_wfi_last_after = after;
 
-    if ((n & (n - 1u)) == 0u) {
+    if (STAGE90_IDLE_PATH_PUBLISH(n)) {
         entry_live_write("xnu_live_wfi_seq", n);
         entry_live_write("xnu_live_wfi_fast", fast);
         entry_live_write("xnu_live_wfi_inst", inst);
@@ -5542,7 +5576,7 @@ void entry_note_pce(uint32_t caller, uint32_t up, uint32_t ncpu, uint32_t datap,
         g_pce_first_before = before;
     }
 
-    if ((n & (n - 1u)) == 0u) {
+    if (STAGE90_IDLE_PATH_PUBLISH(n)) {
         entry_live_write("xnu_live_pce_seq", n);
         entry_live_write("xnu_live_pce_caller", caller);
         entry_live_write("xnu_live_pce_up", up);
@@ -5577,7 +5611,7 @@ void entry_note_pcx(uint32_t after, uint32_t tpidrprw, uint32_t datap, uint32_t 
     }
     g_pcx_last_ticks = ticks;
 
-    if (n == 1u || (n & (n - 1u)) == 0u) {
+    if (STAGE90_IDLE_PATH_PUBLISH(n)) {
         entry_live_write("xnu_live_pcx_seq", n);
         entry_live_write("xnu_live_pcx_entered", g_pce_calls);
         entry_live_write("xnu_live_pcx_ticks", ticks);
@@ -5642,7 +5676,7 @@ void entry_note_pce_after(uint32_t tpidrprw, uint32_t datap, uint32_t up, uint32
         g_pce_after_sctlr = sctlr;
     }
 
-    if (n == 1u || (n & (n - 1u)) == 0u) {
+    if (STAGE90_IDLE_PATH_PUBLISH(n)) {
         entry_live_write("xnu_live_pce_after_seq", n);
         entry_live_write("xnu_live_pce_after_tpidrprw", tpidrprw);
         entry_live_write("xnu_live_pce_after_datap", datap);

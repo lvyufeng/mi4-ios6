@@ -558,3 +558,48 @@ honest census the idle path has had without an ending cutting it first.
 boot stays" either — its 28 s was an ending at 4 passes, not a survival. That would move the residence
 rung's object from "remove the ending" (done) to "fix whatever the idle path does on its 5th pass", and
 that is the object arm 4's press is meant to name.
+
+## R14 — arm 5: the 5th pass is a 5-way bisection, and arm 4 was one gate short
+
+Arm 4 widened `entry_slot_publish`'s bound (4 -> 8), so its press can say `slot_post_calls=5` (the 5th
+pass reached the exit wrapper's tail) or `4` (it died at or before the real exit). Reading arm 2's log
+one layer further shows arm 4 is **one gate short**, and that the death is narrower than either cell:
+
+- **`xnu_live_idlestack_calls=5` is a HARD ceiling.** It is the idle **enter** wrapper's count, and
+  `entry_idle_stack_note` publishes it **unconditionally** (`entry_stubs.c:6199`, no schedule gate), with
+  the D-cache on. The live channel was only 72% full (11797 of 16384 records, `xnu_live_cap=0x4000`), so
+  this is not truncation: the idle path was entered **exactly five times and never a sixth**, then the
+  run wedges.
+- **The 5th pass's only record is that enter.** In file order the tail is
+  `... wfi(pass4) -> slot_pre=4 -> slot_post=4 -> pcx=4 -> pcx_after=0x0f48f615 -> (poll_over, tmr_dl, now=0x0f48ff6b)
+  -> idlestack=5 -> EOF`. There is **no `wfi` record for the 5th pass** — the last `wfi`
+  (`before=0x0cfc8a12`, `after=0x0f48ec3f`, pass 4) is the pass *before* it. So the death is **inside the
+  5th `platform_cache_idle_enter`** (the cache-off window: `platform_cache_disable()` + `CleanPoU_Dcache()`,
+  `IDLE_CACHE_ENABLE=0`) **or its `wfi`** — not at the exit wrapper arm 4 was aimed at.
+- **Why the four other sites go silent at 5.** `entry_note_pce` (`:5545`), `entry_note_wfi` (`:5462`),
+  `entry_note_pcx` (`:5580`) and `entry_note_pce_after` (`:5645`) all gate on `n & (n-1) == 0` (or
+  `n==1 ||`). Powers of two: 1,2,4,8. **5,6,7 never publish.** Arm 4 widened only `entry_slot_publish`,
+  so on arm 4 the 5th pass would appear at the exit wrapper's sites and remain invisible at the enter,
+  the `wfi` and the exit's first act — exactly the sites that bisect it.
+
+**Arm 5 = arm 4 + the four idle-path gates widened** (`armed-storage-b459a858`, entry bin
+`b459a858…`, 6498612 B). One macro, `STAGE90_IDLE_PATH_LIVE_MAX 8u`, and
+`STAGE90_IDLE_PATH_PUBLISH(n)` = `n <= 8 || power-of-two`, applied to the four gates above. One press
+then reads, in file order, the last site the 5th pass reached:
+
+| last key present | where the 5th pass died |
+|---|---|
+| `idlestack=5` only | before `entry_note_pce_after` — inside the real enter's *body* (the cache-off window) |
+| `+ pce_after_seq=5` | the enter returned; died before the `wfi` |
+| `+ wfi_seq=5` (`before` and no `after`) | **at the halt** — the CPU never came out of the `wfi` |
+| `+ pcx_seq=5` | the real exit returned; died in the exit wrapper before the `pcx` note |
+| `+ slot_post_calls=5` | reached the far side of the `pop` — the frontier 519/520 named |
+
+Arm 5 keeps arm 4's `slot_post` bound **and** arm 3's watchdog fallback (`xnu_live_wdt_via`), so if the
+pet succeeded in reading through the GIC's block the same press also returns `xnu_live_wdt_countdown`.
+
+**Nothing that must not move.** No switch moved (entry-config identical to arms 3/4 but for the artifact
+hash, so no `STAGE90_ENTRY_ARM_CHANGE`); the payload record is byte-identical (`6c2b6038…`, the seventh
+time); the seam check passed, so `STAGE90_XNU_SEAM_LR` is still `0x8004d2dc`; 6498612 bytes as before
+(the threshold is an immediate). Parked `armed-storage-b459a858`, `verify_revert_set` 11/11,
+`verify_press_ready` 5/5, `make check` exit 0. **Built and parked, NOT pressed.**

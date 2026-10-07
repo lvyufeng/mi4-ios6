@@ -27,6 +27,23 @@
 # `claim_descriptor_guard_is_a_real_predicate` plus five mutations in `tools/test_resident_guard.py`.
 # The fix and the guard are this arm; the press of arm 3 is still owed.
 #
+# WHY ARM 4 NEEDED AN ARM 5, AND WHY ARM 5 IS A 5-WAY BISECTION. Arm 4 (`armed-storage-4f4111fa`) widened only
+# `entry_slot_publish`'s bound, so its press can say which side of the exit the 5th pass died on and no
+# more. Reading arm 2's log tells more than that: `xnu_live_idlestack_calls` is the idle ENTER wrapper's
+# count, published UNCONDITIONALLY with the D-cache on, so `=5` is a HARD ceiling (the live channel was
+# only 72% full, 11797 of 16384 records, so this is not truncation) - the idle path was entered exactly
+# five times and never a sixth. And in FILE ORDER the 5th pass's only record is that enter's `=5`: there
+# is NO `wfi` record for the 5th pass (the last `wfi`, `after=0x0f48ec3f`, belongs to pass 4). So the
+# death is INSIDE the 5th `platform_cache_idle_enter` (the cache-off window) or its `wfi` - NOT at the
+# exit. Arm 4's single widening cannot bisect that, because `entry_note_pce`/`_wfi`/`_pcx`/
+# `_pce_after` publish only on powers of two, and 5 is not one. **Arm 5 (`armed-storage-b459a858`) widens those four
+# idle-path gates too** (one macro, `STAGE90_IDLE_PATH_LIVE_MAX 8u`), so ONE press reads, in file order:
+# `idlestack=5` (always) -> `pce_seq=5` (the 5th enter ran) -> `wfi_seq=5` (the 5th halt, with
+# `before`/`after` = the whole window) -> `pcx_seq=5` (the real exit returned) -> `slot_post_calls=5`
+# (the far side of the `pop`). **The LAST of these that appears names where the pass died**, and a
+# present `wfi` with a `before` and no `after` is a death AT the halt. It keeps arm 4's 8u slot bound
+# and arm 3's watchdog fallback, so this one press answers the location AND the watchdog question.
+#
 # WHY ARM 3'S FIX IS FOLDED INTO ARM 4, AND WHAT ARM 4 ADDS. Arm 3 was built and parked but NEVER
 # pressed, so arm 4 keeps its watchdog fallback unchanged (`xnu_live_wdt_via`) and adds the second
 # question the same press can answer: **where the run's 5th idle pass dies.** Arm-2's own log has
@@ -62,7 +79,7 @@ set -Eeuo pipefail
 SERIAL="4a2fe00b"
 FORBIDDEN_SERIAL="33e80afe"
 CARGO="out/stage90/stage90-qcdt.img"
-EXPECT_ARM="armed-storage-4f4111fa"
+EXPECT_ARM="armed-storage-b459a858"
 CAPTURE="out/stage90/captures/909-resident-$(date -u '+%Y%m%d-%H%M%S')-last_kmsg.txt"
 CALL_TIMEOUT=120
 DO_STAGE=1
