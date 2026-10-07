@@ -515,3 +515,46 @@ so no `STAGE90_ENTRY_ARM_CHANGE`); the payload record is **byte-identical** to 9
 is still `0x8004d2dc` (no entry-group page move). Parked as `armed-storage-4f4111fa` (11 members,
 `SHA256SUMS.txt` 560 B), recorded in `records/revert-set.txt`, `verify_press_ready.sh` **5/5**,
 `make check` exit 0.
+
+## R13 — the cross-run idle census: the 5th pass is the longest idle this project has ever run
+
+Arm 4's design rests on a claim that is checkable without the device: that the ~13.4 s stop is inside
+the **5th** idle pass. The whole capture corpus makes that claim sharper than a single run can.
+`xnu_live_idlestack_calls` (the idle **enter** wrapper's count, published unconditionally with the
+D-cache on) and `xnu_live_slot_post_calls` (the **exit** wrapper's, sampled) over every `last_kmsg` in
+`out/stage90/captures/`:
+
+| runs | `idlestack_calls` | `slot_post_calls` | `post_end_calls` | how it ended |
+|------|-------------------|-------------------|------------------|--------------|
+| rungs 9–58, 690, 697 | **8** | 8 (full sample) | 8 | the deliberate ending |
+| rung 30, 33–37, 39–42, 47–53, 56, 58 | 8 | 8 | 8 | the deliberate ending |
+| rungs 12–16, 29, 31, 32, 38, 43–46, 690 | **7** | **4** | 7 | the deliberate ending |
+| rungs 17–22, 24 | **6** | 4 | 6 | the deliberate ending |
+| **909 arm 2** | **5** | **4** | *none* | **the stop under study** |
+| 908 (both) | 4 | 4 | 4 | the deliberate ending |
+| 689 | 2 | 2 | 2 | the deliberate ending |
+| 687, 692, 909 arm 1 | 1 | 1 | 1 / none | the ending / the pet fault |
+
+Three things fall out, none of which the single-run reading of R12 could show:
+
+1. **No run has ever idled past 8 passes, and every run that idled more than once had its ending armed
+   to fire at exactly its `idlestack` count.** The ending has been the thing that stops the idle path in
+   *every* measured run but 909's — so 909-2nd's 5 passes with no ending is the **longest un-ending
+   idle this project has ever observed**, and it is also the one that stopped.
+2. **`slot_post_calls` is a floor, `idlestack_calls` is exact.** Rung 12 is the proof in one row:
+   `idlestack=7` beside `slot_post=4`. So R12's "the 5th pass is invisible" is not a subtlety of one
+   schedule — it is why every count of 5, 6, 7 reads as 4 in every log in this table.
+3. **The stop is not at a count, it is at a time** — 13.36 s, and the fixture's own polls carry a
+   2000 ms timeout (`xnu_live_poll_timeout_ms=0x7d0`, `poll_ticks≈0x024c7691`≈2.007 s), so the idle
+   thread makes roughly one pass per poll period. The 5-pass census and the 13.4 s clock are the same
+   number read two ways.
+
+**What this changes about arm 4.** Its discriminator is unchanged and now better grounded: `slot_post_calls`
+publishing **5** under the widened bound puts the death in the exit wrapper's own tail (the pcx/pet gap);
+a **4** puts it at or before the real `platform_cache_idle_exit` — and either way the count is the first
+honest census the idle path has had without an ending cutting it first.
+
+**The honest risk.** If the idle path has always faulted at ~5 passes, then 908 did not prove "a plain
+boot stays" either — its 28 s was an ending at 4 passes, not a survival. That would move the residence
+rung's object from "remove the ending" (done) to "fix whatever the idle path does on its 5th pass", and
+that is the object arm 4's press is meant to name.
