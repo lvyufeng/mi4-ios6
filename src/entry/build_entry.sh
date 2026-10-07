@@ -873,6 +873,39 @@ if [[ $USB_STREAM -eq 1 && $USB_ENUM -eq 0 ]]; then
     echo "          stream would have nowhere to send and the switch would be a record that says otherwise." >&2
     exit 1
 fi
+# **911c: the RAM bank layout, measured from the Qualcomm SMEM RAM-partition table.** The goal's newest
+# clause is that XNU recognize the Mi 4's 3 GB of RAM, and the 911c design established that the repo
+# holds NO low-bank base or size anywhere - every "low bank" is an inference from "3 GB minus 1.5 GB".
+# So the 3 GB half must be MEASURED, and the authoritative in-repo source is the SMEM RAM-partition
+# table the Android kernel's `meminfo_init` itself reads. `STAGE90_XNU_SMEM_PROBE=1` (`entry_smem.c`,
+# its own file) maps the SMEM window, walks the heap TOC, validates the partition table by its magic
+# pair, and publishes the system-memory banks and their sum. It WRITES NOTHING, so like 910a there is no
+# hazard to refuse here: a fault would stop the run at the probe, which is a reading, not a brick.
+# Defaults to 0.
+SMEM_PROBE=${STAGE90_XNU_SMEM_PROBE:-0}
+case "$SMEM_PROBE" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_SMEM_PROBE='$SMEM_PROBE' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+# **The one transcribed number this arm can get silently wrong: the partition stride.** `sizeof(struct
+# smem_ram_ptn)` is 56 (16 name + 6 x 4 fields + 4 x 4 reserved), and a 48-byte stride - the number the
+# 911c DESIGN note first carried - would walk into the middle of every second partition and read garbage
+# `start`/`size` pairs, which is exactly "a stand-in can be the right size and the wrong value"
+# ([[mi4-stand-in-size-is-not-value]]) applied to a stride. The header's own field offsets must sum to
+# the stride, and this is a build refusal rather than a comment ([[mi4-a-claim-in-comment-is-not-a-check]]).
+_smem_hdr="$BOOT_DIR/entry_smem.h"
+_smem_stride=$(awk '$1=="#define" && $2=="STAGE90_SMEM_PART_STRIDE" {print $3}' "$_smem_hdr")
+_smem_typeoff=$(awk '$1=="#define" && $2=="STAGE90_SMEM_PART_TYPE_OFF" {print $3}' "$_smem_hdr")
+if [[ $_smem_stride != "56u" ]]; then
+    echo "REFUSING: entry_smem.h sets STAGE90_SMEM_PART_STRIDE='$_smem_stride' but sizeof(struct smem_ram_ptn) is 56." >&2
+    echo "          A 48-byte stride walks into every second partition; see the header's field-offset block." >&2
+    exit 1
+fi
+if [[ $_smem_typeoff != "36u" ]]; then
+    echo "REFUSING: entry_smem.h sets STAGE90_SMEM_PART_TYPE_OFF='$_smem_typeoff' but the packed struct puts type at 36." >&2
+    exit 1
+fi
 # **909: the RESIDENCE arm, and the first switch that REMOVES this image's own ending.** 908 proved a
 # plain power-on enters the OS; it ended because the image ended it - the deliberate deadline/pass-count
 # called `entry_seam_end_run`, whose first store (`RESTART_REASON` at `0x0fa0065c`) faults under XNU's
@@ -1114,6 +1147,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_USB_DEV_FORCE
                 STAGE90_XNU_USB_ENUM
                 STAGE90_XNU_USB_STREAM
+                STAGE90_XNU_SMEM_PROBE
                 STAGE90_XNU_MEM_SIZE_MAX
                 STAGE90_XNU_ENTRY_WINDOW)
 #
@@ -1225,6 +1259,7 @@ do
         STAGE90_XNU_USB_DEV_FORCE)    _v=$USB_DEV_FORCE ;;
         STAGE90_XNU_USB_ENUM)         _v=$USB_ENUM ;;
         STAGE90_XNU_USB_STREAM)       _v=$USB_STREAM ;;
+        STAGE90_XNU_SMEM_PROBE)       _v=$SMEM_PROBE ;;
         # 911b: the physical-memory ceiling. It reaches the ENTRY image's own linked bytes (it is
         # compiled into `osfmk_arm_arm_vm_init.o`, which is IN the link), so unlike ENTRY_WINDOW it is
         # carried in the record LIKE any other entry switch - but read from the ENVIRONMENT with a
@@ -1500,6 +1535,15 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -DSTAGE90_XNU_USB_STREAM="$USB_STREAM" \
     -DSTAGE90_XNU_USB_ENUM="$USB_ENUM" \
     -c "$BOOT_DIR/entry_usb_stream.c" -o "$OUT/xnu_arm_entry_usb_stream.o"
+# **911c: the RAM bank layout, in its own object.** It names `entry_mmio_section` (the live channel's
+# mapper, defined in `entry_stubs.c`), the live channel's words, and no kernel object, so its position
+# in the link list is free. It reads only SMEM, so it depends on no other arm; a build that dropped it
+# while the call site in `entry_trace.c` is unconditional would be a link error, not a quiet
+# difference.
+run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
+    -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
+    -DSTAGE90_XNU_SMEM_PROBE="$SMEM_PROBE" \
+    -c "$BOOT_DIR/entry_smem.c" -o "$OUT/xnu_arm_entry_smem.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
 
@@ -1645,6 +1689,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_USB_DEV_FORCE="$USB_DEV_FORCE" \
         -DSTAGE90_XNU_USB_ENUM="$USB_ENUM" \
         -DSTAGE90_XNU_USB_STREAM="$USB_STREAM" \
+        -DSTAGE90_XNU_SMEM_PROBE="$SMEM_PROBE" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
 fi
@@ -1755,6 +1800,12 @@ LINK_OBJS=(
 # layer (it calls `CleanPoU_DcacheRegion`/`FlushPoC_DcacheRegion`). A build that left it out while the
 # call site in `entry_trace.c` is unconditional is a link error, not a quiet difference.
 [[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_usb_stream.o")
+
+# 911c: the SMEM bank-layout probe. It depends on no other arm (it reads SMEM, not the USB core or the
+# card), so its position here is free - it is placed after the USB objects only to keep the entry's
+# instrumentation objects together. A build that left it out while the call site in `entry_trace.c`
+# is unconditional is a link error, not a quiet difference.
+[[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_smem.o")
 
 if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # --- XNU's own objects, and a generated stub for everything they still need -------------------
@@ -37149,6 +37200,10 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "STAGE90_XNU_USB_ENUM=$USB_ENUM"
     # **910c's switch, written here for the same reason as the three lines above.**
     echo "STAGE90_XNU_USB_STREAM=$USB_STREAM"
+    # **911c's switch, written here for the same reason as the lines above**: this writer is the one
+    # site a name-keyed diff does not visit and the only site the gate ever reads, so a switch that
+    # reached the compiler and the arm-key list but not this line would be a run whose arm nobody read.
+    echo "STAGE90_XNU_SMEM_PROBE=$SMEM_PROBE"
     # **911b's ceiling, written here for 678's reason**: this writer is the one site a name-keyed diff
     # does not visit and the only site the gate ever reads, so a switch that reached the compiler and the
     # arm-key list but not this line would be a run whose ceiling nobody read. Written as `(unset)` when
@@ -37264,6 +37319,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     _want_dev=0;   [[ $USB_DEV   -eq 1 ]] && _want_dev=1
     _want_enum=0;  [[ $USB_ENUM  -eq 1 ]] && _want_enum=1
     _want_stream=0; [[ $USB_STREAM -eq 1 ]] && _want_stream=1
+    _want_smem=0;   [[ $SMEM_PROBE -eq 1 ]] && _want_smem=1
     # **And it must match a TAIL call (`b`), not only a call (`bl`), because `377fb57a` - the already
     # pushed 910a arm - carries the probe as a tail call.** The probe returns void and nothing follows
     # it, so the compiler emits `b <entry_usb_probe>`; a `bl`-only matcher read that arm as having no
@@ -37279,14 +37335,16 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_dev_init>" || $5=="<entry_usb_dev_init>") { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_dev_init:%s\n", sym; ndev++ }
         ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_enum_poll>" || $5=="<entry_usb_enum_poll>") { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_enum_poll:%s\n", sym; nenum++ }
         ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_stream_poll>" || $5=="<entry_usb_stream_poll>") { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_stream_poll:%s\n", sym; nstream++ }
-        END { printf "N:%d:%d:%d:%d\n", nprobe+0, ndev+0, nenum+0, nstream+0 }')
+        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_smem_probe>"    || $5=="<entry_smem_probe>")    { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_smem_probe:%s\n", sym; nsmem++ }
+        END { printf "N:%d:%d:%d:%d:%d\n", nprobe+0, ndev+0, nenum+0, nstream+0, nsmem+0 }')
     _cs_bad=$(printf "%s\n" "$_cs_out" | sed -n 's/^BAD:\([a-z_]*\):\(.*\)$/\1 from \2 /p')
     _cs_probe=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:\([0-9]*\):.*/\1/p')
     _cs_dev=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:[0-9]*:\([0-9]*\):.*/\1/p')
     _cs_enum=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:[0-9]*:[0-9]*:\([0-9]*\):.*/\1/p')
-    _cs_stream=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:[0-9]*:[0-9]*:[0-9]*:\([0-9]*\)/\1/p')
+    _cs_stream=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:[0-9]*:[0-9]*:[0-9]*:\([0-9]*\):.*/\1/p')
+    _cs_smem=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:[0-9]*:[0-9]*:[0-9]*:[0-9]*:\([0-9]*\)/\1/p')
     if [[ -n ${_cs_bad// /} ]]; then
-        layout_fail "the linked image calls a USB probe from a site that is not \`__wrap_Idle_load_context\`: [${_cs_bad}]. Both USB arms carry STAGE90_XNU_IDLE_NO_SLEEP=1, on which \`cpu_idle\` leaves by its first door on every pass and \`__wrap_platform_cache_idle_exit\` is NEVER entered - so a probe called from there is dead code and a press logs zero \`xnu_live_usb_*\` keys. The probes belong in \`__wrap_Idle_load_context\`, the one wrapper every pass reaches on every arm (xnu_entry_513 pins it to machine_idle plus cpu_idle's two first-door bodies). This is [[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]]: a lower arm's switch must not make an upper arm's site unreachable"
+        layout_fail "the linked image calls a USB probe or the SMEM probe from a site that is not \`__wrap_Idle_load_context\`: [${_cs_bad}]. Both USB arms carry STAGE90_XNU_IDLE_NO_SLEEP=1, on which \`cpu_idle\` leaves by its first door on every pass and \`__wrap_platform_cache_idle_exit\` is NEVER entered - so a probe called from there is dead code and a press logs zero \`xnu_live_usb_*\` keys. The probes belong in \`__wrap_Idle_load_context\`, the one wrapper every pass reaches on every arm (xnu_entry_513 pins it to machine_idle plus cpu_idle's two first-door bodies). This is [[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]]: a lower arm's switch must not make an upper arm's site unreachable"
     fi
     [[ $_want_probe -eq $_cs_probe ]] \
         || layout_fail "STAGE90_XNU_USB_PROBE=$USB_PROBE says the read probe should be called ${_want_probe} time(s) from the idle-load wrapper but the linked image calls it ${_cs_probe} time(s): the switch and the body disagree about whether this arm probes the USB core"
@@ -37296,6 +37354,8 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         || layout_fail "STAGE90_XNU_USB_ENUM=$USB_ENUM says the enumeration arm should be called ${_want_enum} time(s) from the idle-load wrapper but the linked image calls it ${_cs_enum} time(s): the switch and the body disagree about whether this arm polls the USB core"
     [[ $_want_stream -eq $_cs_stream ]] \
         || layout_fail "STAGE90_XNU_USB_STREAM=$USB_STREAM says the stream arm should be called ${_want_stream} time(s) from the idle-load wrapper but the linked image calls it ${_cs_stream} time(s): the switch and the body disagree about whether this arm streams the bulk IN endpoint"
+    [[ $_want_smem -eq $_cs_smem ]] \
+        || layout_fail "STAGE90_XNU_SMEM_PROBE=$SMEM_PROBE says the SMEM bank probe should be called ${_want_smem} time(s) from the idle-load wrapper but the linked image calls it ${_cs_smem} time(s): the switch and the body disagree about whether this arm measures the device's RAM banks"
     # **910c's own boundary, made a refusal: the stream arm must never ENABLE the endpoint itself, and the
     # enum arm must hand EP1-IN over rather than prime it.** The stream requires the enum arm (refused
     # above), and EP1-IN has one owner of its qh at a time - the enum arm enables it, the stream owns it

@@ -678,6 +678,7 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_USB_DEV_FORCE
                 STAGE90_XNU_USB_ENUM
                 STAGE90_XNU_USB_STREAM
+                STAGE90_XNU_SMEM_PROBE
                 STAGE90_XNU_MEM_SIZE_MAX
                 STAGE90_XNU_ENTRY_WINDOW)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
@@ -808,6 +809,17 @@ do
   # repaired), and the ladder still owes those presses.
   if [[ -z $_v && $_k == STAGE90_XNU_MEM_SIZE_MAX ]]; then
     printf '  %s=(absent, and a record that does not name the ceiling is Apple\x27s 1 GiB clamp - the only value any pre-911b build could have written)\n' "$_k"
+    continue
+  fi
+  # **911c's key, the same one-way rule as 911b's ceiling and 912's window, and for the same reason.**
+  # Every arm parked before 911c was built with `entry_smem.c` not in the tree at all, so its record has
+  # no `STAGE90_XNU_SMEM_PROBE` line; an absent key is not a missing value but the value - the probe was
+  # off, because it did not exist. Demanding the key would make every existing park unpressable (882's
+  # own defect, seven times repaired now) and the ladder still owes those presses. A post-911c record can
+  # never reach this branch: the writer emits the line unconditionally (value 0 or 1), so a record this
+  # build made carries a non-empty value and the branch above does not fire for it.
+  if [[ -z $_v && $_k == STAGE90_XNU_SMEM_PROBE ]]; then
+    printf '  %s=(absent, and a record that does not name the SMEM probe is one built before entry_smem.c existed - the probe was off, the only value a pre-911c build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \

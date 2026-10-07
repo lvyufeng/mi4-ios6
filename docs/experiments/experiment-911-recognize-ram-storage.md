@@ -463,7 +463,7 @@ memory and 911c is worth the port; **unmoved** says R10's cache-window reading s
 ceiling + window, so one press answers the ceiling, the residence wall, and the card capacity together.
 The goal's **full 3 GB is still NOT met** — that is 911c.
 
-## 10. 911c DESIGNED (2026-10-07) — the bank layout as a MEASUREMENT, not an inference (no arm built)
+## 10. 911c — the bank layout as a MEASUREMENT, not an inference (BUILT 2026-10-07, no press)
 
 **The finding that reshaped 911c.** A repo-wide sweep (including `external/`, which plain `grep -rIn`
 does not descend) found that **the repository contains NO base/size for the low bank at all.** The only
@@ -513,15 +513,15 @@ nothing maps the `0x0fa` megabyte in the entry's context** — the payload maps 
 payload's table is gone once XNU's `start.s` overwrites TTBR0/1/TTBCR. **So one mapping serves two
 purposes**: the bank-layout read AND the run's ending.
 
-**The rung, stated as a buildable plan (NOT built here).**
+**The rung, stated as a buildable plan (BUILT — see the correction and the built block below).**
 1. A new `src/entry/entry_smem.c` whose `entry_smem_probe()` (a) calls
    `entry_mmio_section(0xe0000000u, 0x0fa00000u, ...)` and refuses if it returns 0 (`g_live_state != 1`
-   or a table below the window), (b) walks the TOC slots at `SMEM+0xD0 + i*16` reading `{allocated,
-   offset, size}`, (c) validates a candidate ptable by `magic[0]==0x9DA5E0A8 && magic[1]==0xAF9EC4E2`,
-   (d) walks `parts[]` (stride 48 B) for `size != 0` and publishes each bank as
-   `xnu_live_smem_bankN_start`/`_size` plus a count `xnu_live_smem_banks` and
-   `xnu_live_smem_ptable_found`. The **sum of the bank sizes is the device's real total** — the number
-   the goal's 「3GB内存」 names, measured rather than assumed.
+   or a table below the window), (b) walks the TOC slots at `SMEM+0xE0 + i*16` reading `{allocated,
+   offset, size}` (`heap_info` is `SMEM+0xD0`), (c) validates a candidate ptable by
+   `magic[0]==0x9DA5E0A8 && magic[1]==0xAF9EC4E2` **and** `len` in 1..32, (d) walks `parts[]` at
+   **stride 56 B** and publishes each bank as `xnu_live_smem_bankN_start`/`_size` plus a count
+   `xnu_live_smem_banks` and `xnu_live_smem_ptable_found`. The **sum of the bank sizes is the device's
+   real total** — the number the goal's 「3GB内存」 names, measured rather than assumed.
 2. Hook `entry_smem_probe()` into `__wrap_Idle_load_context` beside the USB probes
    (`entry_trace.c:2148-2160`) — the one site every idle pass reaches on every arm (`IDLE_NO_SLEEP`
    makes the exit wrapper unreachable; the 910a dead-code lesson, `mi4-a-lower-rungs-side-effect-
@@ -534,6 +534,22 @@ purposes**: the bank-layout read AND the run's ending.
    is-not-a-check`).
 4. Optionally map the **low identity** too, so the same run closes the `RESTART_REASON` self-end.
 
+**Two corrections the source forced on the design, found while building (2026-10-07).** The design
+above carried two numbers that a reading of the owning structs refutes, and both would have made the
+walk a reading of nothing:
+
+- **The stride is 56, not 48.** `sizeof(struct smem_ram_ptn)` is `16 (name) + 6×4 (start, size, attr,
+  category, domain, type) + 4×4 (reserved2..5) = 56`, `__packed`. A 48-byte stride walks into the middle
+  of every second partition and reads garbage `start`/`size` pairs — [[mi4-stand-in-size-is-not-value]]
+  applied to a stride. `entry_smem.h` spells the stride and every field offset from the struct's own
+  field list, and `build_entry.sh` **refuses** a build whose `STAGE90_SMEM_PART_STRIDE` is not `56u` (a
+  claim in a comment is not a check, [[mi4-a-claim-in-comment-is-not-a-check]]).
+- **The bank filter is the device's own rule, not `size != 0`.** `memory_topology.c`'s
+  `meminfo_init(type, min)` keeps a partition iff `parts[i].type == type && size >= min_bank_size`, and
+  every board calls it `meminfo_init(SYS_MEMORY, SZ_256M)` (`board-8064.c:3702`). So a bank is
+  `type == SYS_MEMORY (1) && size >= 256 MB`. `size != 0` would have swept in the modem/IMEM carve-outs
+  and made the "total" larger than the RAM.
+
 **What 911c is NOT.** It does **not** make XNU *own* the low bank: XNU's physmap is single-span
 (`phystokv(a) = a − gPhysBase + gVirtBase`, `vm_param.h:196`; `vm_first_phys = gPhysBase`,
 `pmap.c:2859`; the tables are sized by `atop(mem_size)`, `:2829-2834`), so 3 GB cannot be linearly
@@ -542,4 +558,16 @@ physmapped from `virtBase = 0x80000000` (PA `0xC0000000` → VA `0x140000000`, p
 **911c's job is to MEASURE the layout that port must be designed against** — and, per the goal's wording
 (「正确识别」), to make the device's true banks *reported*. The port proper is 911e.
 
-**Status: DESIGNED, grounded in the repo's own evidence, NOT built.** No arm, no key, no press.
+**Status: BUILT 2026-10-07 (no press).** Park `out/stage90/frozen/armed-storage-1d3ae364` (11/11,
+`verify_revert_set` VERIFIED with `--set`); the set name is the **entry bin's** hash (the entry image
+moved — `entry_smem.o` is in the link), the `armed-storage-*` family rule. Entry bin
+`1d3ae3649c174668f0b0fe5177b767fb9a1f80b288c046316d08e9e7abcccdfe`, config
+`9f2d3302ca51415c5df44c73ed16dfe50954634e96e3091946ea3d7ce218e87e` (now 35 arm keys, the new one
+`STAGE90_XNU_SMEM_PROBE=1`), sources `96fea9f4…` (`entry_smem.c`/`entry_smem.h` add two files, 33 → 35).
+`build_entry.sh` exit 0 with the full 911b switch set plus `STAGE90_XNU_SMEM_PROBE=1`; the linked image
+calls `entry_smem_probe` **once** from `__wrap_Idle_load_context` (`bl 800157cc` at `0x804d3f24`) and the
+new nm clause reads `N:1:1:1:1:1`; the three globals `g_stage90_smem_ptable_found`/`_total_bytes`/
+`_banks` are in the image. Payload `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1
+-DSTAGE90_XNU_MEM_SIZE_MAX=0x5e500000'` exit 0 (`stage90-build-config.txt` byte-identical to 911b's
+`6c2b6038`). `check_set_name_rule` 0; `make check` 0; `verify_press_ready` **5/5** — row 4 names **the
+911c SMEM RAM-BANK-MEASUREMENT arm**. **NO press.**

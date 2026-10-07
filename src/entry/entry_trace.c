@@ -142,6 +142,7 @@
 #include "entry_usb_dev.h"
 #include "entry_usb_enum.h"
 #include "entry_usb_stream.h"
+#include "entry_smem.h"
 
 /* entry_stubs.c. Records into `g_kv_buf`, which only an epilogue writes out - see above. */
 extern void entry_kv(const char *key, uint32_t value);
@@ -2196,6 +2197,24 @@ void __wrap_Idle_load_context(void)
 #endif
 #if STAGE90_XNU_USB_STREAM
     entry_usb_stream_poll();
+#endif
+
+/*
+ * **911c: the RAM bank-layout probe, at the same site and before the USB polls.** `entry_smem_probe`
+ * (`entry_smem.c`) maps the SMEM window, walks the heap TOC, validates the RAM-partition table by its
+ * magic pair, and publishes the device's system-memory banks and their sum - the numbers the 3 GB clause
+ * is about. It runs here because this template is the one site every pass reaches on every arm (the
+ * dead-code lesson 910a paid for), and it is idempotent, so the first pass does the walk and later
+ * passes only re-check the latch. **It depends on no other arm** and names only `entry_mmio_section`
+ * and the live channel, so the ordering above is a preference (do the cheap independent read first),
+ * not a dependency - and the build's linked-image clause refuses it being called from anywhere but this
+ * wrapper, the way the four USB probes are refused.
+ */
+#ifndef STAGE90_XNU_SMEM_PROBE
+#define STAGE90_XNU_SMEM_PROBE 0
+#endif
+#if STAGE90_XNU_SMEM_PROBE
+    entry_smem_probe();
 #endif
 
 #if STAGE90_XNU_RESIDENT && STAGE90_XNU_IDLE_NO_SLEEP
