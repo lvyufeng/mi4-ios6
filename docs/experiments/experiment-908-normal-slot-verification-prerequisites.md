@@ -331,6 +331,27 @@ retained boot-arg label, not a separate backing store. What the `/dev/rmd0` ENOE
 *naming* defect on the fixture's open path (the 904-owed item), not that the root is a RAM blob.
 What remains for the goal is **repeatability** and the **self-end/watchdog** clause — not the boot.
 
+## Repeatability verified (read-only, 2026-10-07)
+
+The boot is **repeatable on the same root without pre-clearing anything**, and this was measured
+directly, not inferred. After the plain-slot XNU boot, p25 was read back from TWRP while the phone
+was still in recovery:
+
+- The HFS+ volume header (`offset 1024`) still reads `482b 0004 8000 0100`:
+  `attributes=0x80000100` — **`kHFSVolumeUnmountedBit` (0x100) is still SET**. A read-only mount
+  never clears the clean-unmount bit, exactly as predicted; a *writable* mount would have.
+- The whole first 512 KiB of p25 hashes to
+  `d9d2ade4e5b0b3086cec2005567a7df83493579a05067d65ac7dde6c3e6a4bb6`, **byte-identical to the
+  recorded clean card image** (`experiment-908 §"Live state"`). The plain-slot XNU boot left the
+  volume **unchanged** — no catalog, bitmap or allocation writes, because the root was mounted RO.
+
+So the dirty-non-journaled-volume refusal
+(`hfs_mounthfsplus: cannot mount dirty non-journaled volumes`) cannot fire on the next boot, and no
+pre-clearing of p25 is needed. **Repeatability of the read-only root is established**; what a
+second plain boot would add is a confirmation of stability across boots, not a new unknown. The
+write-path repeatability question belongs to the write arms (one clean cycle remains unmeasured),
+and is separate from this clause.
+
 ## Completion bar
 
 Preparation and a verified write are not the goal. A completed normal-boot stage
