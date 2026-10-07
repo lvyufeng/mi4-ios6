@@ -824,8 +824,8 @@ if [[ $RESIDENT -eq 1 && $HW_WATCHDOG -ne 1 ]]; then
 fi
 if [[ $RESIDENT -eq 1 && $ENTRY_TRACE -ne 1 ]]; then
     echo "REFUSING: STAGE90_XNU_RESIDENT=1 with STAGE90_ENTRY_TRACE=$ENTRY_TRACE." >&2
-    echo "          The pet lives in the exit wrapper's tail (`__wrap_platform_cache_idle_exit`'s own" >&2
-    echo "          `entry_post_clock`), and that wrapper is entry_trace.c's - without the trace there is" >&2
+    echo "          The pet lives in the exit wrapper's tail (\`__wrap_platform_cache_idle_exit\`'s own" >&2
+    echo "          \`entry_post_clock\`), and that wrapper is entry_trace.c's - without the trace there is" >&2
     echo "          no site that runs on the idle passes and nothing petted (909)." >&2
     exit 1
 fi

@@ -670,7 +670,7 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS STAGE90_XNU_STORAGE_PROBE
                 STAGE90_XNU_PWR_WAIT_TICKS STAGE90_XNU_MOUNT STAGE90_XNU_HFS_ROOT_MEDIA
                 STAGE90_XNU_EMMC_STRATEGY STAGE90_XNU_ROOT_FROM_CARD STAGE90_XNU_HDD_WRITE
-                STAGE90_XNU_HFS_ROOT_RW
+                STAGE90_XNU_HFS_ROOT_RW STAGE90_XNU_RESIDENT
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
@@ -726,6 +726,19 @@ if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/
      | grep -q 'entry_root_media_write_arm_on'; then
   _entry_root_rw=on
 fi
+# **909: `STAGE90_XNU_RESIDENT` gets the same ARTIFACT-grounded treatment as the four above.** A record
+# written before 909 cannot carry the key, and demanding it would make every pre-909 park unpressable
+# (882's own defect, four times repaired). The marker is grounded on the ARTIFACT and not on the
+# calendar: the resident arm's pet is its own function `entry_wdt_pet`, compiled ONLY under
+# `#if STAGE90_XNU_RESIDENT` (909 step 3, entry_trace.c) and asserted ABSENT when the switch is 0 by the
+# build's own linked clause - so an entry ELF that DEFINES `entry_wdt_pet` (a `t`) is the residence arm
+# and MUST record the key (a record without it could send a run whose deliberate ending nobody named, or
+# whose watchdog pet nobody named), while an image that cannot carry the pet has no such value to record.
+_entry_resident_arm=""
+if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/dev/null \
+     | awk '$3 == "entry_wdt_pet" && $2 == "t" { found = 1 } END { exit(found ? 0 : 1) }'; then
+  _entry_resident_arm=on
+fi
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
@@ -743,6 +756,10 @@ do
   fi
   if [[ -z $_v && $_k == STAGE90_XNU_HFS_ROOT_RW && -z $_entry_root_rw ]]; then
     printf '  %s=(absent, and this entry image carries no eMMC-write arm whose rw clear it would name - the key is N/A here)\n' "$_k"
+    continue
+  fi
+  if [[ -z $_v && $_k == STAGE90_XNU_RESIDENT && -z $_entry_resident_arm ]]; then
+    printf '  %s=(absent, and this entry image carries no residence pet to name - the key is N/A here)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \
@@ -1674,6 +1691,47 @@ def obj_spans(elf, base, nbytes):
             m[a:b] = b"\x01" * (b - a)
     return m
 
+# **A NAMED FUNCTION IS CODE, AND A CLASS OF CODE THIS CLAUSE MUST BE ABLE TO TAKE BACK THE EXCLUSION OF.**
+# The clause below refuses an image that carries the watchdog's page in any of three encodings, because a
+# run whose only net is the one the image can reach is a run nobody can rescue. 909's residence arm
+# INVERTS that premise on purpose: the pet's whole job is to reach the page and FEED the net, so the arm
+# must carry the address. The remedy is not to weaken the clause for everyone but to let the image's own
+# ELF say which functions are allowed to carry it - a whitelist read off the artifact, not a switch this
+# gate remembers. `entry_wdt_pet` is the pet itself - compiled ONLY under `#if STAGE90_XNU_RESIDENT`
+# (`entry_trace.c`), so an image that DEFINES it is the residence arm and nothing else is - and its body
+# is the one place that may carry the address, because feeding the net is what it is for. **The pet alone
+# is exempt, and the exempt set IS the residence test.** `entry_mmio_section` is deliberately NOT exempt:
+# it is the generic mapper that links into EVERY entry image and takes the address as an argument, so its
+# own body carries none of the three encodings (`movt 0` in the draft's measurement) - and exempting it
+# would let a future build hide a real page reach inside the one function every image has. The residence
+# test is therefore "this ELF defines `entry_wdt_pet`", which only the `#if STAGE90_XNU_RESIDENT` block
+# can produce. A non-resident image defines no pet, so the clause for it is exactly the one it was: no
+# code may carry the page. The exemption is by symbol, so it cannot be widened by moving bytes.
+_PAGE_OK = {"entry_wdt_pet"}
+
+def exempt_findings(elf, base, nbytes, names):
+    """Bin spans of the FUNC symbols in `names` - the code allowed to carry the watchdog's page."""
+    out = subprocess.run(["readelf", "-sW", elf], stdout=subprocess.PIPE, text=True).stdout
+    spans = []
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) < 8 or f[3] != "FUNC":
+            continue
+        if f[7].split("@")[0] not in names:
+            continue
+        try:
+            va, sz = int(f[1], 16), int(f[2], 16)
+        except ValueError:
+            continue
+        if sz:
+            spans.append((va - base, va - base + sz))
+    m = bytearray(nbytes)
+    for a, b in spans:
+        a, b = max(0, a), min(nbytes, b)
+        if b > a:
+            m[a:b] = b"\x01" * (b - a)
+    return m
+
 def ror(v, n):
     n &= 31
     return ((v >> n) | (v << (32 - n))) & 0xffffffff if n else v
@@ -1688,7 +1746,9 @@ def movt_pattern(imm):
 MOVT_WATCH, MASK = movt_pattern(0xf901)
 MOVT_WITNESS, _ = movt_pattern(0xf900)
 
-def census(path, objmask=None):
+def census(path, objmask=None, keep=False):
+    """Count page/witness reaches. `objmask` set + keep=False skips masked words (the refusable count
+    excludes named objects AND the exempt code); keep=True counts ONLY masked words (the exempt code)."""
     d = open(path, 'rb').read()
     if len(d) < 4096:
         sys.exit("  %s is %d bytes - this is a scan that could not look" % (path, len(d)))
@@ -1696,8 +1756,8 @@ def census(path, objmask=None):
     wit = dict(pool=0, movt=0, mov=0)      # in the GIC's pages, one nibble below
     enc = 0                                # words carrying the movt encoding at all, data included
     for i in range(len(d) // 4):
-        if objmask is not None and objmask[i * 4]:
-            continue                       # a named data object, not a literal pool (see above)
+        if objmask is not None and bool(objmask[i * 4]) != keep:
+            continue
         w = struct.unpack_from('<I', d, i * 4)[0]
         if WATCH_LO <= w <= WATCH_HI:
             hit['pool'] += 1
@@ -1720,7 +1780,17 @@ def census(path, objmask=None):
                 wit['mov'] += 1
     return len(d) // 4, enc, hit, wit
 
-words, enc, hit, wit = census(ENTRY, obj_spans(ENTRY_ELF, load_base(ENTRY_ELF), len(open(ENTRY, 'rb').read())))
+_en = len(open(ENTRY, 'rb').read())
+_base = load_base(ENTRY_ELF)
+_objm = obj_spans(ENTRY_ELF, _base, _en)
+_exm  = exempt_findings(ENTRY_ELF, _base, _en, _PAGE_OK)  # the pet - the only code allowed to carry it
+# **The refusable census excludes the exempt code; the exempt census counts only it.** Composing the two
+# masks this way is what makes `carried` mean "a REACH THE GATE HAS NO NAME FOR": a page hit inside
+# `entry_wdt_pet` is the arm's own pet, not a reach nobody can rescue, so it is counted in `hite` and not
+# in `hit`. A hit OUTSIDE both masks (any other function, or the literal pools) is the refusal.
+_refm = bytearray(a or b for a, b in zip(_objm, _exm))
+words, enc, hit, wit = census(ENTRY, _refm)
+_noneed, _, hite, wite = census(ENTRY, _exm, keep=True)   # the exempt code, and nothing else
 print("  %s:" % ENTRY)
 print("    %d aligned words, %d carrying the movt encoding (a ceiling)" % (words, enc))
 print("    [0xf9010000, 0xf901ffff]   pool word %d   movt rD, #0xf901 %d   mov/mvn immediate %d"
@@ -1730,6 +1800,23 @@ print("    [0xf9000000, 0xf900ffff]   pool word %d   movt rD, #0xf900 %d   mov/m
       % (wit['pool'], wit['movt'], wit['mov']))
 print("      the movt counts are ceilings for the same reason: the mask frees the condition field,")
 print("      so a data word sharing the low half is counted too.")
+# **The second census is what keeps this clause from turning into a check that cannot fail.** The
+# exemption at the top takes `entry_wdt_pet` and `entry_mmio_section` out of the refusable count; those
+# are exactly the symbols the residence arm DEFINES, so if a non-resident image ever came to define them,
+# or a resident one lost the pet, the exemption could not silently excuse the whole clause - the exempt
+# region itself is now required to CARRY the page. A resident image prints a non-zero count here (its pet
+# materialises `0xf9017000`) and a non-resident image prints "0 exempt word(s) ... the exemption is
+# empty". Both are readings: the first is the arm's reach being where it belongs, the second is the
+# exemption not having widened the clause for an image that has no business reaching the page.
+_residence = any(_exm)                 # this image DEFINES the pet - i.e. it IS the residence arm
+print("    exempt code (%s), which a residence arm must carry the page in:"
+      % ", ".join(sorted(_PAGE_OK)))
+if _residence:
+    print("      %d page reach(es) - pool word %d   movt rD, #0xf901 %d   mov/mvn immediate %d"
+          % (hite['pool'] + hite['movt'] + hite['mov'], hite['pool'], hite['movt'], hite['mov']))
+else:
+    print("      the exemption is empty: this image defines neither pet nor mapper, so the count above")
+    print("      is the whole clause and no code here may reach the page.")
 # Both of these stop the gate, and the second is the one that is easy to leave as a warning: a page
 # that reads zero because it is not carried and a page that reads zero because the instrument saw
 # nothing print the same four numbers, and this project's rule is that a check which succeeds by
@@ -1750,9 +1837,22 @@ if not any(contr.values()):
     print("    this instrument is not demonstrably able to see one and the entry image's zero is not")
     print("    a reading - distrust the counts above it.")
 if carried:
-    print("    the entry image carries the watchdog's page: pool word %d, movt %d, mov/mvn %d"
-          % (hit['pool'], hit['movt'], hit['mov']))
-if carried or unread:
+    print("    the entry image carries the watchdog's page OUTSIDE its residence code: pool word %d,"
+          % hit['pool'])
+    print("    movt %d, mov/mvn %d - that is a reach the gate does not have a name for, and it stops this"
+          % (hit['movt'], hit['mov']))
+    print("    image (a run whose only net is the one the image can touch).")
+if unread or not any(contr.values()):
+    print("    (the witness is unread, or the positive control is not satisfied - the counts above")
+    print("    are not a reading, so the run is refused on the instrument rather than on the image.)")
+# **The refusable condition - and the one exemption that is itself read.** A page hit OUTSIDE the
+# exemption stops the run (above). But an image that DEFINES the residence pet must not reach the page
+# ZERO times, because a pet that carries no address is not a pet: it is a function that cannot feed the
+# net, and its presence is then the arm claiming an ability it does not have. So the direction is
+# two-sided for an image that defines either exempt symbol: it must carry at least the movt sites that
+# materialise `0xf9017000`. A non-resident image defines neither (`_residence` is false) and this clause
+# is silent for it, exactly as it was before 909.
+if carried or unread or not any(contr.values()) or (_residence and not any(hite.values())):
     sys.exit(1)
 PY
   then
@@ -1769,6 +1869,13 @@ PY
   # the ceiling is a number in this tree rather than prose: the two constants are read out of `stage90.h`
   # (rung 1b's rule - a threshold quoted from the file that defines it, never written here again), and
   # the clause refuses rather than guessing if either cannot be read.
+  #
+  # **909's residence arm is the exception, and the `if` below IS that exception.** Everything in this
+  # comment is a claim about an image that does not pet the net - `carried == 0` above, "nothing in it
+  # does". A resident image petting the net is not capped, so it gets a different paragraph: the
+  # countdown trace instead of the ceiling. The branch is taken on the entry ELF (`_entry_resident_arm`,
+  # the same read the config-keys block uses) and not on a switch this gate remembers, so the paragraph
+  # an operator reads is always about the artifact they are about to boot.
   #
   # **The claim that nothing pets it is the clause above, not this one - and the two are different
   # claims, which is why they are now printed as two.** `carried == 0` is "no code in the entry image
@@ -1803,25 +1910,54 @@ PY
   if [[ -z $WDT_TMO || -z $WDT_GAP ]]; then
     fail "STAGE90_HW_WATCHDOG_TIMEOUT_S / _BITE_GAP_S could not be read from $SRC_DIR/stage90.h, so the ceiling this arm runs under cannot be stated - and a gate that describes a run without its ceiling is describing a different run"
   fi
-  echo "  and nothing in this image pets the net, so the run is CAPPED: a run of this arm that goes well"
-  echo "  also ends within the net's own interval, not when the payload stops. The two constants are read"
-  echo "  out of stage90.h rather than quoted here:"
-  echo "    STAGE90_HW_WATCHDOG_TIMEOUT_S    $WDT_TMO s   (the bark)"
-  echo "    STAGE90_HW_WATCHDOG_BITE_GAP_S   $WDT_GAP s   (bark -> bite)"
-  echo "    so the bite is at most $(( WDT_TMO + WDT_GAP )) s after the payload arms it, and the payload"
-  echo "    spends about 1 s of that before the jump (measured: 533's payload timebase sample to the"
-  echo "    idle's first read is 1.1805 s on one 19.2 MHz counter)."
-  echo "  READ IT AS 'UNUSED', NOT 'UNREACHABLE'. This image maps the watchdog's registers on every boot -"
-  echo "  the GIC probe's own 1 MB section descriptor (0xf901040e, base 0xf9000000, attr index 3 ="
-  echo "  strongly-ordered) covers 0xf9017000, and both archived captures carry it. What the scan above"
-  echo "  measures is that nothing STORES to them, and a store is what a pet is. Changing this ceiling is"
-  echo "  therefore not new machinery: it is one store to 0xf9017004 (WDT0_RST) from a path XNU already"
-  echo "  runs, in a wrapper this image already has. That is a decision about the arm and not part of it."
-  echo "  MEASURED, what that ceiling looks like: 513's two captures - the same regime, an image with no"
-  echo "  repair - end their payload records at the fifth poll with panic 0, Attempting system restart 0,"
-  echo "  MACH Reboot 0, pc_sample_watchdog_fired 0 and platform_reboot entered 0, so NO software path"
-  echo "  ended either run and the records simply stop after the work, with no fault text. Read a capture"
-  echo "  of this arm that way: 'the log ends without a fault' is the ceiling, not a missing reading."
+  if [[ $_entry_resident_arm == on ]]; then
+    # **909's residence arm is the one image for which that ceiling is FALSE, and this branch says so
+    # rather than letting the paragraph below describe a run this image is not.** The pet's whole job is
+    # to feed the net, so a resident image's clock is NOT the net's own interval: it is however long the
+    # pet keeps writing `WDT0_RST`. The two constants are still read out of `stage90.h` (they are the
+    # interval the pet must out-run), and the reading that replaces the ceiling is the countdown trace -
+    # `xnu_live_wdt_countdown` published over many idle passes, each value below the bark and never zero.
+    # A resident run that comes back reset is therefore a pet that did not fire, and the log's last
+    # `xnu_live_wdt_*` cells name how far into the interval it got. This branch is keyed on the entry ELF
+    # defining the pet (`_entry_resident_arm`, read at the top) and not on a switch named here.
+    echo '  and this image DOES pet the net - its pet (`entry_wdt_pet`, the exempt code the scan above'
+    echo '  reports carrying the page) writes WDT0_RST on the idle exit, so this run is NOT capped at the'
+    echo '  net'"'"'s interval; it is resident until the pet stops. The interval it must out-run is read out of'
+    echo '  stage90.h rather than quoted here:'
+    echo "    STAGE90_HW_WATCHDOG_TIMEOUT_S    $WDT_TMO s   (the bark)"
+    echo "    STAGE90_HW_WATCHDOG_BITE_GAP_S   $WDT_GAP s   (bark -> bite)"
+    echo "    so a bite is due at most $(( WDT_TMO + WDT_GAP )) s after the payload arms it unless a pet lands"
+    echo "    inside that window - and the payload spends about 1 s of it before the jump (measured: 533's"
+    echo "    payload timebase sample to the idle's first read is 1.1805 s on one 19.2 MHz counter)."
+    echo '  READ A CAPTURE OF THIS ARM AS A COUNTDOWN, NOT A CEILING. The evidence of residence is'
+    echo '  `xnu_live_wdt_countdown` published over many passes, each value below the bark and never reaching'
+    echo '  zero, with the raw `xnu_live_wdt_sts` moving - the pet keeping the countdown pinned low. The'
+    echo '  negative cell is bounded and readable: if the pet'"'"'s read faults (the page is not mapped where the'
+    echo '  install put it), the run dies AT THE PET SITE with a fault address in the watchdog'"'"'s page, not in'
+    echo '  a hang - so `xnu_live_wdt_sts` absent plus a fault at the pet is a measurement, not silence.'
+    echo '  ABSENCE TO EXPECT HERE AND NOT ELSEWHERE: `xnu_live_post_end_calls` (R1 deletes the deliberate'
+    echo '  ending) - its presence would mean the ending this rung removes is still firing.'
+  else
+    echo "  and nothing in this image pets the net, so the run is CAPPED: a run of this arm that goes well"
+    echo "  also ends within the net's own interval, not when the payload stops. The two constants are read"
+    echo "  out of stage90.h rather than quoted here:"
+    echo "    STAGE90_HW_WATCHDOG_TIMEOUT_S    $WDT_TMO s   (the bark)"
+    echo "    STAGE90_HW_WATCHDOG_BITE_GAP_S   $WDT_GAP s   (bark -> bite)"
+    echo "    so the bite is at most $(( WDT_TMO + WDT_GAP )) s after the payload arms it, and the payload"
+    echo "    spends about 1 s of that before the jump (measured: 533's payload timebase sample to the"
+    echo "    idle's first read is 1.1805 s on one 19.2 MHz counter)."
+    echo "  READ IT AS 'UNUSED', NOT 'UNREACHABLE'. This image maps the watchdog's registers on every boot -"
+    echo "  the GIC probe's own 1 MB section descriptor (0xf901040e, base 0xf9000000, attr index 3 ="
+    echo "  strongly-ordered) covers 0xf9017000, and both archived captures carry it. What the scan above"
+    echo "  measures is that nothing STORES to them, and a store is what a pet is. Changing this ceiling is"
+    echo "  therefore not new machinery: it is one store to 0xf9017004 (WDT0_RST) from a path XNU already"
+    echo "  runs, in a wrapper this image already has. That is a decision about the arm and not part of it."
+    echo "  MEASURED, what that ceiling looks like: 513's two captures - the same regime, an image with no"
+    echo "  repair - end their payload records at the fifth poll with panic 0, Attempting system restart 0,"
+    echo "  MACH Reboot 0, pc_sample_watchdog_fired 0 and platform_reboot entered 0, so NO software path"
+    echo "  ended either run and the records simply stop after the work, with no fault text. Read a capture"
+    echo "  of this arm that way: 'the log ends without a fault' is the ceiling, not a missing reading."
+  fi
 
   # **Which idle arm this image runs is a boot argument, and it is read out of the artifact that is
   # about to be booted.** 549's finding: `up_style_idle_exit` is a `.bss` global (default 0) set only by

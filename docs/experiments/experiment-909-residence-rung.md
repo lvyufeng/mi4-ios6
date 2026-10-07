@@ -1,8 +1,8 @@
 # 909 — the residence rung: a normal-slot boot that does not end
 
-Date: 2026-10-07. Status: **designed, not built, not pressed.** This closes the last open clause of
-the goal 「彻底能直接开机就运行xnu」 — 908 proved a plain power-on *enters* the OS; this proves one
-that *stays*.
+Date: 2026-10-07. Status: **built and parked (`armed-storage-e61ce673`), gate-green, `make check` 0;
+not yet pressed — PRESS IS THE OPERATOR'S.** This closes the last open clause of the goal
+「彻底能直接开机就运行xnu」 — 908 proved a plain power-on *enters* the OS; this proves one that *stays*.
 
 ## What 908 left open, stated exactly
 
@@ -151,3 +151,36 @@ comment), which costs one interrupt and no more. So a late pet is survivable; a 
 4. The linked-image clauses (R4) + `tools/test_resident_guard.py` (host fakes).
 5. The fixture variant (R5).
 6. Arm config, park the 11 members, `verify_press_ready.sh`, `make check`, then the operator press.
+
+## R6 — the gate's watchdog-page clause, and why it had to be amended rather than bypassed
+
+The press gate (`scripts/preflight_boot_check.sh`) has a pre-existing clause that scans the entry
+image for an address in the watchdog's 1 MB page `[0xf9010000, 0xf901ffff]` in three encodings (a
+literal-pool word, a `movt rD, #0xf901` pair, a `mov`/`mvn` immediate), and **refuses** if any code
+carries one. Its premise is exactly the residence rung's inverted one: it assumes a page reach is a
+run "whose only net is the one the image can touch" — a reach nobody can rescue. R2's pet deliberately
+materialises `0xf9017000`, so the clause fired on the parked residence arm `armed-storage-e61ce673`,
+and the honest reading is that the clause was right and the arm is the exception it did not know about.
+
+The amendment is **grounded on the artifact, not on a switch the gate remembers** (the same rule the
+config-keys block already uses for `HFS_ROOT_MEDIA`/`ROOT_FROM_CARD`/`HDD_WRITE`):
+
+- **The exemption is the pet SYMBOL.** `entry_wdt_pet` is compiled ONLY under `#if STAGE90_XNU_RESIDENT`
+  (`entry_trace.c`), so an entry ELF that **defines** it (`readelf -s`, a `FUNC` named `entry_wdt_pet`) IS
+  the residence arm and nothing else is. The gate reads that symbol's bin span and excludes it from the
+  refusable census. `entry_mmio_section` is deliberately **not** exempt: it links into every image and
+  carries no page address of its own, so exempting it would let a future build hide a real reach in the
+  one function every image has.
+- **The clause is two-sided for the residence arm.** An image that defines the pet must carry the page
+  (a pet that reaches nothing cannot feed the net); `entry_wdt_pet`'s four `movt rD, #0xf901` sites are
+  the evidence. A non-resident image defines no pet, its exemption set is empty, and the clause for it is
+  exactly the one it was: no code may carry the page.
+- **The refusal message and the ceiling paragraph change with the arm.** For the residence arm the
+  "nothing pets the net, so the run is CAPPED" paragraph is false and is replaced by the countdown-trace
+  reading (`xnu_live_wdt_countdown` below the bark and never zero, `xnu_live_post_end_calls` absent).
+  Both branches are keyed on the same `_entry_resident_arm` read the config-keys block uses.
+
+Verified in four directions on the parked arm: (1) the residence image passes with `movt 0` refusable and
+`movt 4` exempt; (2) the non-resident 908 image (`armed-storage-54d5c585`) is silent as before, `0` in
+both counts; (3) an image whose pet words are zeroed is refused (the pet must reach); (4) an image with a
+page word injected outside the pet is refused (the original clause, unchanged).
