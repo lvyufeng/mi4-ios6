@@ -87,15 +87,44 @@ the holes registered as I/O so one span covers only a *chosen* usable window ≤
 change that meshes spans; and (b) `MEM_SIZE_MAX` raised if the reported number is to exceed 1 GiB and
 (more importantly) a **high physmap window** if 3 GB is to be *mapped* rather than merely *reported*.
 
-## 4. The storage half is nearly free
+## 4. The storage half is nearly free — and the exact reason it is not free yet
 
-`src/entry/entry_storage.c:7035` reads the card's **real** capacity from EXT_CSD `SEC_CNT`
-(`st_ext_sec_count = ST_EXT_CSD_WORD(ST_EXT_CSD_OFF_SEC_CNT)`), and the media layer reports it:
-`stage90_root_media.c:1003-1004` (`DKIOCGETBLOCKCOUNT = st_media_blockcount[unit]`) with the extent set
-from the selected partition (`:1250`). So **the device's own size is already the source**, and the
-clause's storage half is about making the *whole* 16/32 GB visible through the partition/GPT layer —
-an extension of the read path 903 built, not a new number invented host-side. This half should be its
-own rung and is the natural next step after the verdict-on-device clause.
+**The card's real capacity IS already read, and IS already the source.** `src/entry/entry_storage.c:7035`
+reads the whole card from EXT_CSD `SEC_CNT` (`st_ext_sec_count = ST_EXT_CSD_WORD(ST_EXT_CSD_OFF_SEC_CNT)`;
+offset 212, `:3107`). The observed runtime value is `0x01d5a000` = 30,777,344 sectors ≈ **15.76 GB**
+(`:3221-3222`) — this tree's card is the **16 GB** part; a 32 GB part reads ~2× that. **The 16-vs-32
+distinction is therefore already *measured*.**
+
+**What the OS sees today is the selected GPT partition's true extent — not a staged window, and not the
+card.** The chain carries no clamp: the parser picks the entry with the largest `EndingLBA - StartingLBA`
+(`:8367-8371`), `entry_storage_selected_count()` returns that extent verbatim (`:10191-10197`, refusing
+only if the card read failed), and `stage90_root_media.c:1249-1250` publishes it to the card unit
+(`ST_MEDIA_DRIVER = 2`) as `st_media_blockcount[2]`, reported through `DKIOCGETBLOCKCOUNT` (`:1003-1004`).
+The strategy serves every block of it (`:787-799`), so there is **no "first N MB" cap** and no
+`MAX_BLOCK` / staging-window constant on the capacity path. (The `2 GiB`/512 comparisons at `:8076`/`:8217`
+are *readings* logged, not clamps; `ST_GPT_ARRAY_SCAN_MAX = 32u` caps GPT-array *sectors walked*, and this
+disk's 7 is under it.)
+
+**So the gap is exactly three things, all host-side and all in the media layer:**
+
+1. **`st_ext_sec_count` never reaches any `st_media_blockcount[]`.** It feeds only range sanity cells and
+   `entry_storage_selected_pages()` (`:10171-10179`, which reaches only the *staged* unit's `mi_size`).
+   Every unit is RAM-disk (0), one staged sector (1), or the selected partition (2) — **there is no
+   whole-card unit.**
+2. **`DKIOCGETMEDIASIZE` is not implemented** — it is absent from the `st_media_ioctl` switch, so it falls
+   to the `ENOTTY` default (`:1024-1025`). None of the handled ioctls (`:956-1026`) returns the card total.
+3. **The card strategy is partition-locked at the byte level.** `st_medium_disk_bytes(2) = selected_count
+   × 512` (`:539`), `st_medium_disk_base(2)` returns 0 (`:515-516`), and the strategy *always* adds
+   `entry_storage_selected_lba()` (`:765-766`, `:788-789`). So even answering `DKIOCGETBLOCKCOUNT` with the
+   card total would serve wrong bytes for any LBA outside the selected partition — the door itself
+   (`entry_storage.c:7661`) is LBA-agnostic and could read any sector, but the layer above it cannot
+   currently address one.
+
+**The clause's storage half is thus an extension of the read path 903 built, not a new number invented
+host-side**: add a whole-card unit (or un-partition-lock unit 2) whose `st_media_blockcount` is
+`st_ext_sec_count`, implement `DKIOCGETMEDIASIZE`, and let its strategy address raw LBAs. That is rung
+**911d** below, and it is the natural next step after the RAM verdicts — no boot-chain change, no new
+device behaviour.
 
 ## 5. The design, as rungs (each a separate, pressable step — no arm built here)
 
@@ -127,8 +156,14 @@ named. Two further ceilings then gate the *number*: `MEM_SIZE_MAX = 1 GiB`, and 
   physmap VA window** — and `MEM_SIZE_MAX` raised to `0xC0000000`. The 32-bit VA ceiling
   (`vm_param.h:169-170`, linear `phystokv` at `:196`) makes the >1 GiB physmap a pmap change, not a
   constant. **This is a port in its own right.**
-- **911d — storage size**: expose the full eMMC through the GPT/partition layer so the OS sees 16/32 GB
-  — the read path 903/906 built, extended; the card's real capacity is already read (`entry_storage.c:7035`).
+- **911d — storage size**: expose the full 16/32 GB. **Host-side verified (§4):** the card total is
+  already read (`entry_storage.c:7035`, `st_ext_sec_count` = `0x01d5a000` on this 16 GB part) but never
+  surfaced — the OS sees the selected partition's true extent, and `DKIOCGETMEDIASIZE` is unimplemented
+  (`stage90_root_media.c:1024-1025`, `ENOTTY`). The rung is three media-layer changes: (i) a whole-card
+  unit (or an un-locked unit 2) whose `st_media_blockcount` is `st_ext_sec_count`; (ii) implement
+  `DKIOCGETMEDIASIZE`; (iii) a strategy that addresses raw LBAs without adding `entry_storage_selected_lba()`
+  (`:765-766`, `:788-789`). No boot-chain change, no new device behaviour — the read path 903/906 built,
+  extended.
 
 **A caveat that bounds even 911a:** hoisting `memSize` to the high bank assumes the payload's identity
 map and the section map both cover `[0x80000000, 0xde500000)`. The payload maps the whole image by
