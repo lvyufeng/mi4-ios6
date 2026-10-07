@@ -1089,7 +1089,8 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_USB_DEV
                 STAGE90_XNU_USB_DEV_FORCE
                 STAGE90_XNU_USB_ENUM
-                STAGE90_XNU_USB_STREAM)
+                STAGE90_XNU_USB_STREAM
+                STAGE90_XNU_ENTRY_WINDOW)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
 # the case statement below against the script's own environment reads - `grep -o '${STAGE90_[A-Z0-9_]*:-'`
@@ -1198,6 +1199,11 @@ do
         STAGE90_XNU_USB_DEV_FORCE)    _v=$USB_DEV_FORCE ;;
         STAGE90_XNU_USB_ENUM)         _v=$USB_ENUM ;;
         STAGE90_XNU_USB_STREAM)       _v=$USB_STREAM ;;
+        # 912: read from the ENVIRONMENT directly and not from `$ENTRY_SIZE`, because this loop runs
+        # ~27000 lines ABOVE the assignment (`:28651`) - the same reason `STAGE90_ENTRY_REAL_ARM_INIT`
+        # is read with its own `${...:-0}`. The default is the same literal, so an unset switch and an
+        # explicit `0x04000000` are the same arm and two spellings of one value.
+        STAGE90_XNU_ENTRY_WINDOW)     _v=${STAGE90_XNU_ENTRY_WINDOW:-0x04000000} ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_SKIP) _v=${STAGE90_ENTRY_CHECKPOINT_SKIP:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_AFTER) _v=${STAGE90_ENTRY_CHECKPOINT_AFTER:-(unset)} ;;
@@ -28619,12 +28625,61 @@ ENTRY_DATA_LIMIT=$(align_up $((ENTRY_ARGS_OFFSET + ARGS_BYTES + 0x100000)) 0x100
 # first allocations overwrite it: the device's walk read the tree's first 0x43d4 bytes correctly and
 # then diverged, which is the allocation frontier catching up with the walk.
 ENTRY_DT_OFFSET=$((ENTRY_DATA_LIMIT - ENTRY_DT_MAX))
-# The window: kept at 16 MB rather than derived, because it is also `boot_args->memSize`
+# The window: an explicit floor, not derived, because it is also `boot_args->memSize`
 # (`xnu_entry_jump.c:150`) and therefore the kernel's view of physical memory. Its size must not move
 # as a side effect of where the tree sits - with the tree below the limit the minimal covering
 # power of two is 8 MB, and letting it shrink would silently halve XNU's `avail_end`.
-ENTRY_SIZE=0x01000000
+#
+# **THIS IS A RECORDED ARM KEY AND NOT A BARE CONSTANT (912).** The window reaches XNU through the
+# *payload* - `build_entry.sh` substitutes `@ENTRY_SIZE@` into the generated `xnu_arm_entry.h`, which
+# the payload compiles against (`xnu_entry_jump.c:150`'s `a->memSize` and `mmu.c:5476`'s entry-window
+# map loop) - and *not* into the entry image itself: the entry bin does not read `boot_args.memSize`.
+# So a change to this number moves the PAYLOAD and leaves the entry image byte-identical, which is
+# exactly the state 533 exists to refuse: an image the record cannot tell from its predecessor, whose
+# arm the gate's `resolve_arm_set` (keyed on `xnu_arm_entry.bin`) would resolve to the OLD arm while
+# the payload ran the NEW window. The value is therefore in `ENTRY_ARM_KEYS` and the record writer
+# below, so the deliberate-change check and the gate both see it, and the set name (taken from
+# `xnu_arm_entry.bin`) is joined to a record that carries the window. A future build that moves it
+# without saying so is refused before anything in `$OUT` is written.
+#
+# **The value rose from 16 MB to 64 MB in 912a.** `arm_vm_init` leaves XNU a free region of
+# `avail_end - avail_start` = `(physBase + memSize) - (topOfKernelData + 10 pages)`; at 16 MB that is
+# `0x81000000 - 0x8080A000` = 7.96 MB, and 912's finding is that this is a confounder for the residence
+# wall (an OS run on ~8 MB of RAM that dies at ~13 s is a memory-exhaustion shape nothing has ruled out).
+# The span `[0x81000000, 0x84000000)` is provably real RAM (the high bank `[0x80000000, 0xde700000)` has
+# no holes below it), so the 64 MB window points XNU at memory, never at MMIO. This is the reverse of a
+# hazard: it *widens* the free region, it does not move `topOfKernelData` or the tree. The `while` below
+# still only ever raises it further, so the layout invariants are unaffected.
+#
+# The value is a **hex literal**, because `STAGE90_XNU_ENTRY_SIZE` reaches the payload's C as
+# `0x04000000` and the `while` multiplies by two on a power-of-two boundary; `0x04000000` is 64 MiB and
+# the smallest window that leaves the 16 MB arm's 7.96 MB free region behind by a wide factor.
+ENTRY_WINDOW_REQ=${STAGE90_XNU_ENTRY_WINDOW:-0x04000000}
+case "$ENTRY_WINDOW_REQ" in
+    0x????????) ;;
+    *) echo "STAGE90_XNU_ENTRY_WINDOW must be a 32-bit hex literal like 0x04000000, not [$ENTRY_WINDOW_REQ]" >&2
+       echo "        It is substituted into the payload's own header as \`STAGE90_XNU_ENTRY_SIZE\` and" >&2
+       echo "        compared against the tree's offset below, so a decimal or a short literal would" >&2
+       echo "        reach the C as a different value than the record named (912)." >&2
+       exit 1 ;;
+esac
+(( ENTRY_WINDOW_REQ >= 0x01000000 )) || {
+    echo "STAGE90_XNU_ENTRY_WINDOW=$ENTRY_WINDOW_REQ is below 16 MB: the tree needs a window of at least" >&2
+    echo "        ENTRY_DATA_LIMIT (~8 MB) and a value this small cannot be honoured (912)." >&2
+    exit 1; }
+ENTRY_SIZE=$ENTRY_WINDOW_REQ
 while (( ENTRY_SIZE < ENTRY_DT_OFFSET + ENTRY_DT_MAX )); do ENTRY_SIZE=$((ENTRY_SIZE * 2)); done
+# **The requested window is the arm, so a request the tree would silently widen is refused.** The
+# `while` above only RAISES the floor, so a request smaller than the tree's own needs would produce a
+# payload whose `memSize` is *larger* than `STAGE90_XNU_ENTRY_WINDOW` names - and the record, which
+# carries the request, would then describe a window the image does not have. Refusing here is what
+# makes the recorded value EXACT: after this, `$ENTRY_SIZE` is the request, always.
+(( ENTRY_SIZE == ENTRY_WINDOW_REQ )) || {
+    echo "STAGE90_XNU_ENTRY_WINDOW=$ENTRY_WINDOW_REQ is smaller than the tree needs: ENTRY_DT_OFFSET" >&2
+    echo "        + ENTRY_DT_MAX is $((ENTRY_DT_OFFSET + ENTRY_DT_MAX)) bytes and the while-loop would" >&2
+    echo "        raise the window to $ENTRY_SIZE, so the record (which carries the request) would name" >&2
+    echo "        a window the payload does not have (912)." >&2
+    exit 1; }
 
 # --- the invariants that make the layout safe ---------------------------------------------------
 #
@@ -36931,6 +36986,16 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "STAGE90_XNU_USB_ENUM=$USB_ENUM"
     # **910c's switch, written here for the same reason as the three lines above.**
     echo "STAGE90_XNU_USB_STREAM=$USB_STREAM"
+    # **912's window, written here for a reason the other keys do not have.** Every switch above shapes
+    # the ENTRY image's own linked bytes, so the record the gate reads (bound to the entry bin's hash)
+    # already differs whenever they differ. `STAGE90_XNU_ENTRY_WINDOW` does NOT: it reaches only the
+    # *payload*, through the generated `xnu_arm_entry.h`'s `STAGE90_XNU_ENTRY_SIZE`, while the entry bin
+    # stays byte-identical. So this line is the ONLY place the window appears in any record - without it
+    # a 64 MB build and a 16 MB build whose entry images are the same bytes would carry records that
+    # name the same arm, which is precisely the silent state 533 exists to refuse. Written as the
+    # RESOLVED `$ENTRY_WINDOW_REQ` (proved equal to `$ENTRY_SIZE` above), not `${STAGE90_XNU_ENTRY_WINDOW}`,
+    # for 882's reason.
+    echo "STAGE90_XNU_ENTRY_WINDOW=$ENTRY_WINDOW_REQ"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways

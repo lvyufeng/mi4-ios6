@@ -80,14 +80,18 @@ kept proportional, more. **Whichever way, the free region grows by ~8× in one r
   image and the `+0x100000`/`+0x200000` gaps, so they stay put — the window simply has more room *above*
   them, which is exactly the free region.
 
-**Verdict cells.** The idle census (`xnu_live_idlestack_calls`, `slot_post_calls`) against 909's 5/4,
-and the time to death against 13.4 s — both existing keys. **Plus one genuine source change**: the port
-has *no* memory reading at all (the `pmb` keys sit behind `STAGE90_ENTRY_REAL_PMAP_BOOTSTRAP`, which the
-live build does not define — §1), and XNU's `max_mem` sysctl is not reachable from this log. So 912a
-should add a **live memory publish on the idle path** — the entry wrapper can read the kernel's own
-`extern uint32_t mem_size, sane_size;` (already declared at `entry_stubs.c:8279/8283`) and emit them
-like `xnu_live_idlestack_calls`, so the free-memory number is in the log *at* the wall. That is the one
-edit that turns "8 MB free" from a host-side computation into a device-measured fact.
+**Verdict cells — all existing keys, no new hook.** The arm is deliberately **one constant**:
+
+1. **Did it take effect?** `xnu_entry_args_memSize` must read `0x04000000` (it reads `0x01000000` today,
+   §1). This is the whole reason no memory publish is needed — the log already carries the value that
+   changed, and the free region follows from it by arithmetic (`avail_end − avail_start`).
+2. **Did memory matter?** The idle census (`xnu_live_idlestack_calls`, `slot_post_calls`) against 909's
+   5/4, and the time to death against 13.4 s. **Moved** ⇒ memory is (at least part of) the wall — the
+   single biggest re-read of the residence rung since it opened. **Unmoved** ⇒ the 5th-pass fault is
+   independent of free memory, and R10's cache-window reading stands as the cause.
+
+A dedicated free-memory publish on the idle path is a *later* arm's nicety, not 912a's — the constant's
+own key is the reading.
 
 ## 4. What this does and does not claim
 

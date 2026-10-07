@@ -677,7 +677,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_USB_DEV
                 STAGE90_XNU_USB_DEV_FORCE
                 STAGE90_XNU_USB_ENUM
-                STAGE90_XNU_USB_STREAM)
+                STAGE90_XNU_USB_STREAM
+                STAGE90_XNU_ENTRY_WINDOW)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this
@@ -765,6 +766,19 @@ do
   fi
   if [[ -z $_v && $_k == STAGE90_XNU_RESIDENT && -z $_entry_resident_arm ]]; then
     printf '  %s=(absent, and this entry image carries no residence pet to name - the key is N/A here)\n' "$_k"
+    continue
+  fi
+  # **912's window: absent names the 16 MB arm, because that is the ONLY value any pre-912 record could
+  # have carried.** `STAGE90_XNU_ENTRY_WINDOW` reached the record only in 912; every arm parked before it
+  # - and every owed press among them (`cabba670`, `b3fbcd31`, `979ded08`, `6deae815`) - was built with
+  # the fixed 16 MB floor this key now defaults to, so an absent key is not a missing value but the value.
+  # Unlike the conditional keys above this is NOT read off the entry ELF: the window is the one arm
+  # parameter that shapes the PAYLOAD and not the entry image (the entry bin is byte-identical across
+  # 16 MB and 64 MB - `build_entry.sh`'s own note), so no symbol in the entry ELF could report it, and
+  # the default is what the absent case MEANS rather than a guess. A post-912 record can never reach this
+  # branch: `build_entry.sh`'s 678 two-way check refuses a record whose arm-key list omits the key.
+  if [[ -z $_v && $_k == STAGE90_XNU_ENTRY_WINDOW ]]; then
+    printf '  %s=(absent, and a record that does not name the window is the 16 MB arm - the only value any pre-912 build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \
