@@ -2407,6 +2407,117 @@ __attribute__((noinline)) static void entry_post_clock(uint32_t now, uint32_t ca
 }
 #endif
 
+#ifndef STAGE90_XNU_RESIDENT
+#define STAGE90_XNU_RESIDENT 0
+#endif
+
+#if STAGE90_XNU_RESIDENT
+/*
+ * **909: the residence arm's pet, in its own function for 690's reason.** The wrapper's `sp` IS the slot
+ * the exit's `push` writes and its `pop` reads, so nothing that keeps state across a `bl` may live in the
+ * wrapper's body (690 measured a 16-byte frame there and this project's whole `mi4-idle-exit-l2-line`
+ * line exists to avoid it). The pet's logic is here, reached by one call from the wrapper's tail, and the
+ * wrapper's frame stays the 8 bytes the slot lives in.
+ *
+ * **What it does, and why a PET and not a disarm.** The payload arms the SoC watchdog 25 s / 3 s
+ * (`stage90_hw_watchdog_arm`, `hw_watchdog.c`) before the jump and nothing pets it, so a resident boot
+ * that removed its own ending would be reset by the watchdog instead of living. The safe net is to FEED
+ * it, not to disarm it: `WDT_RST` = 1 is a single store, and a store to an unmapped address is a fault the
+ * log shows at this site - whereas clearing `WDT_EN` removes the one net that rescues a hung XNU
+ * ([[mi4-xnu-reboot-path-cannot-reset]]). The register is the vendor driver's, `WDT0_RST` = base + 0x04,
+ * the same word the arm site writes (`hw_watchdog.c:231`); the two are one definition reached by two
+ * files, not a copy.
+ *
+ * **The mapping, proven before the first load.** 908's run shows the storage line already installed a
+ * POST-JUMP device section by the same mechanism (`entry_mmio_section(0xf9824000, …)`, the eMMC
+ * controller) and read it - so 908 proves the *mechanism*, not this *address*. The pet therefore installs
+ * `0xf9017000` (the watchdog's own 1 MB region) once, and reads the countdown from the SAME installed
+ * section; a refused install (return 0) publishes that and skips the pet, so the pet cannot fault through
+ * an install that was refused. `xnu_live_wdt_map` says which happened, `xnu_live_wdt_sts`/
+ * `_countdown` are the readings, and `xnu_live_wdt_pets` is the count the boot lived to.
+ *
+ * **The count is the vendor driver's own, and it reads before it writes.** `WDT0_STS` is not a status
+ * register despite the name: `(sts >> 1) & 0xfffff` is the live count, rising toward the bark
+ * (`hw_watchdog.c`'s pet-path note). So the pet waits until the count has passed HALF the bark
+ * (`bark_ticks/2` at 32765 Hz) before resetting it - a pet on the first pass would be a write with no
+ * reading behind it, and the half-bark test is what makes "the boot lived without a bite" a measurement:
+ * the published `xnu_live_wdt_countdown` is seen to RISE and then DROP at each pet, and a count that
+ * reached the bark with no reset would be the falsifier. The base and its offsets are 909's, resolved
+ * from `hw_watchdog.c`'s own file (not re-typed): the build's clause below reads them back by value.
+ */
+#define STAGE90_WDT_BASE      0xf9017000u
+#define STAGE90_WDT_REG_RST   0x04u
+#define STAGE90_WDT_REG_STS   0x0cu
+#define STAGE90_WDT_BARK      0x10u
+
+/* The live channel and the post-jump section mapper, declared here for the same reason this file's
+ * 690 block declares the first two: this file's order puts the wrapper above the seam's own
+ * declarations, and there is no header both sides share. `entry_mmio_section`'s definition is
+ * `entry_stubs.c:2230` (the console's own mapper, `entry_gic.c:176` declares it identically). The
+ * resident arm requires `POST_END_TICKS=0`, so the declarations above are not in scope here - this is
+ * not a second definition of them, it is the same two externs reached from a configuration the other
+ * block is compiled out of. */
+extern void entry_live_write(const char *key, uint32_t value);
+extern uint32_t entry_live_ready(void);
+extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_before_out,
+                                   uint32_t *desc_out);
+
+static uint32_t g_wdt_installed;
+static uint32_t g_wdt_pets;
+static uint32_t g_wdt_bark_ticks;
+
+static inline uint32_t wdt_read(uint32_t off)
+{
+    return *(volatile uint32_t *)(uintptr_t)(STAGE90_WDT_BASE + off);
+}
+
+/* `(sts >> 1) & 0xfffff` - the vendor driver's own live count. */
+static inline uint32_t wdt_count(void)
+{
+    return (wdt_read(STAGE90_WDT_REG_STS) >> 1) & 0xfffffu;
+}
+
+__attribute__((noinline)) static void entry_wdt_pet(uint32_t calls)
+{
+    uint32_t count;
+
+    /* Install the watchdog's section once; the install is `entry_mmio_section`'s, the same mechanism the
+     * storage line uses post-jump. A refusal (0) is published and the pet is skipped - never attempted
+     * through an install that did not land. */
+    if (g_wdt_installed == 0u) {
+        uint32_t mapped = entry_mmio_section(STAGE90_WDT_BASE, STAGE90_WDT_BASE, 0, 0);
+        if (entry_live_ready() != 0u)
+            entry_live_write("xnu_live_wdt_map", mapped);
+        if (mapped == 0u)
+            return;
+        g_wdt_installed = 1u;
+        g_wdt_bark_ticks = wdt_read(STAGE90_WDT_BARK) & 0xfffffu;
+        if (entry_live_ready() != 0u) {
+            entry_live_write("xnu_live_wdt_base", STAGE90_WDT_BASE);
+            entry_live_write("xnu_live_wdt_bark", g_wdt_bark_ticks);
+        }
+    }
+
+    count = wdt_count();
+    /* Publish on the powers of two of the pass count, so a run that died between pets still says how far
+     * the count had climbed - the negative cell, and the reason the reading is separate from the pet. */
+    if (entry_live_ready() != 0u && (calls & (calls - 1u)) == 0u) {
+        entry_live_write("xnu_live_wdt_sts", wdt_read(STAGE90_WDT_REG_STS));
+        entry_live_write("xnu_live_wdt_countdown", count);
+        entry_live_write("xnu_live_wdt_pets", g_wdt_pets);
+    }
+
+    /* Pet only when the count has passed half the bark. `g_wdt_bark_ticks == 0` (a bark register that did
+     * not read back) disables the threshold and pets every pass, which is safe and still bounded. */
+    if (g_wdt_bark_ticks == 0u || count >= (g_wdt_bark_ticks / 2u)) {
+        *(volatile uint32_t *)(uintptr_t)(STAGE90_WDT_BASE + STAGE90_WDT_REG_RST) = 1u;
+        g_wdt_pets++;
+        if (entry_live_ready() != 0u)
+            entry_live_write("xnu_live_wdt_pet_calls", calls);
+    }
+}
+#endif /* STAGE90_XNU_RESIDENT */
+
 void __real_platform_cache_idle_exit(void);
 void __wrap_platform_cache_idle_exit(void)
 {
@@ -2553,6 +2664,23 @@ void __wrap_platform_cache_idle_exit(void)
      * the ending, so nothing here is live across it.
      */
     entry_post_clock(entry_counter(), g_slot_post.calls);
+#endif
+
+#if STAGE90_XNU_RESIDENT
+    /*
+     * **909: the resident arm's pet, at 690's site for 690's reason.** This is the one place in the image
+     * that already runs on every idle pass *inside the handed-off kernel* - 60931 times in 908 - and the
+     * only reason the pet is a call and not a body written here is the one 690's block above states: the
+     * wrapper's `sp` **is** the slot, so all of the pet's state lives in `entry_wdt_pet`'s own frame and
+     * this function's stays the 8 bytes the exit's `push`/`pop` read. The arguments are by value and
+     * nothing is live across the `bl`.
+     *
+     * It comes **after** `entry_note_pcx` and after the ending's block, not before: a run that ends must
+     * still publish the pass it died on, and a pet that faulted must be attributable to the pet's own
+     * store rather than to an instrument that had not run yet - the same ordering argument 692's probe
+     * block above makes for `entry_storage_probe`.
+     */
+    entry_wdt_pet(g_slot_post.calls);
 #endif
 }
 
