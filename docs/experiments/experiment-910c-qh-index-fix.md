@@ -103,9 +103,10 @@ fix's bytes.
 **One consequence the parking has to respect.** The entry switch `STAGE90_XNU_USB_STREAM` is an *entry*
 switch, but it moves the whole **link**: the stream arm's object is linked only when `STREAM=1`, so the
 910b entry ELF is 7,711,612 bytes and the 910c one is 7,711,968 — **different lengths**, hence different
-entry hashes and (task: confirm) different payload bytes. That is exactly the `6c2b6038` shell the
-`stage90-build-config.txt` record cannot see through, and the reason the arm row joins the ELF reading to
-the entry record rather than trusting either alone.
+entry hashes and different payload bytes (confirmed: 910b `stage90-qcdt.img` = `6dc9450b`, 910c =
+`dfced01b`). That is exactly the `6c2b6038` shell the `stage90-build-config.txt` record cannot see
+through, and the reason the arm row joins the ELF reading to the entry record rather than trusting either
+alone.
 
 ## 5. What this changes about the ladder, and the next rung
 
