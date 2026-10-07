@@ -321,3 +321,55 @@ entry exit 0 (37 record keys, `STAGE90_XNU_CARD_TOTAL=1` at line 30); payload ex
 `entry_root_media_register_card_raw` and `entry_storage_card_sectors` is a `T` symbol; park verifies
 11/11; `check_set_name_rule` 0; `make check` 0; `verify_press_ready` 5/5 (row 4 names the 911d
 CARD-CAPACITY arm). NO press.
+
+## 8. 911a BUILT (2026-10-07) — the RAM half, host-side, NO press
+
+911a is **911d's entire switch set with ONE VALUE changed**: `STAGE90_XNU_ENTRY_WINDOW` raised from
+`0x04000000` (64 MB, 912a/911d) to `0x40000000` (1 GiB). It is the **payload-only** half of the goal's
+newest clause — the memory side, where 911d was the storage side.
+
+**Why 1 GiB and not the device's 3 GB.** XNU arm32 clamps the value it is handed:
+`mem_size = min(args->memSize, xmaxmem, MEM_SIZE_MAX)` (`external/xnu-4570.1.46/osfmk/arm/arm_vm_init.c:354-358`)
+with `MEM_SIZE_MAX = 0x40000000` (`:134`). A 3 GB request therefore **silently clamps to 1 GiB** — the
+arm would read as if it took effect while the kernel used a third of it, `mi4-measurement-defects` on the
+value itself. `0x40000000` is the largest number the EXISTING constant accepts without a clamp, so it is
+the honest ceiling of this arm. Raising `MEM_SIZE_MAX` itself is a PORT and is 911b/911c, not 911a.
+
+**The window reaches only the payload, through the generated header.** `build_entry.sh` substitutes the
+window into `out/stage90/xnu_arm_entry.h` as `#define STAGE90_XNU_ENTRY_SIZE`, which the payload consumes
+at `src/xnu_entry_jump.c:150` (`a->memSize = STAGE90_XNU_ENTRY_SIZE`) and `src/mmu.c`'s identity-map
+loop. **No entry source reads it**, so `cmp` confirms the entry bin is **byte-identical to 911d's**
+`605a43c2` (and the ELF to `52ab2d0d`). Because the entry bin did not move AND is not set-unique
+(911d's park carries the same bytes), the set-name suffix comes from `stage90-qcdt.img` = `aff86051` —
+the **`armed-window-*` family** (like 912a), NOT `armed-storage-*` (which the set-name rule requires to
+be the entry image). The one linked byte that differs is `xnu_arm_entry-config.txt` (`a0610f96…`), which
+carries `STAGE90_XNU_ENTRY_WINDOW=0x40000000`.
+
+**What it buys.** The free region XNU is handed is `(physBase + memSize) − (topOfKernelData + 10 pages)`
+(`xnu_entry_jump.c`, `ENTRY_DATA_LIMIT`). At 1 GiB: `0xc0000000 − 0x8080A000` ≈ **1015 MB**, versus
+911d's ~55.9 MB and the 16 MB arms' 7.96 MB — a **~127×** widening over the pre-912 state. The window
+raises `memSize`, **not** `topOfKernelData`, so the framed layout does not move and the press is
+non-brick-by-construction (same argument as 912).
+
+**Why the span is clean.** The device's high bank `[0x80000000, 0xde700000)` has **no hole** (every DT
+hole is below `0x80000000`); the RAM console is at `0xde500000` and MMIO at `≥0xf9000000`. `0x80000000 +
+0x40000000 = 0xc0000000` sits **480 MB below the console** and 992 MB below MMIO, so the section TTEs XNU
+emits (`memSize / 1 MiB` of them, `start.s:198-207`) name RAM and never a device.
+
+**The discriminator is ONE press, ONE value.** If the 909 residence wall is free memory, the death moves
+or vanishes and the idle census beats 5 calls / 4 pairs; if it is independent, the death is unmoved and
+R10's 5th-pass cache-window reading stands. **The refusal is read first, always**: `xnu_entry_args_memSize`
+must read `0x40000000`, or the value never reached the live `xnu_entry_build_args` and the arm is a no-op.
+
+**Built:** platform object exit 0 (911d's full define set); entry exit 0 (`cmp` says the entry bin is
+IDENTICAL to 911d's `605a43c2` — payload-only confirmed); payload exit 0 (`xnu_arm_entry.h` carries
+`STAGE90_XNU_ENTRY_SIZE 0x40000000`); park `out/stage90/frozen/armed-window-aff86051` (11/11,
+`verify_revert_set --set=armed-window-aff86051` VERIFIED); `check_set_name_rule` 0 (every set's suffix
+names a member; both `armed-window-*` sets take theirs from the qcdt); `make check` 0;
+`verify_press_ready` 5/5 — **row 4 names the 911a RAM-RECOGNITION arm**, via a branch keyed on
+`CARD_TOTAL=1 && ENTRY_WINDOW=0x40000000` placed **after** the 911d branch (911a carries 911d's whole
+switch set, so a window-only or key-only selection would mis-name it). NO press.
+
+**911a supersedes 911d and 912a for the next press:** it carries the raw card unit (911d) AND the widest
+window, so one press answers memory-at-the-ceiling and the card capacity together. The goal is **NOT**
+met — 1 GiB is not 3 GB; `MEM_SIZE_MAX` and the high-bank physmap window are the port that 911b/911c owe.
