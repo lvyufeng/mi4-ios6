@@ -319,13 +319,19 @@ claim. The run's own clock (`xnu_live_tmr_dl_now`, the absolute physical-timer c
 | max absolute tick | 217 866 893 (11.35 s) | 256 442 219 (13.36 s) |
 
 The wrapper's own counter — `xnu_live_slot_post_calls`, the deep-idle exit's **return count**, published
-by `entry_slot_note(&g_slot_post, sp)` on every exit — reaches **4 and stops** in both. 908 then *chose*
-to end at 4 (`STAGE90_XNU_POST_END_RUN=4`); 909 removed that ending and **still** wedges at exactly 4.
-So the run is not resident: it **wedges in the deep-idle loop after ~4 passes, ~13.4 s in**, a few
-seconds after `mini4: the OS has nothing to run — pid 1 parked in poll` — **before** the watchdog's
-bark (25 s), which is why nothing resets. The 52 dark minutes are post-wedge wall-clock, not run
-lifetime. (The log is complete: 872 KB < the 2 MB console bound and 11 796 records < the 16 384 cap,
-**no** `xnu_live_capped` — the silence is the machine stopping, not the instrument dropping.)
+on the 1,2,3,4,8,16,… schedule by `entry_slot_note(&g_slot_post, sp)` on every exit — reaches **4 and
+stops** in both (earlier runs in `out/stage90/captures/` reach `8`, so 4 is a real stop, not the schedule's
+ceiling). 908 then *chose* to end at 4 (`STAGE90_XNU_POST_END_RUN=4`); 909 removed that ending and
+**still** stops at exactly 4. A **second, independent** counter says the same thing: the payload's user
+fixture ends in an **infinite** `b park` loop (`entry_ramdisk.s:74-78` — `poll(NULL, 0, 2000)` then branch
+back forever), yet `xnu_live_poll_seq` also reaches only **4** (timeouts 5, 40, 2000, 2000 ms = the two
+one-shot calls plus two park iterations). So the run is not resident: it **stops executing** a few
+iterations into an infinite loop, ~13.4 s in — after `mini4: the OS has nothing to run — pid 1 parked in
+poll`, before the watchdog's bark (25 s), which is why nothing resets. The 52 dark minutes are
+post-stop wall-clock, not run lifetime. (The log is complete: 872 KB < the 2 MB console bound and
+11 796 records < the 16 384 cap, **no** `xnu_live_capped`; and the console **appends** — `entry_write_kv`
+reads `*size_p`, which `entry_live_init` does not reset — so a reboot would append a *second* arm block,
+and there is exactly one.)
 
 ### What arm 3 must do, and the third finding it also carries
 
