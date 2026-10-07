@@ -252,8 +252,23 @@ def claim_pet_installs_before_it_reads(facts, failures, notes):
                         "`if (mapped == 0u) return;`): a pet would then fault through an install that "
                         "did not land, which is the one cell the design says must stay bounded")
         return
-    notes.append("the pet installs 0xf9017000 once and returns before its first read when the install "
-                 "is refused")
+    # **The refusal must be REACHABLE, and the outputs are what make it so.** `entry_section_install`
+    # writes `*slot_before_out` before its refusal test (`entry_stubs.c:2121`), so a NULL there faults at
+    # address 0 *before* the `mapped == 0u` cell above can ever be taken - which is what 909's first
+    # press did. Both outputs must therefore be real addresses. Every other caller in the tree passes
+    # locals (`entry_gic.c:393`, `entry_storage.c:5261/10306/10332`); the pet is the arm that made the
+    # mistake, so the check is on the pet.
+    call = re.search(r"entry_mmio_section\s*\(([^;]*)\)", pet)
+    args = call.group(1).strip() if call else ""
+    if not re.search(r"&[A-Za-z_]\w*\s*,\s*&[A-Za-z_]\w*$", args):
+        failures.append("entry_wdt_pet passes something other than two `&`-outputs to "
+                        "`entry_mmio_section` (the design relies on `, 0, 0)` in the wrong hands being "
+                        "a store to address 0 that faults *before* the refusal can be observed - 909's "
+                        "first press): the `slot_before_out`/`desc_out` arguments must be addresses of "
+                        "locals in the pet's own frame")
+        return
+    notes.append("the pet installs 0xf9017000 once with two real outputs and returns before its first "
+                 "read when the install is refused")
 
 
 def claim_count_is_the_vendors_encoding(facts, failures, notes):
@@ -375,8 +390,28 @@ def claim_linked_image(facts, failures, notes):
         failures.append("__wrap_platform_cache_idle_exit does not tail-branch to entry_wdt_pet in the "
                         "linked image: the pet is not reached from the idle-exit pass")
         return
+    # **The install's second argument register must be a frame address, not zero.** The linked body
+    # loads `r1` with the VA and then calls `entry_mmio_section`; `r2` is `slot_before_out`. The first
+    # press's pet had `mov r2, r3` (r3 = 0) there, and the install stored through it to address 0
+    # *before* its refusal test, so the run could not observe the refusal at all. The reachable-refusal
+    # form loads `r2` from `sp` (`sub`/`add rX, sp, #N` then `mov r2, rX`, or `mov r2, sp`); a
+    # `mov r2, #0` / `mov r2, rY` where `rY` is a zeroed register is the fault this clause exists for.
+    before_call = pet_body[:pet_body.find("<entry_mmio_section>")] \
+        if "<entry_mmio_section>" in pet_body else ""
+    # The instruction that loads `r2` for the call must take it from `sp`. Scanning for any
+    # sp-relative instruction would pass on an unrelated temporary (the pet's own frame setup uses
+    # `add r3, sp, #4`), so the check is bound to the last write to `r2`.
+    r2_writes = re.findall(r"\b(mov|movw|add|sub|ldr)\s+r2,\s*([^\n;]+)", before_call)
+    if not r2_writes or not re.match(r"sp\b", r2_writes[-1][1].strip()):
+        failures.append("entry_wdt_pet's linked body never materialises a stack address before its "
+                        "`bl entry_mmio_section`: `slot_before_out` (the second argument, `r2`) is not a "
+                        "real output, so the install's unconditional `*slot_before_out` store faults at "
+                        "address 0 before the refusal test - 909's first press (fault_addr=0x0, "
+                        "r1=0xf9017000), which never published xnu_live_wdt_map")
+        return
     notes.append("the linked image carries the pet: 8-byte wrapper frame, one tail branch to "
-                 "entry_wdt_pet, the f9017000 base with the +4 store, and the ubfx #1/#20 count")
+                 "entry_wdt_pet, the f9017000 base with the +4 store, the ubfx #1/#20 count, and a "
+                 "stack-address output so the install's refusal is reachable")
 
 
 def compare(facts, mutate=None):
@@ -427,11 +462,12 @@ def mutate_facts(facts, mutate):
         facts["trace_defs"]["STAGE90_WDT_REG_RST"] = 0x08
     elif mutate == "no_install":
         rederive_trace(_bump(facts["trace_text"],
-                             "uint32_t mapped = entry_mmio_section(STAGE90_WDT_BASE, STAGE90_WDT_BASE, 0, 0);",
+                             "uint32_t mapped = entry_mmio_section(STAGE90_WDT_BASE, STAGE90_WDT_BASE,\n"
+                             "                                             &slot_before, &desc);",
                              "uint32_t mapped = 1u;"))
     elif mutate == "install_after_the_first_read":
-        block = ("        uint32_t mapped = entry_mmio_section(STAGE90_WDT_BASE, "
-                 "STAGE90_WDT_BASE, 0, 0);\n")
+        block = ("        uint32_t mapped = entry_mmio_section(STAGE90_WDT_BASE, STAGE90_WDT_BASE,\n"
+                 "                                             &slot_before, &desc);\n")
         gated = facts["gated"]
         assert gated.count(block) == 1, gated.count(block)
         moved = gated.replace(block, "", 1)
@@ -442,6 +478,11 @@ def mutate_facts(facts, mutate):
     elif mutate == "refused_install_does_not_return":
         rederive_trace(_bump(facts["trace_text"],
                              "        if (mapped == 0u)\n            return;\n", ""))
+    elif mutate == "the_install_outputs_are_null":
+        # 909's first press: `entry_mmio_section(..., 0, 0)` makes the install's unconditional
+        # `*slot_before_out` a store to address 0, so the run faults before it can observe the refusal.
+        rederive_trace(_bump(facts["trace_text"],
+                             "&slot_before, &desc);", "0, 0);"))
     elif mutate == "count_shift_wrong":
         rederive_trace(_bump(facts["trace_text"],
                              "(wdt_read(STAGE90_WDT_REG_STS) >> 1) & 0xfffffu",
@@ -485,6 +526,10 @@ def mutate_facts(facts, mutate):
         # `ubfx ..., #1, #20` in the body (the others are `#0, #20` on the bark and would be match
         # noise). Widening or clearing the shift is the mutation.
         facts["pet_body"] = facts["pet_body"].replace("#1, #20", "#2, #20")
+    elif mutate == "the_install_output_is_not_a_stack_address":
+        # The linked form of 909's fault: the pet's second argument (`r2`, `slot_before_out`) is a zero
+        # register rather than a frame address, so the install stores through it to address 0.
+        facts["pet_body"] = facts["pet_body"].replace("mov\tr2, sp", "mov\tr2, r5")
     else:
         raise SystemExit("unknown mutation %s" % mutate)
     return facts
@@ -492,12 +537,13 @@ def mutate_facts(facts, mutate):
 
 MUTATIONS = (
     "base_moved", "reg_rst_moved", "no_install", "install_after_the_first_read",
-    "refused_install_does_not_return", "count_shift_wrong", "threshold_is_not_half",
+    "refused_install_does_not_return", "the_install_outputs_are_null",
+    "count_shift_wrong", "threshold_is_not_half",
     "store_targets_sts", "the_call_is_not_last", "the_call_is_removed", "the_pet_is_not_gated",
     "the_fallback_is_not_zero", "a_refusal_is_dropped", "the_arm_key_is_dropped",
     "the_record_writer_is_dropped", "the_pet_is_not_in_the_image",
     "the_wrapper_tail_branches_elsewhere", "the_wrapper_frame_is_16", "the_store_is_not_at_plus_4",
-    "the_count_is_not_the_vendors_field",
+    "the_count_is_not_the_vendors_field", "the_install_output_is_not_a_stack_address",
 )
 
 

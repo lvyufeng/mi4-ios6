@@ -2480,12 +2480,24 @@ static inline uint32_t wdt_count(void)
 __attribute__((noinline)) static void entry_wdt_pet(uint32_t calls)
 {
     uint32_t count;
+    uint32_t slot_before, desc;
 
     /* Install the watchdog's section once; the install is `entry_mmio_section`'s, the same mechanism the
      * storage line uses post-jump. A refusal (0) is published and the pet is skipped - never attempted
-     * through an install that did not land. */
+     * through an install that did not land.
+     *
+     * **The two outputs must be real addresses, and 909's first press is why.** `entry_section_install`
+     * writes `*slot_before_out` *unconditionally, before its refusal test* (`entry_stubs.c:2121`), so a
+     * NULL there is a store to address 0 that faults **before the refusal can be observed** - the exact
+     * cell R3 promised would be readable (`xnu_live_wdt_map=0`). The press logged
+     * `fault_addr=0x0, pc=entry_mmio_section+0x94, r1=0xf9017000` and `xnu_live_wdt_map` never
+     * appeared, because the pet was the only caller in the tree passing `0, 0` (every other caller -
+     * `entry_gic.c:393`, `entry_storage.c:5261/10306/10332` - passes real locals). The locals live in
+     * this function's own frame, which is where 690 already puts all of the pet's state, so the
+     * wrapper's 8-byte frame is untouched. */
     if (g_wdt_installed == 0u) {
-        uint32_t mapped = entry_mmio_section(STAGE90_WDT_BASE, STAGE90_WDT_BASE, 0, 0);
+        uint32_t mapped = entry_mmio_section(STAGE90_WDT_BASE, STAGE90_WDT_BASE,
+                                             &slot_before, &desc);
         if (entry_live_ready() != 0u)
             entry_live_write("xnu_live_wdt_map", mapped);
         if (mapped == 0u)
@@ -2495,6 +2507,11 @@ __attribute__((noinline)) static void entry_wdt_pet(uint32_t calls)
         if (entry_live_ready() != 0u) {
             entry_live_write("xnu_live_wdt_base", STAGE90_WDT_BASE);
             entry_live_write("xnu_live_wdt_bark", g_wdt_bark_ticks);
+            /* The install's own two readings, which the NULL argument could not carry: what the L1
+             * slot held before (`slot_before`) and the descriptor written (`desc`). `desc` non-zero is
+             * the install landing; `slot_before` says whether the walk had already answered. */
+            entry_live_write("xnu_live_wdt_slot_before", slot_before);
+            entry_live_write("xnu_live_wdt_desc", desc);
         }
     }
 

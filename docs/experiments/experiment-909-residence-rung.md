@@ -1,8 +1,10 @@
 # 909 — the residence rung: a normal-slot boot that does not end
 
-Date: 2026-10-07. Status: **built and parked (`armed-storage-e61ce673`), gate-green, `make check` 0;
-not yet pressed — PRESS IS THE OPERATOR'S.** This closes the last open clause of the goal
-「彻底能直接开机就运行xnu」 — 908 proved a plain power-on *enters* the OS; this proves one that *stays*.
+Date: 2026-10-07. Status: **pressed once (arm `armed-storage-e61ce673`, log
+`out/stage90/captures/909-resident-20261007-0530-last_kmsg.txt`), and it FAULTED at the pet — the run
+did not stay, and the cause is now known and repaired. See “R7 — the first press, and the defect it
+found” below.** This closes the last open clause of the goal 「彻底能直接开机就运行xnu」 — 908 proved a
+plain power-on *enters* the OS; this proves one that *stays*.
 
 ## What 908 left open, stated exactly
 
@@ -184,3 +186,76 @@ Verified in four directions on the parked arm: (1) the residence image passes wi
 `movt 4` exempt; (2) the non-resident 908 image (`armed-storage-54d5c585`) is silent as before, `0` in
 both counts; (3) an image whose pet words are zeroed is refused (the pet must reach); (4) an image with a
 page word injected outside the pet is refused (the original clause, unchanged).
+
+## R7 — the first press, and the defect it found
+
+The press ran, and it **faulted at the pet on the pet's first call**. The log is unambiguous; the cause
+is one argument, and it is repaired here.
+
+### What the log says
+
+`out/stage90/captures/909-resident-20261007-0530-last_kmsg.txt`, 16084 lines. The run is *better* than
+908 in exactly the way R1 asked and *worse* in one way R2 did not foresee:
+
+- **R1 held.** `xnu_live_seam_end_run=0`, `xnu_live_seam_post_end_run=0`,
+  `xnu_live_seam_post_end_ticks=0`; no `xnu_live_post_end_calls`, no `fault_addr=0xfa0065c`. The image
+  no longer ends itself.
+- **The boot reached the OS.** `BSD root: md0, major 4, minor 2`; `/sbin/launchd` was attempted, did
+  not fail; `mini4: the AST is done — pid 1's thread is at 0x10e0 for user mode`. So XNU was up and
+  pid 1 was in user mode — 908's whole result, reproduced.
+- **Then it died, at the pet:**
+  `panic(cpu 0 caller 0x804a9908): kernel abort type 4: fault_type=0x3, fault_addr=0x0`, with
+  `pc: 0x80002684`, `lr: 0x80804000`, `r0: 0x00000001  r1: 0xf9017000  r2: 0x00000000  r3: 0x00000000`,
+  `r4: 0xf901040e  r5: 0xf9017000  r6: 0x0000000c`, `fsr: 0x805`, `far: 0x0`. `0x80002684` is inside
+  `entry_mmio_section` (bin `0x800025f0`, +0x94 — the `str r4, [r2]`), and `r1 = 0xf9017000` is the pet's
+  VA. The `xnu_live_gic_*` keys 908 published are absent, so this is the same run's **first**
+  `entry_mmio_section` call.
+
+### Why — one argument, and the refusal that could not happen
+
+`entry_mmio_section` ends in `entry_section_install(va, pa, l1, g_live_attr, slot_before_out, desc_out)`
+(`entry_stubs.c:2248`), and that function writes its first output **before it can refuse**:
+
+```c
+before = *slot;
+*slot_before_out = before;                    /* line 2121 — unconditionally, before the test */
+if ((before & LIVE_TTE_TYPE_MASK) != 0u)
+    return 0u;                                /* the refusal the design relies on */
+...
+*desc_out = desc;
+```
+
+The pet passed `0` for both outputs: `entry_mmio_section(STAGE90_WDT_BASE, STAGE90_WDT_BASE, 0, 0)`. So
+`*slot_before_out` is a store to address `0` — the `fault_addr=0x0` panic — and it happens **before** the
+`before`-test, so the "a refused install publishes `xnu_live_wdt_map=0` and skips the pet" cell the design
+rests on is unreachable: the run cannot observe a refusal, because the store that would have carried the
+refusal's own reading is the fault.
+
+The pet is the only caller in the tree that passes NULL for the outputs — `entry_gic.c:393`,
+`entry_storage.c:5261/10306/10332` all pass real locals — and it is the arm's *first* call on the first
+idle pass, which is why the log shows no `xnu_live_wdt_*` key of any kind.
+
+### The repair
+
+Two lines in `entry_trace.c`: declare `slot_before`/`desc` in `entry_wdt_pet`'s own frame (which is where
+690 already puts all of the pet's state) and pass their addresses. This is the shape every other caller
+uses. With it, a refused install stores its `before` into a local, returns 0, and the pet publishes
+`xnu_live_wdt_map=0` and returns — the bounded negative cell R3 promised.
+
+### R8 — the clause that should have caught it, and did not
+
+`tools/test_resident_guard.py`'s `claim_pet_installs_before_it_reads` asserted
+`if (mapped == 0u) return;` and the install-before-read order, so the *design* passed — but neither it
+nor the build's linked-image clause ever asked **whether the install call can be refused at all**, which
+is the whole of R3. Three new clauses close it:
+
+1. **Source:** the pet's `entry_mmio_section(...)` call must pass a real `&`-output for both
+   `slot_before_out` and `desc_out`; a numeric `0` there is a refusal.
+2. **Linked image:** `entry_wdt_pet`'s body must materialise a **frame address** into `r2` before its
+   `bl entry_mmio_section` — `sub`/`add rX, sp, #N`, or `mov r2, sp` — because a NULL is a `mov r2, #0`.
+   The existing `bl` target check did not look at `r2`, which is why the fault got through a green build.
+3. **Selftest:** the mutation that restores `, 0, 0)` must be refused.
+
+The lesson is the one `test_resident_guard.py`'s own header states and this press re-paid for: it asserted
+the *shape* of the refusal path and never the *reachability* of it. A refusal a call cannot take is a
+comment.
