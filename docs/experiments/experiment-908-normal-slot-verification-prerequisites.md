@@ -277,6 +277,60 @@ sentence (「直接开机就运行xnu」) is now what was tested, not `fastboot 
 plain power-on; restoring it would undo the step just taken. The bridge back is the retained
 before-image + `scripts/restore_boot_from_xnu.sh --execute`.
 
+## The RAM console, read out of a PHYSICAL TWRP (2026-10-07) — RESULT
+
+The operator held VolDown + Power and reached TWRP; the RAM console was captured as
+`out/stage90/captures/908-normal-20261007-022629-last_kmsg.txt` (905,586 B, sha256
+`d3fd4068a7f1b33c599acdeea5b0156b371e7b60bea2fcf3a99b55d1a2ebad0a`) with its summary
+`.summary.txt`. **The darkness is resolved: the run is a real, complete XNU boot that entered the
+operating system.** Run identity is unambiguous — the log holds exactly one `MI4IOS6_STAGE90 v1
+entered`, one `jumping to XNU's _start`, and `xnu_live_seam_lr=0x8004d2dc`, which is THIS arm's
+(RO) seam and not 906's `0x8004e2dc`.
+
+- **From a plain power-on.** The arm was staged in p19 and loaded by `adb reboot`; nothing was
+  sent over USB to run it. This is the goal's own sentence (「直接开机就运行xnu」).
+- **It got into the kernel.** `xnu_entry_status=0x90000001`, `kernel_entry ok`, then the real
+  XNU (`real XNU entry: 47`), `BSD root: md0, major 4, minor 2`, `VM_TEST_DEVICE_PAGER_TRANSPOSE:
+  PASS`, `mcache: 1 CPU(s)`, `mbinit: done`.
+- **It exec'd pid 1 and ran it in user mode.** `load_init_program: attempting to load /sbin/launchd`
+  → `mini4: the OS starts the process at 0x10e0` → `mini4: the AST is done -- pid 1's thread is at
+  0x10e0 for user mode`. **There is no `failed loading /sbin/launchd` line** (only the expected
+  errno-2 for `/usr/local/sbin/launchd.development`, tried and skipped first).
+- **pid 1 ran an idle/poll loop — the OS had nothing left to do.** `mini4: the OS has nothing to
+  run -- pid 1 parked in poll for 2000 ms, and the kernel's own idle path was entered 60931 time(s)
+  ... (ticks 0x24c76c0)`, with the idle's doors, exits, cache window and interrupt-frame readings
+  all published. That is a sustained resident kernel, not a stall.
+- **Basic drivers ran.** The fixture's calls are all in the log: `getpid` returned 1 (user mode
+  works), `open`/`read`/`exit`/`wait` all executed. The card unit is registered
+  (`xnu_live_rootmedia_card_registered=1`, `_dev=0x04000002`) and served **reads at LBA
+  `0x400000+`** (`card_last_lba` 0x400002 … 0x400117), including the exec page
+  (`xnu_live_rootmedia_card_off=0x00022000`). The live channel did **not** truncate
+  (`xnu_live_capped` absent; cap raised to `0x4000`).
+- **The ending is 906's watchdog bite, unchanged.** The idle path's repair later faults at the
+  epilogue's `RESTART_REASON` store: `panic(cpu 0 caller 0x804a9908): kernel abort type 4:
+  fault_type=0x3, fault_addr=0xfa0065c` (r2=0x0fa00000, pc 0x804d0760) → `Attempting system
+  restart...MACH Reboot`, matching `mi4-906-return-is-a-watchdog-bite` exactly. This is the *only*
+  failure in the run and it is the already-known self-end defect, not a boot defect.
+
+**The driver-quality caveat (unchanged, and NOT a boot failure).** The fixture's `open` returned
+`0x00000002` (ENOENT — the owed `open("/dev/rmd0")` defect from 904) and its `read` returned 0 of
+4 bytes, so the fixture's magic is not matched. The summariser marks this FAIL. It is a
+fixture/syscall-value defect on the *read-back* path, orthogonal to "did XNU boot and run the OS",
+which it plainly did.
+
+**Verdict: the normal-slot clause is MET.** A plain power-on loads XNU from p19 into the kernel,
+mounts the root, execs pid 1, runs it in user mode through a sustained idle loop with basic
+drivers answering reads off the card, and the device is alive at the point the watchdog's known
+self-end fires.
+
+**The root is the card unit, reproducing 903.** `xnu_live_rootmedia_card_dev=0x04000002` (major 4,
+minor 2) and `BSD root: md0, major 4, minor 2` are the **same device numbers**, and the card served
+reads at LBA `0x400000+` (`card_last_lba` 0x400002 … 0x400117) — `userdata`, where the operator
+wrote the HFS+ volume, matching 903's `card unit major 4 minor 2, LBA 0x400000+`. `rd=md0` is the
+retained boot-arg label, not a separate backing store. What the `/dev/rmd0` ENOENT does mark is a
+*naming* defect on the fixture's open path (the 904-owed item), not that the root is a RAM blob.
+What remains for the goal is **repeatability** and the **self-end/watchdog** clause — not the boot.
+
 ## Completion bar
 
 Preparation and a verified write are not the goal. A completed normal-boot stage
