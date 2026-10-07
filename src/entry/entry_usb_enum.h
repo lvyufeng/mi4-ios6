@@ -58,12 +58,24 @@
  */
 #define STAGE90_USB_ENUM_QH_STRIDE      64u
 
-/* The endpoint number of the one enumerable IN endpoint, and the qh index for each. */
+/*
+ * The endpoint number of the one enumerable IN endpoint, and the qh index for each.
+ *
+ * **THE QH INDEX IS THE REGISTER BIT.** The core indexes the endpoint list by `num + (dir ? 16 : 0)`:
+ * the vendor's `ep0in` is `ci13xxx_ep[hw_ep_max/2]` (`ci13xxx_udc.h:166`), and `isr_tr_complete_handler`
+ * walks `mEp = &ci13xxx_ep[i]` against `hw_test_and_clear_complete(i)` (`ci13xxx_udc.c:2666`/`:2672`),
+ * i.e. the SAME `i` is both the array subscript and the `ENDPTCOMPLETE`/`ENDPTPRIME` bit. So an
+ * endpoint's `ENDPTPRIME` bit IS its qh index, and **EP1-IN is `EP_IN + 16 = 17`, not `EP_IN = 1`**
+ * (index 1 is EP1-OUT's slot, which is empty here - the core would fetch a terminated qh and never
+ * move a byte, while the CPU filled EP1-IN's slot). With `hw_ep_max = 32` (= `ENDPT_MAX`, DEN=16 on this
+ * IP) the half offset is 16 = `ENDPT_MAX/2`. `tools/check_usb_enum.py` refuses any qh index that is not
+ * `num + ENDPT_MAX/2`, so this cannot drift back into a comment
+ * ([[mi4-one-value-two-definitions]]; [[mi4-a-claim-in-a-comment-is-not-a-check]]).
+ */
 #define STAGE90_USB_ENUM_EP_IN          1u    /* endpoint 1, IN direction - the one a host reads.    */
-#define STAGE90_USB_ENUM_QH_OUT0        0u    /* ep0out = ci13xxx_ep[0].                             */
-#define STAGE90_USB_ENUM_QH_IN0         16u   /* ep0in  = ci13xxx_ep[hw_ep_max/2] = [16] (§10.8).    */
-#define STAGE90_USB_ENUM_QH_IN1         1u    /* endpoint 1's qh; RX/TX are two halves of ONE         */
-                                              /* ENDPTCTRL(n), but the qh array is direction-split.   */
+#define STAGE90_USB_ENUM_QH_OUT0        0u    /* ep0out = ci13xxx_ep[0]                     (bit 0).  */
+#define STAGE90_USB_ENUM_QH_IN0         16u   /* ep0in  = ci13xxx_ep[ENDPT_MAX/2]           (bit 16). */
+#define STAGE90_USB_ENUM_QH_IN1         17u   /* ep1in  = ci13xxx_ep[EP_IN + ENDPT_MAX/2]   (bit 17). */
 #define STAGE90_USB_ENUM_QH_COUNT       32u   /* the vendor's array: 16 RX halves + 16 TX halves.     */
 
 /* `ENDPTPRIME` / `ENDPTCOMPLETE` bit for an endpoint: `BIT(num + (dir?16:0))`. */

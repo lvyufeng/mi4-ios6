@@ -12,7 +12,9 @@ recompute the offset from `struct ci13xxx_qh` ([[mi4-one-value-two-definitions]]
 1. **STRUCT OFFSETS, RECOMPUTED.** Parse `struct ci13xxx_td` and `struct ci13xxx_qh` from
    `ci13xxx_udc.h` and compute every field offset (packed, aligned(4)), then compare to this header's
    `STAGE90_USB_ENUM_QH_OFF_*` / `STAGE90_USB_ENUM_TD_OFF_*`. A field that moves in the owner, or a
-   define that drifts, is refused.
+   define that drifts, is refused. **And the qh INDEX is recomputed too** (`num + dir*ENDPT_MAX/2`) -
+   the core indexes the endpoint list by the ENDPTCOMPLETE/ENDPTPRIME bit, so an index that loses the
+   IN direction half points the core at the OUT slot (this guard caught `QH_IN1 = 1`, which is EP1-OUT).
 
 2. **THE WRITTEN VALUES against the owner's own expressions** - `USBCMD_SUTW`, the `USBi_*` mask, the
    `ENDPTCTRL` bits and the bulk type encodings, `QH_IOS`/`QH_ZLT`, the `TD_*` tokens, `DEVICEADDR`.
@@ -256,6 +258,51 @@ def check_sources():
     say("  qh/td layout: %d field offsets recomputed from `struct ci13xxx_qh` (size %d) and "
         "`struct ci13xxx_td` (size %d)" % (len(STRUCT_OFFSETS), owner[("qh", "size")], owner[("td", "size")]))
 
+    # (1b) the qh INDEX is the register bit, recomputed from the owner's ENDPT_MAX.
+    #
+    # The core indexes the endpoint list by `num + (dir ? ENDPT_MAX/2 : 0)`: `ci13xxx_udc.h:166` is
+    # `#define ep0in ci13xxx_ep[hw_ep_max / 2]` and `ci13xxx_udc.c:2666`/`:2672` dispatch by the same `i`
+    # for both the array subscript and the ENDPTCOMPLETE/ENDPTPRIME bit. `hw_ep_max = ENDPT_MAX` on this
+    # IP (DCCPARAMS.DEN = 16 -> 32, and `ENDPT_MAX (32)`). This was a live defect: `QH_IN1 = 1` is EP1-OUT
+    # (the IN bit is `EP_IN + 16`), so the core would fetch a terminated qh while the CPU filled EP1-IN's.
+    try:
+        endpt_max = eval_expr("ENDPT_MAX", owner_defines(GADGET_H))
+    except Refused as exc:
+        problems.append("no ENDPT_MAX in the owner headers: %s" % exc)
+        endpt_max = None
+    if endpt_max is not None:
+        want_index = {
+            "ENUM_QH_OUT0": 0,
+            "ENUM_QH_IN0": endpt_max // 2,
+            "ENUM_QH_IN1": None,   # filled below from ENUM_EP_IN
+        }
+        try:
+            ep_in = int(vals["ENUM_EP_IN"].rstrip("u"), 0)
+        except (KeyError, ValueError):
+            problems.append("entry_usb_enum.h defines no integer ENUM_EP_IN")
+            ep_in = None
+        if ep_in is not None:
+            want_index["ENUM_QH_IN1"] = ep_in + endpt_max // 2
+        for short, want in sorted(want_index.items()):
+            name = "STAGE90_USB_" + short
+            if short not in vals:
+                problems.append("entry_usb_enum.h defines no %s, but the check names it" % name)
+                continue
+            if want is None:
+                continue
+            try:
+                got = int(vals[short].rstrip("u"), 0)
+            except ValueError:
+                problems.append("%s is not an integer literal (%r)" % (name, vals[short]))
+                continue
+            if got != want:
+                problems.append(
+                    "%s = %d but the qh INDEX is the register bit = `num + dir*ENDPT_MAX/2`, so %s = %d "
+                    "(index == ENDPTCOMPLETE/ENDPTPRIME bit, ci13xxx_udc.c:2666/2672; ep0in = "
+                    "ci13xxx_ep[ENDPT_MAX/2], ci13xxx_udc.h:166) [[mi4-one-value-two-definitions]]"
+                    % (name, got, name, want))
+        say("  qh index: OUT0/IN0/IN1 checked against `num + dir*ENDPT_MAX/2` (ENDPT_MAX=%d)" % endpt_max)
+
     # (2) the written values against the owner's own expressions. The table also carries this header's
     # own names and the two earlier USB headers', so a value defined in terms of a sibling
     # (`ENDPTCTRL_TXE`) evaluates rather than being pronounced unknown.
@@ -427,6 +474,12 @@ def selftest():
               "#define STAGE90_USB_ENUM_QH_OFF_SETUP   40u",
               "#define STAGE90_USB_ENUM_QH_OFF_SETUP   32u",
               "QH_OFF_SETUP")
+    # The qh INDEX returns to the endpoint number (the exact defect QH_IN1 shipped with: index 1 is
+    # EP1-OUT's slot, not EP1-IN's - the IN bit is EP_IN + ENDPT_MAX/2).
+    with_edit("the EP1-IN qh index loses its direction half", "h",
+              "#define STAGE90_USB_ENUM_QH_IN1         17u",
+              "#define STAGE90_USB_ENUM_QH_IN1         1u",
+              "QH_IN1")
     # A written value drifts.
     with_edit("USBCMD_SUTW drifts from BIT(13)", "h",
               "#define STAGE90_USB_ENUM_USBCMD_SUTW    0x00002000u",
