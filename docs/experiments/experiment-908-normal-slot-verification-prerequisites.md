@@ -207,6 +207,49 @@ fallback the plan relies on. Adopted corrections:
 - Because p19 already holds `fc956eae`, re-writing it is a no-op; a "single
   variable" claim must either restore p19 to `b2119252` for staging or be dropped.
 
+## The read-only arm, parked and verified (2026-10-07)
+
+The normal-slot diagnostic arm is built, parked and verified; nothing has been pressed.
+
+- **Arm `armed-storage-54d5c585`** is 906 (`f347d060`) rebuilt with the only two arm keys that
+  move: `STAGE90_XNU_HDD_WRITE=0` and `STAGE90_XNU_HFS_ROOT_RW=0`, with the HFS platform objects
+  rebuilt under those switches, so the root is genuinely read-only. Entry image `54d5c585`
+  (6,498,612 B), payload `046219ad` (9,519,104 B, `ANDROID!`). It carries 906's fsync fixture
+  unchanged. A read-only HFS mount never clears the volume header's clean-unmount bit, so this
+  arm does **not** dirty p25 and is safe to repeat; it does not retract 906's write result.
+- The RO HFS objects are members of the entry group, so the exit's `bl FlushPoU_Dcache` moved back
+  one page, `0x8004e2d8` → `0x8004d2d8` (returns to `0x8004d2dc`). The entry build's own clause
+  refused first; `entry_trace.c`'s `STAGE90_XNU_SEAM_LR` and `run_and_capture.sh`'s
+  `EXIT_POP_LR_LITERAL` are both `0x8004d2dc`. The disassembly decided the direction, not the
+  record.
+- Parked at `out/stage90/frozen/armed-storage-54d5c585` (11 members) and recorded in
+  `records/revert-set.txt`. Verified: `tools/check_set_name_rule.sh` 0, `tools/verify_revert_set.sh`
+  0, `verify_press_ready.sh` 5/5, `make check` 0. Committed `9873eb0`.
+- **`scripts/stage_boot_p19.sh`** stages the recorded payload into p19, because `fastboot boot`
+  writes nothing and a plain power-on can only run what is IN the partition. Default dry-run;
+  `--expect-sha256=HEX` is required and checked against the bytes; writes **only** the payload's
+  own sector count (`bs=512 count=18592`), never the whole partition, so the tail is untouched; it
+  saves the full 32 MiB before image, hashes a full readback of the payload region, holds no
+  `fastboot` call at all, and is the only route back if an arm is abandoned. Its host-only suite
+  (`tools/test_stage_boot_p19.py`, 25 cases) pins the bounded write as a check. Dry-run against
+  the live device passed (root shell, by-name, geometry validated; no write).
+
+## The normal-slot press has a bootloop hazard the fastboot press does not
+
+The 906/907 returning runs came back to Android because p19 was booted **non-persistently** by
+`fastboot boot`: the payload ran, the watchdog bit, and the reset reverted to the normal slot,
+which was still Android. Once XNU is staged IN p19, that reversion loads **XNU again** — a
+watchdog bite reboots straight back into the payload. So a normal-slot XNU run that faults can
+boot-loop rather than return, and the log is not reachable through adb (XNU brings up no adbd).
+
+The escape is unchanged and already verified: **VolDown + Power + USB → fastboot →**
+`fastboot boot` the verified TWRP (non-persistent) **→** read `/proc/last_kmsg` (the RAM console
+survives a warm reset into TWRP — the 906/908 route) **→** optionally
+`scripts/restore_boot_from_xnu.sh --execute`. The parser and orchestrator for a *normal-slot*
+capture, and a `--normal-boot` mode for `run_and_capture.sh`, do not exist yet; the fastboot-boot
+runner cannot read a log from a boot-looped device. That is the next step, not something the
+current press path can fake.
+
 ## Completion bar
 
 Preparation and a verified write are not the goal. A completed normal-boot stage
