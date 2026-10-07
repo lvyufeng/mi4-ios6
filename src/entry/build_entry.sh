@@ -36575,6 +36575,27 @@ run python3 "$REPO_ROOT/tools/check_os_entry.py" --image "$OUT/xnu_arm_entry.elf
 run python3 "$REPO_ROOT/tools/check_fault_recovery.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
 run python3 "$REPO_ROOT/tools/check_fault_recovery.py" --image "$OUT/xnu_arm_entry.elf" --selftest || exit 1
 
+# **909: the residence arm's pet, read out of the linked image, in both directions.** With RESIDENT=1
+# the pet (`entry_wdt_pet`) must be a defined symbol the idle-exit wrapper tail-branches to once, whose
+# body installs the watchdog's section with `entry_mmio_section` and returns before its first read when
+# that install is refused, thresholds at half the bark on the vendor's own `(sts >> 1) & 0xfffff` count,
+# and stores 1 to base+RST (0xf9017004) - read BY VALUE and BOUND to the base register, per
+# [[mi4-linked-code-order-is-not-source-order]]. The tool also compares the pet's register names against
+# `hw_watchdog.c`'s own values ([[mi4-one-value-two-definitions]]) and asserts the wrapper's frame stays
+# the 8 bytes the slot lives in ([[mi4-idle-exit-l2-line]]). With RESIDENT=0 the pet must be ABSENT from
+# the image, so an image whose record says it is not the residence arm cannot carry the pet - the
+# negative direction [[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]] names.
+if [[ $RESIDENT -eq 1 ]]; then
+    run python3 "$REPO_ROOT/tools/test_resident_guard.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
+    run python3 "$REPO_ROOT/tools/test_resident_guard.py" --image "$OUT/xnu_arm_entry.elf" --selftest || exit 1
+else
+    if arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_wdt_pet" { found = 1 } END { exit(found ? 0 : 1) }'; then
+        say "FAIL: STAGE90_XNU_RESIDENT=0 but \`entry_wdt_pet\` IS in the linked $OUT/xnu_arm_entry.elf: the non-resident image must not carry the pet, or an image whose record says it is not the residence arm is indistinguishable from one that keeps itself alive. The trace-side switch did not reach this build. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    say "  xnu_entry_909: STAGE90_XNU_RESIDENT=0 - the linked image carries no entry_wdt_pet, so the idle-exit wrapper's tail is the ending's own and no watchdog is fed"
+fi
+
 # ---------------------------------------------------------------- 533: **which arm this image is**
 #
 # **The build knew which arm it had made and wrote it down nowhere, and the gate could not ask.** The
