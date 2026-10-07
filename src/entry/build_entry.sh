@@ -774,6 +774,20 @@ if [[ $HDD_WRITE -eq 1 && $HFS_ROOT_RW -ne 1 ]]; then
     echo "          then rebuild this entry image under the write arm." >&2
     exit 1
 fi
+# **910a: the USB2 OTG probe, and the first switch whose arm is a READ of a HIGH-STAKES device.** The
+# Mi 4's micro-B port (`adb`/`fastboot`) is the ChipIdea CI13xxx core at `0xf9a55000`, and the whole
+# point of 910a is that the port may be live with the host, so this arm installs the core's 1 MB
+# section and reads its identification and state - `USBMODE`, `USBCMD`, `USBSTS`, `PORTSC`, `OTGSC`,
+# the endpoint table - and writes NOTHING. It defaults to 0 and its records reach the standing live
+# channel; there is no refusal to build here (the read cannot brick the device - a fault would stop the
+# run at the probe, which is a reading, not a hazard the way a write would be). The writes - the PHY
+# sequence and the device-mode transition - are 910a2.
+USB_PROBE=${STAGE90_XNU_USB_PROBE:-0}
+case "$USB_PROBE" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_USB_PROBE='$USB_PROBE' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **909: the RESIDENCE arm, and the first switch that REMOVES this image's own ending.** 908 proved a
 # plain power-on enters the OS; it ended because the image ended it - the deliberate deadline/pass-count
 # called `entry_seam_end_run`, whose first store (`RESTART_REASON` at `0x0fa0065c`) faults under XNU's
@@ -1008,7 +1022,8 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_HFS_ROOT_RW
                 STAGE90_XNU_RESIDENT
                 STAGE90_XNU_PWR_WAIT_TICKS
-                STAGE90_XNU_IDLE_NO_SLEEP)
+                STAGE90_XNU_IDLE_NO_SLEEP
+                STAGE90_XNU_USB_PROBE)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
 # the case statement below against the script's own environment reads - `grep -o '${STAGE90_[A-Z0-9_]*:-'`
@@ -1112,6 +1127,7 @@ do
         STAGE90_XNU_RESIDENT)         _v=$RESIDENT ;;
         STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
+        STAGE90_XNU_USB_PROBE)        _v=$USB_PROBE ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_SKIP) _v=${STAGE90_ENTRY_CHECKPOINT_SKIP:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_AFTER) _v=${STAGE90_ENTRY_CHECKPOINT_AFTER:-(unset)} ;;
@@ -1323,6 +1339,18 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -DSTAGE90_XNU_PWR_WAIT_TICKS="$PWR_WAIT_TICKS" \
     -DSTAGE90_XNU_HDD_WRITE="$HDD_WRITE" \
     -fsyntax-only "$BOOT_DIR/entry_storage.c"
+# **910a: the USB2 OTG controller read.** Compiled on the same condition as the four above - a
+# measurement whose numbers only exist in a traced build - with the same split the storage line states:
+# `STAGE90_ENTRY_USB_TRACED` is what makes the records exist and `STAGE90_XNU_USB_PROBE` is what makes
+# the arm *armed*. The arm switch reaches this file and `entry_trace.c`, and no other, so it goes on
+# this command line rather than into `STUB_DEFINES` (the storage line's own rule). It names
+# `entry_mmio_section` and the live channel's words, and no kernel object, so its position in the link
+# list is free.
+run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
+    -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
+    -DSTAGE90_ENTRY_USB_TRACED="$ENTRY_TRACE" \
+    -DSTAGE90_XNU_USB_PROBE="$USB_PROBE" \
+    -c "$BOOT_DIR/entry_usb.c" -o "$OUT/xnu_arm_entry_usb.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
 
@@ -1462,6 +1490,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_MOUNT="$MOUNT" \
         -DSTAGE90_XNU_ROOT_FROM_CARD="$ROOT_FROM_CARD" \
         -DSTAGE90_XNU_IDLE_NO_SLEEP="$IDLE_NO_SLEEP" \
+        -DSTAGE90_XNU_USB_PROBE="$USB_PROBE" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
 fi
@@ -1547,6 +1576,13 @@ LINK_OBJS=(
 # `#if` is on and whose callee is undefined, which is a link error and not a quiet difference; it is in
 # this list because the wrapper is not the only reader of `STAGE90_XNU_STORAGE_PROBE`.
 [[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_storage.o")
+
+# 910a: the USB probe, on the same condition and with the same dependency shape as the storage probe
+# above: it names `entry_mmio_section` (`entry_stubs.c`) and the live channel's `g_live_mmio_*` words,
+# and no kernel object - so its position in this list is free. A build that left it out while the call
+# site (`entry_trace.c`) is unconditional would have an undefined callee, which is a link error and
+# not a quiet difference; it is here because `entry_trace.c` is not the only reader of the switch.
+[[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_usb.o")
 
 if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # --- XNU's own objects, and a generated stub for everything they still need -------------------
@@ -36575,6 +36611,22 @@ run python3 "$REPO_ROOT/tools/check_os_entry.py" --image "$OUT/xnu_arm_entry.elf
 run python3 "$REPO_ROOT/tools/check_fault_recovery.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
 run python3 "$REPO_ROOT/tools/check_fault_recovery.py" --image "$OUT/xnu_arm_entry.elf" --selftest || exit 1
 
+# **910a: the USB2 OTG probe, guarded three ways.** `tools/check_usb_probe.py` compares every one of
+# `entry_usb.h`'s transcribed register offsets against the Android header that OWNS it - both
+# directions, the [[mi4-one-value-two-definitions]] guard applied to the first device in this walk whose
+# value's owner is an external tree - asserts the write-nothing property on comment-stripped source (a
+# probe of a port that may be live with the host must take no store), and reads `STAGE90_XNU_USB_PROBE`
+# out of the record and the linked image together: with the switch 1 the body must be a real T body that
+# reads the `0xf9a5` window, with it 0 a bare return. An image whose record claims the arm and whose
+# body is empty is [[mi4-off-option-two-spellings]] one build further out. It runs against every arm
+# (the source half is switch-independent; the image half adapts), so it is outside the RESIDENT branch.
+# **IT DOES NOT RUN HERE.** The image half reads `STAGE90_XNU_USB_PROBE` out of
+# `xnu_arm_entry-config.txt`, and this position is upstream of the `} > "$OUT/xnu_arm_entry-config.txt"`
+# that rewrites that file, so a check here compares THIS image against the PREVIOUS arm's record - which
+# is exactly what the first 910a ON build refused with (`the record says STAGE90_XNU_USB_PROBE=0 but
+# the linked entry_usb_probe body is 1340 bytes`). It runs below, after the writer and after the 678
+# clause that proves the key reached the record at all.
+
 # **909: the residence arm's pet, read out of the linked image, in both directions.** With RESIDENT=1
 # the pet (`entry_wdt_pet`) must be a defined symbol the idle-exit wrapper tail-branches to once, whose
 # body installs the watchdog's section with `entry_mmio_section` and returns before its first read when
@@ -36731,6 +36783,12 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # reading an ending image cannot produce. Written as the RESOLVED `$RESIDENT`, not
     # `${STAGE90_XNU_RESIDENT}`, for 882's reason.
     echo "STAGE90_XNU_RESIDENT=$RESIDENT"
+    # **910a's switch, written here in the same breath as the two above and for the reason 678's block
+    # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
+    # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line
+    # would be a run whose arm nobody read. The two-way check after the file is written is what makes
+    # forgetting it a refusal rather than a commit. Written as the RESOLVED `$USB_PROBE`.
+    echo "STAGE90_XNU_USB_PROBE=$USB_PROBE"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways
@@ -36762,6 +36820,17 @@ _record_extra=$(awk -F= '!/^#/ && $1 ~ /^STAGE90_/ { print $1 }' "$OUT/xnu_arm_e
 # what makes the two refusals above the whole of the statement, and a future key that is added to
 # both lists but not to the writer would otherwise show up only as this number not moving.
 say "  xnu_entry_678: the record carries ${#ENTRY_ARM_KEYS[@]} arm key(s) plus the two artifact keys, which is exactly the set ENTRY_ARM_KEYS names - compared in both directions against the file just written, so the writer block above is checked rather than remembered"
+
+# ------------------------------------------------- 910a: the USB probe's switch, image against record
+#
+# Placed here and not with the other post-link clauses above, on purpose: `check_usb_probe.py`'s image
+# half reads the switch out of the record the writer above just rewrote, so it must run after that
+# writer - and after the 678 clause, which is what proves the key is in the record at all. Run before
+# the writer it compared this image against the previous arm's record. The source half (the offsets
+# against their Android owner, and the write-nothing property) is read from files and does not care
+# where it runs; its self-test is here too so one placement runs both.
+run python3 "$REPO_ROOT/tools/check_usb_probe.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
+run python3 "$REPO_ROOT/tools/check_usb_probe.py" --selftest || exit 1
 
 # ------------------------------------------------- 533: **the sources of this image, by content**
 #

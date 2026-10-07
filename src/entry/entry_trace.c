@@ -129,6 +129,14 @@
  * kernel with the live channel up, and the wrapper's frame is not disturbed by a call whose arguments
  * are by value and whose state lives in the probe's own file. */
 #include "entry_storage.h"
+/* 910a: the USB2 OTG probe's own entry point, called from the exit wrapper below beside the storage
+ * probe above and for its reasons exactly - the line the arm is on is the probe's own body
+ * (`entry_usb.c`), and this file only decides *when* it runs. It runs on the wrapper's first call and
+ * only on it (the probe's own `g_usb_probed` guard), so it costs one compare on every later pass; the
+ * frame stays the 8 bytes the slot lives in because the call's arguments are by value and its state
+ * lives in its own file. It is called **after** the storage probe so the storage arm's records are
+ * not displaced by a read-only probe that carries near-zero hazard. */
+#include "entry_usb.h"
 
 /* entry_stubs.c. Records into `g_kv_buf`, which only an epilogue writes out - see above. */
 extern void entry_kv(const char *key, uint32_t value);
@@ -2739,6 +2747,24 @@ void __wrap_platform_cache_idle_exit(void)
     entry_storage_probe();
 #endif
 
+#ifndef STAGE90_XNU_USB_PROBE
+#define STAGE90_XNU_USB_PROBE 0
+#endif
+#if STAGE90_XNU_USB_PROBE
+    /*
+     * **910a: the USB2 OTG controller's read, at the storage probe's own site for the storage probe's
+     * own reasons.** `entry_mmio_section` refuses unless the live channel exists (`g_live_state != 1`
+     * is its first of four refusals), and the live channel is a console write's own proof; this
+     * wrapper is inside the handed-off kernel, after that proof. It is called **after** the storage
+     * probe (whose records the mount arm's readers depend on) and before the clock's block below, so
+     * the USB records precede the ending's last one: if the arm's clock runs out, the probe has
+     * published; if the probe's reads do not come back, the ending is never reached and the log is the
+     * probe's own partial record - the reading, not a loss. The port may be live with the host, so the
+     * probe **writes nothing** (see `entry_usb.c`); a compile that reached here with the switch off
+     * leaves a one-compare pass-through. */
+    entry_usb_probe();
+#endif
+
 #if STAGE90_XNU_POST_END_TICKS
     /*
      * **690: one call, and this wrapper's frame stays the 8 bytes the slot lives in.** The whole arm is
@@ -2985,8 +3011,24 @@ void __wrap_platform_cache_idle_exit(void)
  * same entry group** - and being a loop it pushed the group over a page: the build refused with `the
  * exit's call to FlushPoU_Dcache is at 2147803864 and returns to 2147803868, while entry_trace.c's
  * STAGE90_XNU_SEAM_LR is 0x8004d2dc`. **The value below is re-derived from that refusal, and
- * `scripts/run_and_capture.sh`'s literal follows it.** */
-#define STAGE90_XNU_SEAM_LR       0x8004d2dcu
+ * `scripts/run_and_capture.sh`'s literal follows it.**
+ *
+ * **THAT MOVE WAS UNDONE BY 908 AND IS RE-MADE HERE, AND THE PARAGRAPH ABOVE IS WHY THIS NOTE EXISTS.**
+ * 908's read-only p19 arm was `0x8004d2dc` (`9873eb0` moved both copies and the paragraph immediately
+ * above was left naming the 905 refusal's value, which is the value the define holds again below) -
+ * its arm's entry group came in under the page that 905's wait had crossed. So the define and the
+ * runner literal were `0x8004d2dc` from 908 through every 909 arm, and the paragraph above has been
+ * reading as a promise the value did not keep since 908. **910a's read-only USB probe re-crosses it**:
+ * `entry_usb.c`'s ON body (the `entry_live_write` publishes and two `entry_mmio_section` installs) is
+ * added to the entry group, the build refused with the *909-era numbers but 905's address* - `the
+ * exit's call to FlushPoU_Dcache is at 2147803864 and returns to 2147803868` = **`0x8004e2dc`**,
+ * `+0x1000` from the `0x8004d2dc` a 909 arm and this rung's own OFF build both return - and the
+ * constant below is re-derived from that measurement. `scripts/run_and_capture.sh`'s literal follows
+ * it (both copies, one edit each - the hazard `tools/check_stage_paths.sh` cannot see and only the
+ * build's own clause catches). **This is a NINTH move, and a ninth is the point: the value is a
+ * function of the entry group's size and not of any rung's meaning, so nothing but the build's clause
+ * can keep the two copies honest.** */
+#define STAGE90_XNU_SEAM_LR       0x8004e2dcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);

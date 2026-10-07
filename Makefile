@@ -192,6 +192,12 @@ check:
 #                              The one-line "cleanup" that undoes it reads as an improvement.
 	@tools/check_hfs_root_blob.py src/entry/blob/xnu_arm_entry_root_hfs.img
 	@tools/check_hfs_root_arm_split.py
+# 910a: the USB2 OTG probe. The source half of `check_usb_probe.py` is switch-independent - it compares
+# every offset `entry_usb.h` transcribed against the Android header that owns it, both directions, and
+# asserts the write-nothing property - so it runs here on any machine with no build and no device. The
+# image half (the switch read out of the linked ELF) needs a build and runs inside build_entry.sh.
+	@tools/check_usb_probe.py --selftest >/dev/null
+	@tools/check_usb_probe.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not

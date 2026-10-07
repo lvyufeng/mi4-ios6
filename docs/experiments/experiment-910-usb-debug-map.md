@@ -2,7 +2,9 @@
 
 Date: 2026-10-07
 
-Status: **MAP** — no arm. This is the standing "map before the rung" step (the same shape as
+Status: **MAP + arm 1 (910a) BUILT AND PARKED, NOT PRESSED.** `entry_usb_probe` — the read-only USB2
+OTG probe — is arm `armed-storage-377fb57a` (arm `cabba670` plus `STAGE90_XNU_USB_PROBE=1`). The map
+below is §1-§7; **§8 is the arm.** This is the standing "map before the rung" step (the same shape as
 `mi4-hfs-wiring-mapped`, 870/874, before the HFS port was built): the goal's added requirement is
 
 > 「保持在xnu里，可以通过usb进行调试」 — a resident XNU must also be *debuggable over USB*.
@@ -120,10 +122,107 @@ the GIC applies here with no occupancy conflict. The rung is not blocked on addr
   until then the channel would go dark with the run. This makes **the 909 press the first thing to do**,
   and 910 a rung that *builds* while 909 is being pressed.
 
-## 7. What this map does NOT decide
+## 7. The fork, and the operator's decision
 
 The choice between **KDP-over-bulk** and **CDC-ACM** for the first live channel, and whether `adbd` is
-worth building versus a kernel-print console. That is the operator's call, and it is a real fork: KDP buys
-a debugger (read/write memory, breakpoints) but no shell; CDC-ACM buys a log stream but no control; `adbd`
-buys both and is the most work. **The recommendation is to build 910a and 910b first** — they are the
-shared prerequisite of all three and each is a pressable reading on its own.
+worth building versus a kernel-print console, is the operator's. **Decided 2026-10-07: KDP.** So 910c is
+KDP over a USB bulk endpoint (the engine is in-tree, `osfmusb_kdp_kdp_udp.o`'s disabled stub is swapped for
+the real `kdp_core`/`kdp_serial` + a USB transport, and `mach_kdp` is flipped into `STAGE90_BOOT`), not
+CDC-ACM. `adbd` (910d) remains the literal goal clause and sits on 910b's endpoint afterward.
+
+**The first arm is a READ, not a bring-up.** The established pattern for a new device in this project is a
+read-only probe before any write (692's storage probe; rung A for the card). USB is the highest-stakes
+device so far — the port may be live with the host — so **910a is `entry_usb_probe`: install
+`0xf9a55000`'s 1 MB section and READ the core's identification and state registers, publishing
+`xnu_live_usb_*`, writing NOTHING.** It answers: is the core mapped; what mode did the bootloader leave it
+in; is it already in device mode (the SDHCI "the mode sequence is a re-do" cell). 910a2 then does the PHY
++ device-mode bring-up (the writes). Both are pressable arms and the read arm carries near-zero hazard.
+
+**§7 originally named this arm with DWC3 registers — `HWVERSION`, `CAP`, `DCFG`, `DCTL`, `GINTSTS`,
+`DSTS`. That was the map's own error, corrected by the arm (see §8): this core is a ChipIdea CI13xxx,
+and reading a DWC map off it would have made every number a reading of the wrong file's bytes.** The
+registers the arm actually reads are ChipIdea's — `USB_ID_CAP`, `USB_HWGENERAL`, `USB_HWDEVICE`,
+`USB_CAPLENGTH`/`USB_HCIVERSION`, `USB_USBCMD`, `USB_USBSTS`, `USB_USBMODE`, `USB_PORTSC`, `USB_OTGSC`,
+`USB_ENDPTCTRL(n)`, `USB_ULPI_VIEWPORT` — transcribed in `src/entry/entry_usb.h`, each offset owned by
+`external/android_kernel_xiaomi_cancro`'s `msm_hsusb_hw.h` and cross-checked there by `tools/check_usb_probe.py`.
+## 8. Arm 1 — 910a: the read-only probe `entry_usb_probe` (arm `377fb57a`)
+
+**Built and parked, NOT pressed. The press is the operator's.** The arm is `armed-storage-377fb57a`
+(11 members in `out/stage90/frozen/armed-storage-377fb57a/`, recorded in `records/revert-set.txt`),
+which is 909's residence arm `cabba670` plus ONE switch, `STAGE90_XNU_USB_PROBE=1`. Nothing else moved:
+the payload's own switch record is byte-identical (`6c2b6038…`, now the **ninth** arm in a row), and the
+entry record is arm 6's 26 keys plus `STAGE90_XNU_USB_PROBE=1`.
+
+### 8.1 The controller is a ChipIdea CI13xxx, not a DWC-OTG — the map's error, corrected
+
+910's map (§3) called the USB2 port a "DWC-OTG gadget". The device's own checkout says otherwise three
+ways: the node's `compatible` is `qcom,hsusb-otg` (`arch/arm/boot/dts/msm8974.dtsi`, `usb@f9a55000`),
+`msm_otg.c` is the OTG/PHY wrapper, and the *gadget* is `drivers/usb/gadget/{ci13xxx_msm.c,msm72k_udc.c}`
+→ `ci13xxx_udc.c` — none of which is a DWC register file. The DWC3 map belongs to the *other*
+controller (`0xf9200000`, USB3 SS), which this arm reads for its identification only and treats as a
+different part. **Reading a DWC map off this core would have made every number a reading of the wrong
+file's bytes**, which is why the arm's first act is a read with the map's owner named in the record.
+
+### 8.2 The three guard clauses (`tools/check_usb_probe.py`)
+
+1. **One value, two definitions.** `entry_usb.h` cannot include the device's Linux headers, so all 30
+   register offsets are transcribed; the check compares each, both directions, against the Android
+   header that owns it (`MSM_USB_BASE + N`), and checks the base against the `msm8974.dtsi` node.
+2. **The write-nothing property, at the source.** Comment-stripped, `entry_usb.c` must define no write
+   accessor and take no store through the window — a store is a `*(volatile …)` that is not a `return`.
+3. **The switch reached the image, both ways.** Read `STAGE90_XNU_USB_PROBE` out of the arm's record and
+   the linked ELF: with it 1 the body must be a real `T` body reading the `0xf9a5` window, with it 0 a
+   bare return. The image half runs **after** the record writer in `build_entry.sh` (a check before it
+   compares the image against the *previous* arm's record — that is what the first 910a ON build refused
+   with, and the placement is why it is where it is now).
+
+The battery is 4 mutations (one per failure mode) and all 4 are refused.
+
+### 8.3 The entry-group page move, and the seam re-pin (both copies)
+
+Adding the probe's ON body to the entry group pushed it past a page boundary, so the build's own clause
+refused — the exact refusal 905's programming wait produced:
+`the exit's call to FlushPoU_Dcache is at 2147803864 and returns to 2147803868` = **`0x8004e2dc`**. So
+`STAGE90_XNU_SEAM_LR` was re-derived `0x8004d2dc → 0x8004e2dc` (+0x1000) in `entry_trace.c` **and**
+`EXIT_POP_LR_LITERAL` in `scripts/run_and_capture.sh` — both copies, one edit each. **The value is a
+function of the entry group's size and not of any rung's meaning.** 908 had moved it *back* to
+`0x8004d2dc` without updating the comment thread; this move restored the value and the comment now
+records the history (`0x8004e2dc` at 905 → `0x8004d2dc` at 908 → `0x8004e2dc` here).
+
+### 8.4 What the run would be
+
+The same four-part probe shape as `entry_storage.c`/`entry_gic.c`, called once from
+`__wrap_Idle_load_context` (after `entry_storage_probe`), idempotent, gated on the install:
+
+- **(1) the mapping first.** `entry_mmio_section(0xf9a55000, …)` installs the 1 MB section for
+  megabyte `0xf9a`, which no other device this image maps owns (the *opposite* of the watchdog's fate at
+  `0xf9017000`, where the WDT and the GIC share `0xf90` and the install was refused). A 0 result
+  publishes `xnu_live_usb_mapped=0` and reads no USB register at all.
+- **(2) identification.** `USB_ID_CAP`, `HWGENERAL` (decoded `PHYW`), `HWDEVICE`, `CAPLENGTH`/`HCIVERSION`,
+  `DCIVERSION`, `HCCPARAMS`.
+- **(3) the mode the bootloader left.** `USBMODE` and its decoded bits (2=device, 3=host, 0=neither —
+  the "mode sequence is a re-do" cell 910a2 must read before it writes), `USBCMD`/`RST`, `USBSTS`,
+  `FRINDEX`, `DEVICEADDR`, `ENDPOINTLISTADDR`, `BURSTSIZE`, `ULPI_VIEWPORT` (read-only; a transaction is
+  a WRITE and belongs to 910a2), `PORTSC`/`CCS`/`PHCD`, `OTGSC`/`BSV`/`ID`.
+- **(4) the endpoint table, shallowly.** `ENDPTCTRL(0..3)` and `_epctrl_any`.
+- then the **USB3 SS** core's identification only (`0xf9200000`, a DWC3 — `GSNPSID`/`GHWPARAMS0`).
+
+**Everything is a `volatile` 32-bit read; the arm writes NOTHING.** The keys are `xnu_live_usb_*`, with
+the SS core's under `xnu_live_usb_ss_*` so they are never read as the OTG core's. `xnu_live_usb_loaded=1`
+is the last key and is the "read completed" marker.
+
+### 8.5 Readiness, and what is owed
+
+`tools/verify_press_ready.sh` is **5/5 green** on `377fb57a`, and `make check` exits 0. **Row 4 needed a
+repair to get there**: it names the arm by the ELF reading joined to the record, but the USB switch is an
+*entry* switch that changes no reachability sentence and leaves `STAGE90_XNU_STORAGE_PROBE=60` — so row 4
+printed `ok` while naming the rung-61 CARD arm for a USB press. The row now reads `STAGE90_XNU_USB_PROBE`
+and, when it is 1, names the 910a arm (this file's own subject matter, repaired the way 683/686/690/692/716
+repaired it one switch over).
+
+**Owed, in order:** (1) the operator's press of `377fb57a` (a plain boot, the same staging and escape as
+909 — `scripts/press_909_normal.sh` names `cabba670` and would need its `EXPECT_ARM` moved to `377fb57a`);
+(2) read the `xnu_live_usb_*` block out of TWRP's `/proc/last_kmsg`; (3) then build 910a2 (the PHY +
+device-mode bring-up — the writes). **The goal is NOT met** — a read of the controller is not a debug
+transport, and 910b (event loop + an enumerable endpoint) and 910c (KDP over bulk, the operator's choice)
+are each a separate press, none built yet.

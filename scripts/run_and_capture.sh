@@ -383,7 +383,7 @@ unset _self _bad
 # to `0x8004d2dc` there, `arm-none-eabi-objdump -d out/stage90/xnu_arm_entry.elf` puts the `bl` at
 # `0x8004d2d8` (`__wrap_FlushPoU_Dcache` at `0x804d2044`), and this literal follows it. **Both copies
 # are `0x8004d2dc` for armed-storage-54d5c585.**
-EXIT_POP_LR_LITERAL=0x8004d2dc
+EXIT_POP_LR_LITERAL=0x8004e2dc
 exit_pop_lr_addr() {
   local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
   local start size body ret
