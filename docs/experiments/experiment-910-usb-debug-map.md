@@ -408,3 +408,218 @@ USB key — see above). (2) read the `xnu_live_usb_dev_*` block out of TWRP's `/
 it against the `xnu_live_usb_*` block the same press carries; (3) then build 910b (the event loop + an
 enumerable endpoint) and 910c (KDP over bulk). **The goal is NOT met** — a PHY init and a mode transition
 answer no control transfer and enable no interrupt, so this is not yet a device the host can talk to.
+
+## 10. The 910b reconnaissance — the EP0 control path, mapped (no arm built)
+
+This is the standing "map before the rung" step (the same shape as `mi4-hfs-wiring-mapped`, 870/874,
+before the HFS port was built): §5 named 910b as "the polling event loop + a print channel" and this
+section is the reconnaissance that scopes it. It **builds nothing and presses nothing**; it is the
+fact-base the arm will be designed against. Every line number is the device's own ChipIdea UDC,
+`external/android_kernel_xiaomi_cancro/drivers/usb/gadget/ci13xxx_udc.c`, unless the header is named.
+
+### 10.1 The loop is one ISR, and its priority is fixed
+
+The vendor's entire device-mode runtime is **`udc_irq`** (`:3653`). One pass:
+
+1. `intr = hw_test_and_clear_intr_active()` (`:785`) = `USBSTS & USBINTR`, and the ANDed value is
+   **written back to `USBSTS`** — the ChipIdea status register is R/WC, so writing the read value clears
+   exactly the latched bits (`hw_ctest_and_clear`, `:274`).
+2. A fixed priority walk (`:3681`, comment: *"order defines priority - do NOT change it"*):
+
+| bit | `USBi_*` | meaning | handler |
+|---|---|---|---|
+| 6 | `URI` | reset received | `isr_reset_handler` (`:2331`) |
+| 2 | `PCI` | port change | `isr_resume_handler` (`:2383`) |
+| 1 | `UEI` | USB error | **counted only, no handler** (`:3690`) |
+| 0 | `UI` | transaction complete | `isr_tr_complete_handler` (`:2651`) |
+| 8 | `SLI` | suspend | `isr_suspend_handler` (`:2405`) |
+
+**`USBi_NAKI` (bit 16) is never enabled and never handled anywhere in the driver.** `USBINTR` is written
+with bits `{0,1,2,6,8}` = **`0x00000147`** (`hw_device_state`, `:417-419`). A one-endpoint port can ignore
+NAK entirely.
+
+### 10.2 The three-stage control transfer, and the two "semaphores"
+
+There is **no `_ep0_setup`/`_ep0_read`/`_ep0_write`** in this driver — the equivalent is a `switch` inside
+the UI handler. The core writes the 8 SETUP bytes **into the EP0 qh at offset 32** (`qh->setup`, the
+`struct ci13xxx_qh` `setup_data[8]`) and raises `ENDPTSETUPSTAT.bit0`; it also auto-clears the EP0-OUT qh
+`td.token` status. The driver then:
+
+```
+:2689  if (mEp->type != XFER_CONTROL || !hw_test_and_clear_setup_status(i)) continue;
+:2693  if (i != 0) { warn("ctrl traffic received at endpoint"); continue; }
+:2702  _ep_nuke(&udc->ep0out); _ep_nuke(&udc->ep0in);           // drop the previous setup's leftovers
+:2706  do {
+:2707      hw_test_and_set_setup_guard();                       // USBCMD.SUTW = 1
+:2708      memcpy(&req, &mEp->qh.ptr->setup, 8);                // read the 8 bytes under the guard
+:2710      mb();
+:2711  } while (!hw_test_and_clear_setup_guard());              // if HW cleared SUTW, a new setup raced: re-read
+:2715  udc->ep0_dir = (type & USB_DIR_IN) ? TX : RX;
+```
+
+**Two distinct "semaphores" that are easy to conflate:**
+
+- **`ENDPTSETUPSTAT`** — the setup-token semaphore. Cleared by writing the read value back. `hw_ep_prime`
+  (`:582`) refuses to prime EP0-OUT while its bit is still set (`:586`/`:591` → `-EAGAIN`).
+- **`USBCMD.SUTW` (bit 13)** — the setup-lockout guard around the `memcpy` (`:799`/`:810`). The retry loop
+  exists so a setup arriving mid-read forces a re-read instead of a torn 8 bytes.
+
+**Stage 2 (DATA).** Direction from `bRequestType` bit 7. The gadget's `->setup()` callback queues a request
+on EP0; `ep_queue` (`:3083-3092`) redirects a length-bearing control request to the half matching
+`udc->ep0_dir` (`ep0out` for RX, `ep0in` for TX), nuking any stale request on that half first.
+`_hardware_enqueue` (`:1926`) fills the qh's `td` and primes via `hw_ep_prime` with `is_ctrl=1`.
+**Stage 3 (STATUS).** `isr_setup_status_phase` (`:2522`) queues a zero-length request on the **opposite**
+half (`mEp = (ep0_dir==TX) ? ep0out : ep0in`); a no-data request forces `ep0_dir=TX` (`:2844`) so status
+lands on `ep0out`. The `UI`-side completion path is `:2673-2687`: on `ENDPTCOMPLETE(i)`, run
+`isr_tr_complete_low`; for control, `err>0` (data moved) queues the status phase, `err<0` halts.
+
+**Standard requests**, each ending in a status phase: `GET_STATUS` (`:2450`, 2 bytes into `status_buf`,
+forced to 1 byte for `OTG_STATUS_SELECTOR`), `SET_ADDRESS` (`:2760` → `hw_usb_set_address`, `:821`,
+`DEVICEADDR = (v<<25)|USBADRA`), `CLEAR/SET_FEATURE` (`:2720`/`:2775`), `SET_CONFIGURATION` (`:2771`,
+only sets `udc->configured`; the real work is the gadget driver's `delegate` at `:2843`).
+
+### 10.3 What 910a2 omitted, and what the minimum port must add
+
+910a2 (`§9`) did `USBCMD.RST`, the PHY POR/ULPI writes, `USBMODE` `IDLE→DEVICE→|SLOM`, `USBCMD.ITC←0`,
+`USBCMD.RS←1`, and **deliberately skipped `USBINTR`, `ENDPOINTLISTADDR`, and EP0 `ENDPTCTRL0`**
+(`entry_usb_dev.c:416-420`). The minimum 910b port adds exactly those, in vendor form:
+
+- **(a) `USBINTR ← 0x147`** (`hw_device_state`, `:417`).
+- **(b) `ENDPOINTLISTADDR ← <phys addr of the EP0-OUT qh>`** (`:404`). The qh array is contiguous and the
+  hardware indexes endpoint N as **`ENDPOINTLISTADDR + N*64`**; the vendor uses a dma_pool with **align 64,
+  boundary 4096** (`:3452`), so the base and every qh must be **64-byte aligned**. For MSM72K EP0-IN's qh
+  is at index `hw_ep_max/2` (the TX half), so it lands at `list + (hw_ep_max/2)*64`.
+- **(c) `ENDPTCTRL(0) ← 0x00C000C0`** — the vendor never writes it literally (its `ep_enable` *skips*
+  `hw_ep_enable` for `num==0`, `:2925`: "ep0 is always enabled"), so the reset-default is relied on; a
+  bare-metal port must set it. Bits: `TXE|TXR|TXT=0` in the high half, `RXE|RXR|RXT=0` in the low half
+  (`ci13xxx_udc.h:242-249`) → still control type, unstalled, toggle reset, both directions enabled.
+- **(d) `USBCMD`** — 910a2 already set `RS`; re-asserting is harmless. The two runtime bits are
+  `SUTW` (bit 13, §10.2) and `ATDTW` (bit 14, an "endpoint data-toggle write" interlock used only when
+  appending to a non-empty queue, `:2038-2051`) — neither is needed until the endpoint has traffic.
+
+**The bus-reset re-init is mandatory, not optional** (`hw_usb_reset`, `:835`): on every `URI` reset,
+`DEVICEADDR←0`, `ENDPTFLUSH←~0`, `ENDPTSETUPSTAT←0`, `ENDPTCOMPLETE←0`, then drain `ENDPTPRIME→0` (100 µs
+bound). Skipping it wedges EP0 permanently on the *second* enumeration — the host re-enumerates from
+`USBMODE` state and stale semaphores never clear. This is the one "optional-looking" step that is not.
+
+### 10.4 The qh and dTD, sized
+
+`struct ci13xxx_qh` (`ci13xxx_udc.h:63-78`) is 48 bytes but the hardware stride is **64**:
+
+| field | off | init |
+|---|---|---|
+| `cap` | 0 | EP0 = `QH_IOS(bit15) | (maxpacket<<16)` = `| 0x00400000` for 64 B → **`0x00408000`** |
+| `curr` | 4 | read-only (HW fills the in-flight dTD addr) |
+| `td` (embedded `ci13xxx_td`) | 8 | `td.next = TD_TERMINATE(bit0)` when idle |
+| `RESERVED` | 28 | |
+| `setup` | 32 (8 B) | the SETUP packet — read under `SUTW` |
+
+`struct ci13xxx_td` (`:40-60`) is 28 bytes, `aligned(4)`: `next` (0), `token` (4), `page[5]` (8..27).
+`_hardware_enqueue` builds it as `token = (length<<16) | TD_STATUS_ACTIVE | TD_IOC`; `next = TD_TERMINATE`;
+`page[0] = phys(buf)`, `page[i] = (phys+i*4096) & ~0xFFF`. **The `page[]` low 12 bits are a byte offset
+within the page**, so each 4 KiB span of the buffer must be physically contiguous and **cache-flushed
+before prime** (`wmb()` at `:2007`, `:2107`); the core DMAs by **physical address**, and this entry image
+is identity-mapped (`physBase==virtBase==0x80000000`), so a **static 64-byte-aligned qh array and dTDs in
+`.bss` are directly DMA-able** — replacing the vendor's `dma_pool`/`kzalloc` entirely.
+
+**The qh's embedded `td` is a link/status shadow**, not the real descriptor: `qh.td.next ← phys(dTD)`.
+`hw_ep_prime(num,dir,is_ctrl)` writes `ENDPTPRIME = BIT(n)` with **`n = num + (dir?16:0)`** — EP0-OUT is
+`BIT(0)`, EP0-IN is `BIT(16)`.
+
+### 10.5 The one enumerable IN endpoint
+
+Beyond EP0, 910b needs exactly one IN endpoint. The recurring pattern from `hw_ep_enable` (`:512-545`):
+
+- `ENDPTCTRL(1)` high half = `TXE(bit23) | TXR(bit22) | TXT<<18`, `TXT = 2` for **bulk** (`0x03` is
+  interrupt/iso by the low two bits; **`USB_ENDPOINT_XFER_BULK = 2`**, so `TXT = 2`, i.e. bits 18-19 = `10`)
+  → e.g. **`0x00C80000`** (enable + toggle-reset + bulk), then `mb()`.
+- A second qh at index 1 in the same array, `cap = QH_ZLT(bit29) | QH_MULT? | (maxpacket<<16)`; bulk uses
+  `QH_ZLT` (the vendor ORs it in `_hardware_enqueue` `:2104`).
+- An IN dTD whose `page[0]` names the buffer the host will read; prime with `BIT(1+16)=BIT(17)`.
+
+**Descriptors** come from the vendor tree, and the values matter only as the *shape*: `android.c` carries
+`VENDOR_ID 0x18D1` / `PRODUCT_ID 0x0001` as **compile-time defaults** that Google's adb driver overrides at
+runtime (`idVendor 18d1`, `idProduct d00d` for the adb-only config) — so a bare-metal port should pick its
+own **stable** `ID_VENDOR`/`ID_PRODUCT` pair and a `bcdDevice`, not chase the runtime values. The
+descriptors required for a host to enumerate are: **device** (18 B), **config** (9 B) + the interface's
+**endpoint** descriptor (7 B), and the **string** set (`iManufacturer`/`iProduct`/`iSerialNumber`). The
+`GET_DESCRIPTOR` answer is a `memcpy` out of a static table, with `wLength` clamped and a short/zero-length
+status handled by §10.2's status phase.
+
+### 10.6 The reduction, honestly stated
+
+What a minimum one-IN-endpoint port can **omit** (from the vendor's 3890 lines): `USBi_NAKI` entirely;
+the `UEI`/suspend/resume/remote-wakeup machinery; all debugfs/`dbg_*`/`isr_statistics`/tracepoints; the
+`ep_prime_timer` robustness watchdog (`:1860`); `dma_pool` and the `ci13xxx_req` request-list machinery
+(a single request replaces `_ep_nuke`/`ep_dequeue`/`isr_tr_complete_low`'s walk); multi-request and
+`CI13XXX_PAGE_SIZE*4` chunking (bulk >16 KiB only); the MSM SPS vendor-DMA mode (`MSM_ETD_*`,
+`CAP_ENDPTPIPEID`); `AHB2AHB_BYPASS`; halt/wedge; test modes and OTG SRP/HNP; every endpoint but 0 and
+the one IN. What it can **not** omit is §10.3(d): the bus-reset re-init of `ENDPTSETUPSTAT`/`ENDPTCOMPLETE`/
+`ENDPTFLUSH`/`ENDPTPRIME`.
+
+**This is a large rung** — a from-scratch EP0 control-transfer state machine plus one endpoint, against a
+driver written for Linux's `usb_request`/`dma_pool`/workqueue world. The map above is the raw material;
+the arm's own design (the static qh/dTD layout, the ISR body, the descriptor table, the guard) is the next
+step, and it is worth its own document before a line is written — the same discipline §9.6 enforced for the
+*small* USB arm.
+
+### 10.7 What 910b still does not close
+
+A host that enumerates and can read one endpoint is a **live channel**, not a debug transport: reading a
+buffer the kernel chose to publish. The goal clause 「可以通过usb进行调试」 needs either 910c (KDP over
+that endpoint, or a CDC-ACM whose `printf` reaches a terminal) or 910d (`adbd`, the literal clause, which
+sits on 910b's endpoint). 910b is the rung that makes any of them possible; it is not yet the goal.
+
+### 10.8 The descriptor, endpoint and PHY values, from the vendor tree (exact)
+
+§10.5 gave the *shape*; this is the vendor's literal values, so the arm's tables are transcriptions with
+a named owner rather than inventions (`[[mi4-one-value-two-definitions]]`). Source: the Android composite
+gadget `drivers/usb/gadget/android.c` + `f_adb.c`, the UDC `ci13xxx_udc.c`, and the PHY `drivers/usb/otg/
+msm_otg.c`, all under `external/android_kernel_xiaomi_cancro/`.
+
+**The endpoint array is 32 entries, and direction is a half offset.** `hw_ep_max = DCCPARAMS.DEN × 2`
+(`ci13xxx_udc.c:315-319`); on this IP `DEN=16` physical endpoints, so **`hw_ep_max = 32`** (16 RX + 16 TX
+halves), capped at `ENDPT_MAX = 32` (`ci13xxx_udc.h:26`). `ep0out = ci13xxx_ep[0]`, `ep0in =
+ci13xxx_ep[hw_ep_max/2] = ci13xxx_ep[16]`. **`USB_ENDPTCTRL(n)` is one word per *number*** with RX in the
+low half and TX in the high half — so EP1-IN and EP1-OUT are the two halves of `ENDPTCTRL(1)`, and the
+IN half is not a separate register. The address a host sees is `(_usb_addr`) `0x80|num` for IN, `num` for
+OUT (`ci13xxx_udc.c:1855-1858`).
+
+**The reference interface** (`f_adb.c`, the ADB function) — the shape 910b should mirror even though it
+needs only one IN endpoint: `bInterfaceClass 0xFF`, `SubClass 0x42`, `Protocol 1` (`f_adb.c:67-69`, the
+Google-ADB signature), `bNumEndpoints = 2`, **bulk**, `wMaxPacketSize` **512 high-speed / 64 full-speed**
+(`f_adb.c:106-135`). The two endpoint addresses are assigned by `usb_ep_autoconfig` (`f_adb.c:261-289`),
+so the ported table reproduces the interface and lets its own EP0/EP1 choice stand; a single-config port
+needs only the FS (or HS) descriptor pair.
+
+**The device descriptor** (`android.c:269-278`, 18 bytes): `bcdUSB 0x0200`, `bDeviceClass
+USB_CLASS_PER_INTERFACE (0)`, `bNumConfigurations 1`, and — the fields that are runtime-mutable via sysfs
+(`android.c:2539-2547`) and therefore board-decided, **not** compile-time facts:
+
+- `idVendor`/`idProduct` defaults `0x18D1`/`0x0001` (`android.c:107-108`), but the board's own
+  `init.qcom.usb.rc` writes `05C6:901D` and the adb-only config sets `18d1:d00d` — so a bare port must
+  **pick its own stable pair** and not chase a runtime value.
+- `bcdDevice` = `0x0200 + gcnum` at bind (`android.c:2693-2700`).
+- `bMaxPacketSize0` is **not** in the struct: it comes from `CTRL_PAYLOAD_MAX = 64` (`ci13xxx_udc.h:27`),
+  set as `ep0in/out.ep.maxpacket = 64`.
+- **`iSerialNumber`**: the kernel default is the literal `"0123456789ABCDEF"` (`android.c:2681`); the
+  phone's `4a2fe00b` appears only because a userspace script echoes `ro.serialno` into the sysfs
+  `iSerial` node (`init.qcom.usb.sh:36-47`). **A bare port that boots the gadget gets the placeholder,
+  not the CID — the serial string must be hard-coded to be the phone's.**
+- Strings: `iManufacturer`/`iProduct` default `"Android"`; ids are assigned dynamically by
+  `usb_string_id` at bind (`android.c:2663-2688`); `iConfiguration` is 0 (not defined). No `iSerialNumber`
+  → host reads nothing there, which is fine for enumeration.
+
+**The PHY facts** (from the device's own dtsi, `arch/arm/boot/dts/msm8974.dtsi` `usb_otg` `:267`):
+`qcom,hsusb-otg-phy-type = <2>` = **`SNPS_28NM_INTEGRATED_PHY`** (`include/linux/usb/msm_hsusb.h:95-102`);
+`qcom,hsusb-otg-phy-init-seq = <0x63 0x81 0xffffffff>` — **exactly one ULPI write, value `0x63` to register
+`0x81`** (the `0xffffffff` is `ulpi_init`'s sequence sentinel, `msm_otg.c:427-438`). These are the two
+values 910a2 already transcribed (`entry_usb_dev.h:125-129`), which is the cross-check that the map and the
+arm agree. The regulators the vendor enables are `HSUSB_1p8` / `HSUSB_3p3` / `HSUSB_VDDCX`
+(`msm_otg.c:108-109`, `:181-193`) — RPM-SMD resources, **not touched by this image's ladder**
+(`[[mi4-vendor-path-powers-the-card]]`), and 910a2's success/failure reading is what says whether they
+matter here.
+
+**One correction to §10.5, from the same source:** the reference function has **two** bulk endpoints, not
+one. 910b's own requirement is one *enumerable IN* endpoint (§5); the descriptor may advertise two and
+simply never service the OUT until 910c, or advertise one — a design decision for the arm, not a fact.
