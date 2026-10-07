@@ -76,14 +76,25 @@ Section is not installed — the pet cannot fault through an install that was re
   asserts `entry_mmio_section` is called from the wrapper's own body once for `0xf9017000`, and that
   the pet site's store targets `0xf9017004` **by value**, bound to the anchor's base register.
 
-### R5 — the fixture must not end the run either
-908's pid-1 fixture did `exit(3)` (the log's `exit 1 call(s), pid 0x00000002, rval 0x00000003`). A
-kernel whose only init has exited still idles (that is what 908 shows — the idle loop ran after the
-fixture's exit), so the fixture exiting is **not** what ends the run; the deliberate ending is. But
-for a *usable* resident OS the fixture should loop (a poll/`nanosleep` cycle) rather than exit, so
-the resident arm carries a fixture variant that does not exit. This is a fixture change, gated on
-`RESIDENT`, and it is a **separate** prong from R1/R2 so a fixture defect cannot masquerade as an
-ending defect.
+### R5 — the fixture does not end the run, and needs no change (corrected from the 908 log)
+The first draft of this section asserted 908's pid-1 fixture did `exit(3)`. **The 908 run falsifies
+that**, and the correction is the reason R5 is closed with no code change:
+
+- The log's `exit 1 call(s), pid 0x00000002, rval 0x00000003` is the **child**, pid **2** — the
+  `fork`/`exit`/`wait4` triple the fixture has run since 505/506/508 to prove `wait4` reaps a
+  `W_EXITCODE`. The parent's `wait4` reads that status back (`p_xstat = 0x300`); it is a measurement the
+  fixture *requires*, not a defect.
+- **pid 1 never exits.** The log says so directly at line 4003:
+  `pid 1 parked in poll for 2000 ms (caller 0x8028e5b8)`, and the idle path was entered `60931` times
+  while parked. The fixture's own tail is `park: poll(NULL,0,PARK_MS); b park` — an unbounded park loop
+  (`entry_ramdisk.s`, `park` at +288..+308). A kernel whose init has exited cannot also be parked in
+  `poll`, so the ending 908 saw was **R1's deliberate ending**, exactly as this doc's opening says.
+
+So there is **no fixture change**: the resident arm's pid-1 fixture already parks rather than ends, and
+R5 is a statement about the fixture that the image already satisfies. What matters is only that the
+ending keys (`xnu_live_post_end_calls`, the `fault_addr=0xfa0065c` panic) are absent — R1 — while the
+park evidence (`pid 1 parked in poll`, the sustained idle count) is present. If a future press shows
+`xnu_live_wdt_*` moving AND the park line, the run is resident; the fixture is not the variable.
 
 ## The open unknown, named before the press
 
