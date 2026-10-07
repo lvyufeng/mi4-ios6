@@ -1,10 +1,12 @@
 # 909 — the residence rung: a normal-slot boot that does not end
 
-Date: 2026-10-07. Status: **pressed once (arm `armed-storage-e61ce673`, log
-`out/stage90/captures/909-resident-20261007-0530-last_kmsg.txt`), and it FAULTED at the pet — the run
-did not stay, and the cause is now known and repaired. See “R7 — the first press, and the defect it
-found” below.** This closes the last open clause of the goal 「彻底能直接开机就运行xnu」 — 908 proved a
-plain power-on *enters* the OS; this proves one that *stays*.
+Date: 2026-10-07. Status: **pressed twice. Arm 1 (`armed-storage-e61ce673`) FAULTED at the pet (R7);
+arm 2 (`armed-storage-104b10ce`) fixed the fault but the pet's install was REFUSED every call — the
+watchdog `0xf9017000` and the GIC `0xf9000000` share one 1 MB block, so `xnu_live_wdt_map=0` ×4 and the
+pet never petted (R9). The run was ALSO not resident: it wedges in the deep-idle loop after ~4 passes,
+~13.4 s in — the same structural point 908 reached, without 908's deliberate ending. The residence
+clause is NOT met; see R9.** The goal's last clause is 「彻底能直接开机就运行xnu」 — 908 proved a plain
+power-on *enters* the OS; 909 set out to prove one that *stays*, and R9 shows what still blocks that.
 
 ## What 908 left open, stated exactly
 
@@ -259,3 +261,91 @@ is the whole of R3. Three new clauses close it:
 The lesson is the one `test_resident_guard.py`'s own header states and this press re-paid for: it asserted
 the *shape* of the refusal path and never the *reachability* of it. A refusal a call cannot take is a
 comment.
+## R9 — the second press: the pet's install was REFUSED, because the watchdog and the GIC share one 1 MB block
+
+Arm 2 (`armed-storage-104b10ce`, entry bin `104b10ce`) was staged into p19 and plain-booted
+2026-10-07 06:08Z. The escape (operator's VolDown+Power → verified TWRP) captured the RAM console at
+`out/stage90/captures/909-resident-2nd-20261007-070047-last_kmsg.txt` (872 535 B, 15 770 lines). The
+pet's fault from arm 1 is **gone**: no `fault_addr=0x0`, no panic, and `xnu_live_wdt_map` **is**
+published. But it is published **four times, and it reads `0` every time**:
+
+```
+xnu_live_wdt_map=0x00000000     (lines 15501, 15593, 15656, 15744 — one per pet call)
+```
+
+and **no other** `xnu_live_wdt_*` key appears — no `_pets`, no `_countdown`, no `_sts`, no `_bark`,
+no `_slot_before`, no `_desc`. The pet returned at its first branch on all four calls. It never petted.
+
+### The cause, exactly: a 1 MB block cannot hold two devices
+
+`entry_mmio_section` installs a **1 MB section** and `entry_section_install` indexes the L1 by
+`va >> 20` (`entry_stubs.c:2118`), refusing when that slot already carries a type bit
+(`entry_stubs.c:2122`). The **GIC probe** (`entry_gic.c:393`, `entry_mmio_section(0xf9000000, …)`) runs
+**after** the jump and installs the whole `0xf90` megabyte into the live table:
+
+```
+xnu_live_gic_map=0x00000001
+xnu_live_gic_l1=0x80804000
+xnu_live_gic_l1_moved=0x00000001     -> the post-jump table, not the console's latch
+```
+
+The watchdog is at `0xf9017000` — **the same `0xf90` megabyte** (`0xf9000000 >> 20 == 0xf9017000 >> 20
+== 0xf90`). By the time the pet runs (idle pass 1, after the GIC's install), that slot is occupied, so
+`before & 3 != 0` and the install returns 0 *before writing anything*. The refusal is the designed,
+bounded cell — R3's `xnu_live_wdt_map=0` — not a fault. The pet's `return` on refusal is correct; the
+**address it was handed is what is wrong**. It cannot map one device's 4 KB into a megabyte a neighbour
+already owns.
+
+### Why this is the *same* defect as R3, one address over
+
+R3 chose `0xf9017000` and reasoned "the pet installs the watchdog's own 1 MB region"; the install is
+per-**megabyte**, and `0xf9000000` (the GIC) is in that megabyte. The pet's fix (arm 2) made the
+refusal *reachable*; this reading shows the refusal is *being taken*. So the arm's negative cell is
+now measured — and the positive cell (a pet) still needs an install that can land.
+
+### The wrong premise this press retires: "a resident XNU stays dark for 52 minutes"
+
+The run was reported as resident because the phone sat dark for ~52 minutes. The log dates that
+claim. The run's own clock (`xnu_live_tmr_dl_now`, the absolute physical-timer count at 19.2 MHz,
+`CNTFRQ=0x0124F800`) tops out at **`0x0f48ff6b` = 256 442 219 ticks = 13.36 s**. 908's tops out at
+`0x0cfc628d` = 217 866 893 = **11.35 s**. Both runs stop at the **same structural point**:
+
+| key | 908 | 909 |
+|---|---|---|
+| `xnu_live_poll_seq` | 1–4 | 1–4 |
+| `xnu_live_pcx_seq` | 1, 2, 4 | 1, 2, 4 |
+| `xnu_live_slot_post_calls` | 1–4 | 1–4 |
+| `xnu_live_post_end_calls` | 4 (the deliberate ending) | **absent** |
+| max absolute tick | 217 866 893 (11.35 s) | 256 442 219 (13.36 s) |
+
+The wrapper's own counter — `xnu_live_slot_post_calls`, the deep-idle exit's **return count**, published
+by `entry_slot_note(&g_slot_post, sp)` on every exit — reaches **4 and stops** in both. 908 then *chose*
+to end at 4 (`STAGE90_XNU_POST_END_RUN=4`); 909 removed that ending and **still** wedges at exactly 4.
+So the run is not resident: it **wedges in the deep-idle loop after ~4 passes, ~13.4 s in**, a few
+seconds after `mini4: the OS has nothing to run — pid 1 parked in poll` — **before** the watchdog's
+bark (25 s), which is why nothing resets. The 52 dark minutes are post-wedge wall-clock, not run
+lifetime. (The log is complete: 872 KB < the 2 MB console bound and 11 796 records < the 16 384 cap,
+**no** `xnu_live_capped` — the silence is the machine stopping, not the instrument dropping.)
+
+### What arm 3 must do, and the third finding it also carries
+
+1. **Give the watchdog its own megabyte.** `0xf9017000` cannot be installed while the GIC owns
+   `0xf90`. The pet must map a section whose `>> 20` is free — and the GIC already mapped the
+   watchdog's own 4 KB when it mapped `0xf9000000`, so the watchdog may be **readable at
+   `0xf9017000` through the GIC's existing block with no install at all**. Arm 3 either drops the
+   install and reads directly (proving the address via the GIC's mapping), or installs a **different**
+   free megabyte and proves *that* lands. The build clause must refuse an install whose `va >> 20`
+   equals a device section another probe already installs.
+2. **The wedge at idle pass 4 is a separate frontier and it is the real blocker.** The pet cannot fix a
+   run that stops taking idle exits within seconds — even a landed pet feeds a watchdog the wedge no
+   longer outlives. Before a further pet arm, the ~13.4 s wedge must be explained: both 908 and 909 stop
+   after 4 deep-idle exits with no fault, no panic, and no further publishes. That is a hang, and a hang
+   is what the watchdog's bite exists to break — but the bite (~28 s) never came either, which needs its
+   own answer.
+
+### The honest status of the goal
+
+「彻底能直接开机就运行xnu」 is **not met**. A plain power-on enters XNU and reaches the OS's idle loop,
+then wedges at ~13.4 s (dark), not resident. 909's pet does not yet land (block collision), and even
+landed it would feed a run that has already stopped. The residence clause needs both the block fix and
+the wedge answered.
