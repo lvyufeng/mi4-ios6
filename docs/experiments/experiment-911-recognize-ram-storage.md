@@ -401,7 +401,7 @@ bits, and any value reaching `CONSOLE=0xde500000` / `MMIO_FLOOR=0xf9000000`.
 **The clamp is why 911a alone was a NO-OP, and why BOTH must move.** The observable effect of raising
 the ceiling is the pmap fold: `pmap_bootstrap((gVirtBase + MEM_SIZE_MAX + 0x3FFFFF) & 0xFFC00000)`
 (`arm_vm_init.c:520`) and the page-table pre-init loop (`:532`) both fold to a **different constant**,
-so the pmap's `virtual_space_start` moves off `0xc0000000` to **`0xe0000000`**. With the window at
+so the pmap's `virtual_space_start` moves off `0xc0000000` to **`0xde800000`**. With the window at
 `0x5e500000` the free region XNU is handed is `(physBase + memSize) − (topOfKernelData + 10 pages)` =
 `0xde500000 − 0x8080A000` ≈ **1.47 GB**, versus 911a's ~1015 MB, 911d's ~55.9 MB and the 16 MB arms'
 7.96 MB.
@@ -452,7 +452,7 @@ PHYSICAL-MEMORY-CEILING arm**. NO press. The payload was then built with
 consumes the entry image and the generated `xnu_arm_entry.h`.
 
 **The press reads ONE decisive cell.** `xnu_entry_args_memSize` must read **`0x5e500000`** and the
-pmap's `virtual_space_start` must read **`0xe0000000`** (where every arm through 911a reads
+pmap's `virtual_space_start` must read **`0xde800000`** (where every arm through 911a reads
 `0xc0000000`); `topOfKernelData` must **not** have moved. The refusal is first: if `memSize` still
 reads `0x04000000` the window never reached `xnu_entry_build_args`; if it reads `0x40000000` the
 *window* moved but the *ceiling* did not, and the vstart stays `0xc0000000`. The discriminator: the
