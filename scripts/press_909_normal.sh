@@ -27,6 +27,19 @@
 # `claim_descriptor_guard_is_a_real_predicate` plus five mutations in `tools/test_resident_guard.py`.
 # The fix and the guard are this arm; the press of arm 3 is still owed.
 #
+# WHY ARM 3'S FIX IS FOLDED INTO ARM 4, AND WHAT ARM 4 ADDS. Arm 3 was built and parked but NEVER
+# pressed, so arm 4 keeps its watchdog fallback unchanged (`xnu_live_wdt_via`) and adds the second
+# question the same press can answer: **where the run's 5th idle pass dies.** Arm-2's own log has
+# `xnu_live_idlestack_calls=0x5` (the idle *enter* wrapper's count, published unconditionally with
+# the D-cache on, so it is the true count) against `xnu_live_slot_post_calls=0x4` (the *exit*
+# wrapper's, published on `entry_slot_publish`'s schedule). The boot entered a 5th idle pass and never
+# left it - and on arm 2/3 that pass is invisible to every scheduled site, because 5 is neither `<= 4`
+# nor a power of two. Arm 4's only source change is `STAGE90_SLOT_LIVE_MAX 4u -> 8u`, so the exit
+# wrapper's own sites now publish count 5. **This script names the arm-4 arm `armed-storage-4f4111fa`**
+# (the entry bin's own hash prefix), whose press answers both: `xnu_live_wdt_via`/`_countdown` for the
+# watchdog, and `xnu_live_slot_post_calls` (=5 the 5th pass reached the exit tail and died in the
+# pcx/pet gap; =4 it died at or before the real `platform_cache_idle_exit`).
+#
 # THE HAZARD, AND WHY 909 IS THE FIRST RUNG THAT CAN STRAND THE PHONE. A resident XNU runs no adbd
 # and does not re-init USB, so once it is up the ONLY exit is a physical press. Nothing here writes
 # p1/p2/p3/p7, the GPT, or p20; `fastboot boot` still writes nothing. The escape is unchanged and
@@ -49,7 +62,7 @@ set -Eeuo pipefail
 SERIAL="4a2fe00b"
 FORBIDDEN_SERIAL="33e80afe"
 CARGO="out/stage90/stage90-qcdt.img"
-EXPECT_ARM="armed-storage-a703257d"
+EXPECT_ARM="armed-storage-4f4111fa"
 CAPTURE="out/stage90/captures/909-resident-$(date -u '+%Y%m%d-%H%M%S')-last_kmsg.txt"
 CALL_TIMEOUT=120
 DO_STAGE=1
@@ -114,7 +127,7 @@ fi
 # --- 2. the bytes in out/ are the arm this press names, checked BEFORE anything is written -------
 # The staging step below writes whatever is in out/. `verify_press_ready.sh` is the project's own
 # answer to "are these bytes the recorded arm, and does the gate accept the tree" - five checks,
-# and it refuses if the live set is not `armed-storage-a703257d` (the arm this script names). It is
+# and it refuses if the live set is not `armed-storage-4f4111fa` (the arm this script names). It is
 # run here so a stale out/ is caught before p19 is overwritten, not after.
 if (( ! DRY_RUN )); then
     bash tools/verify_press_ready.sh >/tmp/press_909_readiness.log 2>&1 \

@@ -469,3 +469,49 @@ there is no two-copy pin (`mi4-entry-group-page-move-pins-two-copies`). The payl
 Arm 3 is parked as `armed-storage-a703257d` (11 members, all byte-identical to `out/`, `SHA256SUMS.txt`
 560 B), recorded in `records/revert-set.txt`, `verify_press_ready.sh` **5/5**, `make check` exit 0.
 It is **built and parked, NOT pressed** — the press is the operator's.
+
+## R12 — the stop is in the 5th idle pass, and the publisher had sampled it away
+
+Arm-2's log, read more carefully than R10 read it, carries two counters that disagree:
+
+| key | value | how it publishes |
+|-----|-------|------------------|
+| `xnu_live_idlestack_calls` | **5** | unconditional, at `entry_trace.c:2190`, with the **D-cache on** (the enter wrapper's own top) |
+| `xnu_live_slot_post_calls` | **4** | `entry_slot_publish`'s schedule (`<= 4`, then powers of two) |
+
+`idlestack_calls` is taken **before** `__real_platform_cache_idle_enter` — with the cache on, in the
+wrapper's own frame — so it is the true count and cannot be a stale read. `slot_post_calls` is the
+**exit** wrapper's, two lines before the pet. So the boot **entered the 5th idle pass and never came
+out of it**, and on arms 2/3 that fifth pass is invisible to *every* scheduled site, because
+`STAGE90_SLOT_LIVE_MAX` is 4 and 5 is neither `<= 4` nor a power of two. The counter is right; the
+schedule sampled away the one call the whole question is about — the same class of miss 520's ninth,
+fatal abort was, where `STAGE90_SLOT_AB_MAX` was widened for exactly this reason.
+
+**The corroborating traps (why R10 could not see it).** `xnu_live_wfi_seq` and
+`xnu_live_pce_after_seq` both publish the value **1 four and five times** — because they are
+incremented *inside* the cache-off window (`entry_note_wfi`/`entry_note_pce_after` run between the
+real enter and exit), so their stored count is a stale DRAM read; the source says so. And
+`xnu_live_pcx_entered` reads 4 — but `entry_note_pce` also publishes only on the powers of two, so 4
+is the highest power of two ≤ the true 5. The single-boot check holds: one `xnu_entry_status` line,
+one live header — this is two counters of **one** boot, not two boots.
+
+**Arm 4 — `armed-storage-4f4111fa` (built, parked, NOT pressed).** The only source change from arm 3
+is `STAGE90_SLOT_LIVE_MAX 4u -> 8u`, so the exit wrapper's own sites now publish count **5**. The
+`pcx` gate is deliberately left at `n == 1 || power-of-two`, so `slot_post_calls=5` beside a
+`pcx_seq=4` is itself the sub-gap's reading. Arm 3 was never pressed, so arm 4 keeps its watchdog
+fallback unchanged and one press answers both questions:
+
+- `xnu_live_slot_post_calls = 5` → the 5th pass reached the exit tail and died in the **2-instruction
+  pcx/pet gap** (a `bl` to `entry_note_pcx` or to `entry_wdt_pet`).
+- `xnu_live_slot_post_calls = 4` → it died **at or before** the real `platform_cache_idle_exit` — the
+  known `pop {fp, pc}` frontier.
+- `xnu_live_wdt_via = 2` and `xnu_live_wdt_map = 0` (the install still refuses) with
+  `xnu_live_wdt_countdown` — rising toward `0x0c7fb5` ⇒ the watchdog is counting and will bite;
+  frozen ⇒ the register is dead and the stop is purely in-kernel.
+
+**Nothing moved that must not.** The switch set is identical to arm 3 (only the artifact hash differs,
+so no `STAGE90_ENTRY_ARM_CHANGE`); the payload record is **byte-identical** to 908/arm-2/arm-3
+(`6c2b6038…`); the entry bin is the same 6498612 bytes and the seam check passed, so `STAGE90_XNU_SEAM_LR`
+is still `0x8004d2dc` (no entry-group page move). Parked as `armed-storage-4f4111fa` (11 members,
+`SHA256SUMS.txt` 560 B), recorded in `records/revert-set.txt`, `verify_press_ready.sh` **5/5**,
+`make check` exit 0.

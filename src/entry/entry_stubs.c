@@ -6244,7 +6244,18 @@ void entry_idle_stack_note(void)
  * state `Idle_context` stores and `Load_context` restores is eleven words whose tenth and eleventh are
  * `sp` and `lr` (`cswitch.s`, `stmia r3!, {r4..ip, sp, lr}` after `add r3, r3, #16`).
  */
-#define STAGE90_SLOT_LIVE_MAX   4u
+/* **909 arm 4: the bound is 8, not 4, and the reason is a reading 909's own log already carries.**
+ * Arm 2/3's log has `xnu_live_idlestack_calls=0x00000005` (the idle *enter* wrapper's own count,
+ * published unconditionally, so it is the true count) against `xnu_live_slot_post_calls=0x00000004`
+ * (the exit wrapper's, published on this schedule). The boot **entered the 5th idle pass and never
+ * came out of it**, and on arm 2/3 that fifth pass is invisible to every scheduled site: `5` is
+ * neither `<= 4` nor a power of two. The counter is right; the schedule sampled the one call that
+ * matters - the same class of miss 520's ninth, fatal abort was, where `STAGE90_SLOT_AB_MAX` above was
+ * widened for exactly this reason. Widening to 8 makes the exit wrapper's own sites publish count 5,
+ * which splits "died in the 5th pass before the exit wrapper's tail" (the pet, at 4) from "died in the
+ * 5th pass's post/pcx" (5). The `pcx` gate is deliberately left at `n==1 || power-of-two` so a
+ * `slot_post_calls` of 5 beside a `pcx_seq` of 4 is itself the sub-gap's reading. */
+#define STAGE90_SLOT_LIVE_MAX   8u
 /* **The abort site's own bound, and 520's run is why it is a different rule.** A geometric subsample
  * (`<= 4` then the powers of two) is right for a site in a loop that makes thousands of passes and wrong
  * for a site whose interesting reading is the *last* one: 520's fatal abort was `seq 9`, which is neither
