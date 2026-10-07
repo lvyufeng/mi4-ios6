@@ -774,6 +774,61 @@ if [[ $HDD_WRITE -eq 1 && $HFS_ROOT_RW -ne 1 ]]; then
     echo "          then rebuild this entry image under the write arm." >&2
     exit 1
 fi
+# **909: the RESIDENCE arm, and the first switch that REMOVES this image's own ending.** 908 proved a
+# plain power-on enters the OS; it ended because the image ended it - the deliberate deadline/pass-count
+# called `entry_seam_end_run`, whose first store (`RESTART_REASON` at `0x0fa0065c`) faults under XNU's
+# post-jump mappings. `STAGE90_XNU_RESIDENT=1` is that ending taken OUT of the image and the armed SoC
+# watchdog PETTED (never disarmed - a pet fails readable at the pet site, a disarm loses the one net that
+# rescues a hung XNU; the arm site `hw_watchdog.c:231` and the residence doc `experiment-909` state why).
+# It is a SEPARATE switch from the ending switches and not a third value on any of them, for 675's reason:
+# `POST_END_TICKS` counts ticks and `POST_END_RUN` counts passes, and "no ending at all" is a different
+# question from either. Three refusals make the property structural rather than a comment:
+RESIDENT=${STAGE90_XNU_RESIDENT:-0}
+case "$RESIDENT" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_RESIDENT='$RESIDENT' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $RESIDENT -eq 1 && $SEAM_POST_END_TICKS -ne 0 ]]; then
+    echo "REFUSING: STAGE90_XNU_RESIDENT=1 with STAGE90_XNU_POST_END_TICKS=$SEAM_POST_END_TICKS." >&2
+    echo "          The residence arm's whole point is that the image carries NO ending; a nonzero" >&2
+    echo "          POST_END_TICKS is the deliberate ending still in the image, so the run would end at" >&2
+    echo "          the deadline while the record named the resident arm - a residence claim about a" >&2
+    echo "          boot that was told to stop (909). Set POST_END_TICKS=0." >&2
+    exit 1
+fi
+if [[ $RESIDENT -eq 1 && $SEAM_POST_END_RUN -ne 0 ]]; then
+    echo "REFUSING: STAGE90_XNU_RESIDENT=1 with STAGE90_XNU_POST_END_RUN=$SEAM_POST_END_RUN - that is" >&2
+    echo "          the same ending reached by a pass count instead of a clock, and residence needs the" >&2
+    echo "          ending gone whatever reaches it (909). Set POST_END_RUN=0." >&2
+    exit 1
+fi
+if [[ $RESIDENT -eq 1 && $SEAM_END_RUN -ne 0 ]]; then
+    echo "REFUSING: STAGE90_XNU_RESIDENT=1 with STAGE90_XNU_SEAM_END_RUN=$SEAM_END_RUN - the seam's own" >&2
+    echo "          ending is the third way into the same store, before the pop; residence needs all three" >&2
+    echo "          off (909). Set SEAM_END_RUN=0." >&2
+    exit 1
+fi
+# The watchdog is the PAYLOAD's switch, read here only so the residence arm cannot be built against a
+# payload with no net to pet. It defaults to ARMED (`src/stage90.h`), and a residence arm on a
+# watchdog-disabled payload would be a run with neither an ending NOR a watchdog - the one combination
+# this project must never ship ([[mi4-xnu-reboot-path-cannot-reset]]).
+HW_WATCHDOG=${STAGE90_HW_WATCHDOG:-1}
+if [[ $RESIDENT -eq 1 && $HW_WATCHDOG -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_RESIDENT=1 with STAGE90_HW_WATCHDOG=$HW_WATCHDOG." >&2
+    echo "          Residence removes the image's own ending, so the armed SoC watchdog is the ONLY net" >&2
+    echo "          left; the pet this arm adds resets the countdown, it does not replace the net. A" >&2
+    echo "          resident arm on a watchdog-disabled payload is a run with nothing that can reset a" >&2
+    echo "          hung XNU (909). Leave STAGE90_HW_WATCHDOG at its default (ARMED)." >&2
+    exit 1
+fi
+if [[ $RESIDENT -eq 1 && $ENTRY_TRACE -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_RESIDENT=1 with STAGE90_ENTRY_TRACE=$ENTRY_TRACE." >&2
+    echo "          The pet lives in the exit wrapper's tail (`__wrap_platform_cache_idle_exit`'s own" >&2
+    echo "          `entry_post_clock`), and that wrapper is entry_trace.c's - without the trace there is" >&2
+    echo "          no site that runs on the idle passes and nothing petted (909)." >&2
+    exit 1
+fi
 # **The allowed rungs are the LADDER'S OWN BOUND, read out of the source it guards - not a list here.**
 # Until 732 this was a hand-typed `case` naming `0` through `13`, and raising the ladder to 14 in
 # `entry_storage.c` therefore did not raise it here: the two readings of one quantity disagreed, and the
@@ -951,6 +1006,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_ROOT_FROM_CARD
                 STAGE90_XNU_HDD_WRITE
                 STAGE90_XNU_HFS_ROOT_RW
+                STAGE90_XNU_RESIDENT
                 STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_XNU_IDLE_NO_SLEEP)
 #
@@ -1053,6 +1109,7 @@ do
         STAGE90_XNU_ROOT_FROM_CARD)   _v=$ROOT_FROM_CARD ;;
         STAGE90_XNU_HDD_WRITE)        _v=$HDD_WRITE ;;
         STAGE90_XNU_HFS_ROOT_RW)      _v=$HFS_ROOT_RW ;;
+        STAGE90_XNU_RESIDENT)         _v=$RESIDENT ;;
         STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
@@ -1400,6 +1457,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_SEAM_END_RUN="$SEAM_END_RUN" \
         -DSTAGE90_XNU_POST_END_RUN="$SEAM_POST_END_RUN" \
         -DSTAGE90_XNU_POST_END_TICKS="$SEAM_POST_END_TICKS" \
+        -DSTAGE90_XNU_RESIDENT="$RESIDENT" \
         -DSTAGE90_XNU_STORAGE_PROBE="$STORAGE_PROBE" \
         -DSTAGE90_XNU_MOUNT="$MOUNT" \
         -DSTAGE90_XNU_ROOT_FROM_CARD="$ROOT_FROM_CARD" \
@@ -36645,6 +36703,13 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # `hfs_mountroot` with, recorded so a record that names the write arm also names the clear that makes
     # it reachable (the linked image is checked against this below, both directions).
     echo "STAGE90_XNU_HFS_ROOT_RW=$HFS_ROOT_RW"
+    # **909's residence arm, as the RESOLVED `$RESIDENT`** - the switch that takes the image's own ending
+    # OUT and adds the watchdog pet. It is an arm key for MOUNT's reason and a sharper one: the same
+    # record that names the other switches describes a DIFFERENT image when this is 1 (no ending, a pet in
+    # the wrapper's tail), and a record that omitted it would read a resident boot's countdown trace as a
+    # reading an ending image cannot produce. Written as the RESOLVED `$RESIDENT`, not
+    # `${STAGE90_XNU_RESIDENT}`, for 882's reason.
+    echo "STAGE90_XNU_RESIDENT=$RESIDENT"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways
