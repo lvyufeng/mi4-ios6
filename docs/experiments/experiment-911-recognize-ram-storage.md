@@ -462,3 +462,84 @@ memory and 911c is worth the port; **unmoved** says R10's cache-window reading s
 **911b supersedes 911a and 911d for the next press:** it carries 911d's raw card unit AND the raised
 ceiling + window, so one press answers the ceiling, the residence wall, and the card capacity together.
 The goal's **full 3 GB is still NOT met** — that is 911c.
+
+## 10. 911c DESIGNED (2026-10-07) — the bank layout as a MEASUREMENT, not an inference (no arm built)
+
+**The finding that reshaped 911c.** A repo-wide sweep (including `external/`, which plain `grep -rIn`
+does not descend) found that **the repository contains NO base/size for the low bank at all.** The only
+concrete bank it holds is the high bank `[0x80000000, 0xde700000)` (`src/stage90.h:29-30`,
+`RAM_PHYS_BASE`/`RAM_TOP`); every "low bank" reference (§2, §5, `verify_press_ready.sh`) is an
+*inference* from "3 GB total minus ~1.5 GB high", and the `80000000-de6fffff : System RAM` string is
+**prose in `docs/history/stage0-payload-plan.md:53` and `stage1-boot-wrapper-plan.md:94`**, not a capture
+(the `out/` capture it came from is gitignored, `records/baseline-readings.txt:24-27`). So 911c **cannot
+be designed against an assumed low-bank layout** — its first act must be to *measure* it.
+
+**Where the measurement is — and it is in-repo.** The authoritative bank source is the Qualcomm SMEM
+**RAM-partition table**:
+- Structure: `smem_ram_ptable { magic[2]; version; reserved1; len; parts[32]; buf; }` with
+  `_SMEM_RAM_PTABLE_MAGIC_1 = 0x9DA5E0A8`, `_SMEM_RAM_PTABLE_MAGIC_2 = 0xAF9EC4E2`, each part
+  `smem_ram_ptn { char name[16]; u32 start; u32 size; u32 attr; u32 category; u32 domain; u32 type;
+  u32 r2..r5; }` — `external/android_kernel_xiaomi_cancro/arch/arm/mach-msm/memory_topology.c:28-58`.
+- The kernel reads it via `smem_alloc(SMEM_USABLE_RAM_PARTITION_TABLE, ...)` (`memory_topology.c:131`),
+  which resolves a TOC entry: `struct smem_shared` puts `heap_info` at `0xD0` and `heap_toc[512]` right
+  after (`smem_private.h:22-49`), each `smem_heap_entry { u32 allocated; u32 offset; u32 size; u32 }`.
+  **The ptable is at `SMEM + 0xD0 + id*16 + (toc[id].offset & 0xFFFFF)`** — but 911c does **not** need
+  `id`: it can **scan every TOC slot and validate by magic**, which is more robust than computing a
+  deep-enum index (`SMEM_USABLE_RAM_PARTITION_TABLE = SMEM_SMD_FIFO_BASE_ID + 64`,
+  `msm_smem.h:126-128`).
+- SMEM is the SoC shared RAM at PA **`0x0fa00000`, size `0x200000`** (`msm_iomap.h:92`,
+  `msm_iomap-8974.h:26` `MSM8974_MSM_SHARED_RAM_PHYS`; DT `soc/qcom,smem@fa00000/reg = <0x0fa00000
+  0x200000>`; `src/stage90.h:16-25`, `src/xnu_arm_vm_init_full_pmap.c:463-475`). **`0x0fa00000` is the
+  project's `MSM_IMEM_BASE_PHYS` — the address the epilogue's `RESTART_REASON` store targets.**
+
+**How the entry image reaches a LOW physical address (the empirical question, now answered).** The entry
+runs on **XNU's** page tables with **TTBCR.N = 2** (`osfmk/arm/start.s:75-76`,
+`TTBCR_N_1GB_TTB0`), so VA `< 0x40000000` walks TTBR0 and `>= 0x40000000` walks TTBR1; on this device
+**TTBR0 == TTBR1** (live `xnu_live_ttbr0 = xnu_live_ttbr1 = 0x8080004a`), which is why the entry's
+`entry_mmio_section` — whose `entry_live_ttb_base` returns TTBR1 for `n != 0` (`entry_stubs.c:2186`)
+— has worked for every high MMIO it maps. `entry_mmio_section`/`entry_section_install` have **no VA
+guard** (`index = va >> 20`, `entry_stubs.c:2113`; the only guard is on the *table base* `>= 0x80000000`,
+`:2245`), so a low VA installs into the same live table. Two mappings are available:
+- **the high alias `0xe0000000 → 0x0fa00000`** (index `0xe00`, free, above the `0xde500000` window) — the
+  ROBUST choice, unambiguous under a TTBR0/TTBR1 split; reads SMEM as a Strongly-ordered section
+  (`g_live_attr = 0xc`), which is what `entry_gic.c:393`/`entry_usb.c:149` already do; or
+- **the low identity `0x0fa00000 → 0x0fa00000`** (index `0xfa`, free — XNU clears entries
+  `[2048, 3557)` only) — which **additionally un-faults the epilogue's `RESTART_REASON` store**, closing
+  the owed clean self-end (`mi4-906-return-is-a-watchdog-bite`).
+
+**The `RESTART_REASON` fault is the same door.** The epilogue's store to `0x0fa0065c` faults today
+(section fault `fsr 0x805`, `far = 0x0fa0065c`, `docs/experiments/experiment-745-*.md:76`) **because
+nothing maps the `0x0fa` megabyte in the entry's context** — the payload maps it (`mmu.c:5458`) but the
+payload's table is gone once XNU's `start.s` overwrites TTBR0/1/TTBCR. **So one mapping serves two
+purposes**: the bank-layout read AND the run's ending.
+
+**The rung, stated as a buildable plan (NOT built here).**
+1. A new `src/entry/entry_smem.c` whose `entry_smem_probe()` (a) calls
+   `entry_mmio_section(0xe0000000u, 0x0fa00000u, ...)` and refuses if it returns 0 (`g_live_state != 1`
+   or a table below the window), (b) walks the TOC slots at `SMEM+0xD0 + i*16` reading `{allocated,
+   offset, size}`, (c) validates a candidate ptable by `magic[0]==0x9DA5E0A8 && magic[1]==0xAF9EC4E2`,
+   (d) walks `parts[]` (stride 48 B) for `size != 0` and publishes each bank as
+   `xnu_live_smem_bankN_start`/`_size` plus a count `xnu_live_smem_banks` and
+   `xnu_live_smem_ptable_found`. The **sum of the bank sizes is the device's real total** — the number
+   the goal's 「3GB内存」 names, measured rather than assumed.
+2. Hook `entry_smem_probe()` into `__wrap_Idle_load_context` beside the USB probes
+   (`entry_trace.c:2148-2160`) — the one site every idle pass reaches on every arm (`IDLE_NO_SLEEP`
+   makes the exit wrapper unreachable; the 910a dead-code lesson, `mi4-a-lower-rungs-side-effect-
+   poisoned-the-rung-above`) — and **make it a build refusal** when the switch is on and the call is not
+   from that symbol.
+3. A `STAGE90_XNU_SMEM_PROBE` arm key (like `STAGE90_XNU_USB_PROBE`), threaded through `build_entry.sh`
+   (`ENTRY_ARM_KEYS`, the compile line, the link list, the record writer) and
+   `scripts/preflight_boot_check.sh`; the witness (an `entry_smem.c`-defined symbol in the linked `.text`)
+   lets the build tell a probe that ran from one compiled out (533's defect / `mi4-a-claim-in-a-comment-
+   is-not-a-check`).
+4. Optionally map the **low identity** too, so the same run closes the `RESTART_REASON` self-end.
+
+**What 911c is NOT.** It does **not** make XNU *own* the low bank: XNU's physmap is single-span
+(`phystokv(a) = a − gPhysBase + gVirtBase`, `vm_param.h:196`; `vm_first_phys = gPhysBase`,
+`pmap.c:2859`; the tables are sized by `atop(mem_size)`, `:2829-2834`), so 3 GB cannot be linearly
+physmapped from `virtBase = 0x80000000` (PA `0xC0000000` → VA `0x140000000`, past `VM_MAX_KERNEL_ADDRESS
+= 0xFFFEFFFF`). Recognising the full 3 GB in the kernel needs a **region-list / high-physmap port**;
+**911c's job is to MEASURE the layout that port must be designed against** — and, per the goal's wording
+(「正确识别」), to make the device's true banks *reported*. The port proper is 911e.
+
+**Status: DESIGNED, grounded in the repo's own evidence, NOT built.** No arm, no key, no press.
