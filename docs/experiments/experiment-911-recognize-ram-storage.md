@@ -41,12 +41,13 @@ installs, and `/defaults hw.memsize = 0x5e500000` (`src/stage90_main.c:868`) / `
 {0x80000000, 0x5e500000}` (`:49-51`) describe the span **the payload's own RAM console sits under**
 (device-tree properties), not the kernel's `memSize`.
 
-**And this port does not run stock `arm_vm_init`.** The live arm-vm path is
-`src/xnu_arm_vm_init_full_pmap.c`, which **asserts** `args->memSize == (RAM_CONSOLE_BASE - RAM_PHYS_BASE)`
-and `physBase == STAGE90_BASE` (`:294-296`) — i.e. it is written for the *payload's own* 1.47 GB
-boot_args, while the *entry* copy is 16 MB. **That mismatch is unresolved here and is step 0 of the RAM
-work** (see §3): the live kernel is handed 16 MB by a builder that disagrees with the module meant to
-consume it.
+**And the payload's own dry-run chain uses the *first* copy, not the second — by design, no mismatch.**
+`src/xnu_arm_vm_init_full_pmap.c:293-296` **asserts** `args->physBase == STAGE90_BASE` (`= 0x8000`!) and
+`args->memSize == (RAM_CONSOLE_BASE - RAM_PHYS_BASE)` (`= 0x5e500000`). Those are exactly the values of
+`src/boot_args.c`'s `build_boot_args` — so `full_pmap` consumes the **payload's own** boot_args (via the
+loader → `stage90_xnu_start_stub` → `xnu_entry_stub.c:209`), a separate object from the entry copy. The
+two copies are for two consumers and are internally consistent; **what XNU itself reads is the 16 MB
+entry copy**, because `start.s` builds the section map from the boot_args pointer the jump was given (§3).
 
 Neither the live 16 MB nor the 93 MB is 3 GB. And (§3) **the section-map builder is `start.s`, not
 `arm_vm_init.c`** — so which of these numbers reaches `hw.memsize` turns on what `start.s` does with
@@ -124,9 +125,10 @@ generated header (`xnu_arm_entry.h:7`), with `topOfKernelData` at `+8388608` (`:
 maps the whole 16 MB the entry image, its BSS, the device tree and the boot_args tables live inside,
 and **nothing above `0x81000000` is mapped at all**.
 
-**Consequence, stated plainly:** the RAM clause cannot be met by the payload alone. Step 0 is resolving
-*which* `memSize` is live and making the 16 MB entry window and the 1.47 GB `full_pmap` module agree.
-Then it needs (a) the mapped span raised to the real high bank (≤1 GiB without touching `MEM_SIZE_MAX`),
+**Consequence, stated plainly:** the RAM clause cannot be met by the payload alone. Step 0 is confirming
+that the value edited is the **16 MB entry copy** XNU's `start.s` reads (the `full_pmap` module's
+`0x5e500000` is the payload's *own* boot_args, a separate consumer — §1). Then it needs (a) the mapped
+span raised to the real high bank (≤1 GiB without touching `MEM_SIZE_MAX`),
 and (b) either the holes registered as I/O so one span covers a *chosen* usable window ≤1 GiB, or a
 pmap/VA change that meshes spans; and (c) `MEM_SIZE_MAX` raised if the reported number is to exceed
 1 GiB and (more importantly) a **high physmap window** if 3 GB is to be *mapped* rather than merely
@@ -179,13 +181,14 @@ device behaviour.
 the section map is `memSize`-driven and covers exactly that (§3). Three ceilings gate the *number*:
 the 16 MB window itself, `MEM_SIZE_MAX = 1 GiB`, and the 32-bit kernel VA.
 
-- **911a0 — reconcile the three `memSize` definitions (step 0, must come first).** Today the live
-  `xnu_entry_build_args` hands XNU **16 MB** while `src/xnu_arm_vm_init_full_pmap.c:294-296` **asserts**
-  `memSize == 0x5e500000`. Either that assert never runs on the live path, or the two disagree in a way
-  the log already knows. Before any number is raised, one pass must say **which `memSize` XNU's
-  `start.s` and `arm_vm_init` actually consume** and make the definitions one
-  ([[mi4-one-value-two-definitions]]). Its verdict cell is the existing `xnu_entry_args_memSize` plus
-  the `full_pmap` assert's status.
+- **911a0 — change the *right* one of the three `memSize` definitions (step 0, do this first).** The
+  port has three size numbers (§1); only `xnu_entry_build_args`'s **16 MB** reaches XNU, and the
+  `full_pmap` assert (`:293-296`, `physBase == 0x8000`, `memSize == 0x5e500000`) is the **other** copy,
+  consumed by the payload's dry-run chain, correctly. So 911a0 is not a reconciliation but a discipline
+  check: **edit the entry copy's `memSize` and nothing else**, and confirm from the linked image that the
+  value XNU's `start.s` reads is that one ([[mi4-one-value-two-definitions]] — three definitions is
+  exactly how a change lands on a copy nothing reads). Its verdict cell is the live
+  `xnu_entry_args_memSize` (`xnu_entry_jump.c:172`).
 - **911a — name the high bank (the real, testable first rung).** After 911a0, set the live
   `boot_args.memSize` to the high span's size. Two candidate values, and the honest one matters:
   - the **payload's own extent**, `0xde500000 - 0x80000000 = 0x5e500000` (1510 MiB) — the span whose
@@ -240,10 +243,10 @@ large enough to hold the whole L1 — the builder's loops simply stop at the ima
 windows, never at `0xde500000`.
 
 **The clause's honest verdict (revised 2026-10-07 with the traces in §1/§3/§5-caveat):** the live port
-tells XNU it has **16 MB** and maps exactly those 16 MB; it does **not** run stock `arm_vm_init` (the
-port replaced it with `full_pmap`, which asserts a different `memSize`); and both the XNU section map and
-the payload identity map stop at the entry window, nowhere near the 1.5 GB high bank. So **911a0 must
-come first** (one meaning for `memSize`), then the map-extension work in **911a**
+tells XNU it has **16 MB** and maps exactly those 16 MB; `full_pmap`'s `0x5e500000` is the payload's own
+boot_args, not the copy XNU reads (§1); and both the XNU section map and the payload identity map stop at
+the entry window, nowhere near the 1.5 GB high bank. So **911a0 comes first** (edit the entry copy,
+prove from the linked image that is the one XNU reads), then the map-extension work in **911a**
 (payload identity map **and** the XNU window), then **911b** (`MEM_SIZE_MAX`), then **911c** (the
 literal 「3GB内存」 — a pmap region list or a high physmap window, a port comparable to the ARM bring-up).
 911a/911b remain *buildable* and are payload-plus-one-macro edits; 911c is the port. The storage half
