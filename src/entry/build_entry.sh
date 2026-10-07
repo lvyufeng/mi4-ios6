@@ -764,6 +764,29 @@ case "$HFS_ROOT_RW" in
     *) echo "REFUSING: STAGE90_XNU_HFS_ROOT_RW='$HFS_ROOT_RW' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **911d: the CARD-CAPACITY arm - the 「16GB/32GB存储」 clause, and it is ADDITIVE.** With
+# `STAGE90_XNU_CARD_TOTAL=1` the root-media module registers a FOURTH unit (the raw whole-card unit,
+# `ST_MEDIA_CARD_RAW = 3`) whose `DKIOCGETBLOCKCOUNT` is the CARD's real sector count (EXT_CSD SEC_CNT,
+# read by the ladder at `entry_storage.c:7035`) rather than the SELECTED PARTITION's extent, and whose
+# strategy addresses RAW medium LBAs (base 0, so `DKIOCGETBLOCKCOUNT` = the card and a read of medium
+# LBA 1 returns the GPT). It REQUIRES the card strategy (its bytes come through the ladder's door) but
+# NOT the root arm: unlike HDD_WRITE it does not make the root writable, and its unit is a READING of the
+# medium's size that must be obtainable WHETHER OR NOT the card is the root - so it is required only of
+# EMMC_STRATEGY, and it does NOT move the mount rung (unit 2 is untouched; this is unit 3 beside it).
+CARD_TOTAL=${STAGE90_XNU_CARD_TOTAL:-0}
+case "$CARD_TOTAL" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_CARD_TOTAL='$CARD_TOTAL' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $CARD_TOTAL -eq 1 && $EMMC_STRATEGY -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_CARD_TOTAL=1 needs STAGE90_XNU_EMMC_STRATEGY=1." >&2
+    echo "          The raw whole-card unit is served through the card ladder's door (block N of the" >&2
+    echo "          medium is LBA N through entry_storage_driver_read), and it reports the capacity the" >&2
+    echo "          ladder read from EXT_CSD. Without the card strategy there is no door and no SEC_CNT," >&2
+    echo "          so the unit would report a size it cannot address. Build both together." >&2
+    exit 1
+fi
 if [[ $HDD_WRITE -eq 1 && $HFS_ROOT_RW -ne 1 ]]; then
     echo "REFUSING: STAGE90_XNU_HDD_WRITE=1 needs STAGE90_XNU_HFS_ROOT_RW=1." >&2
     echo "          The write rung's whole point is that the HFS+ root mounts READ-WRITE; the one edit" >&2
@@ -1082,6 +1105,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_ROOT_FROM_CARD
                 STAGE90_XNU_HDD_WRITE
                 STAGE90_XNU_HFS_ROOT_RW
+                STAGE90_XNU_CARD_TOTAL
                 STAGE90_XNU_RESIDENT
                 STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_XNU_IDLE_NO_SLEEP
@@ -1191,6 +1215,7 @@ do
         STAGE90_XNU_ROOT_FROM_CARD)   _v=$ROOT_FROM_CARD ;;
         STAGE90_XNU_HDD_WRITE)        _v=$HDD_WRITE ;;
         STAGE90_XNU_HFS_ROOT_RW)      _v=$HFS_ROOT_RW ;;
+        STAGE90_XNU_CARD_TOTAL)       _v=$CARD_TOTAL ;;
         STAGE90_XNU_RESIDENT)         _v=$RESIDENT ;;
         STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
@@ -1604,6 +1629,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_STORAGE_PROBE="$STORAGE_PROBE" \
         -DSTAGE90_XNU_MOUNT="$MOUNT" \
         -DSTAGE90_XNU_ROOT_FROM_CARD="$ROOT_FROM_CARD" \
+        -DSTAGE90_XNU_CARD_TOTAL="$CARD_TOTAL" \
         -DSTAGE90_XNU_IDLE_NO_SLEEP="$IDLE_NO_SLEEP" \
         -DSTAGE90_XNU_USB_PROBE="$USB_PROBE" \
         -DSTAGE90_XNU_USB_DEV="$USB_DEV" \
@@ -27616,6 +27642,40 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     else
         say "  xnu_entry_905: the root-media module and this build agree about the WRITE arm (STAGE90_XNU_HDD_WRITE=$write_arm); every unit refuses a write with EROFS, as in 888"
     fi
+    # **911d: the CARD-CAPACITY arm, the same `nm` shape.** The module defines exactly one of
+    # `entry_root_media_card_total_arm_on` / `..._off`, so the OBJECT says whether it registers the raw
+    # whole-card unit (4 units, `ST_MEDIA_CARD_RAW = 3`). A build whose record says CARD_TOTAL=1 while
+    # the module compiled the arm OFF would promise a card-capacity unit that is not there - the same
+    # one-object-two-scripts defect `xnu_entry_905` guards for the write arm.
+    if arm-none-eabi-nm "$STAGE90_ROOT_MEDIA_OBJ" 2>/dev/null | grep -q 'T entry_root_media_card_total_arm_on'; then
+        ctotal_arm=1
+    elif arm-none-eabi-nm "$STAGE90_ROOT_MEDIA_OBJ" 2>/dev/null | grep -q 'T entry_root_media_card_total_arm_off'; then
+        ctotal_arm=0
+    else
+        say "REFUSING: $STAGE90_ROOT_MEDIA_OBJ carries neither entry_root_media_card_total_arm_on nor" >&2
+        say "          entry_root_media_card_total_arm_off, so this build cannot tell whether the module" >&2
+        say "          was compiled for the card-capacity arm. The module defines exactly one of the two;" >&2
+        say "          their absence means the object predates 911d. Rebuild it:" >&2
+        say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+        say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_CARD_TOTAL=$CARD_TOTAL' \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    fi
+    if [[ $ctotal_arm != "$CARD_TOTAL" ]]; then
+        say "REFUSING: the platform block compiled stage90_root_media.c with STAGE90_XNU_CARD_TOTAL=" >&2
+        say "          '$ctotal_arm' and this build's STAGE90_XNU_CARD_TOTAL is '$CARD_TOTAL'." >&2
+        say "          One object, two scripts, and the switch has to reach both. Rebuild the module with" >&2
+        say "          the same value this script was given:" >&2
+        say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+        say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_CARD_TOTAL=$CARD_TOTAL' \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    fi
+    if [[ $CARD_TOTAL -eq 1 ]]; then
+        say "  xnu_entry_911d: the root-media module and this build agree about the CARD-CAPACITY arm (STAGE90_XNU_CARD_TOTAL=$ctotal_arm); the module registers the raw whole-card unit (ST_MEDIA_CARD_RAW=3) whose block count is the card's EXT_CSD SEC_CNT, and the linked image is checked for entry_root_media_register_card_raw below"
+    else
+        say "  xnu_entry_911d: the root-media module and this build agree about the CARD-CAPACITY arm (STAGE90_XNU_CARD_TOTAL=$ctotal_arm); no raw whole-card unit is registered - the card unit (2) is the only card-backed device, as in 903"
+    fi
     # **The DOOR half of 888's check is the NEXT block's business, not this one's** - see the
     # `entry_storage_driver_read` clause the link block carries after `xnu_arm_entry.elf` exists. A
     # check placed HERE would read the PREVIOUS arm's elf (the link below has not run yet), which is
@@ -28549,6 +28609,53 @@ if [[ $ROOT_FROM_CARD -eq 1 ]]; then
         exit 1
     fi
     say "  xnu_entry_903: the card-root redirection is in the linked image - __wrap_mdevlookup (at $ml_addr) calls entry_root_media_register_card (T, 0x$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_root_media_register_card" { print $1 }')) and NOT entry_root_media_register, so the mount path's root device is the card unit"
+fi
+
+# **911d: THE RAW WHOLE-CARD UNIT, READ OUT OF THE LINKED IMAGE, BOTH DIRECTIONS.** Three readings,
+# each against the LINK rather than the source, in the shape 888/903/905 established:
+# (a) `entry_root_media_register_card_raw` is a defined (T) symbol (not a linker stub - a registration
+#     that resolves nowhere publishes a device nobody answers);
+# (b) `__wrap_mdevlookup`'s body CALLS it - the registration is in the image the run boots, not merely
+#     in the source ([[mi4-a-claim-in-a-comment-is-not-a-check]] on the line this arm turns on);
+# (c) `entry_storage_card_sectors` is a defined (T) symbol - the capacity the unit reports, resolved
+#     from the ladder in the SAME image. The NEGATIVE direction (CARD_TOTAL=0) is the small-else
+#     structural fact that neither symbol exists at all, which is `mi4-off-option-two-spellings`'
+#     build-refusal form: a record that says OFF while the linked image carries the unit is refused, and
+#     a record that says ON while the unit is absent is refused (a).
+if [[ $CARD_TOTAL -eq 1 ]]; then
+    if ! arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_root_media_register_card_raw" && $2 == "T" { found = 1 } END { exit(found ? 0 : 1) }'; then
+        say "FAIL: STAGE90_XNU_CARD_TOTAL=1 but entry_root_media_register_card_raw is not a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the raw whole-card unit would call a linker stub, so the card's capacity would be a number no device answers. The unit is compiled by STAGE90_XNU_CARD_TOTAL in stage90_root_media.c; build the module with it. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    if ! arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_storage_card_sectors" && $2 == "T" { found = 1 } END { exit(found ? 0 : 1) }'; then
+        say "FAIL: STAGE90_XNU_CARD_TOTAL=1 but entry_storage_card_sectors is not a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the raw unit's block count would come from a stub returning 0, so DKIOCGETBLOCKCOUNT would report zero blocks. The accessor is compiled by entry_storage.c; rebuild it. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    crt_addr=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "__wrap_mdevlookup" { print "0x" $1 }')
+    if [[ -z "$crt_addr" ]]; then
+        say "FAIL: STAGE90_XNU_CARD_TOTAL=1 but __wrap_mdevlookup is not in the linked image: the registration site this arm hangs off does not exist. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    crt_next=$(arm-none-eabi-nm -S -n "$OUT/xnu_arm_entry.elf" | awk -v a="$crt_addr" '
+        { n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bb[n] = ($2 != "") ? 1 : 0 }
+        BEGIN { t = strtonum(a) }
+        END { for (i = 1; i <= n; i++) if (bb[i] && t >= ba[i] && t < ba[i] + bs[i]) { print ba[i] + bs[i]; exit } }')
+    if [[ -z "$crt_next" ]]; then
+        say "FAIL: __wrap_mdevlookup (at $crt_addr) has no size in the linked image, so this clause cannot bound its body. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    crt_body=$(arm-none-eabi-objdump -d --start-address="$crt_addr" --stop-address="$crt_next" "$OUT/xnu_arm_entry.elf")
+    if ! grep -qE 'bl.*<entry_root_media_register_card_raw>' <<<"$crt_body"; then
+        say "FAIL: __wrap_mdevlookup (at $crt_addr) does not CALL entry_root_media_register_card_raw, so the raw whole-card unit is not registered even though STAGE90_XNU_CARD_TOTAL=1: the registration did not reach the linked body. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    say "  xnu_entry_911d: the raw whole-card unit is in the linked image - __wrap_mdevlookup (at $crt_addr) calls entry_root_media_register_card_raw (T, 0x$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_root_media_register_card_raw" { print $1 }')) and entry_storage_card_sectors (T, 0x$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_storage_card_sectors" { print $1 }')) is the capacity it reports, so DKIOCGETBLOCKCOUNT on the raw unit answers the card's EXT_CSD SEC_CNT"
+else
+    if arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_root_media_register_card_raw" { found = 1 } END { exit(found ? 0 : 1) }'; then
+        say "FAIL: STAGE90_XNU_CARD_TOTAL=0 (or unset) is RECORDED but the linked $OUT/xnu_arm_entry.elf DEFINES entry_root_media_register_card_raw: the image registers a fourth, raw whole-card unit while its record says the card-capacity arm is off, so an off arm is indistinguishable from an on one (mi4-off-option-two-spellings in both directions). Rebuild the module with STAGE90_XNU_CARD_TOTAL=0, or record it ON. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    say "  xnu_entry_911d: STAGE90_XNU_CARD_TOTAL=0 agrees with the linked image - no raw whole-card unit is registered; the card unit (2) is the only card-backed device, as in 903"
 fi
 
 # **905: THE WRITE DOOR AND THE TWO-WAY SPLIT, READ OUT OF THE LINKED IMAGE, BOTH DIRECTIONS.**
@@ -36962,6 +37069,12 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # `hfs_mountroot` with, recorded so a record that names the write arm also names the clear that makes
     # it reachable (the linked image is checked against this below, both directions).
     echo "STAGE90_XNU_HFS_ROOT_RW=$HFS_ROOT_RW"
+    # 911d: whether the root-media module registers the raw whole-card unit (ST_MEDIA_CARD_RAW=3) whose
+    # DKIOCGETBLOCKCOUNT is the card's EXT_CSD SEC_CNT rather than the selected partition's extent. An
+    # arm key for MOUNT's reason: a run on this arm carries `xnu_live_rootmedia_card_raw_*` keys the
+    # 906 arm cannot produce, and a record that omitted it would describe a different device set.
+    # Written as the RESOLVED `$CARD_TOTAL`, not `${STAGE90_XNU_CARD_TOTAL}`, for 882's reason.
+    echo "STAGE90_XNU_CARD_TOTAL=$CARD_TOTAL"
     # **909's residence arm, as the RESOLVED `$RESIDENT`** - the switch that takes the image's own ending
     # OUT and adds the watchdog pet. It is an arm key for MOUNT's reason and a sharper one: the same
     # record that names the other switches describes a DIFFERENT image when this is 1 (no ending, a pet in

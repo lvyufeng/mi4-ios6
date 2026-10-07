@@ -10196,6 +10196,33 @@ entry_storage_selected_count(void)
     return st_gpt_best_extent;
 }
 
+/* **911d: the WHOLE CARD's sector count, for the raw unit that reports capacity rather than a partition.**
+ *
+ * `st_ext_sec_count` is EXT_CSD `SEC_CNT` (offset 212), read by `mmc_read_ext_csd` (`:7035`) - the
+ * card's real total, `0x01d5a000` = 30,777,344 sectors = 15.76 GB on
+ * THIS device's 16 GB part (rung 38's press; a 32 GB part reads ~2x). Until 911d nothing in the port
+ * surfaced it: `entry_storage_selected_pages` reads it but reaches only the STAGED unit's `mi_size`,
+ * and every other accessor is the SELECTED PARTITION's extent.
+ *
+ * **THE ZERO IS A REFUSAL AND NOT A CAPACITY.** The same guard the two accessors above make: a card whose
+ * EXT_CSD was never read (`st_ext_sec_count == 0`) answers 0 rather than a plausible constant, so the
+ * raw unit can refuse to register (a device with a zero block count serves nothing) instead of
+ * publishing a fabricated size. **`st_gpt_best_extent` is deliberately NOT a condition here**: this
+ * number is about the MEDIUM, not any partition on it, and a card whose GPT walked to nothing still has
+ * its real capacity - refusing on that would be the "one value, two definitions" defect, capacity
+ * conflated with a selection.
+ *
+ * **ITS RANGE IS THE LADDER'S DOOR, NOT THE SELECTION'S.** The strategy for the raw unit calls
+ * `entry_storage_driver_read(lba)` with `lba == blkno` - no `entry_storage_selected_lba()` offset -
+ * because the medium's LBA 0 is the raw unit's block 0. The door itself is LBA-agnostic
+ * (`entry_storage_driver_read` reads whatever LBA it is handed), which is why a raw unit needs no new
+ * command: it is 903/906's read path addressed from the medium's own base. */
+uint32_t
+entry_storage_card_sectors(void)
+{
+    return st_ext_sec_count;
+}
+
 extern void entry_storage_probe(void);   /* the ladder's own entry - idempotent (`g_storage_probed`) */
 
 /*

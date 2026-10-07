@@ -218,6 +218,16 @@ int entry_root_media_write_arm_on(void)  { return 1; }
 int entry_root_media_write_arm_off(void) { return 0; }
 #endif
 
+/* 911d: the same marker shape for the CARD-CAPACITY arm (a fourth, RAW whole-card unit whose
+ * DKIOCGETBLOCKCOUNT is the card's real capacity and whose strategy addresses raw medium LBAs), so
+ * `build_entry.sh` can refuse an image whose entry side does not name this contract, and so a build
+ * with the switch off is byte-for-byte the 906 arm (no fourth unit, no `st_medium_card_bytes`). */
+#if STAGE90_XNU_CARD_TOTAL
+int entry_root_media_card_total_arm_on(void)  { return 1; }
+#else
+int entry_root_media_card_total_arm_off(void) { return 0; }
+#endif
+
 #if STAGE90_XNU_HFS_ROOT_MEDIA
 /* Defined by `src/entry/blob/xnu_arm_entry_root_hfs.S` (`.incbin` of the committed HFS+ volume).
  * Only declared here, and only on this arm: with the switch off the section the object carries is
@@ -253,12 +263,28 @@ extern char g_stage90_root_hfs_end[];
  * blocks the ladder's own door fetches from the medium. The card unit is a unit of its own because
  * disk 0 serves the Mach-O the root is exec'd from (866 section 4) and disk 1 serves the ONE staged
  * sector; replacing either of those would lose the exec. */
-#if STAGE90_XNU_EMMC_STRATEGY
+#if STAGE90_XNU_EMMC_STRATEGY && STAGE90_XNU_CARD_TOTAL
+/* 911d: the CARD unit (2) plus the RAW WHOLE-CARD unit (3). Unit 2 stays the SELECTED PARTITION -
+ * 903's mount is untouched - and unit 3 is the MEDIUM: `DKIOCGETBLOCKCOUNT` answers its real capacity
+ * (`st_ext_sec_count`) and its strategy addresses raw LBAs with no partition base. Additive and
+ * separate because the capacity clause must not move the mount rung's unit. */
+#define ST_MEDIA_DISKS      4
+#elif STAGE90_XNU_EMMC_STRATEGY
 #define ST_MEDIA_DISKS      3
 #else
 #define ST_MEDIA_DISKS      2
 #endif
 #define ST_MEDIA_DRIVER     2u
+#if STAGE90_XNU_EMMC_STRATEGY && STAGE90_XNU_CARD_TOTAL
+#define ST_MEDIA_CARD_RAW   3u
+/* **911d: the predicate, as a macro so the raw unit's branches FOLD AWAY when the switch is off.** A
+ * bare `unit == ST_MEDIA_CARD_RAW` would not compile with the switch off (the name would be undefined)
+ * and a `#if` around each use would scatter the condition; one macro is the one definition every site
+ * reads. Off, it is the constant 0 - no unit is raw - so the shipped 903/905 image is unchanged. */
+#define ST_MEDIA_RAW_UNIT(u) ((u) == ST_MEDIA_CARD_RAW)
+#else
+#define ST_MEDIA_RAW_UNIT(u) 0
+#endif
 
 /*
  * The flags this device answers `DKIOCGETMEMDEVINFO` from: ON `mdInited` (a non-inited device
@@ -404,6 +430,21 @@ static uint32_t st_medium_staged;        /* 0 until `entry_root_media_stage` has
 #error "STAGE90_XNU_HDD_WRITE=1 needs STAGE90_XNU_EMMC_STRATEGY=1: the write path IS the card unit's, and a unit with no ladder beneath it has no write door to call."
 #endif
 
+/* **911d: THE CAPACITY HALF.** With `STAGE90_XNU_CARD_TOTAL=1` the module registers a fourth, RAW unit
+ * (`ST_MEDIA_CARD_RAW = 3`) whose medium is the WHOLE CARD: `DKIOCGETBLOCKCOUNT` answers the real
+ * capacity the ladder already read (`st_ext_sec_count`, EXT_CSD SEC_CNT) and its strategy addresses raw
+ * LBAs - block N of the medium is LBA N, with no `entry_storage_selected_lba()` base - so an OS reader
+ * sees the 16/32 GB the card is, not the selected partition's extent. Additive: unit 2 (903's mount
+ * unit) is UNTOUCHED, so the mount rung's readings do not move. It REQUIRES the card strategy for the
+ * same reason HDD_WRITE does: its bytes come through the ladder's door, and a capacity with no door
+ * beneath it would report a size it cannot serve. */
+#ifndef STAGE90_XNU_CARD_TOTAL
+#define STAGE90_XNU_CARD_TOTAL 0
+#endif
+#if STAGE90_XNU_CARD_TOTAL && !STAGE90_XNU_EMMC_STRATEGY
+#error "STAGE90_XNU_CARD_TOTAL=1 needs STAGE90_XNU_EMMC_STRATEGY=1: the raw whole-card unit is served through the card ladder's door, and a capacity with no door beneath it would report a size it cannot address."
+#endif
+
 #if STAGE90_XNU_EMMC_STRATEGY
 /* The ladder's door and its two addressing accessors - 887's exported half, in the SAME image when
  * this switch is on (the entry image links `entry_storage.c` and this object together; see
@@ -413,6 +454,11 @@ static uint32_t st_medium_staged;        /* 0 until `entry_root_media_stage` has
 extern const uint32_t *entry_storage_driver_read(uint32_t lba);
 extern uint32_t        entry_storage_selected_lba(void);
 extern uint32_t        entry_storage_selected_count(void);
+/* **911d: the WHOLE CARD's sector count (EXT_CSD SEC_CNT), for the raw unit that reports capacity
+ * rather than a partition.** Declared in the same block as the two above, for the same reason: it is
+ * part of the ladder's exported interface, resolved from `entry_storage.c` in the same image, and a
+ * build that does not resolve it is refused by the linked-image clause rather than calling a stub. */
+extern uint32_t        entry_storage_card_sectors(void);
 #if STAGE90_XNU_HDD_WRITE
 /* **905: the mirror door.** `entry_storage_driver_write(lba, w)` hands 128 words (one 512-byte block)
  * to the card by CMD24; it returns the ladder's own `st_write_block` so the caller can read back what
@@ -423,6 +469,10 @@ extern const uint32_t *entry_storage_driver_write(uint32_t lba, const uint32_t *
 #endif
 /* Defined beside `entry_root_media_stage` (which calls it), so the declaration precedes that body. */
 int entry_root_media_register_card(void);
+#if STAGE90_XNU_CARD_TOTAL
+/* 911d: the raw whole-card unit's registration, declared beside the card unit's for the same reason. */
+int entry_root_media_register_card_raw(void);
+#endif
 #endif
 
 /* The two `.bss` cells the strategy's refusals are counted in, so a served read and a refused one
@@ -514,6 +564,10 @@ st_medium_disk_base(uint32_t unit)
      * `base + offset`. */
     if (unit == ST_MEDIA_DRIVER)
         return 0;
+#if STAGE90_XNU_CARD_TOTAL
+    if (ST_MEDIA_RAW_UNIT(unit))
+        return 0;                  /* 911d: fetched block by block, same as the card unit - no array */
+#endif
 #endif
     if (unit == 1u && st_medium_staged != 0u)
         return (const uint8_t *)st_medium_virt;
@@ -523,6 +577,22 @@ st_medium_disk_base(uint32_t unit)
     return (const uint8_t *)g_stage90_ramdisk;
 #endif
 }
+
+#if STAGE90_XNU_EMMC_STRATEGY && STAGE90_XNU_CARD_TOTAL
+/*
+ * **911d: the whole card in BYTES, 64-bit, because 16 GB does not fit a 32-bit `unsigned`.** The
+ * strategy's `len` bounds a byte offset, and the existing accessors return `unsigned` - which is exact
+ * for the RAM disk and for the selected partition (both < 4 GiB), but TRUNCATES the raw unit's
+ * `card_sectors * 512` (`0x01d5a000 * 512` = ~15.76 GB). A `len` that disagreed with the block count
+ * `DKIOCGETBLOCKCOUNT` reports would be exactly the "one value, two definitions" defect this file
+ * keeps re-learning: the disk would claim 30.7M blocks and serve only the low 4 GiB of them. So the raw
+ * unit's length is computed HERE in 64 bits and the strategy uses a 64-bit `len` on this arm. */
+static uint64_t
+st_medium_card_bytes(void)
+{
+    return (uint64_t)entry_storage_card_sectors() * (uint64_t)ST_MEDIA_BLOCKSIZE;
+}
+#endif
 
 static unsigned
 st_medium_disk_bytes(uint32_t unit)
@@ -537,6 +607,13 @@ st_medium_disk_bytes(uint32_t unit)
      * and whose addressing disagreed would serve a byte range that is not what was selected. */
     if (unit == ST_MEDIA_DRIVER)
         return (unsigned)((uint64_t)entry_storage_selected_count() * ST_MEDIA_BLOCKSIZE);
+#if STAGE90_XNU_CARD_TOTAL
+    /* 911d: the RAW unit's byte length is the WHOLE CARD's - the sector count the ladder read from
+     * EXT_CSD - not the selected partition's. This is the number the 「16GB/32GB存储」 clause turns on:
+     * an OS reader asking this unit's size gets the card, and a 32 GB part reads ~2x this value. */
+    if (ST_MEDIA_RAW_UNIT(unit))
+        return st_medium_card_bytes();
+#endif
 #endif
     if (unit == 1u && st_medium_staged != 0u)
         return ST_MEDIA_BLOCKSIZE;        /* the ONE sector 864 handed over */
@@ -619,7 +696,11 @@ st_media_strategy(struct buf *bp)
     uint32_t unit = (uint32_t)minor(buf_device(bp));
     uint32_t count = (uint32_t)buf_count(bp);
     const uint8_t *base;
+#if STAGE90_XNU_EMMC_STRATEGY && STAGE90_XNU_CARD_TOTAL
+    uint64_t len;                     /* 911d: 64-bit - the raw whole-card unit's length exceeds 4 GiB */
+#else
     unsigned len;
+#endif
     uint64_t off;                     /* 512-byte blocks * 512 - 64-bit because a block number needs it */
 
     st_medium_refused++;
@@ -649,7 +730,14 @@ st_media_strategy(struct buf *bp)
         buf_biodone(bp);
         return;
     }
+    #if STAGE90_XNU_EMMC_STRATEGY && STAGE90_XNU_CARD_TOTAL
+    /* 911d: compute this unit's byte length in 64 bits so the raw unit's card total is not truncated,
+     * and keep every other unit's value byte-for-byte what `st_medium_disk_bytes` returns. */
+    len  = ST_MEDIA_RAW_UNIT(unit) ? st_medium_card_bytes()
+                                   : (uint64_t)st_medium_disk_bytes(unit);
+#else
     len  = st_medium_disk_bytes(unit);
+#endif
     base = st_medium_disk_base(unit);
 #if STAGE90_XNU_EMMC_STRATEGY
     /* **`len == 0` IS THE "NO MEDIUM" TEST, AND IT IS THE ONLY ONE.** Before 888 this guard also
@@ -730,8 +818,15 @@ st_media_strategy(struct buf *bp)
      * contents are overwritten by the NEXT call, so each block MUST be copied out before the next door
      * call - which the loop's order makes true by construction (copy, then advance, then fetch again).
      */
-    if (unit == ST_MEDIA_DRIVER) {
+    if (unit == ST_MEDIA_DRIVER || ST_MEDIA_RAW_UNIT(unit)) {
         uint32_t nblk, i;
+        /* **911d: THE ONE NUMBER THAT DIFFERS BETWEEN THE PARTITION UNIT AND THE RAW UNIT.** Block N of
+         * the SELECTED PARTITION is LBA `selected_lba() + N`; block N of the RAW unit IS the medium's
+         * LBA N. So the raw unit's base is 0 and unit 2's is the selection's - and every LBA below is
+         * `base_lba + blkno + i`, ONE expression with one definition, so a raw read and a partition read
+         * cannot drift apart. On the partition unit this is 903's number unchanged (`base_lba ==
+         * selected_lba()`), which is why 903's readings do not move when this unit is added. */
+        uint32_t base_lba = (unit == ST_MEDIA_DRIVER) ? entry_storage_selected_lba() : 0u;
 
         off = (uint64_t)(uint32_t)buf_blkno(bp) * ST_MEDIA_BLOCKSIZE;
         entry_live_write("xnu_live_rootmedia_card_off", (unsigned)off);
@@ -762,7 +857,7 @@ st_media_strategy(struct buf *bp)
          */
         if ((buf_flags(bp) & B_READ) == 0) {
             for (i = 0u; i < nblk; i++) {
-                uint32_t lba = (uint32_t)((uint64_t)entry_storage_selected_lba()
+                uint32_t lba = (uint32_t)((uint64_t)base_lba
                                           + (off / ST_MEDIA_BLOCKSIZE) + i);
                 uint32_t j;
                 for (j = 0u; j < (uint32_t)ST_LADDER_WRITE_WORDS; j++)
@@ -774,10 +869,10 @@ st_media_strategy(struct buf *bp)
             buf_biodone(bp);
             entry_live_write("xnu_live_rootmedia_card_wr_blocks", nblk);
             entry_live_write("xnu_live_rootmedia_card_wr_first_lba",
-                             (uint32_t)((uint64_t)entry_storage_selected_lba()
+                             (uint32_t)((uint64_t)base_lba
                                         + (off / ST_MEDIA_BLOCKSIZE)));
             entry_live_write("xnu_live_rootmedia_card_wr_last_lba",
-                             (uint32_t)((uint64_t)entry_storage_selected_lba()
+                             (uint32_t)((uint64_t)base_lba
                                         + (off / ST_MEDIA_BLOCKSIZE) + ((nblk != 0u) ? (nblk - 1u) : 0u)));
             st_medium_write_served++;
             entry_live_write("xnu_live_rootmedia_write_served", st_medium_write_served);
@@ -785,7 +880,7 @@ st_media_strategy(struct buf *bp)
         }
 #endif
         for (i = 0u; i < nblk; i++) {
-            uint32_t lba = (uint32_t)((uint64_t)entry_storage_selected_lba()
+            uint32_t lba = (uint32_t)((uint64_t)base_lba
                                       + (off / ST_MEDIA_BLOCKSIZE) + i);
             const uint32_t *w = entry_storage_driver_read(lba);
             bcopy((const void *)w, (void *)(vaddr + i * ST_MEDIA_BLOCKSIZE), ST_MEDIA_BLOCKSIZE);
@@ -795,8 +890,21 @@ st_media_strategy(struct buf *bp)
         buf_biodone(bp);
         entry_live_write("xnu_live_rootmedia_card_blocks", nblk);
         entry_live_write("xnu_live_rootmedia_card_last_lba",
-                         (uint32_t)((uint64_t)entry_storage_selected_lba()
+                         (uint32_t)((uint64_t)base_lba
                                     + (off / ST_MEDIA_BLOCKSIZE) + ((nblk != 0u) ? (nblk - 1u) : 0u)));
+        /* **911d: the RAW unit's first served LBA, under its OWN key.** Unit 2's `_card_last_lba` above
+         * is the partition-relative cell 903's rows read; writing it a second time for the raw unit
+         * would re-point a published number at a different disk - the "one value, two definitions"
+         * defect. On a raw read `_card_raw_first_lba == _card_raw_last_lba - (nblk-1)` and both are
+         * MEDIUM LBAs, so a raw read of the GPT header (medium LBA 1) reads it back as 1, not 1 +
+         * selected_lba. */
+        if (ST_MEDIA_RAW_UNIT(unit)) {
+            entry_live_write("xnu_live_rootmedia_card_raw_first_lba",
+                             (uint32_t)((uint64_t)base_lba + (off / ST_MEDIA_BLOCKSIZE)));
+            entry_live_write("xnu_live_rootmedia_card_raw_last_lba",
+                             (uint32_t)((uint64_t)base_lba + (off / ST_MEDIA_BLOCKSIZE)
+                                        + ((nblk != 0u) ? (nblk - 1u) : 0u)));
+        }
         st_medium_refused--;
         st_medium_served++;
         entry_live_write("xnu_live_rootmedia_served", st_medium_served);
@@ -1001,6 +1109,13 @@ st_media_ioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
     case DKIOCSETBLOCKSIZE:
         break;
     case DKIOCGETBLOCKCOUNT:
+        /* **911d: for the RAW unit this is the CARD's block count, not a partition's** - the
+         * registration sets `st_media_blockcount[ST_MEDIA_CARD_RAW] = entry_storage_card_sectors()`, so
+         * a reader asking the raw unit's size gets the whole medium (16 GB -> `0x01d5a000` sectors; a
+         * 32 GB part reads ~2x). That is the capacity the 「16GB/32GB存储」 clause turns on, and it is
+         * read here through the SAME `DKIOCGETBLOCKCOUNT` every other unit answers - no new opcode.
+         * (`bsd/sys/disk.h` in this tree has no `DKIOCGETMEDIASIZE`; block count x block size is how
+         * this OS reports media size, so the two published numbers ARE the answer.) */
         *(uint64_t *)data = st_media_blockcount[unit];
         break;
     case DKIOCISWRITABLE:
@@ -1259,4 +1374,72 @@ entry_root_media_register_card(void)
                      (unsigned)((uint64_t)count * ST_MEDIA_BLOCKSIZE));
     return (int)dev;               /* 903: the dev_t, so the mount path can answer the root with it */
 }
+
+#if STAGE90_XNU_CARD_TOTAL
+/*
+ * **911d: THE RAW WHOLE-CARD UNIT - THE CAPACITY THE 「16GB/32GB存储」 CLAUSE ASKS FOR.**
+ *
+ * Unit 2 (903's mount unit) is the SELECTED PARTITION: `DKIOCGETBLOCKCOUNT` answers its extent and its
+ * strategy offsets every LBA by `entry_storage_selected_lba()`. This unit is the MEDIUM: its block count
+ * is the WHOLE CARD's and its strategy addresses raw LBAs, so a reader that asks the raw unit gets the
+ * card's real size and can read any sector of it - including the GPT and every partition's own start,
+ * which unit 2 cannot address because its window begins inside the selected partition.
+ *
+ * **IT IS ADDITIVE AND SEPARATE ON PURPOSE.** The clause is a RECOGNITION clause - it must not move the
+ * MOUNT rung - so it is a NEW unit (3), not a change to unit 2. `ST_MEDIA_CARD_RAW = 3` and
+ * `ST_MEDIA_RAW_UNIT()` fold the whole thing away when `STAGE90_XNU_CARD_TOTAL=0`, so the shipped
+ * 903/906 image is unchanged to the byte.
+ *
+ * **THE ZERO IS A REFUSAL.** `entry_storage_card_sectors()` returns 0 when EXT_CSD was never read; a
+ * device registered over that would claim zero blocks and serve nothing, so this refuses with a visible
+ * return and publishes `_card_raw_refused` - the same rule `entry_root_media_register_card` follows.
+ *
+ * **ITS KEYS ARE ITS OWN (`_card_raw_*`), for the reason `_card_*` are** (see the note above): the
+ * registered numbers must not re-point unit 2's published geometry at a different disk.
+ *
+ * **THE READ IS 903's, ADDRESSED FROM THE MEDIUM'S BASE.** The strategy's `base_lba` is 0 for this unit,
+ * so it calls `entry_storage_driver_read(blkno)` - the SAME ladder door 903's reads use, at the LBA the
+ * raw medium names - and copies out per block exactly as unit 2 does. No new command, no new register:
+ * this is the read path 903/906 built, addressed from a different base. It is READ-ONLY (no write
+ * branch reaches it, and `DKIOCISWRITABLE` answers 0 for it below).
+ */
+int
+entry_root_media_register_card_raw(void)
+{
+    dev_t dev;
+    uint32_t sectors = entry_storage_card_sectors();
+
+    if (st_media_major[ST_MEDIA_CARD_RAW] != 0u)      /* registered once, like unit 2 */
+        return (int)makedev(st_media_major[ST_MEDIA_CARD_RAW], ST_MEDIA_CARD_RAW);
+
+    if (sectors == 0u) {
+        entry_live_write("xnu_live_rootmedia_card_raw_refused", 1u);
+        return EINVAL;
+    }
+
+    dev = entry_root_media_register((int)ST_MEDIA_CARD_RAW);
+    if ((int)dev < 0) {
+        entry_live_write("xnu_live_rootmedia_card_raw_err", (unsigned)dev);
+        return (int)dev;
+    }
+
+    /* The registration set the RAM disk's geometry; this device's is the WHOLE CARD's. */
+    st_media_blocksize[ST_MEDIA_CARD_RAW]  = ST_MEDIA_BLOCKSIZE;
+    st_media_blockcount[ST_MEDIA_CARD_RAW] = sectors;   /* the MEDIUM, in sectors - not the selection */
+    st_media_flags[ST_MEDIA_CARD_RAW]      = ST_MEDIA_MDINITED | ST_MEDIA_CARD;
+
+    entry_live_write("xnu_live_rootmedia_card_raw_refused", 0u);
+    entry_live_write("xnu_live_rootmedia_card_raw_registered", 1u);
+    entry_live_write("xnu_live_rootmedia_card_raw_dev", (unsigned)dev);
+    entry_live_write("xnu_live_rootmedia_card_raw_blocks", sectors);
+    /* the card's byte length, published in its HIGH and LOW halves because it exceeds 32 bits:
+     * ~15.76 GB = 0x03AB400000, so the high word is nonzero and a reader sees the whole card, not a
+     * truncated low 4 GiB. This is the reading the capacity clause exists to produce. */
+    entry_live_write("xnu_live_rootmedia_card_raw_bytes_hi",
+                     (unsigned)(((uint64_t)sectors * ST_MEDIA_BLOCKSIZE) >> 32));
+    entry_live_write("xnu_live_rootmedia_card_raw_bytes_lo",
+                     (unsigned)(((uint64_t)sectors * ST_MEDIA_BLOCKSIZE) & 0xffffffffu));
+    return (int)dev;
+}
+#endif
 #endif

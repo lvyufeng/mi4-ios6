@@ -4359,6 +4359,9 @@ extern int entry_root_media_mount_disk(void);
  * (`STAGE90_XNU_EMMC_STRATEGY`), which the card-root arm requires; the entry build refuses a
  * card-root image whose module lacks it (`entry_root_media_cardroot_arm_on`). */
 extern int entry_root_media_register_card(void);
+#if STAGE90_XNU_CARD_TOTAL
+extern int entry_root_media_register_card_raw(void);   /* 911d: the raw whole-card unit */
+#endif
 extern void entry_note_dtwalk(uint32_t t1, uint32_t root, uint32_t count, uint32_t first,
                               uint32_t set, uint32_t kids, uint32_t class0, uint32_t class1,
                               uint32_t control);
@@ -4849,6 +4852,19 @@ int __wrap_mdevlookup(int devid)
     r = entry_root_media_register_card();
 #else
     r = entry_root_media_register(devid);
+#endif
+#if STAGE90_XNU_CARD_TOTAL
+    /*
+     * **911d: THE RAW WHOLE-CARD UNIT, REGISTERED BESIDE THE ROOT - AND IT DOES NOT TOUCH `r`.**
+     * `entry_root_media_register_card_raw()` registers a SECOND card-backed device whose block count is
+     * the CARD's real capacity (EXT_CSD SEC_CNT, ~15.76 GB on this 16 GB part) rather than the selected
+     * partition's extent, and whose strategy addresses raw medium LBAs. It is the 「16GB/32GB存储」
+     * recognition clause, and it is deliberately an ADDITION beside the root device: the root answer `r`
+     * above is UNCHANGED, exactly as unit 1 (the staged sector) was an addition beside disk 0 and did
+     * not move the root. A run reads the capacity through `xnu_live_rootmedia_card_raw_*`; the mount is
+     * unaffected, because this call returns a `dev_t` this function discards.
+     */
+    (void)entry_root_media_register_card_raw();
 #endif
 #else
     r = __real_mdevlookup(devid);

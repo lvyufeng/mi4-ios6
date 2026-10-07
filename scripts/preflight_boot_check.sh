@@ -670,7 +670,7 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS STAGE90_XNU_STORAGE_PROBE
                 STAGE90_XNU_PWR_WAIT_TICKS STAGE90_XNU_MOUNT STAGE90_XNU_HFS_ROOT_MEDIA
                 STAGE90_XNU_EMMC_STRATEGY STAGE90_XNU_ROOT_FROM_CARD STAGE90_XNU_HDD_WRITE
-                STAGE90_XNU_HFS_ROOT_RW STAGE90_XNU_RESIDENT
+                STAGE90_XNU_HFS_ROOT_RW STAGE90_XNU_CARD_TOTAL STAGE90_XNU_RESIDENT
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP
                 STAGE90_XNU_USB_PROBE
@@ -745,6 +745,18 @@ if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/
      | awk '$3 == "entry_wdt_pet" && $2 == "t" { found = 1 } END { exit(found ? 0 : 1) }'; then
   _entry_resident_arm=on
 fi
+# **911d: `STAGE90_XNU_CARD_TOTAL` gets the same ARTIFACT-grounded treatment as the five above.** A record
+# written before 911d cannot carry the key, and demanding it would make every pre-911d park unpressable
+# (882's own defect, five times repaired). The entry image carries the marker
+# `entry_root_media_card_total_arm_on` / `..._off` UNCONDITIONALLY (the module defines exactly one), so the
+# ELF says whether the key is owed; an image that carries the raw whole-card unit MUST record it - a record
+# without it could send a run that registers a fourth device nobody named - and one that cannot carry the
+# arm has no such value to record.
+_entry_card_total_arm=""
+if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/dev/null \
+     | grep -q 'entry_root_media_card_total_arm_on'; then
+  _entry_card_total_arm=on
+fi
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
@@ -766,6 +778,10 @@ do
   fi
   if [[ -z $_v && $_k == STAGE90_XNU_RESIDENT && -z $_entry_resident_arm ]]; then
     printf '  %s=(absent, and this entry image carries no residence pet to name - the key is N/A here)\n' "$_k"
+    continue
+  fi
+  if [[ -z $_v && $_k == STAGE90_XNU_CARD_TOTAL && -z $_entry_card_total_arm ]]; then
+    printf '  %s=(absent, and this entry image carries no raw whole-card unit to name - the key is N/A here)\n' "$_k"
     continue
   fi
   # **912's window: absent names the 16 MB arm, because that is the ONLY value any pre-912 record could

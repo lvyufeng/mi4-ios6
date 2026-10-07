@@ -263,3 +263,61 @@ literal 「3GB内存」 — a pmap region list or a high physmap window, a port 
   to iterate — the same cost class as the ARM layer, not the payload.
 - **The obligations are unchanged**: stage to master, never brick, `fastboot` reachable, presses are
   the operator's. Residence (909) still gates whether any of this can be *observed* on a device.
+## 7. 911d BUILT (2026-10-07) — the storage half, host-side, NO press
+
+Rung 911d is built and parked. It is **912a's switch set plus one key** (`STAGE90_XNU_CARD_TOTAL=1`),
+so the press that sends it answers **both** the 912a memory question and this storage question in one
+run. Set `armed-storage-605a43c2`, parked at `out/stage90/frozen/armed-storage-605a43c2/`.
+
+**Design correction found at build time.** §4 named the mechanism `DKIOCGETMEDIASIZE`; that ioctl
+**does not exist** in this tree's `bsd/sys/disk.h`. The OS reports media size via
+`DKIOCGETBLOCKCOUNT` × blocksize, and `DKIOCGETBLOCKCOUNT` *is* handled (`stage90_root_media.c:1003-1004`)
+— it answers with `st_media_blockcount[unit]`. So the rung does **not** add an ioctl; it adds a **unit**
+whose block count is the card's own.
+
+**What was built (all in the media layer, additive to 903's mount unit):**
+
+- `src/entry/entry_storage.c` — `entry_storage_card_sectors()` returns the live `st_ext_sec_count`
+  (EXT_CSD `SEC_CNT`, offset 212, read at `:7035`; `0x01d5a000` = 30,777,344 sectors ≈ 15.76 GB on this
+  16 GB part). The zero is a refusal, and `st_gpt_best_extent` is deliberately NOT a condition — the raw
+  unit is the *card*, not a partition.
+- `src/platform/stage90_root_media.c` — a FOURTH unit `ST_MEDIA_CARD_RAW = 3` (`ST_MEDIA_DISKS 2 → 4`),
+  registered **beside** the mount unit (2) from `__wrap_mdevlookup`. `st_medium_card_bytes()` returns
+  `uint64_t` (30,777,344 × 512 = 15,757,999,872 B **overflows** a 32-bit `unsigned`, so `len` in the
+  strategy widens to 64-bit under this switch). `st_medium_disk_base(3)` = 0 and `st_medium_disk_bytes(3)`
+  = the card total; the strategy's card branch takes `base_lba = 0` for the raw unit instead of
+  `entry_storage_selected_lba()`, and `DKIOCGETBLOCKCOUNT` answers unit 3 with the card's true count.
+- The registration publishes `xnu_live_rootmedia_card_raw_registered`, `_card_raw_blocks`,
+  `_card_raw_bytes_hi`/`_card_raw_bytes_lo`, `_card_raw_first_lba`/`_card_raw_last_lba`, `_card_raw_dev`,
+  `_card_raw_err`, `_card_raw_refused`.
+- Build plumbing: `STAGE90_XNU_CARD_TOTAL` in `ENTRY_ARM_KEYS`, the record writer, the `nm`-based
+  two-script agreement check (`xnu_entry_911d`, mirroring `xnu_entry_905`), and the gate's
+  `ENTRY_CFG_KEYS` + artifact-grounded check.
+
+**The mount rung does NOT move.** Unit 2 (903's selected-partition card unit) is byte-unchanged; the
+raw unit is a sibling. So every storage reading already true of 903/906 stays true, and this arm adds
+only the capacity reading.
+
+**The press is the operator's; the goal is NOT met until it is read.** The decisive cell is
+`xnu_live_rootmedia_card_raw_blocks = 0x01d5a000` (or the larger SEC_CNT on a 32 GB part) with the
+903 mount at `0x00400000+` unchanged — the recognition the goal's newest clause asks for. The refusal
+is the same one 912a names: if `xnu_entry_args_memSize` still reads the 16 MB default, neither the
+window nor this arm reached the live image.
+
+**A DEFECT THE FIRST DRAFT CARRIED, AND THE CHECK THAT CAUGHT IT.** The first 911d build
+(`6d2469f0`) compiled `#if STAGE90_XNU_CARD_TOTAL` in `entry_trace.c` to `0` — because `CARD_TOTAL`
+was **not** added to `entry_trace.c`'s own compile line in `build_entry.sh` (it is compiled
+separately from `STUB_DEFINES`, like `ROOT_FROM_CARD`, and the first draft added the define to
+`STUB_DEFINES`' siblings but not here). So `__wrap_mdevlookup` **called nothing**: the raw unit
+would never register, and the arm's record would promise a capacity the image never produced —
+`mi4-off-option-two-spellings` with a shorter fuse, and exactly the shape the `xnu_entry_911d`
+**linked-image clause** (added in the same step, mirroring 903/905) refuses. The clause fired, the
+missing `-DSTAGE90_XNU_CARD_TOTAL` was added, and the corrected build (`605a43c2`) now shows the
+call in the linked body. **The draft was never committed** and is not a recorded set.
+
+**Built:** platform object exit 0 (`HFS_ROOT_MEDIA=1 EMMC_STRATEGY=1 ROOT_FROM_CARD=1 CARD_TOTAL=1`);
+entry exit 0 (37 record keys, `STAGE90_XNU_CARD_TOTAL=1` at line 30); payload exit 0; entry bin
+`605a43c2…`; the linked clause `xnu_entry_911d` confirms `__wrap_mdevlookup` calls
+`entry_root_media_register_card_raw` and `entry_storage_card_sectors` is a `T` symbol; park verifies
+11/11; `check_set_name_rule` 0; `make check` 0; `verify_press_ready` 5/5 (row 4 names the 911d
+CARD-CAPACITY arm). NO press.
