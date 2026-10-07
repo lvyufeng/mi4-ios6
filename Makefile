@@ -198,6 +198,12 @@ check:
 # image half (the switch read out of the linked ELF) needs a build and runs inside build_entry.sh.
 	@tools/check_usb_probe.py --selftest >/dev/null
 	@tools/check_usb_probe.py
+# 910a2: the USB write arm. `check_usb_dev.py` compares every offset it writes and every value it sets
+# against the Android source that OWNS it (the owner's own expression, evaluated), asserts the
+# write-target whitelist and the mode gate at the source, and reads the switch out of the linked ELF.
+# The source half is switch-independent, so it runs here with no build and no device.
+	@tools/check_usb_dev.py --selftest >/dev/null
+	@tools/check_usb_dev.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not

@@ -95,7 +95,7 @@ set -Eeuo pipefail
 SERIAL="4a2fe00b"
 FORBIDDEN_SERIAL="33e80afe"
 CARGO="out/stage90/stage90-qcdt.img"
-EXPECT_ARM="armed-storage-cabba670"
+EXPECT_ARM="armed-storage-1138fdc6"
 CAPTURE="out/stage90/captures/909-resident-$(date -u '+%Y%m%d-%H%M%S')-last_kmsg.txt"
 CALL_TIMEOUT=120
 DO_STAGE=1

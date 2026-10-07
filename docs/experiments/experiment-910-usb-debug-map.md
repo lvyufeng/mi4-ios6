@@ -2,9 +2,11 @@
 
 Date: 2026-10-07
 
-Status: **MAP + arm 1 (910a) BUILT AND PARKED, NOT PRESSED.** `entry_usb_probe` — the read-only USB2
-OTG probe — is arm `armed-storage-377fb57a` (arm `cabba670` plus `STAGE90_XNU_USB_PROBE=1`). The map
-below is §1-§7; **§8 is the arm.** This is the standing "map before the rung" step (the same shape as
+Status: **MAP + arm 1 (910a) and arm 2 (910a2) BUILT AND PARKED, NEITHER PRESSED.** `entry_usb_probe`
+— the read-only USB2 OTG probe — is arm `armed-storage-377fb57a` (arm `cabba670` plus
+`STAGE90_XNU_USB_PROBE=1`); `entry_usb_dev_init` — the PHY init + the device-mode transition, **the first
+arm of this walk that writes to the port** — is arm `armed-storage-1138fdc6` (910a plus
+`STAGE90_XNU_USB_DEV=1`). The map below is §1-§7; **§8 is arm 1 and §9 is arm 2.** This is the standing "map before the rung" step (the same shape as
 `mi4-hfs-wiring-mapped`, 870/874, before the HFS port was built): the goal's added requirement is
 
 > 「保持在xnu里，可以通过usb进行调试」 — a resident XNU must also be *debuggable over USB*.
@@ -64,8 +66,17 @@ sequence, and the protocol/console layers above it mostly exist already.**
 
 The USB2 controller is driven by an **Android-only** stack: `drivers/usb/otg/msm_otg.c` (the OTG/PHY:
 regulators `HSUSB_1p8/3p3/VDDCX`, `ULPI` viewport, `hsusb-otg-phy-init-seq = <0x63 0x81 …>` from the dtsi)
-plus a DWC-OTG *gadget* controller. **This is not an XNU-usable object** — it is a Linux driver built on
-`regulator`, `usb_phy`, and the gadget framework, none of which XNU has.
+plus a **ChipIdea CI13xxx (MSM72K)** *gadget* controller (`ci13xxx_msm.c` → `ci13xxx_udc.c`). **This is not
+an XNU-usable object** — it is a Linux driver built on `regulator`, `usb_phy`, and the gadget framework,
+none of which XNU has.
+
+**CORRECTION (910a): the UDC is a ChipIdea CI13xxx, not a DWC-OTG.** This section first called it a
+"DWC-OTG gadget" — a guess from the family of Qualcomm USB cores, and wrong for this one. The device's own
+checkout says `qcom,hsusb-otg`, `msm_otg.c`, `ci13xxx_udc.c`; there is no DWC register file here. So the
+register layout §4 and §5 name below from the DWC lineage is **wrong**, and the real one is ChipIdea's
+(`USB_ID_CAP`, `USB_USBCMD`, `USB_USBMODE`, `USB_ENDPTCTRL(n)`, `USB_ULPI_VIEWPORT` — the ChipIdea map
+`include/linux/usb/msm_hsusb_hw.h` transcribes). The DWC3 (<code>DCFG</code>/<code>DCTL</code>/<code>GINTSTS</code>)
+belongs to the *USB3 SS* core (`0xf9200000`), which the micro-B port does not use.
 
 **This is the decisive difference from the watchdog.** The WDT (`0xf9017000`) shared the GIC's 1 MB block
 and its install was refused. Both USB bases are in **fresh megabytes** — `0xf92` and `0xf9a` — owned by no
@@ -74,10 +85,12 @@ the GIC applies here with no occupancy conflict. The rung is not blocked on addr
 
 ## 4. The three files a USB-debug rung must produce, and where each comes from
 
-1. **A device-controller driver.** Nothing to reuse; the DWC-OTG programming sequence (device mode:
-   `DCFG`, `DCTL`, `DEVTEN`, the EP0/EP1-4 `DIEPCTL*/DOEPCTL*` registers, `USBCMD`/`USBSTS`, the `GINTSTS`
-   event loop, the FIFO/DMA split). It is a *port*: the register semantics come from the Android source,
-   the structure from this project's own `st_*` ladder style (`src/entry/entry_storage.c`).
+1. **A device-controller driver.** Nothing to reuse; the **ChipIdea** device-mode programming sequence
+   (the *ChipIdea* register set, not DWC's: `USB_USBMODE`, `USB_ENDPOINTLISTADDR`, the EP0
+   `USB_ENDPTCTRL`/`USB_ENDPTPRIME`/`USB_ENDPTFLUSH` handling, `USB_USBCMD`/`USB_USBSTS`, the `USBSTS`
+   event loop, the queue-head + dTD list). It is a *port*: the register semantics come from the Android
+   source (`ci13xxx_udc.c`, `msm_hsusb_hw.h`), the structure from this project's own `st_*` ladder style
+   (`src/entry/entry_storage.c`).
 2. **A PHY/clock/power init.** The dtsi's `hsusb-otg-phy-init-seq = <0x63 0x81>` and the ULPI viewport
    writes from `msm_otg.c`. The regulators are the same RPM-SMD family the card rung already reaches
    (`mi4-vendor-path-powers-the-card`) — `HSUSB_1p8/3p3` join `sdhci-msm`'s rails on the ladder's power
@@ -90,15 +103,25 @@ the GIC applies here with no occupancy conflict. The rung is not blocked on addr
 
 ## 5. The recommended ladder (each rung one pressable arm)
 
-- **910a — the controller comes up (device mode).** Install `0xf9a55000`'s section, run the vendor PHY
-  init, bring the core to device mode, and publish `xnu_live_usb_*` (`_base`, `_hwsection`, `_phy`,
-  `_devctl`, `_speed`, `_intr`). Success = the core reports a speed/connection and the first `GINTSTS`
-  device event fires. **No gadget, no protocol** — this rung is a *reading* that the controller and PHY
-  answer, exactly as rung A read the card.
-- **910b — the polling event loop + a print channel.** Drive `GINTSTS`, answer the enumeration's control
-  transfers (GET_DESCRIPTOR, SET_ADDRESS, SET_CONFIGURATION), and expose **one IN endpoint** a host can
-  read. Publish `xnu_live_usb_enum_*`. Success = the host (`lsusb`) sees a device with the image's VID/PID
-  and can read the endpoint. This is the first rung that gives a *live* channel rather than a post-mortem.
+- **910a — the controller's identification and state (a READING).** Install `0xf9a55000`'s section and
+  READ the ChipIdea core's identification and the mode the bootloader left it in — `USB_ID_CAP`,
+  `USB_HWGENERAL`, `USB_USBMODE`, `USB_USBCMD`/`USB_USBSTS`, `USB_PORTSC`, `USB_OTGSC`, `USB_ENDPTCTRL`.
+  **Writes NOTHING** (the port may be live with the host). Success = the `xnu_live_usb_*` block answers:
+  is the core mapped (the 1 MB `0xf9a` slot free), what mode is it in (`USBMODE` 2=device/3=host/0=neither),
+  what PHY. **BUILT: arm `377fb57a`.**
+- **910a2 — the PHY init + the device-mode transition (the WRITES).** Run the vendor PHY init
+  (`msm_otg.c`'s `usb_phy`/ULPI viewport sequence, the `hsusb-otg-phy-init-seq` table), then bring the core
+  to **device mode** (`USB_USBMODE <- 2`, `USB_ENDPOINTLISTADDR`, `USB_USBCMD.RS`, `USB_USBINTR`). It must
+  READ `USBMODE` first (from 910a) and not fight the mode the bootloader left — the "mode sequence is a
+  re-do" cell. Success = `USB_USBSTS`/`USB_PORTSC` report a speed/connect and a device event fires.
+  **No gadget, no protocol.** It is the first arm that WRITES to this device, so it lives in its own file
+  (`entry_usb_dev.c`) and 910a's `entry_usb.c` stays provably write-nothing. **HAZARD: a bad write can drop
+  the host's enumeration — but the escape is the physical press, not USB.**
+- **910b — the polling event loop + a print channel.** Drive `USB_USBSTS`/`USB_USBINTR`, answer the
+  enumeration's control transfers (GET_DESCRIPTOR, SET_ADDRESS, SET_CONFIGURATION), and expose **one IN
+  endpoint** a host can read. Publish `xnu_live_usb_enum_*`. Success = the host (`lsusb`) sees a device
+  with the image's VID/PID and can read the endpoint. This is the first rung that gives a *live* channel
+  rather than a post-mortem.
 - **910c — KDP over that endpoint (or a CDC-ACM).** Swap `kdp_udp.o`'s disabled stub for the real
   `kdp_core`/`kdp_serial` (or a USB transport), add them to the manifest, and flip `mach_kdp` into
   `STAGE90_BOOT`. Success = a host debugger can `read`/`write` kernel memory over USB. **Or** the simpler
@@ -226,3 +249,113 @@ repaired it one switch over).
 device-mode bring-up — the writes). **The goal is NOT met** — a read of the controller is not a debug
 transport, and 910b (event loop + an enumerable endpoint) and 910c (KDP over bulk, the operator's choice)
 are each a separate press, none built yet.
+
+
+## 9. Arm 2 — 910a2: the PHY init and the device-mode transition, `entry_usb_dev_init` (arm `1138fdc6`)
+
+**910a2 is 910a plus ONE key**, `STAGE90_XNU_USB_DEV=1`, exactly as 910a was 909's residence arm plus
+one. The key gates a new file, `src/entry/entry_usb_dev.c` (with its own header `entry_usb_dev.h` and its
+own guard `tools/check_usb_dev.py`), whose ON body is called once from `entry_trace.c`, immediately after
+the 910a call. **910a's `entry_usb.c` is untouched, so its write-nothing property stays a property of
+that file** — the reason for a separate file rather than adding stores to the probe.
+
+### 9.1 The sequence, transcribed from the vendor, step by step
+
+The order is the vendor's: `msm_otg.c`'s `msm_otg_reset` (the PHY) then `ci13xxx_udc.c`'s
+`hw_device_reset` + the partial `hw_device_state` (the device mode). Each store names the Android
+function that makes the same store:
+
+| step | source | stores |
+| --- | --- | --- |
+| PHY reset, first half | `msm_otg_phy_reset` | clear `AHB2AHB_BYPASS` (bit 31 of `USB_AHBMODE 0x98`) **if set**; `USB_PORTSC = (PORTSC & ~(3<<30)) \| (3<<30)` — **PTS = ULPI** |
+| link reset | `msm_otg_link_reset` | `USB_USBCMD = USBCMD_RST (2)`; poll `RST` clear ≤ 250 ms; `USB_PORTSC = 0x80000000`; `USB_AHBBURST (0x90) = 0` |
+| (the vendor's `msleep(100)`) | `msm_otg_reset` | — |
+| PHY POR ×2 | `usb_phy_reset` | `USB_PHY_CTRL (0x240)` bit 0 assert, ~12 µs, deassert — **run twice** |
+| ULPI init | `ulpi_init`, the dtsi's `hsusb-otg-phy-init-seq` | ONE viewport transaction, `ulpi_write(phy, reg 0x81, 0x63)` |
+| OTG enables | `OTG_PHY_CONTROL` branch | `USB_OTGSC \|= OTGSC_BSVIE (bit 27)`; `ulpi_write(ULPI_INT_SESS_VALID, reg 0x0d)` and the same to `0x10` |
+| device mode | `hw_device_reset` | `USB_USBMODE` `CM_IDLE(0)` → `CM_DEVICE(2)` → `\| USBMODE_SLOM`; read-back asserted `[1:0] == 2`; `USBCMD.ITC(23:16) ← 0` |
+| run | `hw_device_state` (partial) | `USBCMD.RS(bit 0) ← 1` |
+
+**What it deliberately does NOT write, and publishes that it did not:** `USBINTR`,
+`USB_ENDPOINTLISTADDR`, and EP0's `USB_ENDPTCTRL`. Those three are what `hw_device_state` does with a
+**queue-head list**; this image has no `ci13xxx` gadget, no qh/dTD pool and no DMA-visible buffer for
+endpoint 0, so `ENDPOINTLISTADDR` with no list behind it is a core told to DMA from nowhere. That is
+910b. The arm publishes `_dev_intr = _dev_eplist = _dev_ep0_ctrl = 0` so the omission is a reading and
+not a silence.
+
+**The vendor collapses into ONE reset here.** `msm_otg_link_reset` and `hw_device_reset` both write
+`USBCMD.RST`; on this path they are the same store, and doing it twice only widens the window in which
+the host sees the controller come and go. The arm writes it once and publishes `_dev_rst_count = 1` so
+the collapse is a reading and not a silent difference.
+
+### 9.2 The hazard, named and bounded
+
+`msm_otg_link_reset` writes `USBCMD.RST`, which resets the controller — **on a port the host is
+enumerating that drops the enumeration** (recoverable: the host sees a disconnect–reconnect). A wedged
+PHY is not recoverable, and the escape from a dark phone is the physical VolDown+Power press, not USB
+(`[[mi4-device-dark-needs-power-press]]`), so `fastboot` stays reachable through the bootloader
+regardless. The arm bounds the hazard two ways:
+
+1. **It writes no USB register at all unless the core is ALREADY a device** (`USBMODE[1:0] == 2`). That
+   is 531 §6's "the mode sequence is a re-do" case: the bootloader left the core in the mode the vendor
+   driver wants, so the shaping is not what makes it a device — the reset is. Anything else means this
+   arm does not understand the core's live state and it refuses rather than resets it blind. The opt-in
+   `STAGE90_XNU_USB_DEV_FORCE=1` relaxes that gate for a deliberate experiment, and the build refuses
+   `FORCE=1` with `DEV=0` (a relaxation with nothing to relax).
+2. **Every wait is bounded by the vendor's own number** — `ULPI_IO_TIMEOUT_USEC = 10 ms` for a viewport
+   transaction, the link reset's 250 ms — so a viewport or a reset that never completes is a number (the
+   `ULPI_IO_TIMEOUT` sentinel / a nonzero `_dev_rst_polls` with `_dev_rst_cleared = 0`) and not an
+   unending spin.
+
+### 9.3 The mapping: reuse-of-record vs a fresh install
+
+`entry_mmio_section` installs a 1 MB L1 section and **returns 0 if the slot is already occupied**. 910a
+installs megabyte `0xf9a` first, so on a run with BOTH arms on this arm's own install returns 0 — and
+then the slot is not empty, it holds **910a's desk**: `entry_section_install` refuses when
+`(before & 0x3) != 0`, and 910a's section is a *block* descriptor (`type == 2`) whose physical-address
+field is megabyte `0xf9a`. So the arm proves the occupant is 910a's own section (`usb_dev_section_is_ours`)
+and reads on; **any other occupant leaves `_dev_owned = 0` and the arm reads NO USB register at all** —
+the same refusal 910a makes when its own install is refused. The proof is the `slot_before` the mapper
+already returns, so the hardcoded `mapped != 0` safety check the earlier probes carry does **not** apply
+here (`_dev_mapped=0` beside `_dev_owned=1` is the expected dual-USB reading).
+
+### 9.4 The guard, `tools/check_usb_dev.py`
+
+Source half (switch-independent, runs in `make check` with no build and no device):
+- 5 cross-offsets and 36 cross-values, each compared against the Android header/source that OWNS it —
+  the owner's own expression, evaluated (`BIT(n)`, `(1<<n)`, `(3<<30)`, sums), `UL`/`U` suffixes stripped.
+- a **write-target whitelist**: every `usb_dev_write32(<NAME>…)` first argument must be a defined
+  `STAGE90_USB_*`; a numeric offset is refused, so a store to an untranscribed register cannot slip in.
+- the **mode gate**, matched by exact FORM (not presence): the
+  `!= STAGE90_USB_USBMODE_CM_DEVICE ) && ( STAGE90_XNU_USB_DEV_FORCE == 0 )` regex plus a `return`, and
+  the init body's first store must be AFTER it. This was a real defect found while writing the guard: the
+  first version checked only that `CM_DEVICE` appears, and `CM_DEVICE` appears 4× in the file — the
+  mutation battery ACCEPTED a gate with `CM_DEVICE` removed. The form regex plus the `return` check refuse
+  it.
+- the published omissions `_dev_rst_count`/`_dev_intr`/`_dev_eplist` must be present.
+
+Image half (needs a build, runs inside `build_entry.sh`): the switch read out of the linked ELF both
+ways. Selftest: 5/5 mutations refused.
+
+### 9.5 Readiness, and what is owed
+
+`tools/verify_press_ready.sh` is **5/5 green** on `1138fdc6`, the park verifies against the record
+(11 members, `tools/verify_revert_set.sh` `VERIFIED`), and `make check` exits 0. **Row 4 needed its own
+repair again**: 910a2 carries `STAGE90_XNU_USB_PROBE=1` too, so it would be caught by the 910a branch —
+the new branch reads `STAGE90_XNU_USB_DEV` and, when it is set, SUPERSEDES the 910a text (placed after
+it), naming the WRITE arm and its different consequence rather than the read.
+
+**The payload record is byte-identical to every arm since 909** (`6c2b6038…`, the tenth time): `USB_DEV`
+is an ENTRY switch, so no payload switch moved. The entry record is 29 keys; the arm `xnu_arm_entry.bin`
+is unchanged in LENGTH (6498612 bytes) — the ON body is added inside `.text`. **`STAGE90_XNU_SEAM_LR` did
+NOT move this time** (`0x8004e2dc` held), so the entry build exited 0 with no seam-clause refusal —
+unlike 910a, where adding the probe crossed a page.
+
+**Owed, in order:** (1) the operator's press of `377fb57a` (910a) and of `1138fdc6` (910a2) — both plain
+boots, the same staging and escape as 909; `scripts/press_909_normal.sh`'s `EXPECT_ARM` is now
+`armed-storage-1138fdc6`, so it stages and verifies arm 2 (**move it back to `377fb57a` for the 910a
+press, or press 910a2 first**); (2) read the `xnu_live_usb_dev_*` block out of TWRP's
+`/proc/last_kmsg` and compare it against the `xnu_live_usb_*` block from 910a; (3) then build 910b (the
+event loop + an enumerable endpoint) and 910c (KDP over bulk). **The goal is NOT met** — a PHY init and
+a mode transition answer no control transfer and enable no interrupt, so this is not yet a device the
+host can talk to.

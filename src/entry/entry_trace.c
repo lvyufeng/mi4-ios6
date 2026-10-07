@@ -137,6 +137,7 @@
  * lives in its own file. It is called **after** the storage probe so the storage arm's records are
  * not displaced by a read-only probe that carries near-zero hazard. */
 #include "entry_usb.h"
+#include "entry_usb_dev.h"
 
 /* entry_stubs.c. Records into `g_kv_buf`, which only an epilogue writes out - see above. */
 extern void entry_kv(const char *key, uint32_t value);
@@ -2763,6 +2764,23 @@ void __wrap_platform_cache_idle_exit(void)
      * probe **writes nothing** (see `entry_usb.c`); a compile that reached here with the switch off
      * leaves a one-compare pass-through. */
     entry_usb_probe();
+#endif
+
+#ifndef STAGE90_XNU_USB_DEV
+#define STAGE90_XNU_USB_DEV 0
+#endif
+#if STAGE90_XNU_USB_DEV
+    /*
+     * **910a2: the PHY init and the device-mode transition, at the probe's own site and immediately
+     * after it.** It runs here for the probe's reasons (this wrapper is inside the handed-off kernel,
+     * after the live channel's proof, and its records precede the ending's), and **after** the probe
+     * specifically because the probe installs the `0xf9a` section this arm then proves is its own rather
+     * than re-installing. The arm WRITES and can drop the host's enumeration, so it is bounded two ways
+     * (a mode gate on 910a's reading, and every wait bounded by the vendor's own number) - see
+     * `entry_usb_dev.c`. With the switch off this is one compare on a body that is a bare `return`, so
+     * the call is unconditional and the frame stays the 8 bytes the slot lives in.
+     */
+    entry_usb_dev_init();
 #endif
 
 #if STAGE90_XNU_POST_END_TICKS

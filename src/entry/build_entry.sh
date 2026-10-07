@@ -788,6 +788,33 @@ case "$USB_PROBE" in
     *) echo "REFUSING: STAGE90_XNU_USB_PROBE='$USB_PROBE' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **910a2: the USB2 OTG PHY init and device-mode transition - the FIRST arm that WRITES to this port.**
+# `STAGE90_XNU_USB_DEV=1` runs the vendor's PHY sequence (`msm_otg.c`'s `msm_otg_reset`) and the ChipIdea
+# device-mode sequence (`ci13xxx_udc.c`'s `hw_device_reset`), in `entry_usb_dev.c` - a file of its own so
+# 910a's write-nothing property stays a property of 910a's source. The arm WRITES, so unlike the probe
+# it carries a hazard: the link reset (`USBCMD.RST`) can drop the host's enumeration. It is bounded by a
+# mode gate - **it does not write unless 910a found the core already a device** (`USBMODE[1:0] == 2`) -
+# and `STAGE90_XNU_USB_DEV_FORCE=1` is the opt-in that relaxes that gate for a deliberate experiment.
+# Both default to 0. `DEV` being on while `PROBE` is off is not refused: the arm gates on its OWN fresh
+# `USBMODE` read and only uses 910a's reading as a second number in the record.
+USB_DEV=${STAGE90_XNU_USB_DEV:-0}
+case "$USB_DEV" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_USB_DEV='$USB_DEV' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+USB_DEV_FORCE=${STAGE90_XNU_USB_DEV_FORCE:-0}
+case "$USB_DEV_FORCE" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_USB_DEV_FORCE='$USB_DEV_FORCE' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $USB_DEV_FORCE -eq 1 && $USB_DEV -eq 0 ]]; then
+    echo "REFUSING: STAGE90_XNU_USB_DEV_FORCE=1 with STAGE90_XNU_USB_DEV=0." >&2
+    echo "          The force switch only relaxes the WRITE arm's gate; with the arm off there is no" >&2
+    echo "          gate to relax, and a set-but-inert switch is a record that says otherwise." >&2
+    exit 1
+fi
 # **909: the RESIDENCE arm, and the first switch that REMOVES this image's own ending.** 908 proved a
 # plain power-on enters the OS; it ended because the image ended it - the deliberate deadline/pass-count
 # called `entry_seam_end_run`, whose first store (`RESTART_REASON` at `0x0fa0065c`) faults under XNU's
@@ -1023,7 +1050,9 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_RESIDENT
                 STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_XNU_IDLE_NO_SLEEP
-                STAGE90_XNU_USB_PROBE)
+                STAGE90_XNU_USB_PROBE
+                STAGE90_XNU_USB_DEV
+                STAGE90_XNU_USB_DEV_FORCE)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
 # the case statement below against the script's own environment reads - `grep -o '${STAGE90_[A-Z0-9_]*:-'`
@@ -1128,6 +1157,8 @@ do
         STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_XNU_USB_PROBE)        _v=$USB_PROBE ;;
+        STAGE90_XNU_USB_DEV)          _v=$USB_DEV ;;
+        STAGE90_XNU_USB_DEV_FORCE)    _v=$USB_DEV_FORCE ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_SKIP) _v=${STAGE90_ENTRY_CHECKPOINT_SKIP:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_AFTER) _v=${STAGE90_ENTRY_CHECKPOINT_AFTER:-(unset)} ;;
@@ -1351,6 +1382,19 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -DSTAGE90_ENTRY_USB_TRACED="$ENTRY_TRACE" \
     -DSTAGE90_XNU_USB_PROBE="$USB_PROBE" \
     -c "$BOOT_DIR/entry_usb.c" -o "$OUT/xnu_arm_entry_usb.o"
+# **910a2: the write arm, in its own object with the same split.** `STAGE90_ENTRY_USB_TRACED` makes its
+# records exist and `STAGE90_XNU_USB_DEV` arms it; `STAGE90_XNU_USB_DEV_FORCE` relaxes the mode gate. It
+# names `entry_mmio_section`, the live channel, 910a's two published readings, and `stage90_cntvct_read`
+# (a linked global from `entry_timebase.c`), so its position in the link list is free. Kept beside the
+# read so the two USB objects compile together and a build that dropped one is a link error at the
+# unconditional call site in `entry_trace.c`, not a quiet difference.
+run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
+    -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
+    -DSTAGE90_ENTRY_USB_TRACED="$ENTRY_TRACE" \
+    -DSTAGE90_XNU_USB_PROBE="$USB_PROBE" \
+    -DSTAGE90_XNU_USB_DEV="$USB_DEV" \
+    -DSTAGE90_XNU_USB_DEV_FORCE="$USB_DEV_FORCE" \
+    -c "$BOOT_DIR/entry_usb_dev.c" -o "$OUT/xnu_arm_entry_usb_dev.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
 
@@ -1491,6 +1535,8 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_ROOT_FROM_CARD="$ROOT_FROM_CARD" \
         -DSTAGE90_XNU_IDLE_NO_SLEEP="$IDLE_NO_SLEEP" \
         -DSTAGE90_XNU_USB_PROBE="$USB_PROBE" \
+        -DSTAGE90_XNU_USB_DEV="$USB_DEV" \
+        -DSTAGE90_XNU_USB_DEV_FORCE="$USB_DEV_FORCE" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
 fi
@@ -1583,6 +1629,13 @@ LINK_OBJS=(
 # site (`entry_trace.c`) is unconditional would have an undefined callee, which is a link error and
 # not a quiet difference; it is here because `entry_trace.c` is not the only reader of the switch.
 [[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_usb.o")
+
+# 910a2: the write arm, same condition and dependency shape as the read probe above. It names
+# `stage90_cntvct_read` (a linked global from `entry_timebase.c`), so it must come after that object in
+# this list - a build that left it out while the call site is unconditional is a link error, not a quiet
+# difference. 910a's `g_stage90_usb_id_cap`/`g_stage90_usb_usbmode` are defined unconditionally in
+# `entry_usb.c`, so this object resolves them whether or not the read probe's body is compiled.
+[[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_usb_dev.o")
 
 if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # --- XNU's own objects, and a generated stub for everything they still need -------------------
@@ -36789,6 +36842,11 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # would be a run whose arm nobody read. The two-way check after the file is written is what makes
     # forgetting it a refusal rather than a commit. Written as the RESOLVED `$USB_PROBE`.
     echo "STAGE90_XNU_USB_PROBE=$USB_PROBE"
+    # **910a2's two switches, written here for the same reason as the line above**: this reader is the
+    # one site a name-keyed diff does not visit and the only site the gate ever reads, so a switch that
+    # reached the compiler and the arm-key list but not here would be a run whose arm nobody read.
+    echo "STAGE90_XNU_USB_DEV=$USB_DEV"
+    echo "STAGE90_XNU_USB_DEV_FORCE=$USB_DEV_FORCE"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways
@@ -36831,6 +36889,15 @@ say "  xnu_entry_678: the record carries ${#ENTRY_ARM_KEYS[@]} arm key(s) plus t
 # where it runs; its self-test is here too so one placement runs both.
 run python3 "$REPO_ROOT/tools/check_usb_probe.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
 run python3 "$REPO_ROOT/tools/check_usb_probe.py" --selftest || exit 1
+
+# **910a2: the USB write arm's guard, on the same condition and at the same late position.** It reads
+# `STAGE90_XNU_USB_DEV` out of `xnu_arm_entry-config.txt` and the linked ELF, so - like the probe's image
+# half above - it MUST run after the record writer (`} > "$OUT/xnu_arm_entry-config.txt"`); a check here
+# compares THIS image against the PREVIOUS arm's record, which is the refusal the probe's own placement
+# comment records. The source half (offsets/values against the owner, the write-target whitelist, the
+# mode gate) is switch-independent and runs against every arm.
+run python3 "$REPO_ROOT/tools/check_usb_dev.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
+run python3 "$REPO_ROOT/tools/check_usb_dev.py" --selftest || exit 1
 
 # ------------------------------------------------- 533: **the sources of this image, by content**
 #
