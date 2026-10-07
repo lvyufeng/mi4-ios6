@@ -329,9 +329,11 @@ one-shot calls plus two park iterations). So the run is not resident: it **stops
 iterations into an infinite loop, ~13.4 s in — after `mini4: the OS has nothing to run — pid 1 parked in
 poll`, before the watchdog's bark (25 s), which is why nothing resets. The 52 dark minutes are
 post-stop wall-clock, not run lifetime. (The log is complete: 872 KB < the 2 MB console bound and
-11 796 records < the 16 384 cap, **no** `xnu_live_capped`; and the console **appends** — `entry_write_kv`
-reads `*size_p`, which `entry_live_init` does not reset — so a reboot would append a *second* arm block,
-and there is exactly one.)
+11 796 records < the 16 384 cap, **no** `xnu_live_capped`.) **Correction (R10): the single arm block
+does NOT rule out a reboot loop.** The payload's `log_init` (`src/ram_console.c:11`) resets
+`rc->size = 0` on **every** payload entry, at the same base `0xde500000` the live channel appends to
+(`entry_write_kv`), so a warm reset **clears** the buffer — a boot-loop reads as one complete session,
+and a read always shows the *current* iteration. The halt-vs-loop question is therefore **open**.
 
 ### What arm 3 must do, and the third finding it also carries
 
@@ -355,3 +357,70 @@ and there is exactly one.)
 then wedges at ~13.4 s (dark), not resident. 909's pet does not yet land (block collision), and even
 landed it would feed a run that has already stopped. The residence clause needs both the block fix and
 the wedge answered.
+
+## R10 — the stop, discriminated: the wfi returns; the re-arm is what fails; and the willingness to loop is open
+
+An read-only investigation of the ~13.4 s stop produced five verdicts. Two confirm R9; two narrow it;
+and one corrects a claim R9's addendum pushed.
+
+### Ruled out
+
+- **A software dead-man.** It is armed only in the payload as a GIC timer PPI
+  (`stage90_arm_pc_sampling_watchdog`, `src/gic.c:519`) and **disarmed immediately before the jump**
+  by `stage90_disarm_deadman_timer()` (`src/xnu_entry_jump.c:265`, body `src/gic.c:630-690`). The log
+  confirms: `disarm_isenabler0_before=0x000c7fff → after=0x00007fff`, `disarm_cntp_ctl_before=0x5 →
+  after=0x2`. Nothing in the payload runs after the jump, so it has no post-jump kicker.
+- **A stuck `wfi`.** This is the report's own discriminator and it decides the question.
+  `entry_note_wfi` (`src/entry/entry_stubs.c:5443`) publishes `xnu_live_wfi_before` and
+  `..._after` from the same call, so a run that *parks* inside the `wfi` publishes `before` and no
+  `after`. 909's log has **four complete pairs** —
+
+  ```
+  before=0x0616a6e9 after=0x0862e620  (Δ 0x024c3f37 = 2 406 199 ticks = 2.007 s)
+  before=0x08637ec0 after=0x0aafd339  (Δ 0x024c5479)
+  before=0x0aaffcfa after=0x0cfc58e0  (Δ 0x024c5be6)
+  before=0x0cfc8a12 after=0x0f48ec3f  (Δ 0x024c622d)
+  ```
+
+  every `after` present, each window ~2.007 s (the fixture's `poll(NULL,0,2000)` park,
+  `entry_ramdisk.s:192-197`). The `wfi` returned all four times. **So the run does not park in the
+  `wfi`**; it stops *between* the fourth `wfi`'s return and the fifth. The one-shot `CNTP_TVAL`
+  wakeup works, and the failure is in what happens at the wakeup — the re-arm into the next `cpu_idle`
+  pass — not in the sleep itself.
+
+### Narrowed, and the new top candidate
+
+- **The watchdog is the only physical timer still counting.** `CNTFRQ=0x0124f800` = 19.2 MHz;
+  the pet never fed it (R9). Computed from the log's own words (`hw_watchdog_hz=0x7ffd` = 32765,
+  `src/hw_watchdog.c:103`): bark `0x000c7fb5` = 817 077 ticks = **24.94 s**, bite `0x000dffac` =
+  917 420 ticks = **27.99 s**. The stop is at 13.36 s — **~14 s before the bite** — so a bite cannot be
+  the ~13.4 s stopper. But because `log_init` clears on re-entry (correction above), a bite at ~28 s
+  **would reboot into the payload and clear the buffer**, so the run's *terminal* mechanism (halt vs
+  loop) is **not yet decided** — the last complete transition is the 4th wfi return at ~13.36 s, and
+  what follows it is the open cell.
+- **The idle machinery stops making progress after the 4th pass** (the strongest structural
+  signature). `xnu_live_idle_seq` (powers of two, `src/entry/entry_stubs.c:5159`) tops out at
+  **`0x8000` = 32768**, while the `mini4:` console reports **60931** idle entries at the park's return
+  (`entry_trace.c:1607`; the summary prints only when `poll` returns, `:1565`). Since 32768 is the
+  highest power of two ≤ 60931, the kernel made **almost no further `cpu_idle` entries after ~2 s**.
+  And `mini4:`'s `platform_cache_idle_enter entered … 1` against `xnu_live_slot_post_calls=4` says the
+  cache-window **enter ran once while its exit returned four times** — at least three of the four
+  "exits" were not on the normal enter→wfi→exit path. Both runs share the 1-vs-4 mismatch.
+
+### The cheapest discriminating arm
+
+**Land the pet's install** (arm 3's block fix) so it publishes `xnu_live_wdt_map=1` and, with it,
+`xnu_live_wdt_countdown`/`_sts`/`_pets`/`_base`/`_bark`. The register read the pet already attempts
+(`(STS >> 1) & 0xfffff`, `entry_trace.c:2475`) is exactly the discriminator: a countdown that **rises
+toward the bark with no pet** means the watchdog is still counting and will bite; a countdown **frozen**
+means the register is dead and the stop is purely in-kernel. It is one refusal away from working (the
+code is already in the image), needs no new hook, and its negative cell is currently the only thing the
+log cannot answer. A zero-build cross-check, if the phone were still dark, would be to read `0xf9017008`
+(`WDT_EN`) out of TWRP — still 1 after the run means no bite occurred.
+
+### What R10 changes about R9
+
+R9 answered "the run stops at 13.36 s, one arm block, no reboot". R10 keeps the 13.36 s and the stop
+**but withdraws the "no reboot" half**: a reboot clears the buffer, so the single arm block is not
+evidence against it. The stop's *last recorded transition* is real (the 4th wfi returned); whether the
+run then halted or looped-until-a-bite is the next thing to measure.
