@@ -213,3 +213,44 @@ VDDCX`) work — that last one is 910a2's open question and not 910b's to close.
 **Not deferred, because it is not optional:** the bus-reset re-init (§3) and the cache-direction discipline
 (§2). Both are the kind of thing that works in a first press and wedges in a second — the failure mode this
 project has been bitten by before.
+## 9. The first arm as built (arm `880a3568`, 2026-10-07) — and the two things the build forced
+
+The first arm **is** the smallest slice §8 recommended: EP0 armed and answering `GET_DESCRIPTOR`
+(device/config/string, plus the LANGID), `SET_ADDRESS`, `SET_CONFIGURATION` and `GET_STATUS`, and the one
+bulk IN endpoint armed with the arm's magic — no live stream yet (that is 910c). It is 910a2's `b3fbcd31`
+plus one entry key, `STAGE90_XNU_USB_ENUM=1`; the payload's own switch set is byte-identical
+(`6c2b6038` — `USB_ENUM` is an *entry* switch). Entry bin 6,498,612 bytes, unchanged in length. Park
+`out/stage90/frozen/armed-storage-880a3568/`, 11 members, `make check` 0, `verify_press_ready.sh` 5/5.
+
+**Two things the build forced, and both are the class this project keeps catching.**
+
+**(a) The seam `STAGE90_XNU_SEAM_LR` moved a tenth time, +0x1000 to `0x8004f2dc`.** The ON body — the two
+descriptor tables and a 2 KB `g_usb_qh` array — crosses one more page than 910a/910a2 (whose own arm fit
+inside the same page). The build refused with the entry clause, as designed; both copies of the constant
+(`src/entry/entry_trace.c` and `scripts/run_and_capture.sh`) moved together. **The bin's *length* being
+unchanged is not the claim that nothing moved** — the entry group crossed an internal page boundary while
+the total stayed 6,498,612 bytes, the same arithmetic a prior rung measured ([[mi4-linker-fill-term]]). The
+value is a function of the entry group's size and not of the rung's meaning.
+
+**(b) The core→CPU cache operation is `FlushPoC_DcacheRegion`, NOT `FlushPoU_Dcache`.** The first draft used
+the design's §2 primitive and the build refused: `__wrap_FlushPoU_Dcache is the callee at 5 site(s) and not
+4`. The seam arm (`STAGE90_XNU_SEAM_POC`) puts `--wrap=FlushPoU_Dcache` in the link, so **every** call to
+that symbol in the image is redirected to `__wrap_FlushPoU_Dcache`, whose identification is written against
+exactly the kernel's four call sites (`cache_xcall`, the enter's else arm, the exit's own, `cache_xcall_handler`).
+A fifth caller from a new entry file is a build refusal — and correctly so, because it would move the
+identification's coverage. `FlushPoC_DcacheRegion` is the same clean-and-invalidate operation aimed at the
+**Point of Coherency** instead of Unification — which is where the USB core's DMA writes land, so it is the
+*correct* target for the SETUP region as well as the one the seam does not wrap. The design's "a targeted
+invalidate is a later refinement" is therefore paid here, early, and for a second reason. `CleanPoU_DcacheRegion`
+(the CPU→core clean) is not wrapped and stays.
+
+**(c) The guard recomputes its own transcription.** `tools/check_usb_enum.py` does not trust the header's
+comment: it parses `struct ci13xxx_qh` / `struct ci13xxx_td` out of `ci13xxx_udc.h` and recomputes every
+field offset (the qh `setup` field is at **40, not 32** — it drifted while this arm was written, which is
+the defect [[mi4-one-value-two-definitions]] names). It compares every written value against the owner's own
+expression, asserts the write-target whitelist has no `USBCMD.RST`, checks the mode gate at the source, reads
+the switch out of the linked ELF both ways, and runs a 5-mutation falsification battery (all refused).
+
+**GOAL NOT MET by this arm.** An enumeration rung is a *host-visible* thing only if a host reads it; this arm
+arms the device side. 910c (a stream, or KDP over bulk) and 910d (`adbd`) each remain a press. THE PRESS IS
+THE OPERATOR'S.
