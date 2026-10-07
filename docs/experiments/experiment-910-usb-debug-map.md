@@ -561,7 +561,10 @@ the one IN. What it can **not** omit is §10.3(d): the bus-reset re-init of `END
 driver written for Linux's `usb_request`/`dma_pool`/workqueue world. The map above is the raw material;
 the arm's own design (the static qh/dTD layout, the ISR body, the descriptor table, the guard) is the next
 step, and it is worth its own document before a line is written — the same discipline §9.6 enforced for the
-*small* USB arm.
+*small* USB arm. **That document is `docs/experiments/experiment-910b-design.md`** (the arm's shape, the
+poll-not-ISR decision, the static qh/dTD graph, the descriptor tables, the guard, and the named
+falsifications); it designs the whole rung and recommends the *first* arm be the smallest slice — arm EP0
+and answer `GET_DESCRIPTOR(device)` only — the way 910a was a read before 910a2 a write.
 
 ### 10.7 What 910b still does not close
 
