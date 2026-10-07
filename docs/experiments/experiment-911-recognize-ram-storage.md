@@ -13,19 +13,44 @@ So this is a *recognition* clause about numbers the OS reports, and it is the se
 been about a number rather than about a path (the first was 903's mount). Its two halves are **very
 different in difficulty**, and that difference is the point of this doc.
 
-## 1. What the port reports TODAY (host-side, read)
+## 1. What the port reports TODAY — **the live number is 16 MB, and it is a third definition**
 
-- **`boot_args.memSize = 0x05d00000`** (93 MB) and `memSizeActual = 0x05d00000`, from
-  `src/xnu_boot_args_conformant.c:108` (the value), `:177`/`:184` (the two stores). The rationale
-  (`:83-107`) says plainly it is the **contiguous span from PA 0 to the first memory hole**
-  (`0x5d00000`), 1 MB aligned so XNU's 1 MB-stepping section loop "stops cleanly at the hole". It is
-  *sourced* from the device's own map but is **only the first span**, ~3 % of the device.
-- **`/defaults hw.memsize = 0x5e500000`** (≈1.47 GB), from `src/stage90_main.c:868`, defined as
-  `RAM_CONSOLE_BASE - RAM_PHYS_BASE` = `0xde500000 - 0x80000000`. It is the extent of RAM the
-  **payload's own RAM console sits under**, not the device's memory.
-- `/memory reg = {0x80000000, 0x5e500000}` (`src/stage90_main.c:49-51`) — the same 1.47 GB.
+**Correction (2026-10-07, host-side).** The earlier draft of this section quoted
+`src/xnu_boot_args_conformant.c`'s `memSize = 0x05d00000`. **That is not the boot_args XNU is handed.**
+There are **three** definitions of the handoff size in the tree, and the one on the live path is the
+smallest ([[mi4-one-value-two-definitions]]):
 
-Neither number is 3 GB, and (see §3) **neither one controls the answer by itself.**
+| definition | `physBase` | `memSize` | on the live path? |
+|---|---|---|---|
+| `src/xnu_boot_args_conformant.c:69/80/108` | `0x0` | `0x05d00000` (93 MB) | **no** — module not called |
+| `src/boot_args.c` (payload's own) | `STAGE90_BASE` | `RAM_CONSOLE_BASE-RAM_PHYS_BASE` (1.47 GB) | only as the **source**, re-derived below |
+| **`src/xnu_entry_jump.c` `xnu_entry_build_args` (`:124`; `memSize` at `:150`)** | **`0x80000000`** | **`STAGE90_XNU_ENTRY_SIZE` = `0x01000000` (16 MB)** | **YES — the copy XNU runs on** |
+
+`xnu_entry_build_args` is reached from `stage90_xnu_entry_run` (`:176`), called once at
+`src/xnu_kernel.c:243` under `#if STAGE90_XNU_ENTRY` — the last thing the payload does. It builds a
+**second** boot_args inside the entry window (`ENTRY_ARGS_PA = 0x80000000 + offset`) with
+`physBase == virtBase == 0x80000000` ("the whole trick") and `memSize = STAGE90_XNU_ENTRY_SIZE`
+(= `@ENTRY_SIZE@` from `out/stage90/xnu_arm_entry.h`, `0x01000000`). **Observed on device**:
+`xnu_entry_args_memSize=0x01000000`, `physBase == virtBase == 0x80000000`
+(experiment-451 `:83-84`, experiment-444 `:159`) — a **16 MB identity window `[0x80000000, 0x81000000)`**,
+not 93 MB and not 1.5 GB.
+
+So the OS is told it has **16 MB** of RAM, at a base of PA `0x80000000`. The two other numbers are real
+but *other* things: `xnu_boot_args_conformant.c`'s 93 MB is a roadmap-Phase-2 module the payload never
+installs, and `/defaults hw.memsize = 0x5e500000` (`src/stage90_main.c:868`) / `/memory reg =
+{0x80000000, 0x5e500000}` (`:49-51`) describe the span **the payload's own RAM console sits under**
+(device-tree properties), not the kernel's `memSize`.
+
+**And this port does not run stock `arm_vm_init`.** The live arm-vm path is
+`src/xnu_arm_vm_init_full_pmap.c`, which **asserts** `args->memSize == (RAM_CONSOLE_BASE - RAM_PHYS_BASE)`
+and `physBase == STAGE90_BASE` (`:294-296`) — i.e. it is written for the *payload's own* 1.47 GB
+boot_args, while the *entry* copy is 16 MB. **That mismatch is unresolved here and is step 0 of the RAM
+work** (see §3): the live kernel is handed 16 MB by a builder that disagrees with the module meant to
+consume it.
+
+Neither the live 16 MB nor the 93 MB is 3 GB. And (§3) **the section-map builder is `start.s`, not
+`arm_vm_init.c`** — so which of these numbers reaches `hw.memsize` turns on what `start.s` does with
+`boot_args->memSize`, which §3 traces.
 
 ## 2. What the device ACTUALLY has — and the fact that changes the shape
 
@@ -51,9 +76,13 @@ So cancro removes `[0x05a00000, 0x0d200000)` (120 MB) and `[0x0fa00000, 0x0ff000
 `80000000-de6fffff : System RAM`, i.e. `[0x80000000, 0xde700000)` (top = `RAM_TOP` in `stage90.h:30`),
 ≈1.51 GB, with the top 2 MiB the Android `ram_console` (`= RAM_CONSOLE_BASE 0xde500000`). **Because
 every DT hole is under `0x80000000`, the high bank XNU runs in is *not* fragmented by them** — the
-holes are exactly why the *low* PAs `[0, 0x80000000)` are not one clean span, and why the payload cut
-`memSize` at the first hole (93 MB). The 3 GB is the low bank plus the high bank; the OS is told only
-the low bank's first 93 MB.
+holes are exactly why the *low* PAs `[0, 0x80000000)` are not one clean span.
+
+**What the OS is actually told, though, is neither 3 GB nor 1.5 GB nor even 93 MB — it is 16 MB**
+(§1): `xnu_entry_build_args` hands XNU a **16 MB identity window `[0x80000000, 0x81000000)`,
+`physBase == virtBase == 0x80000000`**. The 3 GB is the low bank plus the high bank; the high bank is
+~1.5 GB; and the running kernel is described as a 16 MB window at the *top* of the low bank. The port's
+size numbers are not merely small, they are **three disagreeing definitions** (§1).
 
 ## 3. What XNU arm32 (this tree) can be told, and what it cannot — the hard boundaries
 
@@ -82,10 +111,26 @@ Traced through `external/xnu-4570.1.46/` (read-only), each line load-bearing:
    cannot be linearly physmapped below `0xFFFEFFFF` on this tree.** This is the boundary that makes
    the RAM half a port project rather than a constant.
 
-**Consequence, stated plainly:** the RAM clause cannot be met by the payload alone. It needs (a) either
-the holes registered as I/O so one span covers only a *chosen* usable window ≤1 GiB, or a pmap/VA
-change that meshes spans; and (b) `MEM_SIZE_MAX` raised if the reported number is to exceed 1 GiB and
-(more importantly) a **high physmap window** if 3 GB is to be *mapped* rather than merely *reported*.
+**The section map is built in `start.s`, not `arm_vm_init.c` — and it is `memSize`-driven.** Verified
+2026-10-07 from the linked source: `external/xnu-4570.1.46/osfmk/arm/start.s:106` loads `BA_MEM_SIZE`
+into `r10`, and `_start`'s `mapveqp` loop (`:198-207`) emits exactly `memSize / 1 MiB` section TTEs,
+stepping `r7` by 1 MiB and emitting VA `[virtBase, virtBase+memSize)` → PA `[physBase, physBase+memSize)`.
+`arm_vm_init.c` only *copies and re-protects* that boot table (`:370-376`, full 4096-entry L1 tables —
+no fixed array is overflowed by a larger `memSize`; 1510 entries ≪ 4096). **So the map covers exactly
+the span `memSize` names, and nothing else** — the "does the map already cover the high span" question is
+answered the same way as the number: it covers 16 MB (the entry window `[0x80000000, 0x81000000)`), no
+more. The window is `ENTRY_SIZE = 0x01000000` in both the linker (`build_entry.sh:28626`) and the
+generated header (`xnu_arm_entry.h:7`), with `topOfKernelData` at `+8388608` (`:14`) — so `start.s`
+maps the whole 16 MB the entry image, its BSS, the device tree and the boot_args tables live inside,
+and **nothing above `0x81000000` is mapped at all**.
+
+**Consequence, stated plainly:** the RAM clause cannot be met by the payload alone. Step 0 is resolving
+*which* `memSize` is live and making the 16 MB entry window and the 1.47 GB `full_pmap` module agree.
+Then it needs (a) the mapped span raised to the real high bank (≤1 GiB without touching `MEM_SIZE_MAX`),
+and (b) either the holes registered as I/O so one span covers a *chosen* usable window ≤1 GiB, or a
+pmap/VA change that meshes spans; and (c) `MEM_SIZE_MAX` raised if the reported number is to exceed
+1 GiB and (more importantly) a **high physmap window** if 3 GB is to be *mapped* rather than merely
+*reported*.
 
 ## 4. The storage half is nearly free — and the exact reason it is not free yet
 
@@ -128,15 +173,24 @@ device behaviour.
 
 ## 5. The design, as rungs (each a separate, pressable step — no arm built here)
 
-The decisive fact from §2: XNU's RAM `[0x80000000, 0xde700000)` is **already one clean span** ~1.5 GB,
-and the DT holes are all below `0x80000000`. So the obstacle is not fragmentation in the *usable* bank
-— it is that `boot_args` carries only **93 MB** (the low bank's first span), and the high bank is never
-named. Two further ceilings then gate the *number*: `MEM_SIZE_MAX = 1 GiB`, and the 32-bit kernel VA.
+**Revised 2026-10-07 after the host-side traces.** The decisive fact from §2 stands — XNU's physical RAM
+`[0x80000000, 0xde700000)` is **already one clean span** ~1.5 GB, and the DT holes are all below
+`0x80000000` — but the *reported* number is **16 MB, and it is the entry window, not a bank** (§1), and
+the section map is `memSize`-driven and covers exactly that (§3). Three ceilings gate the *number*:
+the 16 MB window itself, `MEM_SIZE_MAX = 1 GiB`, and the 32-bit kernel VA.
 
-- **911a — name the high bank (the real, testable first rung).** Set `boot_args.memSize` to the high
-  span's size. Two candidate values, and the honest one matters:
-  - the **payload's own extent**, `0xde500000 - 0x80000000 = 0x5e500000` (1510 MiB) — the span the
-    payload already maps and whose top it owns (the RAM console); or
+- **911a0 — reconcile the three `memSize` definitions (step 0, must come first).** Today the live
+  `xnu_entry_build_args` hands XNU **16 MB** while `src/xnu_arm_vm_init_full_pmap.c:294-296` **asserts**
+  `memSize == 0x5e500000`. Either that assert never runs on the live path, or the two disagree in a way
+  the log already knows. Before any number is raised, one pass must say **which `memSize` XNU's
+  `start.s` and `arm_vm_init` actually consume** and make the definitions one
+  ([[mi4-one-value-two-definitions]]). Its verdict cell is the existing `xnu_entry_args_memSize` plus
+  the `full_pmap` assert's status.
+- **911a — name the high bank (the real, testable first rung).** After 911a0, set the live
+  `boot_args.memSize` to the high span's size. Two candidate values, and the honest one matters:
+  - the **payload's own extent**, `0xde500000 - 0x80000000 = 0x5e500000` (1510 MiB) — the span whose
+    top the RAM console occupies; **the payload does *not* currently map it** (see the caveat below), so
+    both maps must be grown to it before this value means anything; or
   - the **true top**, `0xde700000 - 0x80000000 = 0x5e700000` (1512 MiB, `RAM_TOP`) — but that claims
     the 2 MiB the Android `ram_console`/ramoops sits in, so it is `memSizeActual`'s number, not a safe
     `memSize`.
@@ -144,10 +198,10 @@ named. Two further ceilings then gate the *number*: `MEM_SIZE_MAX = 1 GiB`, and 
   upper clamp only — `arm_init.c:280-285`, `arm_vm_init.c:351-359`; a smaller value silently wins).
   This makes `hw.memsize` report **~1.5 GB, the device's real usable high bank**, without touching XNU.
   **This is the rung that is close**: a boot-args/DT edit (payload rebuild), same gate, no boot-chain
-  change, no brick risk beyond the normal `fastboot boot`. Its verdict cell is the **boot-args log
-  key `xnu_ba_mem_size`** (`src/xnu_boot_args_conformant.c:143` — the same family as `xnu_ba_phys_base`
-  / `xnu_ba_virt_base`; note it is `xnu_ba_`, *not* the `xnu_live_*` console channel) and the sysctl
-  reading.
+  change, no brick risk beyond the normal `fastboot boot`. Its verdict cell is the **live boot-args log
+  key `xnu_entry_args_memSize`** (`src/xnu_entry_jump.c:172`) — **not** `xnu_ba_mem_size`, which the
+  roadmap module `xnu_boot_args_conformant.c:143` emits but the live path never calls (this is the same
+  three-definition trap as §1) — together with the sysctl `hw.memsize` reading.
 - **911b — `MEM_SIZE_MAX` ≥ the real span** (`arm_vm_init.c:134`) so 911a's ~1.5 GB is not clamped to
   1 GiB. A one-line XNU compile-time edit.
 - **911c — the 3 GB itself (the real work).** Reporting/mapping 3 GB needs the **low bank** too, i.e.
@@ -165,17 +219,35 @@ named. Two further ceilings then gate the *number*: `MEM_SIZE_MAX = 1 GiB`, and 
   (`:765-766`, `:788-789`). No boot-chain change, no new device behaviour — the read path 903/906 built,
   extended.
 
-**A caveat that bounds even 911a:** hoisting `memSize` to the high bank assumes the payload's identity
-map and the section map both cover `[0x80000000, 0xde500000)`. The payload maps the whole image by
-identity sections (`STAGE90_HIGH_ALIAS_BASE`), but **whether XNU's section map already covers all
-1510 MiB, or only the 8 MB/93 MB window the runs have exercised, must be verified from the linked
-`arm_vm_init`/`pmap` before the number is raised** — otherwise the kernel would be handed a size larger
-than the map behind it, the mirror-image of 911a's own hazard. **That verification is the first step of
-911a, not an assumption.**
+**A caveat that bounds even 911a — and it is now RESOLVED (2026-10-07).** Hoisting `memSize` to the high
+bank assumes the payload's identity map and XNU's section map both cover `[0x80000000, 0xde500000)`.
+**They do not.** Measured:
 
-**The clause's honest verdict: 911a/911b are buildable soon and would take `hw.memsize` from 93 MB to
-~1.5 GB (the real usable high bank); 911c is the rung that meets the literal 「3GB内存」 and is a port
-comparable to the ARM bring-up.** The storage half (911d) is close behind 903/906.
+- **XNU's section map covers exactly `memSize`** — `start.s:198-207` emits `memSize / 1 MiB` sections
+  (§3). At today's live `memSize = 0x01000000` that is **16 sections `[0x80000000, 0x81000000)`**, and
+  nothing above `0x81000000` is mapped. Raised to `0x5e500000` it emits 1510 sections — the *count* is
+  not the blocker (the boot L1 tables are full 4096 entries), but 911a0 must first make `memSize` mean
+  one thing (§1/§5.911a0).
+- **The payload's own identity map does not cover the span either** (`src/mmu.c:5404` `build_identity_table`):
+  low 1:1 is the **image only** (`:5416-5419`, `[0, __stage90_image_end)`); the high alias is a **64 MB
+  window** capped at `STAGE90_IMAGE_ALIAS_LIMIT = 0xc4000000` (`:5434-5443`); the entry window is 16 MB
+  (`:5476-5479`); and the only thing at `0xde500000` is the **2-section RAM-console window**
+  (`:5462-5464`) — not RAM. So `[0x81000000, 0xde500000)` is unmapped by the payload too.
+
+**Therefore 911a is not "raise a number": both maps must be extended to the span first**, or the kernel is
+handed a size larger than the map behind it. The `stage90_l1_table` (`src/mmu.c:553`, 4096 entries) is
+large enough to hold the whole L1 — the builder's loops simply stop at the image end and the fixed
+windows, never at `0xde500000`.
+
+**The clause's honest verdict (revised 2026-10-07 with the traces in §1/§3/§5-caveat):** the live port
+tells XNU it has **16 MB** and maps exactly those 16 MB; it does **not** run stock `arm_vm_init` (the
+port replaced it with `full_pmap`, which asserts a different `memSize`); and both the XNU section map and
+the payload identity map stop at the entry window, nowhere near the 1.5 GB high bank. So **911a0 must
+come first** (one meaning for `memSize`), then the map-extension work in **911a**
+(payload identity map **and** the XNU window), then **911b** (`MEM_SIZE_MAX`), then **911c** (the
+literal 「3GB内存」 — a pmap region list or a high physmap window, a port comparable to the ARM bring-up).
+911a/911b remain *buildable* and are payload-plus-one-macro edits; 911c is the port. The storage half
+(911d) is close behind 903/906 and fully traced (§4).
 
 ## 6. Risk, gates, and what this does NOT do
 
