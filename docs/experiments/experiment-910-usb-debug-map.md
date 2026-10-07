@@ -5,8 +5,9 @@ Date: 2026-10-07
 Status: **MAP + arm 1 (910a) and arm 2 (910a2) BUILT AND PARKED, NEITHER PRESSED.** `entry_usb_probe`
 — the read-only USB2 OTG probe — is arm `armed-storage-377fb57a` (arm `cabba670` plus
 `STAGE90_XNU_USB_PROBE=1`); `entry_usb_dev_init` — the PHY init + the device-mode transition, **the first
-arm of this walk that writes to the port** — is arm `armed-storage-1138fdc6` (910a plus
-`STAGE90_XNU_USB_DEV=1`). The map below is §1-§7; **§8 is arm 1 and §9 is arm 2.** This is the standing "map before the rung" step (the same shape as
+arm of this walk that writes to the port** — is arm `armed-storage-b3fbcd31` (910a plus
+`STAGE90_XNU_USB_DEV=1`; **rebuilt 2026-10-07 from the first park `1138fdc6` to fix a dead-code defect at
+the probes' call site — see §9.6**). The map below is §1-§7; **§8 is arm 1 and §9 is arm 2.** This is the standing "map before the rung" step (the same shape as
 `mi4-hfs-wiring-mapped`, 870/874, before the HFS port was built): the goal's added requirement is
 
 > 「保持在xnu里，可以通过usb进行调试」 — a resident XNU must also be *debuggable over USB*.
@@ -215,7 +216,12 @@ records the history (`0x8004e2dc` at 905 → `0x8004d2dc` at 908 → `0x8004e2dc
 ### 8.4 What the run would be
 
 The same four-part probe shape as `entry_storage.c`/`entry_gic.c`, called once from
-`__wrap_Idle_load_context` (after `entry_storage_probe`), idempotent, gated on the install:
+`__wrap_Idle_load_context` (after `entry_storage_probe`), idempotent, gated on the install.
+
+> **CORRECTION (2026-10-07, §9.6):** the sentence that stood here named `__wrap_Idle_load_context`, but the
+> arm as FIRST BUILT (`377fb57a`) actually called the probe from `__wrap_platform_cache_idle_exit` — a
+> **tail call** the record did not match — and that wrapper is never entered on the `IDLE_NO_SLEEP=1` arm.
+> The probe was dead code; it is now genuinely in `__wrap_Idle_load_context`, pinned by a build refusal.
 
 - **(1) the mapping first.** `entry_mmio_section(0xf9a55000, …)` installs the 1 MB section for
   megabyte `0xf9a`, which no other device this image maps owns (the *opposite* of the watchdog's fate at
@@ -244,14 +250,17 @@ and, when it is 1, names the 910a arm (this file's own subject matter, repaired 
 repaired it one switch over).
 
 **Owed, in order:** (1) the operator's press of `377fb57a` (a plain boot, the same staging and escape as
-909 — `scripts/press_909_normal.sh` names `cabba670` and would need its `EXPECT_ARM` moved to `377fb57a`);
+909 — `scripts/press_909_normal.sh` names `cabba670` and would need its `EXPECT_ARM` moved to `377fb57a`).
+**BUT READ §9.6 FIRST: `377fb57a` as built calls its probe from the UNREACHABLE
+`__wrap_platform_cache_idle_exit`, so a press of it logs NO `xnu_live_usb_*` key — the corrected arm that
+carries both probes for real is `b3fbcd31`.**
 (2) read the `xnu_live_usb_*` block out of TWRP's `/proc/last_kmsg`; (3) then build 910a2 (the PHY +
 device-mode bring-up — the writes). **The goal is NOT met** — a read of the controller is not a debug
 transport, and 910b (event loop + an enumerable endpoint) and 910c (KDP over bulk, the operator's choice)
 are each a separate press, none built yet.
 
 
-## 9. Arm 2 — 910a2: the PHY init and the device-mode transition, `entry_usb_dev_init` (arm `1138fdc6`)
+## 9. Arm 2 — 910a2: the PHY init and the device-mode transition, `entry_usb_dev_init` (arm `b3fbcd31`, first parked as `1138fdc6`)
 
 **910a2 is 910a plus ONE key**, `STAGE90_XNU_USB_DEV=1`, exactly as 910a was 909's residence arm plus
 one. The key gates a new file, `src/entry/entry_usb_dev.c` (with its own header `entry_usb_dev.h` and its
@@ -339,23 +348,63 @@ ways. Selftest: 5/5 mutations refused.
 
 ### 9.5 Readiness, and what is owed
 
-`tools/verify_press_ready.sh` is **5/5 green** on `1138fdc6`, the park verifies against the record
+`tools/verify_press_ready.sh` is **5/5 green** on `b3fbcd31`, the park verifies against the record
 (11 members, `tools/verify_revert_set.sh` `VERIFIED`), and `make check` exits 0. **Row 4 needed its own
 repair again**: 910a2 carries `STAGE90_XNU_USB_PROBE=1` too, so it would be caught by the 910a branch —
 the new branch reads `STAGE90_XNU_USB_DEV` and, when it is set, SUPERSEDES the 910a text (placed after
 it), naming the WRITE arm and its different consequence rather than the read.
 
-**The payload record is byte-identical to every arm since 909** (`6c2b6038…`, the tenth time): `USB_DEV`
+**The payload record is byte-identical to every arm since 909** (`6c2b6038…`, the eleventh time): `USB_DEV`
 is an ENTRY switch, so no payload switch moved. The entry record is 29 keys; the arm `xnu_arm_entry.bin`
 is unchanged in LENGTH (6498612 bytes) — the ON body is added inside `.text`. **`STAGE90_XNU_SEAM_LR` did
 NOT move this time** (`0x8004e2dc` held), so the entry build exited 0 with no seam-clause refusal —
 unlike 910a, where adding the probe crossed a page.
 
-**Owed, in order:** (1) the operator's press of `377fb57a` (910a) and of `1138fdc6` (910a2) — both plain
-boots, the same staging and escape as 909; `scripts/press_909_normal.sh`'s `EXPECT_ARM` is now
-`armed-storage-1138fdc6`, so it stages and verifies arm 2 (**move it back to `377fb57a` for the 910a
-press, or press 910a2 first**); (2) read the `xnu_live_usb_dev_*` block out of TWRP's
-`/proc/last_kmsg` and compare it against the `xnu_live_usb_*` block from 910a; (3) then build 910b (the
-event loop + an enumerable endpoint) and 910c (KDP over bulk). **The goal is NOT met** — a PHY init and
-a mode transition answer no control transfer and enable no interrupt, so this is not yet a device the
-host can talk to.
+### 9.6 The dead-code defect at the probes' call site, found 2026-10-07 before either USB arm was pressed
+
+**What was wrong.** Both USB probes were called from exactly one site: `__wrap_platform_cache_idle_exit`
+in `entry_trace.c`. **BOTH USB arms carry `STAGE90_XNU_IDLE_NO_SLEEP=1`** (it comes in from 909 arm 6,
+which 910a is built on), and that key's entire design is that `cpu_idle` leaves by its *first door* on
+every pass, so `platform_cache_idle_enter`/`wfi`/`exit` and their wrappers are **never entered**. So on
+both USB arms the probes were **dead code**: a press would have logged **zero `xnu_live_usb_*` keys**,
+which reads as "the probe did not run" — a silence that is indistinguishable from a never-reached site
+(`[[mi4-silence-is-a-reading-only-if-success-is-silent]]`). This is
+`[[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]]` one rung over: a lower arm's switch (909
+arm 6's `IDLE_NO_SLEEP`) made an upper arm's site unreachable — and the call site's own comment still
+asserted the probe ran.
+
+**It was worse than one arm.** The already-**pushed** arm `377fb57a` (910a) carries the same defect: its
+*record* claims the probe is called from `__wrap_Idle_load_context`, but the **artifact** shows a **tail
+call** (`b 80013ffc <entry_usb_probe>` at `804d2e74`) inside the unreachable
+`__wrap_platform_cache_idle_exit`. The prose was wrong; the ELF was the fact. (`1138fdc6` used a `bl`
+from the same wrong wrapper.) So **both USB arms were dead code, not just 910a2.**
+
+**The repair.** Both probes move to `__wrap_Idle_load_context` — the one wrapper every pass reaches on
+EVERY arm (`xnu_entry_513` pins it to `machine_idle` plus `cpu_idle`'s two first-door bodies, no fourth
+site) — placed BEFORE `__real_Idle_load_context`, which is `noreturn`, so a probe after it would never
+run. **909 arm 6 already made this exact move for the watchdog pet**, for the same reason.
+
+**The refusal that keeps it from coming back** — in `src/entry/build_entry.sh`, after the USB guards: it
+reads the **linked ELF** and refuses when a probe whose switch is ON is called from any symbol other than
+`__wrap_Idle_load_context`, matching **both `bl` and the tail-call `b` form**. The `b`-form is
+load-bearing: the first version matched only `bl` and thereby read `377fb57a`'s tail-call probe as *no
+call at all*, accepting an image whose only USB call sat in the unreachable wrapper — the matcher that
+fails to match reads as "no call there", not as "not checked". It also refuses the count both ways
+(a switch ON whose probe is absent, or a probe present with its switch off). **A comment saying where the
+call belongs is not a check** (`[[mi4-a-claim-in-a-comment-is-not-a-check]]`); this reads the artifact.
+
+**The switches did not move** — only the call SITE did. So the arm keys of `b3fbcd31`'s entry record are
+IDENTICAL to `1138fdc6`'s down to `STAGE90_XNU_USB_DEV=1`/`_FORCE=0`; the arm's identity is its bytes
+(`b3fbcd31…`), not its switches. The first park `armed-storage-1138fdc6` remains in the record as the
+(pre-fix) arm it was; **it was never pressed**, so no press result is invalidated. The already-pushed
+`377fb57a` (§8) remains a park too, but its press, when it happens, will log no `xnu_live_usb_*` — the
+repaired arm is `b3fbcd31`.
+
+**Owed, in order:** (1) the operator's press of `b3fbcd31` (910a2, the corrected arm — it now carries
+**both** the read probe and the write arm, so one press answers the whole USB question) — a plain boot,
+the same staging and escape as 909; `scripts/press_909_normal.sh`'s `EXPECT_ARM` is now
+`armed-storage-b3fbcd31`. Press `377fb57a` only if the read-only probe alone is wanted (it will log no
+USB key — see above). (2) read the `xnu_live_usb_dev_*` block out of TWRP's `/proc/last_kmsg` and compare
+it against the `xnu_live_usb_*` block the same press carries; (3) then build 910b (the event loop + an
+enumerable endpoint) and 910c (KDP over bulk). **The goal is NOT met** — a PHY init and a mode transition
+answer no control transfer and enable no interrupt, so this is not yet a device the host can talk to.

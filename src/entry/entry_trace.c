@@ -129,13 +129,15 @@
  * kernel with the live channel up, and the wrapper's frame is not disturbed by a call whose arguments
  * are by value and whose state lives in the probe's own file. */
 #include "entry_storage.h"
-/* 910a: the USB2 OTG probe's own entry point, called from the exit wrapper below beside the storage
- * probe above and for its reasons exactly - the line the arm is on is the probe's own body
- * (`entry_usb.c`), and this file only decides *when* it runs. It runs on the wrapper's first call and
- * only on it (the probe's own `g_usb_probed` guard), so it costs one compare on every later pass; the
- * frame stays the 8 bytes the slot lives in because the call's arguments are by value and its state
- * lives in its own file. It is called **after** the storage probe so the storage arm's records are
- * not displaced by a read-only probe that carries near-zero hazard. */
+/* 910a: the USB2 OTG probe's own entry point, called from `__wrap_Idle_load_context` (NOT the exit
+ * wrapper - see the block at that wrapper; the exit wrapper is never entered on the IDLE_NO_SLEEP arms
+ * both USB arms carry, so a call there would be dead code). Beside the storage probe and for its
+ * reasons exactly - the line the arm is on is the probe's own body (`entry_usb.c`), and this file only
+ * decides *when* it runs. It runs on the wrapper's first call and only on it (the probe's own
+ * `g_usb_probed` guard), so it costs one compare on every later pass; the frame stays the 8 bytes the
+ * slot lives in because the call's arguments are by value and its state lives in its own file. It is
+ * called **after** the storage probe so the storage arm's records are not displaced by a read-only
+ * probe that carries near-zero hazard. */
 #include "entry_usb.h"
 #include "entry_usb_dev.h"
 
@@ -2111,6 +2113,55 @@ void __wrap_Idle_load_context(void)
 
     entry_note_door(lr, (uint32_t)idle_enable, entry_counter());
 
+    /*
+     * **910a / 910a2: THE USB PROBES' SITE, AND IT IS THIS WRAPPER FOR THE PET'S OWN REASON.**
+     *
+     * These two calls were written into `__wrap_platform_cache_idle_exit` (below) and that was a
+     * DEFECT, found on 2026-10-07 while auditing the arms before a press. **Both USB arms carry
+     * `STAGE90_XNU_IDLE_NO_SLEEP=1`** (`377fb57a` and `1138fdc6`, the key 909 arm 6 introduced), and on
+     * that arm the idle leaves by `cpu_idle`'s first door on EVERY pass, so it never reaches
+     * `platform_cache_idle_exit` at all - which is exactly why 909 arm 6 had to MOVE the watchdog pet
+     * out of that wrapper and into this one. The probes were left where the storage probe lives, so on
+     * both USB arms they were **dead code**: a press would have returned a log with zero `xnu_live_usb_*`
+     * and zero `xnu_live_usb_dev_*` keys, which reads as "the probe did not run" when the truth is "the
+     * site the probe was placed at is never entered on this arm". It is [[mi4-a-lower-rungs-side-effect-
+     * poisoned-the-rung-above]]'s shape one rung over: a switch on a lower arm (`IDLE_NO_SLEEP`) made a
+     * site unreachable for every arm above it, and the call site's own comment still said the probe ran
+     * "on this wrapper's first call".
+     *
+     * **This wrapper is the one site every pass reaches on every arm.** `Idle_load_context` is called
+     * from `machine_idle` (the exit path) AND from both of `cpu_idle`'s first-door bodies (the
+     * disassembly merges them into one `mov lr, pc; b`), and this image's clause `xnu_entry_513` already
+     * pins it to exactly those two callers with no fourth site - so on the `IDLE_NO_SLEEP=0` arms the
+     * pass reaches it as well as the exit wrapper, and on the `IDLE_NO_SLEEP=1` arms it is the only site
+     * left. Placing the probes here makes them run on the FIRST idle pass of BOTH arms, which is the
+     * property the exit-wrapper site was supposed to have and never did.
+     *
+     * **The storage probe stays where it is** (`__wrap_platform_cache_idle_exit`, below): it is called
+     * from the mount path too (`entry_root_media_mount_disk`), and the mount arm's readers depend on
+     * those records, so it is idempotent across both sites by design. The USB probes have no second
+     * caller, so they move here rather than being duplicated.
+     *
+     * **The build REFUSES the defect rather than trusting this comment** ([[mi4-a-claim-in-a-comment-is-
+     * not-a-check]]): `build_entry.sh` reads the linked image and refuses when `entry_usb_probe` or
+     * `entry_usb_dev_init` is called from a symbol OTHER than `__wrap_Idle_load_context` on an arm whose
+     * switch is on - so a future edit that moves them back to the exit wrapper is a build that stops,
+     * not a press that reads nothing.
+     */
+#ifndef STAGE90_XNU_USB_PROBE
+#define STAGE90_XNU_USB_PROBE 0
+#endif
+#if STAGE90_XNU_USB_PROBE
+    entry_usb_probe();
+#endif
+
+#ifndef STAGE90_XNU_USB_DEV
+#define STAGE90_XNU_USB_DEV 0
+#endif
+#if STAGE90_XNU_USB_DEV
+    entry_usb_dev_init();
+#endif
+
 #if STAGE90_XNU_RESIDENT && STAGE90_XNU_IDLE_NO_SLEEP
     /*
      * **909 arm 6: the pet's site on the arm whose idle never sleeps.** With `IDLE_NO_SLEEP=1` the idle
@@ -2746,41 +2797,6 @@ void __wrap_platform_cache_idle_exit(void)
      * clock was moved out of this function in the first place.
      */
     entry_storage_probe();
-#endif
-
-#ifndef STAGE90_XNU_USB_PROBE
-#define STAGE90_XNU_USB_PROBE 0
-#endif
-#if STAGE90_XNU_USB_PROBE
-    /*
-     * **910a: the USB2 OTG controller's read, at the storage probe's own site for the storage probe's
-     * own reasons.** `entry_mmio_section` refuses unless the live channel exists (`g_live_state != 1`
-     * is its first of four refusals), and the live channel is a console write's own proof; this
-     * wrapper is inside the handed-off kernel, after that proof. It is called **after** the storage
-     * probe (whose records the mount arm's readers depend on) and before the clock's block below, so
-     * the USB records precede the ending's last one: if the arm's clock runs out, the probe has
-     * published; if the probe's reads do not come back, the ending is never reached and the log is the
-     * probe's own partial record - the reading, not a loss. The port may be live with the host, so the
-     * probe **writes nothing** (see `entry_usb.c`); a compile that reached here with the switch off
-     * leaves a one-compare pass-through. */
-    entry_usb_probe();
-#endif
-
-#ifndef STAGE90_XNU_USB_DEV
-#define STAGE90_XNU_USB_DEV 0
-#endif
-#if STAGE90_XNU_USB_DEV
-    /*
-     * **910a2: the PHY init and the device-mode transition, at the probe's own site and immediately
-     * after it.** It runs here for the probe's reasons (this wrapper is inside the handed-off kernel,
-     * after the live channel's proof, and its records precede the ending's), and **after** the probe
-     * specifically because the probe installs the `0xf9a` section this arm then proves is its own rather
-     * than re-installing. The arm WRITES and can drop the host's enumeration, so it is bounded two ways
-     * (a mode gate on 910a's reading, and every wait bounded by the vendor's own number) - see
-     * `entry_usb_dev.c`. With the switch off this is one compare on a body that is a bare `return`, so
-     * the call is unconditional and the frame stays the 8 bytes the slot lives in.
-     */
-    entry_usb_dev_init();
 #endif
 
 #if STAGE90_XNU_POST_END_TICKS

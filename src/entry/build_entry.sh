@@ -36899,6 +36899,57 @@ run python3 "$REPO_ROOT/tools/check_usb_probe.py" --selftest || exit 1
 run python3 "$REPO_ROOT/tools/check_usb_dev.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
 run python3 "$REPO_ROOT/tools/check_usb_dev.py" --selftest || exit 1
 
+# ------------------------------------------------- 910a/910a2: the USB probes' CALL SITE is a build refusal
+#
+# **The defect this clause exists for, found 2026-10-07 before either USB arm was pressed.** Both USB
+# probes were called from `__wrap_platform_cache_idle_exit` (entry_trace.c), and BOTH USB arms carry
+# `STAGE90_XNU_IDLE_NO_SLEEP=1` - the residence key whose whole design is that `cpu_idle` leaves by its
+# first door on every pass and never reaches that wrapper. So on both arms the probes were DEAD CODE: a
+# press would have logged zero `xnu_live_usb_*` keys, which reads as "the probe did not run". It is
+# [[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]] one rung over - a lower arm's switch made an
+# upper arm's site unreachable - and the call site's own comment still asserted the probe ran.
+#
+# The repair moves both probes to `__wrap_Idle_load_context`, the one wrapper every pass reaches on
+# EVERY arm (pinned to exactly machine_idle plus cpu_idle's two first-door bodies by `xnu_entry_513`,
+# with no fourth site). This clause is what keeps the repair from being undone: it reads the LINKED
+# image and refuses when a probe whose switch is ON is called from any symbol other than
+# `__wrap_Idle_load_context`. **A comment saying where the call belongs is not a check**
+# ([[mi4-a-claim-in-a-comment-is-not-a-check]]); this reads the artifact.
+#
+# It is placed here, after the record writer like the two guards above, because it reads the same two
+# switches out of the record just written - and it refuses in BOTH directions: a switch that is ON whose
+# probe is at the wrong site, and (the same edit's other half) a probe left at a caller that is not a
+# plain `bl`.
+if [[ $ENTRY_TRACE -eq 1 ]]; then
+    _want_probe=0; [[ $USB_PROBE -eq 1 ]] && _want_probe=1
+    _want_dev=0;   [[ $USB_DEV   -eq 1 ]] && _want_dev=1
+    # **And it must match a TAIL call (`b`), not only a call (`bl`), because `377fb57a` - the already
+    # pushed 910a arm - carries the probe as a tail call.** The probe returns void and nothing follows
+    # it, so the compiler emits `b <entry_usb_probe>`; a `bl`-only matcher read that arm as having no
+    # probe at all and accepted an image whose only USB call sits in `__wrap_platform_cache_idle_exit`.
+    # This is the same dead code the clause exists to refuse, one instruction form over
+    # ([[mi4-silence-is-a-reading-only-if-success-is-silent]]: a matcher that fails to match reads as
+    # "no call there", not as "not checked"). The form is matched by FIELD, not by a prefix regex -
+    # `$3` is the mnemonic as objdump spaces it, so `bl`, `blx` and `b` all count and the field split
+    # cannot be fooled by a symbol name that contains `b`.
+    _cs_out=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" 2>/dev/null | awk '
+        /^[0-9a-f]+ <[a-zA-Z_][a-zA-Z_0-9]*>:/ { sym=$2; gsub(/[<>:]/,"",sym) }
+        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_probe>"    || $5=="<entry_usb_probe>")    { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_probe:%s\n", sym; nprobe++ }
+        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_dev_init>" || $5=="<entry_usb_dev_init>") { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_dev_init:%s\n", sym; ndev++ }
+        END { printf "N:%d:%d\n", nprobe+0, ndev+0 }')
+    _cs_bad=$(printf "%s\n" "$_cs_out" | sed -n 's/^BAD:\([a-z_]*\):\(.*\)$/\1 from \2 /p')
+    _cs_probe=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:\([0-9]*\):.*/\1/p')
+    _cs_dev=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:[0-9]*:\([0-9]*\)/\1/p')
+    if [[ -n ${_cs_bad// /} ]]; then
+        layout_fail "the linked image calls a USB probe from a site that is not \`__wrap_Idle_load_context\`: [${_cs_bad}]. Both USB arms carry STAGE90_XNU_IDLE_NO_SLEEP=1, on which \`cpu_idle\` leaves by its first door on every pass and \`__wrap_platform_cache_idle_exit\` is NEVER entered - so a probe called from there is dead code and a press logs zero \`xnu_live_usb_*\` keys. The probes belong in \`__wrap_Idle_load_context\`, the one wrapper every pass reaches on every arm (xnu_entry_513 pins it to machine_idle plus cpu_idle's two first-door bodies). This is [[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]]: a lower arm's switch must not make an upper arm's site unreachable"
+    fi
+    [[ $_want_probe -eq $_cs_probe ]] \
+        || layout_fail "STAGE90_XNU_USB_PROBE=$USB_PROBE says the read probe should be called ${_want_probe} time(s) from the idle-load wrapper but the linked image calls it ${_cs_probe} time(s): the switch and the body disagree about whether this arm probes the USB core"
+    [[ $_want_dev -eq $_cs_dev ]] \
+        || layout_fail "STAGE90_XNU_USB_DEV=$USB_DEV says the write arm should be called ${_want_dev} time(s) from the idle-load wrapper but the linked image calls it ${_cs_dev} time(s): the switch and the body disagree about whether this arm runs the PHY sequence"
+    say "  xnu_entry_910: the USB probes are called from \`__wrap_Idle_load_context\` and nowhere else (read_probe=${_cs_probe}, write_arm=${_cs_dev}), which is the one idle site every pass reaches on BOTH the SLEEP and the IDLE_NO_SLEEP arms - so a USB key in the log means the probe ran and its absence is not a site this arm never enters"
+fi
+
 # ------------------------------------------------- 533: **the sources of this image, by content**
 #
 # **The gate's freshness sweep compared mtimes, and this directory is where that refused a correct
