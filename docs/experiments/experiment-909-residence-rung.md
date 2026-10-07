@@ -424,3 +424,48 @@ R9 answered "the run stops at 13.36 s, one arm block, no reboot". R10 keeps the 
 **but withdraws the "no reboot" half**: a reboot clears the buffer, so the single arm block is not
 evidence against it. The stop's *last recorded transition* is real (the 4th wfi returned); whether the
 run then halted or looped-until-a-bite is the next thing to measure.
+
+## R11 — arm 3: read the watchdog through the GIC's own block (built, parked, NOT pressed)
+
+Arm 2 answered R9's cheapest question with a **refusal**: `xnu_live_wdt_map=0x00000000` on all four
+pet calls and **no other `xnu_live_wdt_*` key** — the pet ran, asked for the watchdog's mapping, was
+refused, and (as designed by R3) published nothing it could not vouch for. The cause is structural and
+was named in R9: `entry_mmio_section` installs a **1 MB section** and `entry_section_install` indexes
+L1 by `va >> 20`, so `0xf9000000` (the GIC, installed post-jump) and `0xf9017000` (the watchdog) are
+the **same** megabyte `0xf90`. The GIC probe got there first; the pet's install found the slot occupied
+and returned 0.
+
+**The fix is not a new mapping — it is the realisation that none is needed.** The GIC's own section
+already maps `0xf9000000..0xf9100000` **at the same VA**, so `0xf9017000` is readable *through* it.
+But "readable through it" is only true if the descriptor in that slot is the 1 MB block the GIC
+installed, so the pet does not assume it: `entry_section_install` copies the pre-existing descriptor
+out to `*slot_before_out` **before** its refusal test (`entry_stubs.c:2121`), and the new predicate
+
+    wdt_desc_maps_the_block(desc) := (desc & 0x3) == 0x2  &&  (desc & 0xfff00000) == (0xf9017000 & 0xfff00000)
+
+accepts the fallback only when that slot holds a **section** (type 2) whose PA base is the watchdog's
+own megabyte. A page-table pointer, a different descriptor type, or a different megabyte all fail the
+predicate and the pet returns without reading a byte — the same "stay bounded" posture R3 established,
+now applied to a slot the pet did not install itself.
+
+**What arm 3 publishes**: `xnu_live_wdt_via` (1 = the pet's own install succeeded, 2 = the watchdog is
+read through the GIC's block), and `slot_before`/`desc` are now published **unconditionally** (they are
+plain stores into the pet's own frame — arm 1's fault was passing `0, 0`, not publishing them). The
+expected reading on this arm is `xnu_live_wdt_map=0` (the install still refuses — that cell is
+unchanged) **with `xnu_live_wdt_via=2`** and, if the register is live, `xnu_live_wdt_countdown` present.
+That count is what R9's discriminating arm wanted: rising toward `0x0c7fb5` with no pet ⇒ the watchdog
+is counting; frozen ⇒ the register is dead and the ~13.4 s stop is purely in-kernel.
+
+**The guard grew a predicate, not a comment** (`tools/test_resident_guard.py`):
+`claim_descriptor_guard_is_a_real_predicate` binds `STAGE90_WDT_BLOCK_MASK == 0xFFF00000` and
+`STAGE90_WDT_TTE_BLOCK == 2` **by value**, checks the guard tests *both* the type and the PA base, and
+five new mutations (`the_fallback_guard_is_dropped`, `..._drops_the_type_test`, `..._drops_the_base_test`,
+`..._uses_the_wrong_type`, `..._uses_a_wrong_mask`) each turn it red — 32 mutations total.
+
+**Nothing moved that must not.** The pet grew `.text`, so the idle-exit wrapper moved `804d1de0` →
+`804d1e20`, but the **SEAM_LR is unchanged at `0x8004d2dc`** — the entry-group page did not move, so
+there is no two-copy pin (`mi4-entry-group-page-move-pins-two-copies`). The payload record is
+**byte-identical** to 908/arm-2 (`6c2b6038…`) — `RESIDENT` is an entry switch, not a payload switch.
+Arm 3 is parked as `armed-storage-a703257d` (11 members, all byte-identical to `out/`, `SHA256SUMS.txt`
+560 B), recorded in `records/revert-set.txt`, `verify_press_ready.sh` **5/5**, `make check` exit 0.
+It is **built and parked, NOT pressed** — the press is the operator's.

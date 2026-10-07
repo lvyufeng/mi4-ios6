@@ -2462,9 +2462,40 @@ extern uint32_t entry_live_ready(void);
 extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_before_out,
                                    uint32_t *desc_out);
 
-static uint32_t g_wdt_installed;
+static uint32_t g_wdt_installed;      /* the pet has a mapping it can vouch for */
 static uint32_t g_wdt_pets;
 static uint32_t g_wdt_bark_ticks;
+static uint32_t g_wdt_via;            /* 0 = none yet, 1 = the pet's own install, 2 = the GIC's block */
+
+/* **909 arm 3: a 1 MB block cannot hold two devices, so the pet reads through the GIC's own.**
+ * `entry_mmio_section` installs a 1 MB SECTION and `entry_section_install` indexes the L1 by
+ * `va >> 20` (`entry_stubs.c:2118`), refusing when that slot already carries a type bit (`:2122`).
+ * The GIC's probe installs `0xf9000000` *after* the jump (`entry_gic.c:393`), i.e. the whole `0xf90`
+ * megabyte - and the watchdog's `0xf9017000` is **the same megabyte** (`0xf9000000 >> 20 ==
+ * 0xf9017000 >> 20 == 0xf90`). So by the time the pet runs, the slot is occupied and the install is
+ * refused, every call. Arm 2 measured exactly that: `xnu_live_wdt_map=0x00000000` x4 and no other
+ * `xnu_live_wdt_*` key - the pet returned before it could read, so it never fed the watchdog. But the
+ * GIC's block maps `0xf9000000..0xf9100000` at the SAME VA, so **the watchdog is already readable at
+ * `0xf9017000` through the GIC's own descriptor** - the pet needs no install at all. What it needs is
+ * a *guard*: it may read through a section only if the descriptor in the slot is a 1 MB BLOCK whose PA
+ * base is the watchdog's own megabyte. `slot_before` is exactly that descriptor - the value
+ * `entry_section_install` copies out of the L1 slot *before* its refusal test - so the fallback rests
+ * on a reading the install already took, not on a guess about what someone else mapped. */
+#define STAGE90_WDT_VIA_NONE 0u
+#define STAGE90_WDT_VIA_OWN  1u
+#define STAGE90_WDT_VIA_GIC  2u
+#define STAGE90_WDT_BLOCK_MASK 0xfff00000u   /* the section's PA field: 1 MB alignment */
+#define STAGE90_WDT_TTE_TYPE   0x00000003u   /* the L1 descriptor's type bits */
+#define STAGE90_WDT_TTE_BLOCK  0x00000002u   /* a 1 MB section, not a fault or a page table */
+
+/* 1 iff `desc` is a 1 MB section whose PA base is the watchdog's own megabyte: only then does byte
+ * `0xf9017000` resolve to itself. A fault entry (0/1), a page-table pointer (1), or a different
+ * megabyte all refuse. */
+static inline uint32_t wdt_desc_maps_the_block(uint32_t desc)
+{
+    return ((desc & STAGE90_WDT_TTE_TYPE) == STAGE90_WDT_TTE_BLOCK) &&
+           ((desc & STAGE90_WDT_BLOCK_MASK) == (STAGE90_WDT_BASE & STAGE90_WDT_BLOCK_MASK));
+}
 
 static inline uint32_t wdt_read(uint32_t off)
 {
@@ -2480,11 +2511,17 @@ static inline uint32_t wdt_count(void)
 __attribute__((noinline)) static void entry_wdt_pet(uint32_t calls)
 {
     uint32_t count;
-    uint32_t slot_before, desc;
+    /* **Zero-initialised, and that is the arm-1 lesson applied.** These are written only on the
+     * "slot occupied" refusal path (`entry_stubs.c:2121`); if any *earlier* refusal in
+     * `entry_mmio_section` were reachable, they would stay as this initialiser, and a 0 descriptor
+     * fails `wdt_desc_maps_the_block` (type 0 != BLOCK) - so the fallback refuses rather than reading
+     * through an unvouched-for mapping. */
+    uint32_t slot_before = 0u, desc = 0u;
 
-    /* Install the watchdog's section once; the install is `entry_mmio_section`'s, the same mechanism the
-     * storage line uses post-jump. A refusal (0) is published and the pet is skipped - never attempted
-     * through an install that did not land.
+    /* Establish the mapping the pet reads the watchdog through, once. Two ways, both resting on a
+     * descriptor this code read: install the watchdog's own section (landing when the megabyte is
+     * free), or - when that is refused because the GIC already owns the block - accept the GIC's
+     * mapping if and only if its descriptor is a 1 MB section of the watchdog's own megabyte.
      *
      * **The two outputs must be real addresses, and 909's first press is why.** `entry_section_install`
      * writes `*slot_before_out` *unconditionally, before its refusal test* (`entry_stubs.c:2121`), so a
@@ -2498,20 +2535,26 @@ __attribute__((noinline)) static void entry_wdt_pet(uint32_t calls)
     if (g_wdt_installed == 0u) {
         uint32_t mapped = entry_mmio_section(STAGE90_WDT_BASE, STAGE90_WDT_BASE,
                                              &slot_before, &desc);
-        if (entry_live_ready() != 0u)
+        if (entry_live_ready() != 0u) {
             entry_live_write("xnu_live_wdt_map", mapped);
-        if (mapped == 0u)
-            return;
+            /* The install's own two readings: what the L1 slot held before (`slot_before`) and the
+             * descriptor written (`desc`). Arm 2 published `_map=0` and nothing else; `slot_before`
+             * is what the fallback below reads, so it is published unconditionally. */
+            entry_live_write("xnu_live_wdt_slot_before", slot_before);
+            entry_live_write("xnu_live_wdt_desc", desc);
+        }
+        if (mapped != 0u)
+            g_wdt_via = STAGE90_WDT_VIA_OWN;
+        else if (wdt_desc_maps_the_block(slot_before))
+            g_wdt_via = STAGE90_WDT_VIA_GIC;
+        else
+            return;     /* no mapping this arm can vouch for: stay bounded, read nothing */
         g_wdt_installed = 1u;
         g_wdt_bark_ticks = wdt_read(STAGE90_WDT_BARK) & 0xfffffu;
         if (entry_live_ready() != 0u) {
             entry_live_write("xnu_live_wdt_base", STAGE90_WDT_BASE);
             entry_live_write("xnu_live_wdt_bark", g_wdt_bark_ticks);
-            /* The install's own two readings, which the NULL argument could not carry: what the L1
-             * slot held before (`slot_before`) and the descriptor written (`desc`). `desc` non-zero is
-             * the install landing; `slot_before` says whether the walk had already answered. */
-            entry_live_write("xnu_live_wdt_slot_before", slot_before);
-            entry_live_write("xnu_live_wdt_desc", desc);
+            entry_live_write("xnu_live_wdt_via", g_wdt_via);
         }
     }
 

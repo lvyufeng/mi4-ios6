@@ -182,6 +182,8 @@ def gather(image):
     facts["symbols"] = nm(image) if image else {}
     facts["pet_body"] = body_of(image, "entry_wdt_pet") if image else None
     facts["wrap_body"] = body_of(image, "__wrap_platform_cache_idle_exit") if image else None
+    # 909 arm 3: the guard that decides whether a refused install falls back to the GIC's block.
+    facts["desc_guard"] = function_body(facts["trace"], "wdt_desc_maps_the_block")
     return facts
 
 
@@ -247,10 +249,27 @@ def claim_pet_installs_before_it_reads(facts, failures, notes):
         failures.append("entry_wdt_pet reads a watchdog register before it installs the section: the "
                         "load is taken through a mapping this arm has not established")
         return
-    if not re.search(r"if\s*\(\s*mapped\s*==\s*0u\s*\)\s*return\s*;", pet):
-        failures.append("entry_wdt_pet does not return after a refused `entry_mmio_section` (no "
-                        "`if (mapped == 0u) return;`): a pet would then fault through an install that "
-                        "did not land, which is the one cell the design says must stay bounded")
+    # **A refused install must not be read through unless the slot's own descriptor vouches for it.**
+    # Arm 2 measured the guard this replaced: `xnu_live_wdt_map=0x00000000` x4, because the install
+    # refuses whenever the GIC already owns the 0xf90 megabyte - and the watchdog is *readable through
+    # the GIC's block* at the same VA, so the pet simply returned and never fed. Arm 3 falls back to
+    # that mapping, but only behind `wdt_desc_maps_the_block(slot_before)`: a 1 MB section whose PA base
+    # is the watchdog's own megabyte. The clause checks the guard exists, is reached only when the
+    # install refused (`mapped == 0u`), and that the pet still has a `return` bound.
+    if "wdt_desc_maps_the_block(slot_before)" not in pet:
+        failures.append("entry_wdt_pet's refused-install path does not consult "
+                        "`wdt_desc_maps_the_block(slot_before)`: the pet would either read the watchdog "
+                        "through an unvouched-for mapping (a fault) or never read it at all (arm 2's "
+                        "dead pet, xnu_live_wdt_map=0 x4)")
+        return
+    if not re.search(r"mapped\s*!=\s*0u", pet):
+        failures.append("entry_wdt_pet never tests `mapped != 0u`: the descriptor fallback must be "
+                        "reached only on a *refused* install (`if (mapped != 0u) … else if (guard) … "
+                        "else return;`), not on every call")
+        return
+    if not re.search(r"\breturn\s*;", pet):
+        failures.append("entry_wdt_pet has no `return` bound: with neither its own install nor a "
+                        "vouched-for descriptor, the pet must skip the read (the design's bounded cell)")
         return
     # **The refusal must be REACHABLE, and the outputs are what make it so.** `entry_section_install`
     # writes `*slot_before_out` before its refusal test (`entry_stubs.c:2121`), so a NULL there faults at
@@ -269,6 +288,41 @@ def claim_pet_installs_before_it_reads(facts, failures, notes):
         return
     notes.append("the pet installs 0xf9017000 once with two real outputs and returns before its first "
                  "read when the install is refused")
+
+
+def claim_descriptor_guard_is_a_real_predicate(facts, failures, notes):
+    """The arm-3 fallback rests on one predicate, so it is checked by value. It must accept ONLY a
+    1 MB section whose PA base is the watchdog's own megabyte: a fault entry, a page-table pointer, or
+    a different megabyte all have to refuse, because reading `0xf9017000` through any of them is a
+    read of an address the pet cannot vouch for - the fault class `mi4-a-device-address-can-be-right-
+    and-undereferenceable` (the `addr >> 20` check before dereferencing a new device register)."""
+    guard = facts["desc_guard"]
+    if guard is None:
+        failures.append("entry_trace.c no longer defines `wdt_desc_maps_the_block`: the arm-3 fallback "
+                        "reads the watchdog through the GIC's section with no predicate behind it")
+        return
+    if "STAGE90_WDT_TTE_TYPE" not in guard or "STAGE90_WDT_TTE_BLOCK" not in guard:
+        failures.append("`wdt_desc_maps_the_block` does not test the L1 descriptor's type bits "
+                        "(`STAGE90_WDT_TTE_TYPE == STAGE90_WDT_TTE_BLOCK`): a fault entry (0/1) or a "
+                        "page-table pointer (1) would pass, and the read would fault")
+        return
+    if "STAGE90_WDT_BLOCK_MASK" not in guard or "STAGE90_WDT_BASE" not in guard:
+        failures.append("`wdt_desc_maps_the_block` does not test the section's PA base against "
+                        "`STAGE90_WDT_BASE & STAGE90_WDT_BLOCK_MASK`: a section mapping a *different* "
+                        "megabyte would pass, and `0xf9017000` would resolve to something else")
+        return
+    # The two constants must be a 1 MB mask and the section type, by value.
+    defs = facts["trace_defs"]
+    if defs.get("STAGE90_WDT_BLOCK_MASK") != 0xFFF00000:
+        failures.append("STAGE90_WDT_BLOCK_MASK is not 0xfff00000 (the 1 MB PA field): the section "
+                        "base test would compare the wrong bits")
+        return
+    if defs.get("STAGE90_WDT_TTE_BLOCK") != 2:
+        failures.append("STAGE90_WDT_TTE_BLOCK is not 2 (an ARMv7 L1 1 MB section descriptor): the "
+                        "type test would accept the wrong descriptor kind")
+        return
+    notes.append("the arm-3 fallback reads the watchdog only through a 1 MB section whose PA base is "
+                 "0xf9000000 (the GIC's own block), tested by value")
 
 
 def claim_count_is_the_vendors_encoding(facts, failures, notes):
@@ -421,6 +475,7 @@ def compare(facts, mutate=None):
     claim_arm_is_defined(facts, failures, notes)
     claim_base_is_one_definition(facts, failures, notes)
     claim_pet_installs_before_it_reads(facts, failures, notes)
+    claim_descriptor_guard_is_a_real_predicate(facts, failures, notes)
     claim_count_is_the_vendors_encoding(facts, failures, notes)
     claim_pet_threshold_and_store(facts, failures, notes)
     claim_call_is_the_wrapper_tail(facts, failures, notes)
@@ -450,6 +505,7 @@ def mutate_facts(facts, mutate):
         facts["pet"] = function_body(facts["trace"], "entry_wdt_pet")
         facts["count_fn"] = function_body(facts["trace"], "wdt_count")
         facts["wrapper"] = function_body(facts["trace"], "__wrap_platform_cache_idle_exit")
+        facts["desc_guard"] = function_body(facts["trace"], "wdt_desc_maps_the_block")
         facts["gated"] = guarded_region(facts["trace"], "STAGE90_XNU_RESIDENT")
 
     def rederive_build(text):
@@ -477,7 +533,9 @@ def mutate_facts(facts, mutate):
         rederive_trace(facts["trace_text"].replace(gated, moved, 1))
     elif mutate == "refused_install_does_not_return":
         rederive_trace(_bump(facts["trace_text"],
-                             "        if (mapped == 0u)\n            return;\n", ""))
+                             "        else\n"
+                             "            return;     /* no mapping this arm can vouch for: stay "
+                             "bounded, read nothing */\n", ""))
     elif mutate == "the_install_outputs_are_null":
         # 909's first press: `entry_mmio_section(..., 0, 0)` makes the install's unconditional
         # `*slot_before_out` a store to address 0, so the run faults before it can observe the refusal.
@@ -530,6 +588,27 @@ def mutate_facts(facts, mutate):
         # The linked form of 909's fault: the pet's second argument (`r2`, `slot_before_out`) is a zero
         # register rather than a frame address, so the install stores through it to address 0.
         facts["pet_body"] = facts["pet_body"].replace("mov\tr2, sp", "mov\tr2, r5")
+    elif mutate == "the_fallback_guard_is_dropped":
+        # Arm 3's fallback: without the predicate, the pet reads the watchdog through whatever the
+        # slot holds - the arm-2 dead pet's opposite failure (a fault instead of a skip).
+        rederive_trace(_bump(facts["trace_text"],
+                             "else if (wdt_desc_maps_the_block(slot_before))\n"
+                             "            g_wdt_via = STAGE90_WDT_VIA_GIC;\n"
+                             "        else\n            return;",
+                             "else\n            g_wdt_via = STAGE90_WDT_VIA_GIC;"))
+    elif mutate == "the_fallback_guard_drops_the_type_test":
+        rederive_trace(_bump(facts["trace_text"],
+                             "((desc & STAGE90_WDT_TTE_TYPE) == STAGE90_WDT_TTE_BLOCK) &&",
+                             "((desc & STAGE90_WDT_TTE_TYPE) != 0xffffffffu) &&"))
+    elif mutate == "the_fallback_guard_drops_the_base_test":
+        rederive_trace(_bump(facts["trace_text"],
+                             "((desc & STAGE90_WDT_BLOCK_MASK) == (STAGE90_WDT_BASE & STAGE90_WDT_BLOCK_MASK))",
+                             "1u"))
+    elif mutate == "the_fallback_guard_uses_the_wrong_type":
+        # A page-table pointer (type 1) would then be accepted as a 1 MB section.
+        facts["trace_defs"]["STAGE90_WDT_TTE_BLOCK"] = 1
+    elif mutate == "the_fallback_guard_uses_a_wrong_mask":
+        facts["trace_defs"]["STAGE90_WDT_BLOCK_MASK"] = 0xFFC00000
     else:
         raise SystemExit("unknown mutation %s" % mutate)
     return facts
@@ -544,6 +623,9 @@ MUTATIONS = (
     "the_record_writer_is_dropped", "the_pet_is_not_in_the_image",
     "the_wrapper_tail_branches_elsewhere", "the_wrapper_frame_is_16", "the_store_is_not_at_plus_4",
     "the_count_is_not_the_vendors_field", "the_install_output_is_not_a_stack_address",
+    "the_fallback_guard_is_dropped", "the_fallback_guard_drops_the_type_test",
+    "the_fallback_guard_drops_the_base_test", "the_fallback_guard_uses_the_wrong_type",
+    "the_fallback_guard_uses_a_wrong_mask",
 )
 
 
