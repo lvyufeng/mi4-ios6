@@ -115,8 +115,10 @@ named. Two further ceilings then gate the *number*: `MEM_SIZE_MAX = 1 GiB`, and 
   upper clamp only — `arm_init.c:280-285`, `arm_vm_init.c:351-359`; a smaller value silently wins).
   This makes `hw.memsize` report **~1.5 GB, the device's real usable high bank**, without touching XNU.
   **This is the rung that is close**: a boot-args/DT edit (payload rebuild), same gate, no boot-chain
-  change, no brick risk beyond the normal `fastboot boot`. Its verdict cell is `xnu_live_ba_mem_size`
-  and the sysctl reading.
+  change, no brick risk beyond the normal `fastboot boot`. Its verdict cell is the **boot-args log
+  key `xnu_ba_mem_size`** (`src/xnu_boot_args_conformant.c:143` — the same family as `xnu_ba_phys_base`
+  / `xnu_ba_virt_base`; note it is `xnu_ba_`, *not* the `xnu_live_*` console channel) and the sysctl
+  reading.
 - **911b — `MEM_SIZE_MAX` ≥ the real span** (`arm_vm_init.c:134`) so 911a's ~1.5 GB is not clamped to
   1 GiB. A one-line XNU compile-time edit.
 - **911c — the 3 GB itself (the real work).** Reporting/mapping 3 GB needs the **low bank** too, i.e.
