@@ -383,7 +383,15 @@ unset _self _bad
 # to `0x8004d2dc` there, `arm-none-eabi-objdump -d out/stage90/xnu_arm_entry.elf` puts the `bl` at
 # `0x8004d2d8` (`__wrap_FlushPoU_Dcache` at `0x804d2044`), and this literal follows it. **Both copies
 # are `0x8004d2dc` for armed-storage-54d5c585.**
-EXIT_POP_LR_LITERAL=0x8004e2dc
+# **THE TENTH MOVE (910b's USB ENUMERATION ARM).** 910a re-crossed to `0x8004e2dc` (its read-only
+# probe body added to the entry group); 910a2's write arm fit inside that same page, so its corrected
+# `b3fbcd31` still returned to `0x8004e2dc`. `entry_usb_enum.c`'s ON body - the EP0 arming, the two
+# descriptor tables, the qh/dTD graph (a 2 KB `g_usb_qh` array) and the once-per-pass poll - crosses
+# one more page: the build refused with `the exit's call to FlushPoU_Dcache is at 2147807960 and returns
+# to 2147807964`, i.e. the `bl` at `0x8004f2d8` returning to **`0x8004f2dc`**. `entry_trace.c`'s constant
+# was re-derived from that refusal, and this literal follows it. **Both copies are `0x8004f2dc` for the
+# 910b first arm.**
+EXIT_POP_LR_LITERAL=0x8004f2dc
 exit_pop_lr_addr() {
   local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
   local start size body ret

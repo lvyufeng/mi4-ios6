@@ -140,6 +140,7 @@
  * probe that carries near-zero hazard. */
 #include "entry_usb.h"
 #include "entry_usb_dev.h"
+#include "entry_usb_enum.h"
 
 /* entry_stubs.c. Records into `g_kv_buf`, which only an epilogue writes out - see above. */
 extern void entry_kv(const char *key, uint32_t value);
@@ -2162,6 +2163,23 @@ void __wrap_Idle_load_context(void)
     entry_usb_dev_init();
 #endif
 
+/*
+ * **910b: the enumeration arm's poll, at the same site and for the same reason.** `entry_usb_enum_poll`
+ * drains the latched `USBSTS` and advances the EP0 control-transfer state machine (`entry_usb_enum.c`).
+ * It runs AFTER `entry_usb_dev_init` above - the arm/endpoint set it writes is meaningful only once the
+ * core is in device mode - and the file itself re-checks the mode gate (the 910a2 rule: write nothing
+ * unless `USBMODE[1:0] == 2`), so ordering is a belt to the file's own braces. It is idempotent across
+ * the once-per-pass door: `g_usb_enum_done` arms the endpoint set once, then every later pass only
+ * polls. The build refuses it being called from anywhere but this wrapper, the way it does the two USB
+ * probes above - the same dead-code defect ([[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]]).
+ */
+#ifndef STAGE90_XNU_USB_ENUM
+#define STAGE90_XNU_USB_ENUM 0
+#endif
+#if STAGE90_XNU_USB_ENUM
+    entry_usb_enum_poll();
+#endif
+
 #if STAGE90_XNU_RESIDENT && STAGE90_XNU_IDLE_NO_SLEEP
     /*
      * **909 arm 6: the pet's site on the arm whose idle never sleeps.** With `IDLE_NO_SLEEP=1` the idle
@@ -3061,8 +3079,19 @@ void __wrap_platform_cache_idle_exit(void)
  * it (both copies, one edit each - the hazard `tools/check_stage_paths.sh` cannot see and only the
  * build's own clause catches). **This is a NINTH move, and a ninth is the point: the value is a
  * function of the entry group's size and not of any rung's meaning, so nothing but the build's clause
- * can keep the two copies honest.** */
-#define STAGE90_XNU_SEAM_LR       0x8004e2dcu
+ * can keep the two copies honest.**
+ *
+ * **AND IT HAS MOVED A TENTH TIME, ON 910b (the USB enumeration arm).** `entry_usb_enum.c`'s ON body
+ * (the EP0 arming, the descriptor tables, the qh/dTD graph and the once-per-pass poll) is added to the
+ * entry group, and the build refused with `the exit's call to FlushPoU_Dcache is at 2147807960 and
+ * returns to 2147807964, while entry_trace.c's STAGE90_XNU_SEAM_LR is 0x8004e2dc` - `2147807964` =
+ * **`0x8004f2dc`**, `+0x1000` from the `0x8004e2dc` that 910a and 910a2 both carry (910a2's arm fit
+ * inside the same page - `entry_usb_dev.c` is smaller than the enum body plus its 2 KB of qh array and
+ * the descriptor tables). The constant below is re-derived from that measurement, and
+ * `scripts/run_and_capture.sh`'s literal follows it (both copies, one edit each - the hazard
+ * `tools/check_stage_paths.sh` cannot see and only the build's own clause catches). The value is
+ * still a function of the entry group's size and not of any rung's meaning. */
+#define STAGE90_XNU_SEAM_LR       0x8004f2dcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);

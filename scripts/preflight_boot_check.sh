@@ -675,7 +675,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP
                 STAGE90_XNU_USB_PROBE
                 STAGE90_XNU_USB_DEV
-                STAGE90_XNU_USB_DEV_FORCE)
+                STAGE90_XNU_USB_DEV_FORCE
+                STAGE90_XNU_USB_ENUM)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this

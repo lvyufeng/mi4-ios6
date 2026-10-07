@@ -204,6 +204,13 @@ check:
 # The source half is switch-independent, so it runs here with no build and no device.
 	@tools/check_usb_dev.py --selftest >/dev/null
 	@tools/check_usb_dev.py
+# 910b: the enumeration arm. `check_usb_enum.py` RECOMPUTES the qh/dTD field offsets from
+# `struct ci13xxx_qh` / `struct ci13xxx_td` (rather than trusting the header's comment - the qh `setup`
+# field is at 40, not 32), compares every written value against the owner's own expression, asserts the
+# write-target whitelist has no `USBCMD.RST`, and reads the switch out of the linked ELF. Source half is
+# switch-independent, so it runs here with no build and no device.
+	@tools/check_usb_enum.py --selftest >/dev/null
+	@tools/check_usb_enum.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not
