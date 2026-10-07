@@ -181,6 +181,14 @@ check:
 	@tools/check_response_word_order.py --selftest >/dev/null
 	@tools/check_response_word_order.py
 	@tools/check_hfs_staged.sh
+# 911b: the physical-memory ceiling port. `check_mem_size_max.py` re-derives the property the arm's
+# whole safety argument rests on - an UNDEFINED STAGE90_XNU_MEM_SIZE_MAX leaves arm_vm_init.o
+# byte-for-byte as Apple shipped it (both marker arms inside the #ifdef; the outer #else a bare
+# define) - and refuses a ceiling that would map the ram_console (0xde500000) or MMIO as RAM, or wrap
+# gPhysBase + mem_size past 32 bits. Source half, no compiler, no device; its --selftest feeds the
+# MEASURED defect (a marker outside the #ifdef) and asserts it is refused.
+	@tools/check_mem_size_max.py --selftest >/dev/null
+	@tools/check_mem_size_max.py
 # 882: the HFS+ root volume and the arm that mounts it. Three claims, each one a committed artifact
 # or a copied claim rather than a preference:
 #   check_hfs_root_blob.py     reads the volume header out of the COMMITTED blob and refuses the fields

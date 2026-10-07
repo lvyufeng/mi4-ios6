@@ -1114,6 +1114,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_USB_DEV_FORCE
                 STAGE90_XNU_USB_ENUM
                 STAGE90_XNU_USB_STREAM
+                STAGE90_XNU_MEM_SIZE_MAX
                 STAGE90_XNU_ENTRY_WINDOW)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1224,6 +1225,14 @@ do
         STAGE90_XNU_USB_DEV_FORCE)    _v=$USB_DEV_FORCE ;;
         STAGE90_XNU_USB_ENUM)         _v=$USB_ENUM ;;
         STAGE90_XNU_USB_STREAM)       _v=$USB_STREAM ;;
+        # 911b: the physical-memory ceiling. It reaches the ENTRY image's own linked bytes (it is
+        # compiled into `osfmk_arm_arm_vm_init.o`, which is IN the link), so unlike ENTRY_WINDOW it is
+        # carried in the record LIKE any other entry switch - but read from the ENVIRONMENT with a
+        # default, because this loop runs ~27000 lines above the assignment site, the same reason
+        # STAGE90_XNU_ENTRY_WINDOW is read here. The default is `(unset)`, NOT a number: an unset
+        # switch is Apple's 1 GiB clamp (`MEM_SIZE_MAX` undefined here), which is a different image from
+        # one built with the default spelled out, and the record must say which one it is.
+        STAGE90_XNU_MEM_SIZE_MAX)     _v=${STAGE90_XNU_MEM_SIZE_MAX:-(unset)} ;;
         # 912: read from the ENVIRONMENT directly and not from `$ENTRY_SIZE`, because this loop runs
         # ~27000 lines ABOVE the assignment (`:28651`) - the same reason `STAGE90_ENTRY_REAL_ARM_INIT`
         # is read with its own `${...:-0}`. The default is the same literal, so an unset switch and an
@@ -27676,6 +27685,47 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     else
         say "  xnu_entry_911d: the root-media module and this build agree about the CARD-CAPACITY arm (STAGE90_XNU_CARD_TOTAL=$ctotal_arm); no raw whole-card unit is registered - the card unit (2) is the only card-backed device, as in 903"
     fi
+    # **911b: the PHYSICAL-MEMORY CEILING arm, the same `nm` shape, but against the KERNEL object
+    # rather than a platform object.** `tools/patch_mem_size_max.py` makes `arm_vm_init.c`'s `MEM_SIZE_MAX`
+    # a guarded port and emits `entry_xnu_mem_size_max_arm_on` ONLY when `STAGE90_XNU_MEM_SIZE_MAX` is
+    # defined AND differs from Apple's `0x40000000`; a build without the define emits NEITHER marker (that
+    # is what keeps the default object byte-identical, 911b's whole safety argument). So the object says
+    # which image this is, and a build that RECORDED a raised ceiling while the object compiled Apple's
+    # clamp would promise RAM recognition it does not have - the same one-object-two-scripts defect
+    # `xnu_entry_905`/`xnu_entry_911d` guard, here across the kernel/payload split (the ceiling is used by
+    # BOTH `osfmk_arm_arm_vm_init.o` and the payload's `stage90.h`, so the two could silently disagree).
+    _memsize_req=${STAGE90_XNU_MEM_SIZE_MAX:-}
+    _memsize_arm=unset
+    if arm-none-eabi-nm "$ARM_ARM_VM_INIT_OBJ" 2>/dev/null | grep -q 'T entry_xnu_mem_size_max_arm_on'; then
+        _memsize_arm=on
+    elif arm-none-eabi-nm "$ARM_ARM_VM_INIT_OBJ" 2>/dev/null | grep -q 'T entry_xnu_mem_size_max_arm_off'; then
+        _memsize_arm=off
+    fi
+    if [[ -n $_memsize_req && $_memsize_req != 0x40000000 && $_memsize_arm != on ]]; then
+        # The define was passed but the object did not act on it: either the object predates the patch
+        # (no marker at all) or it was built with the define absent/different. Both promise a ceiling the
+        # linked image does not carry.
+        say "REFUSING: this build set STAGE90_XNU_MEM_SIZE_MAX=$_memsize_req but $ARM_ARM_VM_INIT_OBJ" >&2
+        say "          carries the ceiling arm '$_memsize_arm' (on/off/unset); the kernel object must be" >&2
+        say "          built with the SAME define, or the record promises RAM recognition the image lacks." >&2
+        say "          Rebuild the kernel object with the current arm's switch set:" >&2
+        say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_MEM_SIZE_MAX=$_memsize_req' \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh --dir osfmk" >&2
+        exit 2
+    fi
+    if [[ -z $_memsize_req || $_memsize_req == 0x40000000 ]] && [[ $_memsize_arm == on ]]; then
+        # Reverse: the object raised the ceiling but this build's switch does not say so - a record that
+        # would name Apple's clamp over an image whose pmap vstart moved.
+        say "REFUSING: $ARM_ARM_VM_INIT_OBJ carries entry_xnu_mem_size_max_arm_on but this build's" >&2
+        say "          STAGE90_XNU_MEM_SIZE_MAX is '${_memsize_req:-<unset>}' (Apple's 0x40000000). The" >&2
+        say "          object was built with a raised ceiling; rebuild it without the define (--dir osfmk)." >&2
+        exit 2
+    fi
+    case $_memsize_arm in
+        on)  say "  xnu_entry_911b: the kernel's arm_vm_init.o and this build agree the PHYSICAL-MEMORY CEILING is RAISED (STAGE90_XNU_MEM_SIZE_MAX=$_memsize_req); the pmap's vstart moves off 0xc0000000 and the payload's STAGE90_XNU_PMAP_BOOTSTRAP_MEM_SIZE_MAX spells the same value" ;;
+        off) say "  xnu_entry_911b: the kernel's arm_vm_init.o and this build agree the ceiling is Apple's 1 GiB clamp (STAGE90_XNU_MEM_SIZE_MAX=$_memsize_req spelled out); no ceiling moved" ;;
+        *)   say "  xnu_entry_911b: the kernel's arm_vm_init.o carries NO ceiling marker and this build sets no STAGE90_XNU_MEM_SIZE_MAX - Apple's clamp, the default image (the object is byte-identical to Apple's, 911b's safety argument)" ;;
+    esac
     # **The DOOR half of 888's check is the NEXT block's business, not this one's** - see the
     # `entry_storage_driver_read` clause the link block carries after `xnu_arm_entry.elf` exists. A
     # check placed HERE would read the PREVIOUS arm's elf (the link below has not run yet), which is
@@ -37099,6 +37149,12 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "STAGE90_XNU_USB_ENUM=$USB_ENUM"
     # **910c's switch, written here for the same reason as the three lines above.**
     echo "STAGE90_XNU_USB_STREAM=$USB_STREAM"
+    # **911b's ceiling, written here for 678's reason**: this writer is the one site a name-keyed diff
+    # does not visit and the only site the gate ever reads, so a switch that reached the compiler and the
+    # arm-key list but not this line would be a run whose ceiling nobody read. Written as `(unset)` when
+    # the switch is not set, so a record that predates a raised ceiling and one built with Apple's clamp
+    # are distinguishable (`X=` is not `X=(unset)` for the same reason `#define X 0` is not off).
+    echo "STAGE90_XNU_MEM_SIZE_MAX=${STAGE90_XNU_MEM_SIZE_MAX:-(unset)}"
     # **912's window, written here for a reason the other keys do not have.** Every switch above shapes
     # the ENTRY image's own linked bytes, so the record the gate reads (bound to the entry bin's hash)
     # already differs whenever they differ. `STAGE90_XNU_ENTRY_WINDOW` does NOT: it reaches only the

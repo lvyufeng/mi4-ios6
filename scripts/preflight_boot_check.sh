@@ -678,6 +678,7 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_USB_DEV_FORCE
                 STAGE90_XNU_USB_ENUM
                 STAGE90_XNU_USB_STREAM
+                STAGE90_XNU_MEM_SIZE_MAX
                 STAGE90_XNU_ENTRY_WINDOW)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
@@ -795,6 +796,18 @@ do
   # branch: `build_entry.sh`'s 678 two-way check refuses a record whose arm-key list omits the key.
   if [[ -z $_v && $_k == STAGE90_XNU_ENTRY_WINDOW ]]; then
     printf '  %s=(absent, and a record that does not name the window is the 16 MB arm - the only value any pre-912 build could have written)\n' "$_k"
+    continue
+  fi
+  # **911b's ceiling: absent names Apple's 1 GiB clamp.** Every arm parked before 911b (`cabba670`,
+  # `b3fbcd31`, `979ded08`, `6deae815`, the window arms `aff86051`/`605a43c2`/`0d3591fe`) was built with
+  # `MEM_SIZE_MAX` undefined - the patcher's guard had not been added - so an absent key is not a missing
+  # value but the value. A post-911b record can never reach this branch: `build_entry.sh`'s 678 two-way
+  # check refuses a record whose arm-key list omits the key, and the writer emits `(unset)` for the
+  # default, which is a non-empty value. This is the same one-way rule as ENTRY_WINDOW, for the same
+  # reason: demanding the key would make every pre-911b park unpressable (882's own defect, six times
+  # repaired), and the ladder still owes those presses.
+  if [[ -z $_v && $_k == STAGE90_XNU_MEM_SIZE_MAX ]]; then
+    printf '  %s=(absent, and a record that does not name the ceiling is Apple\x27s 1 GiB clamp - the only value any pre-911b build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \

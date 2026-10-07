@@ -1,4 +1,5 @@
  M bsd/vfs/vfs_conf.c
+ M osfmk/arm/arm_vm_init.c
 ?? bsd/hfs/MacOSStubs.c
 ?? bsd/hfs/hfs.h
 ?? bsd/hfs/hfs_attrlist.c

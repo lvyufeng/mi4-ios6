@@ -3108,8 +3108,17 @@ void __wrap_platform_cache_idle_exit(void)
  * the descriptor tables). The constant below is re-derived from that measurement, and
  * `scripts/run_and_capture.sh`'s literal follows it (both copies, one edit each - the hazard
  * `tools/check_stage_paths.sh` cannot see and only the build's own clause catches). The value is
- * still a function of the entry group's size and not of any rung's meaning. */
-#define STAGE90_XNU_SEAM_LR       0x8004f2dcu
+ * still a function of the entry group's size and not of any rung's meaning.
+ *
+ * **AND AN ELEVENTH TIME, ON 911b (the physical-memory-ceiling arm).** `arm_vm_init.c`'s
+ * `entry_xnu_mem_size_max_arm_on` (one 8-byte marker function, compiled into `osfmk_arm_arm_vm_init.o`
+ * which IS in the link) moves the exit path, and the build refused with `the exit's call to
+ * FlushPoU_Dcache is at 2147807992 and returns to 2147807996, while entry_trace.c's STAGE90_XNU_SEAM_LR
+ * is 0x8004f2dc` - `2147807992` = **`0x8004f2f8`**. The move is `+0x20` from 910b's `0x8004f2dc` (the
+ * marker is 0x10 of code plus alignment in the pool object, and the seam sits past it in the entry
+ * group's layout). The constant below is re-derived from that measurement, and
+ * `scripts/run_and_capture.sh`'s literal follows it (both copies, one edit each). */
+#define STAGE90_XNU_SEAM_LR       0x8004f2fcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);

@@ -5037,7 +5037,19 @@ struct stage90_pmap_bootstrap_snapshot {
 
 #define STAGE90_XNU_PMAP_BOOTSTRAP_CONTRACT_VERSION 1u
 #define STAGE90_XNU_PMAP_BOOTSTRAP_PAGE_SIZE        4096u
+/* **911b: this is the payload's own spelling of `arm_vm_init.c`'s `MEM_SIZE_MAX` - one value, two
+ * definitions ([[mi4-one-value-two-definitions]]).** `xnu_pmap_bootstrap_contract.c:365` asserts the
+ * contract's `vstart` equals `proposed_virtBase + MEM_SIZE_MAX + 0x3FFFFF` rounded, so if the kernel
+ * object's ceiling moves and this one does not, the dryrun CONTRACT refuses - which is the pair working.
+ * Default stays Apple's `0x40000000`; `-DSTAGE90_XNU_MEM_SIZE_MAX=<hex>` moves BOTH spellings and the
+ * 911b build passes it to the kernel object (via `XNU_KERNEL_EXTRA_DEFINES`) and to this payload. */
+#ifndef STAGE90_XNU_PMAP_BOOTSTRAP_MEM_SIZE_MAX
+#if defined(STAGE90_XNU_MEM_SIZE_MAX)
+#define STAGE90_XNU_PMAP_BOOTSTRAP_MEM_SIZE_MAX     STAGE90_XNU_MEM_SIZE_MAX
+#else
 #define STAGE90_XNU_PMAP_BOOTSTRAP_MEM_SIZE_MAX     0x40000000u
+#endif
+#endif
 #define STAGE90_XNU_PMAP_BOOTSTRAP_VSTART_ROUND     0x00400000u
 #define STAGE90_XNU_PMAP_BOOTSTRAP_VM_MIN_KERNEL_ADDRESS 0x80000000u
 #define STAGE90_XNU_PMAP_BOOTSTRAP_VM_MAX_KERNEL_ADDRESS 0xfffeffffu

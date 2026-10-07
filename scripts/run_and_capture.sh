@@ -391,7 +391,13 @@ unset _self _bad
 # to 2147807964`, i.e. the `bl` at `0x8004f2d8` returning to **`0x8004f2dc`**. `entry_trace.c`'s constant
 # was re-derived from that refusal, and this literal follows it. **Both copies are `0x8004f2dc` for the
 # 910b first arm.**
-EXIT_POP_LR_LITERAL=0x8004f2dc
+# **THE ELEVENTH MOVE (911b's PHYSICAL-MEMORY-CEILING ARM).** `arm_vm_init.c`'s
+# `entry_xnu_mem_size_max_arm_on` (an 8-byte marker function in the pool object the entry group links)
+# moves the exit path: the build refused with `the exit's call to FlushPoU_Dcache is at 2147807992 and
+# returns to 2147807996`, i.e. the `bl` at `0x8004f2f8` returning to **`0x8004f2fc`**. `entry_trace.c`'s
+# constant was re-derived from that refusal, and this literal follows it. **Both copies are `0x8004f2fc`
+# for the 911b arm.**
+EXIT_POP_LR_LITERAL=0x8004f2fc
 exit_pop_lr_addr() {
   local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
   local start size body ret

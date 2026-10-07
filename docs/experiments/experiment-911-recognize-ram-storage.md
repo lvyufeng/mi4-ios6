@@ -373,3 +373,92 @@ switch set, so a window-only or key-only selection would mis-name it). NO press.
 **911a supersedes 911d and 912a for the next press:** it carries the raw card unit (911d) AND the widest
 window, so one press answers memory-at-the-ceiling and the card capacity together. The goal is **NOT**
 met — 1 GiB is not 3 GB; `MEM_SIZE_MAX` and the high-bank physmap window are the port that 911b/911c owe.
+
+## 9. 911b BUILT (2026-10-07) — the PHYSICAL-MEMORY CEILING, host-side, NO press
+
+**The rung, in one sentence.** 911a raised the *window* (the payload's `memSize`) to 1 GiB, but
+`arm_vm_init.c` clamps that value: `mem_size = args->memSize; … if (mem_size > MEM_SIZE_MAX) mem_size =
+MEM_SIZE_MAX;` with Apple's `MEM_SIZE_MAX = 0x40000000` (1 GiB). **911a's 1 GiB window was accepted
+only because it EQUALED the clamp** — a 3 GB request would have been silently truncated. 911b makes
+`MEM_SIZE_MAX` a **port** and raises **both** the clamp and the window to `0x5e500000`, the largest
+value this device's address map permits.
+
+**Why `0x5e500000` and not 3 GB.** Two hard ceilings, both measured:
+- **The device's own hole.** The high bank is `[0x80000000, 0xde700000)` — no hole. The Android
+  **ram_console** sits at `0xde500000` and **MMIO** at `≥0xf9000000`; mapping either as RAM corrupts
+  a live structure or a device register. `physBase + memSize` must stay below the console *and* not
+  overflow 32 bits (with `physBase = 0x80000000`, anything above `0x80000000` already wraps, so the
+  real bound is the console).
+- **The single-span linear physmap.** `phystokv(a) = a − gPhysBase + gVirtBase` is one linear window;
+  it cannot express the Mi 4's **second, low bank** (which is *below* `physBase = 0x80000000`). So
+  even a perfect ceiling recognises only the high bank. **The full 3 GB is 911c** — a real
+  bank/region-list port, a separate rung.
+
+`0x80000000 + 0x5e500000 = 0xde500000` — **one byte below the ram_console**, ~1.47 GiB. That is the
+ceiling. `tools/check_mem_size_max.py` refuses any value above it, any `physBase + memSize` past 32
+bits, and any value reaching `CONSOLE=0xde500000` / `MMIO_FLOOR=0xf9000000`.
+
+**The clamp is why 911a alone was a NO-OP, and why BOTH must move.** The observable effect of raising
+the ceiling is the pmap fold: `pmap_bootstrap((gVirtBase + MEM_SIZE_MAX + 0x3FFFFF) & 0xFFC00000)`
+(`arm_vm_init.c:520`) and the page-table pre-init loop (`:532`) both fold to a **different constant**,
+so the pmap's `virtual_space_start` moves off `0xc0000000` to **`0xe0000000`**. With the window at
+`0x5e500000` the free region XNU is handed is `(physBase + memSize) − (topOfKernelData + 10 pages)` =
+`0xde500000 − 0x8080A000` ≈ **1.47 GB**, versus 911a's ~1015 MB, 911d's ~55.9 MB and the 16 MB arms'
+7.96 MB.
+
+**The byte-identity safety argument (and the one form that breaks it).** `MEM_SIZE_MAX` is an
+*unconditional* define in Apple's source; the port guards it with `#ifdef STAGE90_XNU_MEM_SIZE_MAX`.
+For an **undefined** macro the object must be **byte-for-byte Apple's**, so the ladder's bytes since
+903 do not move. That property holds **only if BOTH marker arms live INSIDE the `#ifdef` and the
+outer `#else` is Apple's bare `#define`**. A marker symbol in the outer `#else` enters the symbol
+table, shifts `.text` by `0x10` (`0x1f90 → 0x1fa0`) and moves every following symbol
+(`arm_vm_prot_init`, `arm_vm_init`) — the **measured defect**, object hash `424a45e1`. The nested form
+is byte-identical to the pristine-source build (`c12dfbfd`), and `check_mem_size_max.py`'s `selftest()`
+feeds it the `424a45e1` form and asserts it is **refused**.
+
+**The tracked-patch idiom (mirrors HFS).** `external/xnu-4570.1.46` is a gitignored, re-provisionable
+checkout, so the edit is made by a **tracked idempotent patch script** — `tools/patch_mem_size_max.py`
+(shape of `tools/hfs_patch_root_rw.py`), applied by `tools/stage_hfs.sh` §4d, drift-checked by
+`tools/check_mem_size_max.py` in `make check`. The stager's record `src/supply/hfs_tree_status.txt`
+was re-derived (idempotently — the tree's two hashes and its full 66-line porcelain status are
+**unchanged**; the record gained exactly one line, `osfmk/arm/arm_vm_init.c`, which the
+`xnu_compile_graph` gate requires).
+
+**The entry group MOVED — the ELEVENTH move.** The ceiling is compiled into
+`osfmk_arm_arm_vm_init.o`, which is **in the entry link**, so unlike 911a this arm **moves
+`xnu_arm_entry.bin`**. The exit's `bl FlushPoU_Dcache` moved by `+0x20`;
+`STAGE90_XNU_SEAM_LR` and `EXIT_POP_LR_LITERAL` were re-derived from `0x8004f2dc` to **`0x8004f2fc`**
+(both the entry build and `make check` refuse until both copies move in lockstep).
+
+**Build refusals added.**
+- `build_entry.sh`: `STAGE90_XNU_MEM_SIZE_MAX` is an arm key (recorded) **and** an `nm` clause reads
+  `osfmk_arm_arm_vm_init.o` for exactly one of `entry_xnu_mem_size_max_arm_on/_arm_off` and refuses a
+  mismatch between the build's switch and the object — in **both** directions.
+- `scripts/preflight_boot_check.sh`: `STAGE90_XNU_MEM_SIZE_MAX` is a config key; a pre-911b record
+  (key absent) reads as Apple's 1 GiB clamp, like `ENTRY_WINDOW`.
+- `tools/check_mem_size_max.py` (in `make check`): structure, `src/stage90.h` lockstep, the ceiling
+  bound, the patcher citation, and the `424a45e1` self-test.
+
+**Built:** entry build exit 0 with the full switch set plus
+`STAGE90_XNU_MEM_SIZE_MAX=0x5e500000 STAGE90_XNU_ENTRY_WINDOW=0x5e500000` (the `xnu_entry_911b:` line
+printed, the seam clause reads `0x8004f2fc`). Entry bin
+`185d106919192ebb1e2b2909df31e0a48716e37816cf693f66b0cedf98ebd786`, qcdt
+`351c5cea828ef5811064a0fe86a482b11e7b74191331d1f9edac4763bbb63228`. Park
+`out/stage90/frozen/armed-storage-185d1069` (11/11, `verify_revert_set` VERIFIED); the set name is
+the **entry bin's** hash (the entry image moved — the `armed-storage-*` family rule);
+`check_set_name_rule` 0; `make check` 0; `verify_press_ready` **5/5** — row 4 names **the 911b
+PHYSICAL-MEMORY-CEILING arm**. NO press. The payload was then built with
+`STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1 -DSTAGE90_XNU_MEM_SIZE_MAX=0x5e500000'` (exit 0), which
+consumes the entry image and the generated `xnu_arm_entry.h`.
+
+**The press reads ONE decisive cell.** `xnu_entry_args_memSize` must read **`0x5e500000`** and the
+pmap's `virtual_space_start` must read **`0xe0000000`** (where every arm through 911a reads
+`0xc0000000`); `topOfKernelData` must **not** have moved. The refusal is first: if `memSize` still
+reads `0x04000000` the window never reached `xnu_entry_build_args`; if it reads `0x40000000` the
+*window* moved but the *ceiling* did not, and the vstart stays `0xc0000000`. The discriminator: the
+909 residence wall (5 idle calls / 4 pairs, ~13.4 s) — **moved** at 1.47 GB says the wall is free
+memory and 911c is worth the port; **unmoved** says R10's cache-window reading stands.
+
+**911b supersedes 911a and 911d for the next press:** it carries 911d's raw card unit AND the raised
+ceiling + window, so one press answers the ceiling, the residence wall, and the card capacity together.
+The goal's **full 3 GB is still NOT met** — that is 911c.

@@ -76,6 +76,15 @@ say "stage_hfs: applying the HFS+ mount-path live step markers"
 say "stage_hfs: applying the HFS+ read-write root clear"
 "$HERE/hfs_patch_root_rw.py" "$DST"
 
+# --- 4d. the 911b physical-memory ceiling port ----------------------------------------------------
+# 911b: `osfmk/arm/arm_vm_init.c`'s `MEM_SIZE_MAX` (Apple's 1 GiB cap) becomes a guarded port so XNU
+# can be told the Mi 4 has more than 1 GiB (the goal's newest clause).  It is NOT an HFS edit - it is
+# staged here because this script is *THE* one place that reapplies this project's tracked edits to the
+# untracked `external/` tree, and a re-provision that dropped it would leave a 911b build reading
+# Apple's 1 GiB clamp with no error.  `tools/check_mem_size_max.py` (in `make check`) re-derives it.
+say "stage_hfs: applying the 911b MEM_SIZE_MAX port"
+"$HERE/patch_mem_size_max.py" "$DST"
+
 N=$(find "$DST/bsd/hfs" -name '*.c' | wc -l)
 say "stage_hfs: staged $N .c file(s) under $DST/bsd/hfs (plus vfs_journal.c, spl.h, the root row)"
 # --- 5. the record, for the one gate that cannot see the enumerated files -------------------------
