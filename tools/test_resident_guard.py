@@ -176,12 +176,20 @@ def gather(image):
     facts["pet"] = function_body(facts["trace"], "entry_wdt_pet")
     facts["count_fn"] = function_body(facts["trace"], "wdt_count")
     facts["wrapper"] = function_body(facts["trace"], "__wrap_platform_cache_idle_exit")
+    # 909 arm 6: the pet's site on the arm whose idle never sleeps. That wrapper is entered on every
+    # pass there and is the one the pet must move to; the guard reads it too, so the pet is proven to
+    # be the tail of *whichever* wrapper this arm's idle still reaches.
+    facts["idle_wrapper"] = function_body(facts["trace"], "__wrap_Idle_load_context")
     # On the RAW text: the region's `#endif` names the macro in a trailing comment, and comment-stripping
     # would delete the very anchor that bounds the region.
     facts["gated"] = guarded_region(facts["trace_text"], "STAGE90_XNU_RESIDENT")
     facts["symbols"] = nm(image) if image else {}
     facts["pet_body"] = body_of(image, "entry_wdt_pet") if image else None
     facts["wrap_body"] = body_of(image, "__wrap_platform_cache_idle_exit") if image else None
+    facts["idle_body"] = body_of(image, "__wrap_Idle_load_context") if image else None
+    # Which arm the image is (see image_arm): `__wrap_poll` carries the only call to
+    # `cpu_signal_handler_internal`, and its presence or absence is the arm.
+    facts["poll_body"] = body_of(image, "__wrap_poll") if image else None
     # 909 arm 3: the guard that decides whether a refused install falls back to the GIC's block.
     facts["desc_guard"] = function_body(facts["trace"], "wdt_desc_maps_the_block")
     return facts
@@ -355,25 +363,107 @@ def claim_pet_threshold_and_store(facts, failures, notes):
     notes.append("the pet thresholds at half the bark and stores 1 to base+RST")
 
 
+def image_arm(facts):
+    """Which arm the LINKED image is, read from the bytes rather than from the switch's name.
+
+    `STAGE90_XNU_IDLE_NO_SLEEP=1` is the only key in this build that changes the *kernel's control
+    flow*: `cpu_signal_handler_internal(FALSE)` is compiled out of `__wrap_poll`, so the idle leaves by
+    `cpu_idle`'s first door on every pass and never reaches `platform_cache_idle_exit`. The two arms
+    therefore differ in exactly one observable of the bytes: `__wrap_poll` calls
+    `cpu_signal_handler_internal` once when the repair is in (`IDLE_NO_SLEEP=0`) and not at all when it
+    is skipped (1). `build_entry.sh` asserts the same number from the object pool against the switch, so
+    this reader agrees with the build by looking at the same fact; but here it is read from the image,
+    so a forged record cannot make the guard check the wrong wrapper. On the sleeping arm `(0)` the pet
+    is the idle-exit wrapper's tail call; on the no-sleep arm `(1)` that wrapper is never reached and the
+    pet must be `__wrap_Idle_load_context`'s call instead."""
+    if not facts["image"]:
+        return 0
+    body = facts["poll_body"] or ""
+    return 1 if not re.search(r"<cpu_signal_handler_internal>", body) else 0
+
+
+def guard_at_call(body, call_needle):
+    """The innermost open `#if` line at the line holding `call_needle`, or None. This is how a source
+    claim reads a preprocessor arm: the two pet calls are BOTH always in the text (the arm is chosen by
+    the preprocessor at compile time), so which one is live is a property of the `#if` that opens above
+    it, and a claim that searched the stripped text for a call would be satisfied by a call that is
+    compiled out on this arm."""
+    stack = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if re.match(r"#\s*if\b", stripped):
+            stack.append(stripped)
+        elif re.match(r"#\s*endif\b", stripped):
+            if stack:
+                stack.pop()
+        if call_needle in line:
+            return stack[-1] if stack else None
+    return None
+
+
 def claim_call_is_the_wrapper_tail(facts, failures, notes):
     wrapper = facts["wrapper"]
+    idle = facts["idle_wrapper"]
     if wrapper is None:
-        failures.append("entry_trace.c has no __wrap_platform_cache_idle_exit: the site the pet is "
-                        "called from does not exist")
+        failures.append("entry_trace.c has no __wrap_platform_cache_idle_exit: the sleeping arm's pet "
+                        "site does not exist")
         return
+    if idle is None:
+        failures.append("entry_trace.c has no __wrap_Idle_load_context: the no-sleep arm's pet site "
+                        "does not exist")
+        return
+    # Both pet calls are always in the text and exactly one each, because the two wrappers are the two
+    # arms' sites and the arm picks between them at preprocess time.
     if wrapper.count("entry_wdt_pet(") != 1:
         failures.append("__wrap_platform_cache_idle_exit calls entry_wdt_pet %d time(s), not once: the "
-                        "wrapper's `sp` is the exit's frame slot, so the pet must be a single call"
-                        % wrapper.count("entry_wdt_pet("))
+                        "sleeping arm's pet must be a single call at the wrapper whose `sp` is the "
+                        "exit's frame slot" % wrapper.count("entry_wdt_pet("))
         return
-    tail = re.sub(r"#\s*(?:if|ifdef|ifndef|else|endif)[^\n]*\n", "", wrapper)
-    tail = strip_comments(tail)
+    if idle.count("entry_wdt_pet(") != 1:
+        failures.append("__wrap_Idle_load_context calls entry_wdt_pet %d time(s), not once: the "
+                        "no-sleep arm's idle reaches this wrapper every pass, so its pet must be a "
+                        "single call" % idle.count("entry_wdt_pet("))
+        return
+    # The no-sleep site: the call must be immediately before the `noreturn` real function, or it never
+    # runs; and anything between the two would be code the pet's own frame cannot see.
+    idle_body = strip_comments(re.sub(r"#\s*(?:if|ifdef|ifndef|else|endif)[^\n]*\n", "", idle))
+    if not re.search(r"entry_wdt_pet\([^;]*\)\s*;\s*__real_Idle_load_context\s*\(\s*\)\s*;", idle_body):
+        failures.append("__wrap_Idle_load_context does not call the pet immediately before "
+                        "__real_Idle_load_context(): __real_Idle_load_context is `noreturn`, so a pet "
+                        "call placed after it would never run, and anything between the two would be "
+                        "code the pet's own frame cannot see")
+        return
+    # The sleeping site: unchanged - the call is the wrapper's last statement, so nothing after it
+    # needs the slot's registers (the frame 690 forbids growing).
+    tail = strip_comments(re.sub(r"#\s*(?:if|ifdef|ifndef|else|endif)[^\n]*\n", "", wrapper))
     if not re.search(r"entry_wdt_pet\([^;]*\)\s*;\s*\}\s*$", tail.strip()):
         failures.append("entry_wdt_pet is not the LAST statement of "
                         "__wrap_platform_cache_idle_exit: anything the wrapper does after it would "
                         "need the slot's registers, which is the frame 690 forbids")
         return
-    notes.append("the pet is the wrapper's tail call, exactly once")
+    # Each call is guarded by the switch that makes its wrapper the reached one. Without this, a build
+    # could carry both calls live and the pet would run twice per pass (or from a wrapper the arm's
+    # control flow never reaches).
+    exit_guard = guard_at_call(wrapper, "entry_wdt_pet(")
+    if not (exit_guard and "STAGE90_XNU_RESIDENT" in exit_guard
+            and "STAGE90_XNU_IDLE_NO_SLEEP" in exit_guard and "!" in exit_guard):
+        failures.append("the idle-exit wrapper's pet call is not guarded by "
+                        "`#if STAGE90_XNU_RESIDENT && !STAGE90_XNU_IDLE_NO_SLEEP` (guard seen: %r): "
+                        "that wrapper is skipped on the no-sleep arm, so an unguarded call would feed "
+                        "a watchdog from a site the kernel's own control flow never reaches"
+                        % exit_guard)
+        return
+    idle_guard = guard_at_call(idle, "entry_wdt_pet(")
+    if not (idle_guard and "STAGE90_XNU_RESIDENT" in idle_guard
+            and "STAGE90_XNU_IDLE_NO_SLEEP" in idle_guard and "!" not in idle_guard):
+        failures.append("the Idle_load_context wrapper's pet call is not guarded by "
+                        "`#if STAGE90_XNU_RESIDENT && STAGE90_XNU_IDLE_NO_SLEEP` (guard seen: %r): on "
+                        "the sleeping arm that wrapper carries a second pet and the arm would feed the "
+                        "watchdog from two sites" % idle_guard)
+        return
+    notes.append("each arm's pet site carries exactly one call, the no-sleep site immediately before "
+                 "its noreturn real function, the sleeping site as its wrapper's tail, each under the "
+                 "matching half of the IDLE_NO_SLEEP switch")
 
 
 def claim_build_carries_the_switch_and_refusals(facts, failures, notes):
@@ -431,19 +521,66 @@ def claim_linked_image(facts, failures, notes):
         failures.append("entry_wdt_pet's linked body does not extract `(sts >> 1) & 0xfffff` (no "
                         "`ubfx rX, rY, #1, #20`): the count read in the image is not the vendor's field")
         return
-    wrap_body = facts["wrap_body"]
-    if not wrap_body:
-        failures.append("__wrap_platform_cache_idle_exit has no body in the linked image")
-        return
-    # The wrapper's frame stays 8 bytes: `str r4, [sp, #-8]!` / `add sp, sp, #8`.
-    if not re.search(r"str\s+r\d+, \[sp, #-8\]!", wrap_body):
-        failures.append("__wrap_platform_cache_idle_exit's linked frame is not 8 bytes: the slot the "
-                        "exit's push/pop read is at the wrong address (mi4-idle-exit-l2-line)")
-        return
-    if not re.search(r"b\s+[0-9a-f]+ <entry_wdt_pet>", wrap_body):
-        failures.append("__wrap_platform_cache_idle_exit does not tail-branch to entry_wdt_pet in the "
-                        "linked image: the pet is not reached from the idle-exit pass")
-        return
+    arm = image_arm(facts)
+    if arm == 1:
+        # The no-sleep arm: the pet is called by `__wrap_Idle_load_context`, and the exit wrapper this
+        # image never reaches on that arm must tail-branch to no pet. `--wrap=Idle_load_context` renames
+        # the kernel's own function to `__real_Idle_load_context` in the source and to `Idle_load_context`
+        # in the output, so the real call's target reads `<Idle_load_context>` in the disassembly (verified
+        # on the arm-5 image), not `<__real_Idle_load_context>`.
+        idle_body = facts["idle_body"]
+        if not idle_body:
+            failures.append("__wrap_Idle_load_context has no body in the linked image")
+            return
+        # The pet call's arguments are by value and nothing is live across it, so the frame must be the
+        # same 8 bytes the arm-5 image has - a larger frame would mean the compiler kept state live
+        # across the pet, which is the hazard the separate `entry_wdt_pet` frame exists to remove.
+        if not re.search(r"str\s+r\d+, \[sp, #-8\]!", idle_body):
+            failures.append("__wrap_Idle_load_context's linked frame is not 8 bytes: the pet call's "
+                            "arguments are by value and nothing is live across it, so a larger frame "
+                            "means state was kept live across the pet")
+            return
+        pet_at = re.search(r"bl?\s+[0-9a-f]+ <entry_wdt_pet>", idle_body)
+        real_at = re.search(r"bl?\s+[0-9a-f]+ <Idle_load_context>", idle_body)
+        if not pet_at:
+            failures.append("__wrap_Idle_load_context does not branch to entry_wdt_pet in the linked "
+                            "image: the pet is not reached from the site the no-sleep arm still reaches")
+            return
+        if not real_at:
+            failures.append("__wrap_Idle_load_context does not reach the real Idle_load_context "
+                            "(<Idle_load_context>) in the linked image: the pet call is either the "
+                            "wrapper's last instruction - so the real idle never runs and the run is "
+                            "wedged at the pet - or the real function is reached some other way")
+            return
+        if pet_at.start() > real_at.start():
+            failures.append("__wrap_Idle_load_context branches to the real Idle_load_context before it "
+                            "branches to entry_wdt_pet in the linked image: the real function is "
+                            "`noreturn`, so a pet placed after it never runs")
+            return
+        if facts["wrap_body"] and re.search(r"b\s+[0-9a-f]+ <entry_wdt_pet>", facts["wrap_body"]):
+            failures.append("__wrap_platform_cache_idle_exit still tail-branches to entry_wdt_pet on "
+                            "the IDLE_NO_SLEEP arm: that wrapper is skipped on this arm, so the image "
+                            "carries a pet at a site the kernel's own control flow never reaches")
+            return
+    else:
+        wrap_body = facts["wrap_body"]
+        if not wrap_body:
+            failures.append("__wrap_platform_cache_idle_exit has no body in the linked image")
+            return
+        # The wrapper's frame stays 8 bytes: `str r4, [sp, #-8]!` / `add sp, sp, #8`.
+        if not re.search(r"str\s+r\d+, \[sp, #-8\]!", wrap_body):
+            failures.append("__wrap_platform_cache_idle_exit's linked frame is not 8 bytes: the slot "
+                            "the exit's push/pop read is at the wrong address (mi4-idle-exit-l2-line)")
+            return
+        if not re.search(r"b\s+[0-9a-f]+ <entry_wdt_pet>", wrap_body):
+            failures.append("__wrap_platform_cache_idle_exit does not tail-branch to entry_wdt_pet in "
+                            "the linked image: the pet is not reached from the idle-exit pass")
+            return
+        if facts["idle_body"] and re.search(r"bl?\s+[0-9a-f]+ <entry_wdt_pet>", facts["idle_body"]):
+            failures.append("__wrap_Idle_load_context branches to entry_wdt_pet on the sleeping arm: "
+                            "the pet belongs to the idle-exit wrapper here, so a second site is either "
+                            "dead code or the image is a mixture of the two arms")
+            return
     # **The install's second argument register must be a frame address, not zero.** The linked body
     # loads `r1` with the VA and then calls `entry_mmio_section`; `r2` is `slot_before_out`. The first
     # press's pet had `mov r2, r3` (r3 = 0) there, and the install stored through it to address 0
@@ -497,6 +634,11 @@ def mutate_facts(facts, mutate):
     facts = dict(facts)
     facts["trace_defs"] = dict(facts["trace_defs"])
     facts["symbols"] = dict(facts["symbols"])
+    # The arm the image is: the same call sites are in the source under both arms, so a mutation of
+    # the idle-exit tail is only a live defect on the sleeping arm and a mutation of the idle wrapper
+    # only on the no-sleep arm. Applying the wrong-half mutation would be an unsatisfiable test (it
+    # edits a call the image does not carry), which is a broken test, not a passing one.
+    arm = image_arm(facts)
 
     def rederive_trace(text):
         facts["trace_text"] = text
@@ -505,6 +647,7 @@ def mutate_facts(facts, mutate):
         facts["pet"] = function_body(facts["trace"], "entry_wdt_pet")
         facts["count_fn"] = function_body(facts["trace"], "wdt_count")
         facts["wrapper"] = function_body(facts["trace"], "__wrap_platform_cache_idle_exit")
+        facts["idle_wrapper"] = function_body(facts["trace"], "__wrap_Idle_load_context")
         facts["desc_guard"] = function_body(facts["trace"], "wdt_desc_maps_the_block")
         facts["gated"] = guarded_region(facts["trace"], "STAGE90_XNU_RESIDENT")
 
@@ -574,9 +717,27 @@ def mutate_facts(facts, mutate):
     elif mutate == "the_pet_is_not_in_the_image":
         facts["symbols"].pop("entry_wdt_pet", None)
     elif mutate == "the_wrapper_tail_branches_elsewhere":
-        facts["wrap_body"] = facts["wrap_body"].replace("<entry_wdt_pet>", "<entry_post_clock>")
+        if arm == 1:
+            facts["idle_body"] = facts["idle_body"].replace("<entry_wdt_pet>", "<entry_post_clock>")
+        else:
+            facts["wrap_body"] = facts["wrap_body"].replace("<entry_wdt_pet>", "<entry_post_clock>")
     elif mutate == "the_wrapper_frame_is_16":
-        facts["wrap_body"] = facts["wrap_body"].replace("[sp, #-8]!", "[sp, #-16]!")
+        if arm == 1:
+            facts["idle_body"] = facts["idle_body"].replace("[sp, #-8]!", "[sp, #-16]!")
+        else:
+            facts["wrap_body"] = facts["wrap_body"].replace("[sp, #-8]!", "[sp, #-16]!")
+    elif mutate == "the_pet_is_called_from_both_arms":
+        # 909 arm 6: the pet must be reachable from exactly one site per arm. Making the *other* arm's
+        # site live too means the pet runs from a wrapper this arm's control flow never reaches, or
+        # twice per pass - the two definitions of "which arm's site this is".
+        if arm == 1:
+            rederive_trace(_bump(facts["trace_text"],
+                                 "#if STAGE90_XNU_RESIDENT && !STAGE90_XNU_IDLE_NO_SLEEP",
+                                 "#if STAGE90_XNU_RESIDENT"))
+        else:
+            rederive_trace(_bump(facts["trace_text"],
+                                 "#if STAGE90_XNU_RESIDENT && STAGE90_XNU_IDLE_NO_SLEEP",
+                                 "#if STAGE90_XNU_RESIDENT"))
     elif mutate == "the_store_is_not_at_plus_4":
         facts["pet_body"] = facts["pet_body"].replace("[r3, #4]", "[r3, #12]")
     elif mutate == "the_count_is_not_the_vendors_field":
@@ -621,7 +782,8 @@ MUTATIONS = (
     "store_targets_sts", "the_call_is_not_last", "the_call_is_removed", "the_pet_is_not_gated",
     "the_fallback_is_not_zero", "a_refusal_is_dropped", "the_arm_key_is_dropped",
     "the_record_writer_is_dropped", "the_pet_is_not_in_the_image",
-    "the_wrapper_tail_branches_elsewhere", "the_wrapper_frame_is_16", "the_store_is_not_at_plus_4",
+    "the_wrapper_tail_branches_elsewhere", "the_wrapper_frame_is_16",
+    "the_pet_is_called_from_both_arms", "the_store_is_not_at_plus_4",
     "the_count_is_not_the_vendors_field", "the_install_output_is_not_a_stack_address",
     "the_fallback_guard_is_dropped", "the_fallback_guard_drops_the_type_test",
     "the_fallback_guard_drops_the_base_test", "the_fallback_guard_uses_the_wrong_type",

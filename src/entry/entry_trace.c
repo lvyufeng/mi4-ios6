@@ -2080,6 +2080,19 @@ extern void entry_slot_rtc_note(struct entry_slot_rtc_keys *k, uint32_t thr);
 extern void entry_slot_tb_note(struct entry_slot_tb_keys *k, uint32_t before, uint32_t after,
                                uint32_t lo);
 
+/*
+ * **The residence switch is read here rather than only at its own section, because 909 arm 6's pet site
+ * is this wrapper.** The pet is `noreturn`-tail-called from `machine_idle` on every pass on the
+ * `IDLE_NO_SLEEP=1` arm (its body lives further down, where its own section is), so both the switch and
+ * a forward declaration of the pet have to be in scope before this point.
+ */
+#ifndef STAGE90_XNU_RESIDENT
+#define STAGE90_XNU_RESIDENT 0
+#endif
+#if STAGE90_XNU_RESIDENT
+__attribute__((noinline)) static void entry_wdt_pet(uint32_t calls);
+#endif
+
 void __real_Idle_load_context(void) __attribute__((noreturn));
 void __wrap_Idle_load_context(void) __attribute__((noreturn));
 
@@ -2088,6 +2101,27 @@ void __wrap_Idle_load_context(void)
     uint32_t lr = (uint32_t)(uintptr_t)__builtin_return_address(0);
 
     entry_note_door(lr, (uint32_t)idle_enable, entry_counter());
+
+#if STAGE90_XNU_RESIDENT && STAGE90_XNU_IDLE_NO_SLEEP
+    /*
+     * **909 arm 6: the pet's site on the arm whose idle never sleeps.** With `IDLE_NO_SLEEP=1` the idle
+     * leaves by `cpu_idle`'s first door on *every* pass, so it never reaches `platform_cache_idle_exit`
+     * - the site the pet used on arms 1-5 - and the pet must move to the one site every pass still
+     * reaches. That site is here: `Idle_load_context` is called from `machine_idle` (the exit path) *and*
+     * from both of `cpu_idle`'s first-door bodies (the disassembly merges them into one `mov lr, pc; b`),
+     * and this image's clause already pins it to exactly those two callers, so on this arm it is entered
+     * on every pass and once per pass. `g_door_exits` is this wrapper's own counter, incremented two lines
+     * up by `entry_note_door`, so the argument is the pass count and there is no second definition of it
+     * ([[mi4-one-value-two-definitions]]).
+     *
+     * **It is placed before `__real_Idle_load_context`, not after, and that is the one difference from
+     * the exit-arm site.** `__real_Idle_load_context` is `noreturn` - it is `lx`-jumped to and never
+     * returns - so a call placed after it would never run. The pet's own state lives in `entry_wdt_pet`'s
+     * frame; this wrapper keeps no state across the call, so nothing here is live when the real function
+     * is tail-called, which is the property 690's block and [[mi4-idle-exit-l2-line]] exist to protect.
+     */
+    entry_wdt_pet(g_door_exits);
+#endif
 
     __real_Idle_load_context();
 }
@@ -2407,10 +2441,6 @@ __attribute__((noinline)) static void entry_post_clock(uint32_t now, uint32_t ca
 }
 #endif
 
-#ifndef STAGE90_XNU_RESIDENT
-#define STAGE90_XNU_RESIDENT 0
-#endif
-
 #if STAGE90_XNU_RESIDENT
 /*
  * **909: the residence arm's pet, in its own function for 690's reason.** The wrapper's `sp` IS the slot
@@ -2726,7 +2756,7 @@ void __wrap_platform_cache_idle_exit(void)
     entry_post_clock(entry_counter(), g_slot_post.calls);
 #endif
 
-#if STAGE90_XNU_RESIDENT
+#if STAGE90_XNU_RESIDENT && !STAGE90_XNU_IDLE_NO_SLEEP
     /*
      * **909: the resident arm's pet, at 690's site for 690's reason.** This is the one place in the image
      * that already runs on every idle pass *inside the handed-off kernel* - 60931 times in 908 - and the

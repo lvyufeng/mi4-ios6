@@ -27,6 +27,22 @@
 # `claim_descriptor_guard_is_a_real_predicate` plus five mutations in `tools/test_resident_guard.py`.
 # The fix and the guard are this arm; the press of arm 3 is still owed.
 #
+# WHY ARM 5 NEEDED AN ARM 6, AND WHY ARM 6 IS THE RESIDENCE FIX ITSELF. Arm 5 is an *instrument* arm: one
+# press bisects the 5th idle pass five ways (see its own block below). Arm 6 (`armed-storage-cabba670`) is
+# the goal-directed arm and it is arm 5 + ONE switch, `STAGE90_XNU_IDLE_NO_SLEEP=1`. Arm 2's log put the
+# death INSIDE the 5th `platform_cache_idle_enter` - the cache-off window (`platform_cache_disable()` +
+# `CleanPoU_Dcache()`, `IDLE_CACHE_ENABLE=0`) or its `wfi` - and that is EXACTLY the window 594's switch
+# removes: with it, `cpu_signal_handler_internal(FALSE)` is not called, `SIGPdisabled` stays set,
+# `cpu_idle`'s first test is true on every pass, the idle leaves by door 1, and
+# `platform_cache_idle_enter`/`wfi`/`exit` are NEVER entered. 594's own note says it: *a port whose idle
+# never sleeps is a port that reached the OS and stayed*. **The pet's site has to move with it.** On arms
+# 1-5 the pet was the idle-EXIT wrapper's tail; on this arm that wrapper is skipped, so the pet is now a
+# call in `__wrap_Idle_load_context` - the one wrapper `machine_idle` and BOTH of `cpu_idle`'s first-door
+# bodies reach, so it is entered once per pass - placed BEFORE `__real_Idle_load_context`, which is
+# `noreturn`, so a pet after it would never run. **What the operator must do is the same as arm 5's plain
+# boot; what is new is that this arm, if it holds, is a boot that STAYS** - so a dark screen with no adbd
+# is the POSITIVE reading, and the wait before the escape is the experiment, not a timeout.
+#
 # WHY ARM 4 NEEDED AN ARM 5, AND WHY ARM 5 IS A 5-WAY BISECTION. Arm 4 (`armed-storage-4f4111fa`) widened only
 # `entry_slot_publish`'s bound, so its press can say which side of the exit the 5th pass died on and no
 # more. Reading arm 2's log tells more than that: `xnu_live_idlestack_calls` is the idle ENTER wrapper's
@@ -79,7 +95,7 @@ set -Eeuo pipefail
 SERIAL="4a2fe00b"
 FORBIDDEN_SERIAL="33e80afe"
 CARGO="out/stage90/stage90-qcdt.img"
-EXPECT_ARM="armed-storage-b459a858"
+EXPECT_ARM="armed-storage-cabba670"
 CAPTURE="out/stage90/captures/909-resident-$(date -u '+%Y%m%d-%H%M%S')-last_kmsg.txt"
 CALL_TIMEOUT=120
 DO_STAGE=1
@@ -144,7 +160,7 @@ fi
 # --- 2. the bytes in out/ are the arm this press names, checked BEFORE anything is written -------
 # The staging step below writes whatever is in out/. `verify_press_ready.sh` is the project's own
 # answer to "are these bytes the recorded arm, and does the gate accept the tree" - five checks,
-# and it refuses if the live set is not `armed-storage-4f4111fa` (the arm this script names). It is
+# and it refuses if the live set is not `armed-storage-cabba670` (the arm this script names). It is
 # run here so a stale out/ is caught before p19 is overwritten, not after.
 if (( ! DRY_RUN )); then
     bash tools/verify_press_ready.sh >/tmp/press_909_readiness.log 2>&1 \

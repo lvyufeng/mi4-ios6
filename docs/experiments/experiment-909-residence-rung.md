@@ -603,3 +603,65 @@ hash, so no `STAGE90_ENTRY_ARM_CHANGE`); the payload record is byte-identical (`
 time); the seam check passed, so `STAGE90_XNU_SEAM_LR` is still `0x8004d2dc`; 6498612 bytes as before
 (the threshold is an immediate). Parked `armed-storage-b459a858`, `verify_revert_set` 11/11,
 `verify_press_ready` 5/5, `make check` exit 0. **Built and parked, NOT pressed.**
+
+## R15 — arm 6: the residence fix itself — the idle that never sleeps, and the pet's site moves
+
+Arm 5 is an *instrument*: it says where the 5th idle pass died. Arm 6 is the **goal-directed fix**, and
+it is arm 5 plus **one key**, `STAGE90_XNU_IDLE_NO_SLEEP=1`. The two are complementary and both are owed
+a press: arm 5 localizes, arm 6 tries to make 「彻底能直接开机就运行xnu」 a boot that **stays**.
+
+**Why this switch and not a repair.** Arm 2's log put the death *inside* the 5th
+`platform_cache_idle_enter` — the cache-off window (`platform_cache_disable()` + `CleanPoU_Dcache()`,
+`IDLE_CACHE_ENABLE=0`) or its `wfi`. That window is exactly what 594's switch removes: with
+`IDLE_NO_SLEEP=1`, `cpu_signal_handler_internal(FALSE)` is not called, `SIGPdisabled` stays set,
+`cpu_idle`'s first test is true on every pass, the idle leaves by **door 1**, and
+`platform_cache_idle_enter`/`wfi`/`exit` are **never entered at all**. So this arm does not repair the
+window; it removes the code path that contains it. 594's own note is the claim the arm tests: *a port
+whose idle never sleeps is a port that reached the OS and stayed*.
+
+**The pet's site has to move with the idle, and that is the only source change.** On arms 1–5 the pet was
+the idle-**exit** wrapper's tail (`__wrap_platform_cache_idle_exit`, reached 60931 times in 908). On this
+arm that wrapper is **skipped**, so a pet left there would never run and the run would be reset by the
+armed SoC watchdog on the first pass. The pet now lives in `__wrap_Idle_load_context`, which is the one
+wrapper **every** idle pass reaches on this arm — `machine_idle` calls it on the exit path and *both* of
+`cpu_idle`'s first-door bodies merge into one `mov lr, pc; b Idle_load_context` — placed **before**
+`__real_Idle_load_context`, which is `noreturn`, so a call after it would never run. Both call sites are
+always in the source, each under its own half of the switch:
+
+| wrapper | guard | arm it fits |
+|---|---|---|
+| `__wrap_platform_cache_idle_exit` | `#if STAGE90_XNU_RESIDENT && !STAGE90_XNU_IDLE_NO_SLEEP` | sleeping (arms 1–5) |
+| `__wrap_Idle_load_context` | `#if STAGE90_XNU_RESIDENT && STAGE90_XNU_IDLE_NO_SLEEP` | **no-sleep (arm 6)** |
+
+**The guard was made arm-aware, and it reads the arm from the bytes.** `tools/test_resident_guard.py`
+grew `image_arm()`, which reads `__wrap_poll`'s linked body: `cpu_signal_handler_internal` is called once
+when the repair is in (`IDLE_NO_SLEEP=0`) and not at all when it is skipped (`1`) — the same number
+`build_entry.sh` asserts from the object pool, but read from the image so a forged record cannot make the
+guard check the wrong wrapper. On the no-sleep arm the linked clause requires the pet in
+`__wrap_Idle_load_context` **before** its `<Idle_load_context>` tail branch (the real function's symbol
+after `--wrap`), an 8-byte frame, and **no** pet in the exit wrapper; the sleeping arm keeps its original
+clause and now also refuses a pet in the idle wrapper. One new mutation,
+`the_pet_is_called_from_both_arms`, closes the two-sites-live case; the source half is one claim,
+`claim_call_is_the_wrapper_tail`, whose two `guard_at_call` reads check each call's `#if`.
+
+**Measured on the artifact (not reasoned).** `image_arm` reads **1** on a68's
+`xnu_arm_entry.elf`; `__wrap_Idle_load_context`'s body ends
+`bl entry_wdt_pet` → `bl Idle_load_context`; the exit wrapper carries no `<entry_wdt_pet>`; and
+`__wrap_poll` carries no `<cpu_signal_handler_internal>`. `--selftest` refuses all 28 mutations;
+`make check` exit 0.
+
+**Nothing that must not move.** `IDLE_NO_SLEEP` is a key, so the switch set *did* move — the only build
+since 904 to need `STAGE90_ENTRY_ARM_CHANGE=1` — and the artifact hash and bytes changed
+(`cabba670…`, 6498612 B as before, the threshold still an immediate). The payload record is
+**byte-identical** (`6c2b6038…`, the **eighth** time); the seam check passed, so
+`STAGE90_XNU_SEAM_LR` is still `0x8004d2dc`. Parked `armed-storage-cabba670`, `verify_revert_set` 11/11,
+`verify_press_ready` 5/5 (row 4 reads it as the **sleepless** arm), `make check` exit 0. **Built and
+parked, NOT pressed.**
+
+**What the press must show, and the honest risk.** On residence the log carries **no**
+`xnu_live_post_end_calls`, a dark screen with no adbd is the **positive** reading, and
+`xnu_live_wdt_countdown` should move below the bark (24.94 s) without reaching it — the pet is what keeps
+it from biting. The honest risk is the one R13 raised and arm 5/6 do not remove: if the idle path's death
+is not the sleep window but something the door-1 loop also does (a timer path, the poll return), then arm
+6 wedges elsewhere and the press says so by ending at a different count — which is why arm 5 is still
+worth its own press.
