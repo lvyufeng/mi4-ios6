@@ -56,24 +56,28 @@ cd "$(dirname "$0")"
 TOOLS_DIR=$PWD
 REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
 
-XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
+# **Every out-root this build reads or writes follows the selected tree (experiment 933).** The rule
+# (`XNU_TREE` -> `XNU_OBJ_SUFFIX` -> the roots) is defined once in `tools/xnu_tree_roots.sh` and
+# shared with the other five builders, so `XNU_TREE=<d13>` alone selects the `_d13` outputs and a
+# plain run on 4570 is byte-identical. See that file for why a hand-typed multi-variable D13
+# environment was a defect rather than a convenience.
+. "$TOOLS_DIR/xnu_tree_roots.sh"
+
+XNU=$XNU_TREE
 # The non-MIG generated headers (`bsd/sys/sysproto.h` from makesyscalls.sh, `libkern/version.h`).
 # Defined here rather than beside its use below because the **manifest** needs it too: `list_sources.py
 # --generated-dir` resolves the generated `_server.c`/`init_sysent.c` sources against it, and a
 # manifest that names another tree's generated sources is the same one-value-two-definitions shape as
-# the MIG root.  Default is the base tree's root, so 4570 is unchanged.
-GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
+# the MIG root.
+GENERATED=$XNU_GENERATED
 SHIMS=$REPO_ROOT/src/shims
 SHIMS_ARM=$REPO_ROOT/src/shims_arm
-MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
 # The kserver variant goes BESIDE `$MIG_HEADERS`, not at a fixed root: the two are different outputs
 # of the SAME `.defs` set (the `-DKERNEL_SERVER` half), so pairing one tree's headers with another
-# tree's kserver is `one value, two definitions`.  Deriving the default from `$MIG_HEADERS` makes a
-# per-tree `MIG_HEADERS` carry its own kserver automatically; the 4570 default is byte-identical to
-# the old fixed path, so this changes nothing on the base tree.
-MIG_KSERVER=${MIG_KSERVER_OUT:-$MIG_HEADERS/kserver}
-OUT=${XNU_KERNEL_OBJ_OUT:-$REPO_ROOT/out/xnu_kernel_obj}
-MANIFEST=${MANIFEST:-$REPO_ROOT/out/xnu_arm_manifest.txt}
+# tree's kserver is `one value, two definitions`. `xnu_tree_roots.sh` derives it from `$MIG_HEADERS`,
+# so a per-tree `MIG_HEADERS` carries its own kserver automatically.
+MIG_KSERVER=$MIG_KSERVER_OUT
+OUT=$XNU_KERNEL_OBJ_OUT
 
 # **The HFS+ port's sources, which are not in any `conf/files`** (experiments 875/877).  2050's HFS
 # is staged into this tree by `tools/stage_hfs.sh`, but its rows are deliberately NOT added to the
@@ -206,14 +210,14 @@ fi
 # most repeated defect: the target triple used to be spelled out in four scripts before
 # experiment-161. See src/xnu_aeabi_runtime.c.
 RUNTIME_SOURCES=("$REPO_ROOT/src/xnu_aeabi_runtime.c")
-RT_OUT=${XNU_RT_OBJ_OUT:-$REPO_ROOT/out/xnu_rt_obj}
+RT_OUT=$XNU_RT_OBJ_OUT
 
 # The configuration to build. `RELEASE` is Apple's full iOS kernel; `STAGE90_BOOT` is the minimal
 # one declared in tools/xnu_config/minimal/STAGE90_BOOT.local, and its manifest is built by passing
 # the same XNU_MASTER_LOCAL to list_sources.py. Default is the full one, because the full one is
 # what "does XNU compile" means; the minimal one is what "can this boot" means.
 CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
-DEVICE_TABLE=${XNU_DEVICE_TABLE:-$REPO_ROOT/out/device_table.txt}
+DEVICE_TABLE=$XNU_DEVICE_TABLE
 
 LIMIT=0
 ONLY_DIR=""
@@ -667,11 +671,11 @@ DEFINES=(
 # Per configuration: see tools/gen_option_headers.py. RELEASE and STAGE90_BOOT disagree on 20 of
 # these macros, so one shared directory silently gives whichever build was generated last its own
 # values - which is what happened, and it surfaced as a duplicate-symbol error in the link.
-OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
+OPTION_HEADERS=$XNU_OPTION_HEADERS_OUT/$CONFIG
 LIBSA_EXPORT=${XNU_LIBSA_EXPORT:-$REPO_ROOT/out/xnu_libsa_export}
 # The third generator: `device`/`pseudo-device` headers from config(8) - `loop.h`, `pty.h`,
 # `ptmx.h`, `bpfilter.h`.
-DEVICE_HEADERS=${XNU_DEVICE_HEADERS_OUT:-$REPO_ROOT/out/xnu_device}/$CONFIG
+DEVICE_HEADERS=$XNU_DEVICE_HEADERS_OUT/$CONFIG
 [[ -d $OPTION_HEADERS ]] || {
     echo "no option headers for $CONFIG at $OPTION_HEADERS - run:" >&2
     echo "  XNU_KERNEL_CONFIG=$CONFIG ./tools/gen_option_headers.py" >&2
@@ -1423,7 +1427,7 @@ done
 if grep -rIlq '__firehose_buffer_create' "$XNU/bsd" "$XNU/osfmk" "$XNU/libkern" 2>/dev/null; then
 FIREHOSE_SOURCES=("$REPO_ROOT/src/firehose/firehose_buffer.c" \
                   "$REPO_ROOT/src/firehose/firehose_kernel_config.c")
-FH_OUT=${XNU_FIREHOSE_OBJ_OUT:-$REPO_ROOT/out/xnu_firehose_obj}
+FH_OUT=$XNU_FIREHOSE_OBJ_OUT
 FIREHOSE_INCLUDES=(-I"$REPO_ROOT/src/firehose/portinc" -I"$REPO_ROOT/src/firehose" -I"$XNU/libkern/firehose")
 mkdir -p "$FH_OUT"
 fh_fail=0
@@ -1520,7 +1524,7 @@ PL_MESSAGE=$("$TOOLS_DIR/check_platform_lists.py" --file "${PLATFORM_SOURCES[@]}
 [[ ${VERBOSE:-0} -eq 0 ]] || printf '%s\n' "$PL_MESSAGE"
 
 PLATFORM_C_SOURCES=("$REPO_ROOT/src/platform/stage90_platform_config_tables.c")
-PL_OUT=${XNU_PLATFORM_OBJ_OUT:-$REPO_ROOT/out/xnu_platform_obj}
+PL_OUT=$XNU_PLATFORM_OBJ_OUT
 PL_ROOTS=(-I"$XNU/iokit")
 for _c in "${COMPONENT_IMPORT_ORDER[@]}"; do
     [[ $_c == iokit ]] && continue

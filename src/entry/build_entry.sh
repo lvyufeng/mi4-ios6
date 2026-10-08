@@ -54,20 +54,11 @@ mkdir -p "$OUT"
 # `check_d13_board_staged.sh` already uses - Darwin 13 ships the legacy private header
 # `osfmk/sys/types.h`, Darwin 17 does not - so setting `XNU_TREE` alone is enough; an explicit
 # `XNU_OBJ_SUFFIX` still wins for a controlled comparison.
-XNU_TREE=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
-if [[ -z ${XNU_OBJ_SUFFIX:-} ]]; then
-    if [[ -f $XNU_TREE/osfmk/sys/types.h ]]; then XNU_OBJ_SUFFIX=_d13; else XNU_OBJ_SUFFIX=; fi
-fi
-# The object pools, out-parameterized exactly as `tools/build_xnu_arm_kernel.sh` names them, so that
-# pointing the kernel build at a pool and pointing the entry link at the same pool is one variable.
-# The base is spelled `$REPO_ROOT/out` and the pool name separately, on purpose: the per-file paths
-# below are re-rooted by a textual substitution of the contiguous prefix, and this block must not be
-# one of its own victims.
-_OUT_BASE=$REPO_ROOT/out
-XNU_KERNEL_OBJ_OUT=${XNU_KERNEL_OBJ_OUT:-$_OUT_BASE/xnu_kernel_obj$XNU_OBJ_SUFFIX}
-XNU_ASM_OBJ_OUT=${XNU_ASM_OBJ_OUT:-$_OUT_BASE/xnu_asm_obj$XNU_OBJ_SUFFIX}
-XNU_PLATFORM_OBJ_OUT=${XNU_PLATFORM_OBJ_OUT:-$_OUT_BASE/xnu_platform_obj$XNU_OBJ_SUFFIX}
-MACH_HEADERS_OUT=${MACH_HEADERS_OUT:-$_OUT_BASE/mach_headers$XNU_OBJ_SUFFIX}
+# **And the rule is the same one the build tools use (933).** This block used to spell the derivation
+# itself; it now shares `tools/xnu_tree_roots.sh` with the six builders that write these roots, so
+# "which tree" is one definition across the whole build - an entry link and a kernel build cannot
+# disagree about which pool is which tree's.
+. "$REPO_ROOT/tools/xnu_tree_roots.sh"
 
 VERBOSE=0
 [[ ${1:-} == --verbose ]] && VERBOSE=1
@@ -29971,7 +29962,7 @@ verify_trace_symbols() {
         layout_fail "platform_cache_idle_enter does not contain 'mrc p15, 0, r?, cr13, cr0, {4}' followed by 'ldr r?, [r?, #1484]': that pair is getCpuDatap(), the value 514's run dereferenced as 0 with a store to 0x130, and it is the reason a reading taken in that branch is a reading of a disabled-cache load"
     [[ "${pclw:-0}" -ge 1 ]] ||
         layout_fail "platform_cache_idle_enter does not store to [r?, #304]: that is caches.c:421's cpu_CLW_active = 0, the instruction 514's two runs faulted on (far = 0x130), so a build where it is gone is a build where the wall has moved and this step's falsifier is about something else"
-    act=$(awk '$1 == "#define" && $2 == "ACT_CPUDATAP" { print $3; exit }' "$REPO_ROOT/out/xnu_assym/$XNU_KERNEL_CONFIG/assym.s" | tr -d '#')
+    act=$(awk '$1 == "#define" && $2 == "ACT_CPUDATAP" { print $3; exit }' "$XNU_ASSYM_OUT/$XNU_KERNEL_CONFIG/assym.s" | tr -d '#')
     [[ "$act" == 1484 ]] ||
         layout_fail "this configuration's assym.s says ACT_CPUDATAP is [$act] and not 1484: the instrument's own getCpuDatap() reads the same field by the same offset, so the two must be one number - and genassym.c:147 is where it comes from (offsetof(struct thread, machine.CpuDatap))"
     ewrap=$(sym_addr __wrap_platform_cache_idle_enter) ||
@@ -30485,7 +30476,7 @@ verify_trace_symbols() {
     # field; the comparison below is the whole point of the block, and a literal 176 in this file would
     # be a third definition with nothing comparing it.
     a_of() { awk -v m="$1" '$1 == "#define" && $2 == m { print $3; exit }' \
-        "$REPO_ROOT/out/xnu_assym/$XNU_KERNEL_CONFIG/assym.s" | tr -d '#'; }
+        "$XNU_ASSYM_OUT/$XNU_KERNEL_CONFIG/assym.s" | tr -d '#'; }
     s_of() { awk -v m="$1" '$1 == "#define" && $2 == m { v = $3; sub(/u$/, "", v); print v; exit }' \
         "$BOOT_DIR/entry_stubs.c"; }
     # The offsets `entry_saved_state.h` names are read from that file and not from `entry_stubs.c`,

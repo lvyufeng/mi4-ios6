@@ -33,8 +33,12 @@ cd "$(dirname "$0")"
 TOOLS_DIR=$PWD
 REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
 
-XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
-OUT=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
+# The generated root follows the selected tree (experiment 933): the rule lives once in
+# tools/xnu_tree_roots.sh, so `XNU_TREE=<d13>` writes the `_d13` root. See that file.
+. "$TOOLS_DIR/xnu_tree_roots.sh"
+
+XNU=$XNU_TREE
+OUT=$XNU_GENERATED
 
 MASTER=$XNU/bsd/kern/syscalls.master
 MAKESYSCALLS=$XNU/bsd/kern/makesyscalls.sh

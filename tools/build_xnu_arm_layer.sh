@@ -28,20 +28,24 @@ cd "$(dirname "$0")"
 TOOLS_DIR=$PWD
 REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
 
-XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
+# Every out-root follows the selected tree (experiment 933): the rule lives once in
+# tools/xnu_tree_roots.sh, so `XNU_TREE=<d13>` reads and writes the `_d13` roots and a plain run is
+# byte-identical on 4570. See that file.
+. "$TOOLS_DIR/xnu_tree_roots.sh"
+
+XNU=$XNU_TREE
 SHIMS=$REPO_ROOT/src/shims
 SHIMS_ARM=$REPO_ROOT/src/shims_arm
-MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
 # The other two generated roots: MIG's output, and the headers the build generates from the
 # configuration - the `OPTIONS/` macros (tools/gen_option_headers.py) plus `libkern/version.h`
 # (tools/gen_libkern_version.sh). osfmk/arm reaches <mach_ldebug.h> through kern/thread.h:104, so
 # without the second root this build reports 0 of 32.
-GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
+GENERATED=$XNU_GENERATED
 # Per configuration, like build_xnu_arm_kernel.sh: RELEASE and STAGE90_BOOT disagree on 20 of these
 # macros. This script compiles one directory (osfmk/arm), whose files take no `#if NETWORKING`-style
 # branch that differs between them, but the config is named for the same reason the other one is.
-OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/${XNU_KERNEL_CONFIG:-RELEASE}
-OUT=${XNU_ARM_OBJ_OUT:-$REPO_ROOT/out/xnu_arm_obj}
+OPTION_HEADERS=$XNU_OPTION_HEADERS_OUT/${XNU_KERNEL_CONFIG:-RELEASE}
+OUT=$XNU_ARM_OBJ_OUT
 
 SYNTAX_ONLY=0
 SHOW_UNDEFINED=0

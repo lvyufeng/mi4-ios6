@@ -39,16 +39,20 @@ cd "$(dirname "$0")"
 TOOLS_DIR=$PWD
 REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
 
-XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
+# Every out-root follows the selected tree (experiment 933): the rule lives once in
+# tools/xnu_tree_roots.sh, so `XNU_TREE=<d13>` reads and writes the `_d13` roots and a plain run is
+# byte-identical on 4570. See that file.
+. "$TOOLS_DIR/xnu_tree_roots.sh"
+
+XNU=$XNU_TREE
 CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
-OUT=${XNU_ASSYM_OUT:-$REPO_ROOT/out/xnu_assym}/$CONFIG
+OUT=$XNU_ASSYM_OUT/$CONFIG
 
 SHIMS=$REPO_ROOT/src/shims
 SHIMS_ARM=$REPO_ROOT/src/shims_arm
-GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
-OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
-DEVICE_HEADERS=${XNU_DEVICE_HEADERS_OUT:-$REPO_ROOT/out/xnu_device}/$CONFIG
-MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
+GENERATED=$XNU_GENERATED
+OPTION_HEADERS=$XNU_OPTION_HEADERS_OUT/$CONFIG
+DEVICE_HEADERS=$XNU_DEVICE_HEADERS_OUT/$CONFIG
 
 [[ -f $XNU/osfmk/arm/genassym.c ]] || { echo "no genassym.c in $XNU" >&2; exit 2; }
 

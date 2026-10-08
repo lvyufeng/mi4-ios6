@@ -37,7 +37,12 @@ cd "$(dirname "$0")"
 TOOLS_DIR=$PWD
 REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
 
-XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
+# Every out-root follows the selected tree (experiment 933): the rule lives once in
+# tools/xnu_tree_roots.sh, so `XNU_TREE=<d13>` reads and writes the `_d13` roots and a plain run is
+# byte-identical on 4570. See that file.
+. "$TOOLS_DIR/xnu_tree_roots.sh"
+
+XNU=$XNU_TREE
 SHIMS=$REPO_ROOT/src/shims
 SHIMS_ARM=$REPO_ROOT/src/shims_arm
 CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
@@ -61,7 +66,7 @@ fi
 while IFS= read -r d; do
     [[ -n $d ]] && CONFIG_DEFINES+=("$d")
 done <<<"$defines"
-OUT=${XNU_ASM_OBJ:-$REPO_ROOT/out/xnu_asm_obj}
+OUT=$XNU_ASM_OBJ_OUT
 # **519: where the idle thread runs.** `cswitch.s`'s `Idle_context` takes the idle thread's stack from
 # `cpu_data->istackptr` - the same field the exception vectors read to place a handler's stack - so the
 # idle thread and every handler share one stack, and the handler's 5th and 6th pushed words land on the
@@ -99,10 +104,9 @@ case "$IDLE_STACK_SIZE" in
 esac
 PATCH_IDLE_STACK=$TOOLS_DIR/patch_idle_stack.py
 idle_patched=0
-ASSYM=${XNU_ASSYM_OUT:-$REPO_ROOT/out/xnu_assym}/$CONFIG
-OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
-DEVICE_HEADERS=${XNU_DEVICE_HEADERS_OUT:-$REPO_ROOT/out/xnu_device}/$CONFIG
-MANIFEST=${MANIFEST:-$REPO_ROOT/out/xnu_arm_manifest.txt}
+ASSYM=$XNU_ASSYM_OUT/$CONFIG
+OPTION_HEADERS=$XNU_OPTION_HEADERS_OUT/$CONFIG
+DEVICE_HEADERS=$XNU_DEVICE_HEADERS_OUT/$CONFIG
 UNDEF=${ASM_UNDEF:-$REPO_ROOT/out/link/$CONFIG-measure-undef.txt}
 
 NM=${NM:-arm-none-eabi-nm}
@@ -172,7 +176,7 @@ ASFLAGS+=("-DSTAGE90_IDLE_STACK_SIZE=$IDLE_STACK_SIZE")
 INCLUDES=(
     -I"$ASSYM" -I"$REPO_ROOT/src/entry"
     -I"$OPTION_HEADERS" -I"$DEVICE_HEADERS"
-    -I"$REPO_ROOT/out/xnu_generated" -I"$REPO_ROOT/out/mach_headers"
+    -I"$GENERATED" -I"$MIG_HEADERS"
     -I"$XNU/osfmk" -I"$XNU/bsd" -I"$XNU/libkern" -I"$XNU/EXTERNAL_HEADERS"
     -I"$XNU/pexpert" -I"$XNU/osfmk/arm" -I"$XNU/bsd/arm" -I"$XNU"
     -I"$SHIMS" -I"$SHIMS/kern" -I"$SHIMS/mach"

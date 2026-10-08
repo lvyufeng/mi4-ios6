@@ -31,12 +31,17 @@ cd "$(dirname "$0")"
 TOOLS_DIR=$PWD
 REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
 
-XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
+# Every out-root follows the selected tree (experiment 933): the rule lives once in
+# tools/xnu_tree_roots.sh, so `XNU_TREE=<d13>` writes the `_d13` MIG root and a plain run is
+# byte-identical on 4570. See that file.
+. "$TOOLS_DIR/xnu_tree_roots.sh"
+
+XNU=$XNU_TREE
 MIG=${MIG:-$REPO_ROOT/out/mig/build/mig}
-OUT=${MIG_HEADERS_OUT:-$REPO_ROOT/out/mach_headers}
+OUT=$MACH_HEADERS_OUT
 # The build-dir variant (MIGKSFLAGS) goes beside it, not inside it: `rm -rf $OUT` clears only OUT,
 # and the two are different files under the same name.
-KSERVER=${MIG_KSERVER_OUT:-$REPO_ROOT/out/mach_headers/kserver}
+KSERVER=$MIG_KSERVER_OUT
 
 [[ -x $MIG ]] || { echo "no MIG at $MIG - run tools/build_mig.sh first" >&2; exit 2; }
 [[ -d $XNU/osfmk/mach ]] || { echo "no .defs at $XNU/osfmk/mach" >&2; exit 2; }
