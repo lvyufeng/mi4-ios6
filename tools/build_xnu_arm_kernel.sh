@@ -1324,9 +1324,16 @@ mkdir -p "$RT_OUT"
 RT_INCLUDES=()
 for _inc in "${INCLUDES[@]}"; do
     if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
-        RT_INCLUDES+=(-I"$XNU/osfmk")
+        # **The whole component chain in `COMPONENT_IMPORT_ORDER`'s order** - not a hardcoded `osfmk`
+        # head followed by the rest. That was the D13 firehose `time_t` wall (920b): the firehose is
+        # not a tree file, so `component_of` gives it `osfmk`, and a hardcoded `osfmk` head put
+        # Darwin-13's private `osfmk/sys/types.h` (`typedef int time_t`) before bsd's, so
+        # `bsd/sys/time.h:97`'s `typedef __darwin_time_t time_t` redefined it ('long' vs 'int').
+        # `COMPONENT_IMPORT_ORDER` is `(osfmk bsd ...)` on a tree without that legacy header and
+        # `(bsd osfmk ...)` on one with it (line 143-155), so reading it here gives osfmk the head on
+        # 4570 (the identity) and bsd the head on D13. The EABI runtime, the other `RT_INCLUDES`
+        # consumer, includes nothing from the tree, so the order cannot move it either way.
         for _c in "${COMPONENT_IMPORT_ORDER[@]}"; do
-            [[ $_c == osfmk ]] && continue
             RT_INCLUDES+=(-I"$XNU/$_c")
         done
     elif [[ $_inc == OPTION_FIRST_PLACEHOLDER ]]; then
@@ -1357,6 +1364,18 @@ done
 # project's most repeated defect, and this file reads the same kernel headers the loop's files do.
 # `portinc/` is not a shim - it is the newer tree's `libkern/os/` atomics surface, which this 10.13-era
 # tree does not ship, placed where `<os/...>` resolves (experiment 256).
+#
+# **It is a property of the TREE, and Darwin-13 has no firehose at all (920b).** The port exists for
+# 4570 because 4570's `bsd/kern/subr_log.c` calls `__firehose_buffer_create`; **no file in Darwin-13's
+# `bsd`, `osfmk` or `libkern` names it** (measured), so compiling the port there is building a
+# `__firehose_buffer_create` nothing links. Worse, the source is from a newer tree than either (the
+# 2015+ `os_log` era) and needs `atm_get_diagnostic_config()` and `<atm/atm_internal.h>`, which Darwin-13
+# predates entirely - so it *cannot* compile against that tree, which is the wall that stopped the build.
+# The gate below is `grep -rIl` for the symbol's name in the tree's own kernel sources, so it is
+# **tree-derived, not tree-named** (`[[mi4-board-constants-from-device-dt]]`: pick by what exists).
+# On 4570 the grep matches `bsd/kern/subr_log.c` and the firehose compiles exactly as before; on
+# Darwin-13 it matches nothing and the block is a no-op.
+if grep -rIlq '__firehose_buffer_create' "$XNU/bsd" "$XNU/osfmk" "$XNU/libkern" 2>/dev/null; then
 FIREHOSE_SOURCES=("$REPO_ROOT/src/firehose/firehose_buffer.c" \
                   "$REPO_ROOT/src/firehose/firehose_kernel_config.c")
 FH_OUT=${XNU_FIREHOSE_OBJ_OUT:-$REPO_ROOT/out/xnu_firehose_obj}
@@ -1378,6 +1397,7 @@ for _src in "${FIREHOSE_SOURCES[@]}"; do
     fi
 done
 [[ $fh_fail -eq 0 ]] || exit 5
+fi
 
 # The platform expert, which is not in the manifest because no configuration of Apple's has it. The
 # open-source tree contains no concrete platform expert at all (experiment 362 measured the
