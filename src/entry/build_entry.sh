@@ -1855,7 +1855,23 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # closure of `arm_init` is the whole kernel (see tools/entry_closure.py, experiment-158), so a
     # rule like that would not stop anywhere.
     require() {
-        [[ -f $1 ]] || { say "no $1 - $2" >&2; exit 2; }
+        # **Which tree this list belongs to (931).** The object list below is 4570's `arm_init`
+        # closure, hand-picked: on D13 it names 4570 objects D13 never builds or never reaches
+        # (`data.s`, the PRNG/Yarrow tree, `kpc`/`telemetry`/`coalition`/`waitq`, the split
+        # corecrypto, ...). The `436` pool glob adds the WHOLE selected pool (930), so D13's
+        # counterparts are already pulled in by the glob; an absent *named* object is therefore one
+        # the selected tree does not build, and requiring it is requiring 4570. So the require is
+        # fatal on 4570 and tolerant on D13, where the absence is the tree's own layout.
+        if [[ -f $1 ]]; then return 0; fi
+        # Tolerant only for the XNU tree-object pools, and only on the tree whose set differs. The
+        # `STAGE90_*` platform-block objects (in `$XNU_PLATFORM_OBJ_OUT`) and `$LIBGCC` stay fatal:
+        # their absence is a step-not-run error a plain build must keep reporting.
+        if [[ -f $XNU_TREE/osfmk/sys/types.h ]]; then
+            case "$1" in
+                "$XNU_KERNEL_OBJ_OUT"/*|"$XNU_ASM_OBJ_OUT"/*) return 0 ;;
+            esac
+        fi
+        say "no $1 - $2" >&2; exit 2
     }
     # The MIG server objects live in the tree-object directory under a **flattened** name, because
     # build_xnu_arm_kernel.sh keys an object by its source path with `$XNU/` removed and every `/`
@@ -28310,6 +28326,23 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     say "  refused by name:$_436_refused${_436_scratch:+; in the assembly directory but not written by the assembler (no .log beside it):$_436_scratch}"
     LINK_OBJS+=(${POOL_OBJS[@]+"${POOL_OBJS[@]}"})
     unset -v _436_have
+    # **931: drop the older tree's named objects on a newer tree's link.** The names above are 4570's
+    # `arm_init` closure; on D13 the same path can be a DIFFERENT object that the 930 pool glob has
+    # already added (D13's `osfmk_arm_cpu.o` vs the separately-named one), or a path D13 does not
+    # build at all. An object that is already present, or absent, must not be added by its 4570 name:
+    # present -> it would be a duplicate definition; absent -> a dead path. 4570 keeps every object.
+    if [[ -f $XNU_TREE/osfmk/sys/types.h ]]; then
+        declare -A _931_seen=()
+        _931_kept=(); _931_absent=0; _931_dup=0
+        for _o in "${LINK_OBJS[@]}"; do
+            if [[ ! -f $_o ]]; then _931_absent=$((_931_absent + 1)); continue; fi
+            if [[ -n ${_931_seen["$_o"]:-} ]]; then _931_dup=$((_931_dup + 1)); continue; fi
+            _931_seen["$_o"]=1; _931_kept+=("$_o")
+        done
+        say "  931: ${#LINK_OBJS[@]} named -> ${#_931_kept[@]} kept (${_931_absent} absent 4570 name(s), ${_931_dup} duplicate)"
+        LINK_OBJS=("${_931_kept[@]}")
+        unset -v _931_seen _931_kept _931_absent _931_dup
+    fi
 
     require "$LIBGCC" "install the arm-none-eabi toolchain (arm-none-eabi-gcc -print-libgcc-file-name)"
 
