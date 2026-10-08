@@ -880,3 +880,41 @@ sharpens the field. R14's window-or-`wfi` remains the standing hypothesis, and `
 (§15) remains the one variable no press has varied. This is the third code-side dead end for the wedge
 (audit this session; the R7 pet fault; the R9 install refusal) — the fault is in the idle machinery the
 instrumentation wraps, and naming it needs the presses, not more reading.
+
+## 17. The runner could not READ the newest clause's evidence — a reader for the SMEM bank sum (2026-10-08)
+
+**The gap was not the evidence; it was the reader.** The newest goal clause — 「能够正确识别xiaomi 4的
+3GB内存」 — is measured by `entry_smem_probe` (`src/entry/entry_smem.c`), which walks SMEM's
+RAM-partition table and publishes one cell per qualifying bank (`xnu_live_smem_bankN_start`/`_size`)
+plus `_banks`, `_total_bytes`, `_part_seen`, `_ptable_found`. **A grep for `xnu_live_smem_` in
+`run_and_capture.sh` returned nothing.** Every owed press in this family (`armed-storage-*`) exists to
+deliver exactly this reading, and the runner that supervises the press would have printed the records
+raw but never a *verdict* — the operator would be grepping a 600 KB log by hand for the one number the
+clause is about.
+
+**The block.** A new top-level section in `summarise_log`, a sibling of "the goal's own criterion"
+(`:2759`). Like it, it sits **outside the arm branch**: `entry_smem_probe` runs on idle pass 1, before
+either arm's death point, so its keys are a reading of the *machine* on both arms and by every
+archived baseline. It sums the per-bank cells, prints each bank's start/size, and against `0xc0000000`
+prints **3 GB MET** or **NOT MET** (naming the shortfall, not rounding up). It also compares the sum to
+the probe's own `xnu_live_smem_total_bytes`: a disagreement is printed as a **FINDING** — a defect in
+the probe or the table, not a memory size — so the two can never be read one without the other. The
+whole block is guarded on `ptable_found` being present, so a log whose image predates the probe (or
+carries `SMEM_PROBE=0`) prints one absence line rather than a bank list of zeros; `ptable_found=0` (SMEM
+mapped, no table) is a third, distinct state.
+
+**The check, not a comment.** Three rehearsal fixtures, one per reading, each differing from the others
+in one thing (the bank sizes) so the verdict is attributable to the sizes and not to some other
+difference: `smem-banks` (sum `0xc0000000`, total agrees → MET), `smem-2g` (sum `0x80000000` → NOT MET,
+still no FINDING — this is the *size* reading), `smem-mismatch` (sum `0xc0000000`, total `0x40000000` →
+MET *and* the FINDING). The absent branch is proven by the existing `predicted` row, which carries no
+SMEM keys. Full battery green: **20/0, 18/0 (three new rows), 4/0**, with every existing row
+byte-unchanged (`predicted` still `(+7 more)`).
+
+**What this does and does not do.** It does **not** deliver the 3 GB reading — that needs the press.
+It makes the press's log readable the moment it lands, and it closes a gap that was invisible precisely
+because the evidence was assumed present. Commit `954c305`.
+
+**The owed order is unchanged.** (1) `VolDown+Power → fastboot → fastboot boot <twrp> → cat
+/proc/last_kmsg` recovers `armed-storage-21086959`'s log (free; a new press destroys it) — now read it
+through this block for its `xnu_live_smem_*`. (2) Only then press `armed-storage-cb4e17f1`.
