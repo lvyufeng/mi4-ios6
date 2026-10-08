@@ -83,3 +83,33 @@ The next rung's first artifact is a `symbol -> defining D13 object` index over a
 (`arm-none-eabi-nm --defined-only … | sort -u`), and its first move is to seed the `entry_closure.py`
 walk from **D13's own** `arm_init.o` undefined set rather than 4570's seed list — because the question
 is not "where did this object go" but "what does D13's `arm_init` actually need".
+
+## Appendix 2 — the D13 closure walk (measured)
+
+From **D13's own** `arm_init.o`, over the `_d13` pools:
+
+    python3 tools/entry_closure.py \
+      --seed out/xnu_kernel_obj_d13/osfmk_arm_arm_init.o \
+      --preset out/stage90/xnu_arm_start.o \
+      --pool out/xnu_kernel_obj_d13 --pool out/xnu_asm_obj_d13 --pool out/xnu_platform_obj_d13 \
+      --max 400 --out /tmp/d13_closure.txt
+
+**400 objects** added (it hit `--max 400`, so the true closure is larger), and still undefined:
+
+- **184 in-pool "code"**, **62 in-pool "storage"** — defined in the pool but blocked by the
+  duplicate-definition rule (two objects defining one symbol).
+- **6 compiler-runtime** `__aeabi*` — `src/xnu_aeabi_runtime.c`, already in the project.
+- **63 "not defined anywhere in the pool"** — the supply list. None is the banner glue: `panic`,
+  `_sleh_abort`, `PE_early_puts`, `vcputc`, `arm_init_cpu`, `initialize_screen` are all **in** the
+  D13 pool now, exactly as they are in 4570's. The 63 break down as:
+  - `_arm_{d,i}cache_*` (8) — `U` in `cache.o` itself; defined in a D13 caches source **not yet built
+    into the pool**.
+  - `_lck_mtx_lock_{acquire,wait}` / `_lck_mtx_unlock_wakeup` — `U` in `hw_lock.o`; the HD2 machine
+    glue.
+  - `_OSAddAtomic` / `OSAtomic*` — the project's own atomic shim.
+  - `__cxa_atexit`, `__dso_handle` — C++ atexit, the `-fapple-kext` question.
+  - `mach_gss_*`, `lockd_*`, `upl_*` — LKM/devfs stubs.
+
+So the supply set is **(a) more pool coverage** (D13 sources whose symbols the closure needs but
+which the manifest did not select) **plus (b) a small stub set** — the same shape as 4570's, which is
+why the entry stubs will largely port. Measuring which of the 63 (a) and which (b) is the next step.
