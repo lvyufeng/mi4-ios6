@@ -113,6 +113,21 @@ Nothing was written into the external tree.
   license forbids compiling anyway — we model their *shape*.
 - **4570 regression: 32 of 32 unchanged**, `make check` exit 0, `make_defines.sh RELEASE` still 108.
 
-So the pivot's risk is **not the kernel core** — Darwin-13's ARM layer is green under our toolchain.
+**The PE (pexpert), reached through the same probe.** `XNU_ARM_EXTRA_DIRS` compiles dirs outside
+`osfmk/arm` with the *component's own* defines; the fix it forced is that a single global define set
+cannot compile two components — `MACH_KERNEL_PRIVATE` makes `osfmk/kern/misc_protos.h:124` declare
+`int printf(...)` while `pexpert/protos.h:46` declares `void printf(...)`, so a pexpert TU seeing both
+fails on a conflicting type (reproduced identically on 4570, i.e. the probe's modelling defect, not a
+Darwin-13 break). With `GLOBAL_DEFINES` + the component line:
+
+| tree | `pexpert/arm` (+`common`) | `pexpert/gen` | `osfmk/arm` |
+|---|---|---|---|
+| **Darwin-13** | **8 of 8** | **3 of 3** | 19 of 20 |
+| 4570 (control) | 5 of 6 | 3 of 3 | 32 of 32 |
+
+The 4570 `pe_init` miss is a `vc_progress` (progress-bar image) type the probe does not carry — and
+Darwin-13's `pe_init` compiles clean, so it does not affect this path. **The PE is green on Darwin-13.**
+
+So the pivot's risk is **not the kernel core** — Darwin-13's ARM layer and PE are both green under our toolchain.
 The remaining work is the parts that were never in the tree: an **msm8974 PE** (§4.3), the **two-bank
 map** (§4.4), and **AMFI** (§4.5). The reframed plan is `docs/experiments/experiment-914-*`.
