@@ -464,7 +464,13 @@ else
 fi
 
 DEFINES=(
-    "${CONFIG_DEFINES[@]}"
+    # `CONFIG_DEFINES` is NOT here. It is per-component: on a tree with a per-component MASTER layout
+    # (Darwin-13) each component's `conf/MASTER` declares its own `RELEASE` with its own size
+    # attributes, and a single global set takes whichever the union happened to satisfy. The main
+    # loops take `$CONFIG_COMP_DEFINES[@]` per file instead; the few non-manifest blocks
+    # (EABI runtime, firehose, the platform expert) prepend `$CONFIG_DEFINES[@]` themselves, because
+    # their sources are this project's own and belong to no component. On 4570 `component_conf_dir`
+    # returns empty, so both slices are the one `config/MASTER` expansion and nothing changes.
     # MACH_KERNEL_PRIVATE is NOT here. It is per-component, and putting it here was this build's
     # single largest defect: see xnu_config/component_defines.sh for the table and the reason. In
     # short, MACH_KERNEL_PRIVATE is what reaches kern/misc_protos.h, whose ffs/fls/copyinstr
@@ -993,6 +999,21 @@ component_of() {
     printf '%s' "${rel:-osfmk}"
 }
 
+# The MASTER dir for one component's configuration, or empty when the tree has none - the input
+# `select_master.sh` takes as `XNU_MASTER_DIR`. The modern tree (4570) keeps ONE `config/MASTER`
+# shared by every component, so this is empty there and every file sees the same defines. The
+# 2013-era tree keeps `<component>/conf/MASTER`, each declaring its own `RELEASE` with its own size
+# attributes (`bsmall` in bsd/osfmk, `medium` in libkern), and each component is configured by
+# `conf/Makefile`'s per-component `doconf` run - so a file must see ITS OWN component's defines. A
+# single global expansion takes whichever attributes the union satisfied, which for the size axes is
+# both, and `CONFIG_MAX_CLUSTERS` becomes `=4` and `=8` at once. Empty result = "use the default".
+component_conf_dir() {
+    local c=$1
+    if [[ -n $c && -f $XNU/$c/conf/MASTER ]]; then
+        printf '%s' "$XNU/$c/conf"
+    fi
+}
+
 ok=0
 fail=0
 absent=0
@@ -1242,6 +1263,25 @@ while read -r src; do
 
     # shellcheck disable=SC2207
     COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" "$(component_of "$src")") )
+    # The configuration's options for THIS file's component. `select_master.sh` falls back to the
+    # shared `config/MASTER` when the component has no `conf/MASTER` (4570), so the two branches
+    # below are the same expansion there and this is inert on the base tree.
+    #
+    # **This slice goes BEFORE `$DEFINES`, not after, and that is not cosmetic.** `DEFINES` ends
+    # with two *cancellation* flags - `-UCONFIG_NO_PRINTF_STRINGS` and `-USECURE_KERNEL` (472) - and
+    # clang resolves a macro by the last flag naming it. When this slice sat after `DEFINES`, the
+    # `-DSECURE_KERNEL=1` the configuration declares came last and **overrode its own cancellation**:
+    # 182 of 4570's 703 objects differed from the base, the linked-`cs_enforcement_enable` check
+    # flipped to the secure branch, and the whole-image byte control failed. Keeping the
+    # configuration slice first mirrors the original single-array layout, where it was `DEFINES[0]`.
+    CONFIG_COMP_DEFINES=("${CONFIG_DEFINES[@]}")
+    _ccd=$(component_conf_dir "$(component_of "$src")")
+    if [[ -n $_ccd ]]; then
+        CONFIG_COMP_DEFINES=()
+        while IFS= read -r _d; do
+            [[ -n $_d ]] && CONFIG_COMP_DEFINES+=("$_d")
+        done < <(XNU_MASTER_DIR=$_ccd "$TOOLS_DIR/xnu_config/make_defines.sh" "$CONFIG" 2>/dev/null)
+    fi
     # C++ goes through the same pipeline with the same flags, plus its own compiler and the two
     # rules flags. `CPP_FORCE` starts empty: the first measurement of the C++ block in this script
     # is the one with *no* C++-specific accommodation at all, so that whatever is added later has a
@@ -1257,7 +1297,7 @@ while read -r src; do
     # did, for 45 minutes, because this had no timeout and its output was buffered behind a pipe.
     # A timeout is reported as its own outcome rather than as a compile failure, because "clang
     # hung" and "XNU does not compile" are different findings.
-    if timeout "$PER_FILE_TIMEOUT" "${CXX_EXTRA[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_DEFINES[@]}" "${BSD_FORCE[@]}" "${ROUTE_FORCE[@]}" "${KEXT_FORCE[@]}" "${ONE_FILE[@]}" "${CPP_FORCE[@]}" "${EXTRA_DEFINES[@]}" "${FILE_INCLUDES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CXX_EXTRA[@]}" "${FORCE_INCLUDES[@]}" "${CONFIG_COMP_DEFINES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_DEFINES[@]}" "${BSD_FORCE[@]}" "${ROUTE_FORCE[@]}" "${KEXT_FORCE[@]}" "${ONE_FILE[@]}" "${CPP_FORCE[@]}" "${EXTRA_DEFINES[@]}" "${FILE_INCLUDES[@]}" \
          -c "$src" -o "$OUT/$key.o" 2>"$OUT/$key.log"; then
         ok=$((ok + 1))
         [[ $is_cpp == 1 ]] && cpp_ok=$((cpp_ok + 1))
@@ -1297,7 +1337,7 @@ done
 rt_fail=0
 for _src in "${RUNTIME_SOURCES[@]}"; do
     _o="$RT_OUT/$(basename "${_src%.c}").o"
-    if "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${RT_INCLUDES[@]}" \
+    if "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${CONFIG_DEFINES[@]}" "${DEFINES[@]}" "${RT_INCLUDES[@]}" \
            -c "$_src" -o "$_o" 2>"$RT_OUT/$(basename "${_src%.c}").log"; then
         rm -f "$RT_OUT/$(basename "${_src%.c}").log"
     else
@@ -1327,7 +1367,7 @@ for _src in "${FIREHOSE_SOURCES[@]}"; do
     # The port's include roots go FIRST, ahead of the tree's: `portinc/` carries a newer tree's
     # `os/base.h` (which has `OS_OPTIONS`) and newer `firehose_types_private.h`, and the 4570 tree's
     # `libkern/os/base.h` would shadow them from further down the list.
-    if "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${FIREHOSE_INCLUDES[@]}" \
+    if "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${CONFIG_DEFINES[@]}" "${DEFINES[@]}" "${FIREHOSE_INCLUDES[@]}" \
            "${RT_INCLUDES[@]}" \
            -c "$_src" -o "$_o" 2>"$FH_OUT/$(basename "${_src%.c}").log"; then
         rm -f "$FH_OUT/$(basename "${_src%.c}").log"
@@ -1534,7 +1574,7 @@ pl_fail=0
 for _src in "${PLATFORM_SOURCES[@]}"; do
     _o="$PL_OUT/$(basename "${_src%.cpp}").o"
     if timeout "$PER_FILE_TIMEOUT" "${CXX_ARGS[@]}" "${EXTRA_CXX_FLAGS[@]}" "${FORCE_INCLUDES[@]}" \
-           "${DEFINES[@]}" "${PL_COMP_DEFINES[@]}" "${EXTRA_DEFINES[@]}" "${PL_INCLUDES[@]}" \
+           "${CONFIG_DEFINES[@]}" "${DEFINES[@]}" "${PL_COMP_DEFINES[@]}" "${EXTRA_DEFINES[@]}" "${PL_INCLUDES[@]}" \
            -c "$_src" -o "$_o" 2>"$PL_OUT/$(basename "${_src%.cpp}").log"; then
         rm -f "$PL_OUT/$(basename "${_src%.cpp}").log"
     else
@@ -1566,7 +1606,7 @@ for _src in "${PLATFORM_BSD_SOURCES[@]}"; do
     _bsd_defs=("${PL_BSD_COMP_DEFINES[@]}")
     [[ ${_src##*/} == stage90_root_media.c ]] &&
         _bsd_defs+=(-DSTAGE90_ROOT_MEDIA_SIZE_SYM=g_stage90_ramdisk_end)
-    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${CONFIG_DEFINES[@]}" "${DEFINES[@]}" \
            "${_bsd_defs[@]}" "${EXTRA_DEFINES[@]}" "${PL_BSD_INCLUDES[@]}" \
            -c "$_src" -o "$_o" 2>"$PL_OUT/$(basename "${_src%.c}").log"; then
         rm -f "$PL_OUT/$(basename "${_src%.c}").log"
