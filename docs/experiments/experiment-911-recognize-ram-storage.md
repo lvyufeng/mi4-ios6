@@ -918,3 +918,13 @@ because the evidence was assumed present. Commit `954c305`.
 **The owed order is unchanged.** (1) `VolDown+Power → fastboot → fastboot boot <twrp> → cat
 /proc/last_kmsg` recovers `armed-storage-21086959`'s log (free; a new press destroys it) — now read it
 through this block for its `xnu_live_smem_*`. (2) Only then press `armed-storage-cb4e17f1`.
+
+**Follow-up (`af56a8f`), found by reading the arm record against the block.** The arm's own narration
+(`verify_press_ready`) reads first "did the probe run and reach SMEM?" — `xnu_live_smem_mapped` plus
+`_read_base` (which VA installed: `0xe0000000` if the high alias took, `0x0fa00000` if only the
+identity). The block printed neither; it now prints both ahead of the bank list, so `_mapped=0` (a
+reading, not a failed run) is legible. Its `ptable_found=0` branch had named mapping keys but had **no
+rehearsal cell** — narration nothing had run — so a `smem-notable` fixture now exercises it. And the
+project's own `check_backtick_messages` caught a real defect in that narration: a backtick inside a
+double-quoted `say` string, which bash would have run as a command substitution. Battery green:
+**20/0, 19/0 (+the smem-notable row), 4/0**.
