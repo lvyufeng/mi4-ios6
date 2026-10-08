@@ -3779,6 +3779,42 @@ void __wrap_load_init_program(void *proc)
  * the junk the *real* function then read, exited, and took the boot with it. The declaration below is
  * the ABI's, and the build now checks the width from the caller's side.
  */
+#if STAGE90_ENTRY_D13
+/* **D13 declares and defines the entry as 32-bit, so it travels in R1 and not in an r2:r3 pair.**
+ * `osfmk/kern/thread.h:788` is `extern void thread_setentrypoint(thread_t, mach_vm_offset_t)` - the
+ * same header text 4570 carries - but D13's *definition* (`osfmk/arm/status.c:439`) and its one
+ * caller are both `uint32_t`: `exec_mach_imgact` (`bsd/kern/kern_exec.c:998`) compiles the call as
+ * `ldr r1, [sp, #76]` / `mov r0, r5` / `bl thread_setentrypoint` (no r2 or r3 is written). The
+ * declared `mach_vm_offset_t` is 64-bit but the value stored is a `user_addr_t` from
+ * `load_result_t.entry_point`, and on this 32-bit port that is one word - so the wrapper's parameter
+ * is `uint32_t` and it reads R1, which is what the call actually passes. Taking the 4570 pair here
+ * would read r2 (the caller's leftover) exactly as the 4570 first build read r1. The 510 clause
+ * checks this from the caller's side: the D13 call site must write r1 and leave r2/r3 alone, and
+ * there must be no re-pointed `activate_exec_state` (D13 has no such symbol - the call lives inside
+ * `exec_mach_imgact`, the same object that calls `load_machfile`). */
+void __real_thread_setentrypoint(void *thread, uint32_t entry);
+void __wrap_thread_setentrypoint(void *thread, uint32_t entry)
+{
+    const uint32_t pc_delta = (STAGE90_ACT_PCBDATA + STAGE90_SS_PC) / 4;
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    uint32_t before = 0xFFFFFFFFu, after = 0xFFFFFFFFu;
+    uint32_t seq;
+
+    if (thread != 0)
+        before = ((const volatile uint32_t *)thread)[pc_delta];
+
+    seq = entry_note_entrypoint(caller, (uint32_t)(uintptr_t)thread,
+                                (uint32_t)entry, 0u, before);
+    __real_thread_setentrypoint(thread, entry);
+
+    if (thread != 0)
+        after = ((const volatile uint32_t *)thread)[pc_delta];
+    entry_note_entrypoint_returned(seq, (uint32_t)entry, after);
+
+    printf("mini4: the OS starts the process at 0x%x (the thread's user pc was 0x%x)\n",
+           (uint32_t)entry, before);
+}
+#else /* 4570 */
 void __real_thread_setentrypoint(void *thread, uint64_t entry);
 void __wrap_thread_setentrypoint(void *thread, uint64_t entry)
 {
@@ -3801,6 +3837,7 @@ void __wrap_thread_setentrypoint(void *thread, uint64_t entry)
     printf("mini4: the OS starts the process at 0x%x (the thread's user pc was 0x%x)\n",
            (uint32_t)entry, before);
 }
+#endif /* STAGE90_ENTRY_D13 */
 
 /* ------------------------- the kernel's own way out to user mode (511) */
 /*
