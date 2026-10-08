@@ -36881,6 +36881,15 @@ verify_trace_symbols
 verify_root_device() {
     local sym type s w
     local stamp pool_config pool_shim pool_mockfs
+    # **943: which tree this image is.** The root-device path is the second thing after the `sysent`
+    # table (942) that 4570 and Darwin 13 do not share: 4570 mounts its root off **mockfs** - a
+    # 4570-only filesystem whose file node maps straight onto memory - and registers devfs/routefs,
+    # while **D13 ships no mockfs and no routefs at all** (`bsd/miscfs/` is deadfs/devfs/fifofs/specfs/
+    # union). D13's root provider is the native **hfs**: `vfs_conf.c`'s first `vfstbllist` row carries
+    # `hfs_mountroot`, so `vfs_mountroot` reaches it with no patch and no competitor. Same
+    # discriminator the rest of this file uses (`osfmk/sys/types.h`).
+    local is_d13=0
+    [[ -f $XNU_TREE/osfmk/sys/types.h ]] && is_d13=1
 
     # --- the pool this image's whole kernel comes from -------------------------------------------------
     #
@@ -36896,17 +36905,44 @@ verify_root_device() {
         layout_fail "the object pool is the '$pool_config' kernel; this image links all of it and this step needs STAGE90_XNU (RELEASE + mockfs) - the configuration is worth two words and nothing else"
     [[ ${pool_shim:-1} == 0 ]] ||
         layout_fail "$pool_shim object(s) in the pool still reference _consume_printf_args, so the pool was compiled with no_printf_str and the messages this step reads are not in it - the guard in tools/build_xnu_arm_kernel.sh's DEFINES is what removes them"
-    [[ ${pool_mockfs:-0} == 3 ]] ||
-        layout_fail "the pool has ${pool_mockfs:-0} of the 3 bsd_miscfs_mockfs_*.o objects - a pool built without the mockfs option"
-    say "  xnu_entry_459: the pool is the STAGE90_XNU kernel ($(awk '$1 == "objects" { print $2 }' "$stamp") objects), no object in it calls _consume_printf_args, and mockfs is in it"
+    # **943: the pool census is per-tree.** 4570's step needs the three `bsd_miscfs_mockfs_*.o`
+    # objects because its root provider IS mockfs. **D13 has no mockfs**, so that exact `== 3` would
+    # refuse every D13 build for a filesystem the tree never carried - and a missing `mockfs_mountroot`
+    # is *not* 4570's mount loop here, because D13's root row is `hfs`'s `hfs_mountroot` (checked in
+    # the table read below). Read back the same census, but on D13 require **0** mockfs objects and the
+    # **hfs** root provider's own object (`bsd_hfs_hfs_vfsops.o`, which carries `hfs_vfsops` and
+    # `hfs_mountroot`) - the object without which the tree's root row has no ops vector to name.
+    if [[ $is_d13 -eq 1 ]]; then
+        local pool_hfs
+        pool_hfs=$(ls "$XNU_KERNEL_OBJ_OUT"/bsd_hfs_hfs_vfsops.o 2>/dev/null | wc -l)
+        [[ ${pool_mockfs:-0} == 0 ]] ||
+            layout_fail "the D13 pool has ${pool_mockfs:-0} bsd_miscfs_mockfs_*.o object(s), but Darwin 13 ships no mockfs - a mockfs object in a D13 pool means the pool is not this tree's"
+        [[ ${pool_hfs:-0} == 1 ]] ||
+            layout_fail "the D13 pool has ${pool_hfs:-0} of the 1 bsd_hfs_hfs_vfsops.o object; that object carries hfs_vfsops and hfs_mountroot, the tree's root provider - without it vfs_mountroot finds no filesystem with a mountroot"
+        say "  xnu_entry_943: the pool is the D13 STAGE90_XNU kernel ($(awk '$1 == "objects" { print $2 }' "$stamp") objects), no object in it calls _consume_printf_args, no mockfs object (the tree ships none), and hfs_vfsops (the tree's root provider) is in it"
+    else
+        [[ ${pool_mockfs:-0} == 3 ]] ||
+            layout_fail "the pool has ${pool_mockfs:-0} of the 3 bsd_miscfs_mockfs_*.o objects - a pool built without the mockfs option"
+        say "  xnu_entry_459: the pool is the STAGE90_XNU kernel ($(awk '$1 == "objects" { print $2 }' "$stamp") objects), no object in it calls _consume_printf_args, and mockfs is in it"
+    fi
 
     # --- the names the root-device path is made of -----------------------------------------------------
     #
     # Defined *in this image* and not resolved to a generated stand-in. The stand-in would be a
     # function that returns, so a missing one reads as a boot that proceeds one step and stops
     # somewhere else entirely - 455's doubled-underscore defect and the reason both halves are read.
-    for sym in mdevadd mdevlookup bdevsw_add devfs_make_node mockfs_vfsops mockfs_mountroot \
-               vfs_mountroot vfstbllist load_init_program execve g_stage90_ramdisk; do
+    # **943: the provider names are the tree's.** 4570's root path names mockfs's ops vector and
+    # mountroot; D13's names the native hfs pair instead (`mockfs_*` do not exist in a D13 image at
+    # all - the loop below would fail on an absent symbol that the tree never had).
+    local -a root_names
+    if [[ $is_d13 -eq 1 ]]; then
+        root_names=(mdevadd mdevlookup bdevsw_add devfs_make_node hfs_vfsops hfs_mountroot \
+                    vfs_mountroot vfstbllist load_init_program execve g_stage90_ramdisk)
+    else
+        root_names=(mdevadd mdevlookup bdevsw_add devfs_make_node mockfs_vfsops mockfs_mountroot \
+                    vfs_mountroot vfstbllist load_init_program execve g_stage90_ramdisk)
+    fi
+    for sym in "${root_names[@]}"; do
         type=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
                awk -v s="$sym" '$3 == s { print $2; found = 1 } END { exit(found ? 0 : 1) }') ||
             layout_fail "the root-device path needs $sym and the linked image does not define it - it would resolve to a generated stand-in"
@@ -36931,12 +36967,18 @@ verify_root_device() {
     # that looks like a real finding.
     local elf_text
     elf_text=$(arm-none-eabi-strings "$OUT/xnu_arm_entry.elf")
-    for s in "Added memory device md" "load_init_program: attempting to load" \
+    # **943: the load_init_program string is the tree's, not 4570's.** D13's `load_init_program`
+    # (`bsd/kern/kern_exec.c:3710`) prints `"attempting to start init of %s"`; 4570's prints
+    # `"load_init_program: attempting to load %s"`. The other three are the same line in both trees
+    # (`memdev.c`'s md line and `vfs_subr.c:1059`'s bdevvp failure, both read verbatim above).
+    local init_str="load_init_program: attempting to load"
+    [[ $is_d13 -eq 1 ]] && init_str="attempting to start init of"
+    for s in "Added memory device md" "$init_str" \
              "cannot mount root, errno = " "vfs_mountroot: can't setup bdevvp"; do
         [[ $elf_text == *"$s"* ]] ||
             layout_fail "the image has no \"$s\" - the printf class is still compiled out, so this step could not report what it did"
     done
-    say "  xnu_entry_459: the four printf strings this step reads are in the image (the md device's own line, load_init_program's two, and vfs_mountroot's bdevvp failure)"
+    say "  xnu_entry_459: the four printf strings this step reads are in the image (the md device's own line, the init-program line, and vfs_mountroot's bdevvp failure)"
 
     # --- the filesystem table, read out of the image ------------------------------------------------------
     #
@@ -36977,6 +37019,52 @@ verify_root_device() {
             done
             return 1
         }
+        if [[ $is_d13 -eq 1 ]]; then
+            # --- 943: on D13 the root provider is the NATIVE hfs row, not mockfs -----------------------
+            #
+            # D13 ships no mockfs (and no routefs): its `vfs_conf.c` `vfstbllist` is `hfs`, `mfs`,
+            # `devfs`, then `<unassigned>` terminators. The tree's own `vfs_conf.c` wires
+            # `hfs_mountroot` into the FIRST row, so `vfs_mountroot` - which takes the first row whose
+            # `vfc_mountroot` is non-NULL (`vfs_subr.c:1068-1075`) - mounts hfs with no patch and no
+            # competitor. This is the SAME thing 874/895 patch into 4570's table by hand; here it is
+            # the tree's shape. So the check reads D13's table for the facts that must hold: hfs is the
+            # first row, its mountroot is wired, and no mockfs/routefs row exists.
+            j=$(find_ops hfs_vfsops) ||
+                layout_fail "no entry in vfstbllist has hfs_vfsops - on D13 that is the tree's only root provider (its vfs_conf.c wires hfs_mountroot into the first row), so vfs_mountroot would find no filesystem with a mountroot and bsd_init would spin in its mount loop"
+            # The name is `vfc_name[15]`: `hfs` then zeroes, as objdump prints bytes in address order.
+            [[ "$(word_at $((j + 1)))" == "68667300" ]] ||
+                layout_fail "the table entry whose ops vector is hfs_vfsops does not name itself \"hfs\" (its bytes are $(word_at $((j+1)))) - the entries and the ops vectors do not line up"
+            # hfs must be the FIRST row of the table, i.e. the first entry with a non-NULL ops vector.
+            # The scan needs no struct-size assumption: the first non-zero word from the table's base
+            # is the first row's `vfc_vfsops`. (The 4570 branch asserts the same property for mockfs by
+            # checking the rows it knows follow it; D13 has fewer rows, so it is read directly.)
+            first_ops=-1
+            for (( i = 1; i <= n; i++ )); do
+                [[ "$(word_at $i)" != "00000000" ]] && { first_ops=$i; break; }
+            done
+            [[ $first_ops == "$j" ]] ||
+                layout_fail "the first row of vfstbllist (word $first_ops) is not hfs_vfsops's row (word $j): vfs_mountroot takes the first row with a mountroot, and on D13 that row must be hfs's"
+            # The mountroot word, found by the same derived offset the 4570 branch uses.
+            m_off=-1
+            for (( i = j + 3; i <= j + 16 && i <= n; i++ )); do
+                if [[ "$(word_at $i)" == "$(rev_word "$(sym_addr hfs_mountroot)")" ]]; then m_off=$((i - j)); break; fi
+            done
+            (( m_off > 0 )) ||
+                layout_fail "the hfs entry does not hold hfs_mountroot's address - the root would be mounted with the generic VFS_MOUNT path instead of hfs_mountroot; D13's vfs_conf.c wires it file-statically, so a miss here means the row and its ops vector have been separated"
+            # devfs is in the table and must have NO mountroot at that word (D13's devfs row is NULL),
+            # so it cannot be taken before hfs even if it were reached.
+            dev_i=$(find_ops devfs_vfsops) || layout_fail "devfs is not in vfstbllist"
+            [[ "$(word_at $((dev_i + m_off)))" == "00000000" ]] ||
+                layout_fail "devfs's entry has a mountroot at word +$m_off; the first row with one is the one vfs_mountroot mounts, and D13's root provider must be hfs, not devfs"
+            # And the tree ships neither of the two filesystems 4570's table carries.
+            if find_ops mockfs_vfsops >/dev/null 2>&1; then
+                layout_fail "vfstbllist has a mockfs_vfsops row, but Darwin 13 ships no mockfs (bsd/miscfs/ is deadfs/devfs/fifofs/specfs/union) - this is not a D13 table"
+            fi
+            if find_ops routefs_vfsops >/dev/null 2>&1; then
+                layout_fail "vfstbllist has a routefs_vfsops row, but Darwin 13 ships no routefs - this is not a D13 table"
+            fi
+            say "  xnu_entry_943: vfstbllist's first row is hfs (ops at 0x$(sym_addr hfs_vfsops), mountroot $(sym_addr hfs_mountroot) at word +$m_off); devfs has no mountroot at that word and the tree ships no mockfs or routefs - so vfs_mountroot mounts the native hfs, the tree's root provider"
+        else
         j=$(find_ops mockfs_vfsops) ||
             layout_fail "no entry in vfstbllist has mockfs's ops vector - mockfs is not registered, so vfs_mountroot would find no filesystem with a mountroot and bsd_init would spin in its mount loop"
         # The name is the second field: `mock` then `fs\0\0`, as objdump prints bytes in address order.
@@ -37014,6 +37102,10 @@ verify_root_device() {
         # strategy serves the volume - and 894 proved the fall-through execs), and a study arm may set
         # the medium without linking the port. But the condition is made STRUCTURAL so no arm's prose can
         # claim a mount it cannot deliver (`mi4-a-claim-in-a-comment-is-not-a-check`).
+        # **943: the 874/895 HFS-row reconciliation is a 4570 shape.** On 4570 the HFS root row is a
+        # PATCH (`STAGE90_HFS_ROOT` in `vfs_conf.c`) added beside mockfs, so whether it reached the
+        # static table is a real question; on D13 hfs IS the table's first row (read and asserted in
+        # the branch above), so there is nothing to reconcile and this whole note is 4570-only.
         hfs_i=$(find_ops hfs_vfsops 2>/dev/null) || hfs_i=""
         if [[ -n $hfs_i ]]; then
             [[ "$(word_at $((hfs_i + m_off)))" == "$(rev_word "$(sym_addr hfs_mountroot)")" ]] ||
@@ -37025,6 +37117,7 @@ verify_root_device() {
             say "  xnu_entry_895: NOTE - STAGE90_XNU_HFS_ROOT_MEDIA=1 but the linked image has NO hfs_vfsops row in vfstbllist (the table is devfs/mockfs/routefs): the strategy's medium is the volume, but nothing CALLS hfs_mountroot, so vfs_mountroot mounts mockfs off rd=md0 and pid 1 execs from RAM. This is 894's reading - the port (STAGE90_HFS_ROOT) is not linked into the entry image. The mount clause is NOT reachable from this arm."
         else
             say "  xnu_entry_895: the linked image has no HFS root row (the port is off); vfstbllist is devfs/mockfs/routefs and mockfs is the root - the baseline."
+        fi
         fi
     }
 
