@@ -1140,3 +1140,49 @@ launchd loaded, the kernel idle loop running). 「保持在xnu里」 is *not yet
 (pets=0). 「正确识别 3GB」 is NOT met — the SMEM probe reached SMEM but the partition table was not where
 it looked. 「直接开机就运行xnu」 still needs p19 (currently holds stock Android; 908 proved the write
 works but p19 was restored for safety).
+
+## 22. The handed map MEASURED: two banks of exactly 1.5 GiB each = 3.00 GiB (2026-10-08)
+
+§2 named the mechanism (aboot injects the banks; the DT only subtracts `qcom,memblock-remove`
+holes) but had no values for the injected map. They are now read **off the running stock Android
+kernel, free, no press** (`adb shell`):
+
+    /proc/device-tree/memory/reg  =  00 00 00 00 60 00 00 00 80 00 00 00 60 00 00 00
+    /proc/iomem  System RAM       =  00000000-059fffff, 0d200000-0f9fffff, 0ff00000-5fffffff, 80000000-de6fffff
+    MemTotal                      =  2,935,868 kB
+
+The `/memory` node has `#address-cells = #size-cells = 1` (`od -An -tu4` reads `0x01000000` through
+the concat bug), so `reg` is **two** `(base,size)` pairs of 32-bit big-endian cells:
+
+| bank | base | size | end | span |
+|---|---|---|---|---|
+| 0 (low)  | `0x00000000` | `0x60000000` | `0x60000000` | **1.500 GiB** |
+| 1 (high) | `0x80000000` | `0x60000000` | `0xe0000000` | **1.500 GiB** |
+
+**Total = `0xc0000000` = exactly 3.000 GiB** — the Mi 4's 3 GB, confirmed, and it is **two banks,
+not one**. `iomem` corroborates: bank 0 appears as its three hole-punched pieces (`…059fffff`,
+`0d200000-0f9fffff`, `0ff00000-5fffffff` — the two `qcom,memblock-remove` holes are the gaps), and
+bank 1 as `80000000-de6fffff`. Linux's `MemTotal` (2.800 GiB) is 3.00 GiB minus ~200 MiB of carveouts
+(ram_console, the 25 MiB `[0xde700000,0xe0000000)` tail, kernel/text) — **not** the device's RAM.
+
+**This sharpens the wall for the 3 GB clause, and it is now architectural, not a measurement.** §3
+lines 102-104 already found it: `struct boot_args` is **flat** and the pmap uses **one**
+`first_avail`/`avail_end` pair over **one** range — *"the kernel is single-span by construction"*; and
+`MEM_SIZE_MAX` is a hard ceiling. **A single `memSize` cannot describe `[0,0x60000000) ∪
+[0x80000000,0xe0000000)`.** So "recognize 3 GB" is unreachable by *raising a number* — it needs a
+**region list** in `arm_vm_init.c`/`pmap.c` (the 911e plan), which is exactly the piece this repo has
+never had. The 911b `MEM_SIZE_MAX 0x40000000→0x5e500000` raise buys at most **one** bank
+(`0x5e500000` = the low-bank top `0xde500000` minus `0x80000000`), i.e. 1.5 GiB, never 3.
+
+**Also new: `entry_build_args` hands XNU a 16 MB window at the very *top* of bank 1.** So of the two
+handed banks, XNU is currently told about `[0x80000000, 0x81000000)` only. The 3 GB is two banks of
+1.5 GiB; the kernel is described as a 16 MB slice of one of them.
+
+**Consequence for the goal.** The honest options are (a) the **region-list port** (911e): teach arm32
+this tree to accept a multi-bank map and present the union, the only way `hw.memsize` can read ~3 GB;
+or (b) redefine "recognize" as a *reported* total (a new console key + sysctl) while the kernel still
+maps one span. (a) is goal-faithful; (b) is a measurement. The next press-free step is settled:
+attack (a). Recorded; the DTB reader is no longer owed — this is it.
+
+*Provenance: `adb -s 4a2fe00b shell` on the stock Android kernel, 2026-10-08; `33e80afe` absent;
+no write, no press.*
