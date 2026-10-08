@@ -182,6 +182,11 @@ check:
 	@tools/check_response_word_order.py
 	@tools/check_hfs_staged.sh
 	@tools/check_d13_board_staged.sh
+# 926: the entry link's object pool must follow the selected tree. `build_entry.sh` read one
+# hard-pinned tree (4570) and one hard-pinned pool, 289 times; the D13 link needs the `_d13` pool.
+# Re-derives the derivation from the tree's own header and refuses a re-pin. Source half, no device.
+	@tools/check_entry_tree_pools.sh --selftest >/dev/null
+	@tools/check_entry_tree_pools.sh
 # 911b: the physical-memory ceiling port. `check_mem_size_max.py` re-derives the property the arm's
 # whole safety argument rests on - an UNDEFINED STAGE90_XNU_MEM_SIZE_MAX leaves arm_vm_init.o
 # byte-for-byte as Apple shipped it (both marker arms inside the #ifdef; the outer #else a bare

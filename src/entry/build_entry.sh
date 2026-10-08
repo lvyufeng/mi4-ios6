@@ -38,6 +38,37 @@ BOOT_DIR=$SCRIPT_DIR
 OUT=$REPO_ROOT/out/stage90
 mkdir -p "$OUT"
 
+# **Which kernel tree this image links against (925 -> the D13 image link).** Until now this script
+# read one hard-pinned tree (`external/xnu-4570.1.46`, Darwin 17) and one object pool (`out/xnu_*_obj`).
+# The working line pivoted to Darwin 13 ([[mi4-913-ios7-rebase-decision]]), whose build writes a
+# **separate** pool with a `_d13` suffix so the two never collide; the 4570 pools stay exactly as they
+# were, which is what keeps a plain `./build_entry.sh` byte-identical.
+#
+# **The default tree is 4570, exactly as `tools/build_xnu_arm_kernel.sh`'s is** (`XNU=${XNU_TREE:-...
+# /xnu-4570.1.46}`). That is on purpose and it is the one decision that keeps a plain
+# `./build_entry.sh` byte-identical: the pools it reads are the ones the default kernel build wrote.
+# Darwin 13 is always selected explicitly (`XNU_TREE=.../xnu-hd2-darwin13/xnu`), the same way its
+# kernel build is, so entry and kernel cannot disagree about which tree they mean.
+#
+# `XNU_OBJ_SUFFIX` selects the pool. It is **derived** from the tree by the discriminator
+# `check_d13_board_staged.sh` already uses - Darwin 13 ships the legacy private header
+# `osfmk/sys/types.h`, Darwin 17 does not - so setting `XNU_TREE` alone is enough; an explicit
+# `XNU_OBJ_SUFFIX` still wins for a controlled comparison.
+XNU_TREE=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
+if [[ -z ${XNU_OBJ_SUFFIX:-} ]]; then
+    if [[ -f $XNU_TREE/osfmk/sys/types.h ]]; then XNU_OBJ_SUFFIX=_d13; else XNU_OBJ_SUFFIX=; fi
+fi
+# The object pools, out-parameterized exactly as `tools/build_xnu_arm_kernel.sh` names them, so that
+# pointing the kernel build at a pool and pointing the entry link at the same pool is one variable.
+# The base is spelled `$REPO_ROOT/out` and the pool name separately, on purpose: the per-file paths
+# below are re-rooted by a textual substitution of the contiguous prefix, and this block must not be
+# one of its own victims.
+_OUT_BASE=$REPO_ROOT/out
+XNU_KERNEL_OBJ_OUT=${XNU_KERNEL_OBJ_OUT:-$_OUT_BASE/xnu_kernel_obj$XNU_OBJ_SUFFIX}
+XNU_ASM_OBJ_OUT=${XNU_ASM_OBJ_OUT:-$_OUT_BASE/xnu_asm_obj$XNU_OBJ_SUFFIX}
+XNU_PLATFORM_OBJ_OUT=${XNU_PLATFORM_OBJ_OUT:-$_OUT_BASE/xnu_platform_obj$XNU_OBJ_SUFFIX}
+MACH_HEADERS_OUT=${MACH_HEADERS_OUT:-$_OUT_BASE/mach_headers$XNU_OBJ_SUFFIX}
+
 VERBOSE=0
 [[ ${1:-} == --verbose ]] && VERBOSE=1
 
@@ -1655,7 +1686,7 @@ run "${HOST_CC:-cc}" -O2 -Wall -Wextra -Werror -std=gnu11 -DSTAGE90_AES_SELFTEST
 # at a different point of the `.text` output section's `.rodata` run, and that difference is visible
 # in every address above it. Same source, same size, different section: the shape of the object is
 # part of the step.
-STAGE90_CONFIG_TABLES_OBJ=${STAGE90_ENTRY_PLATFORM_CONFIG_TABLES_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_platform_config_tables.o}
+STAGE90_CONFIG_TABLES_OBJ=${STAGE90_ENTRY_PLATFORM_CONFIG_TABLES_OBJ:-$XNU_PLATFORM_OBJ_OUT/stage90_platform_config_tables.o}
 
 # The hang tracer, only when asked for. Compiled here rather than in the link block because it is a
 # translation unit like the two above, and linked into `LINK_OBJS` at the bottom.
@@ -1723,7 +1754,7 @@ fi
 # one clang warning suppressed: XNU's EXTERNAL_HEADERS/stddef.h defines ptrdiff_t as a null-pointer
 # subtraction, which clang flags under -Werror and gcc does not.
 say "== compiling the in-kernel probe (XNU's own DT and boot-arg code) =="
-XNU=$REPO_ROOT/external/xnu-4570.1.46
+XNU=$XNU_TREE
 
 LINK_OBJS=(
     "$OUT/xnu_arm_start.o"
@@ -1834,13 +1865,13 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `_mnt_data_mi4-ios6_out_mach_headers_kserver_mach_mach_vm_server.o`, is this project's own
     # path baked into a file name.
     kserver_obj() {
-        local p="$REPO_ROOT/out/mach_headers/kserver/$1"
-        printf '%s/%s.o\n' "$REPO_ROOT/out/xnu_kernel_obj" "$(printf '%s' "$p" | sed 's|/|_|g; s|\.c$||')"
+        local p="$MACH_HEADERS_OUT/kserver/$1"
+        printf '%s/%s.o\n' "$XNU_KERNEL_OBJ_OUT" "$(printf '%s' "$p" | sed 's|/|_|g; s|\.c$||')"
     }
-    ARM_INIT_OBJ=${STAGE90_ENTRY_ARM_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_arm_init.o}
-    ARM_DATA_OBJ=${STAGE90_ENTRY_DATA_OBJ:-$REPO_ROOT/out/xnu_asm_obj/data.o}
-    ARM_BCOPY_OBJ=${STAGE90_ENTRY_BCOPY_OBJ:-$REPO_ROOT/out/xnu_asm_obj/bcopy.o}
-    ARM_BZERO_OBJ=${STAGE90_ENTRY_BZERO_OBJ:-$REPO_ROOT/out/xnu_asm_obj/bzero.o}
+    ARM_INIT_OBJ=${STAGE90_ENTRY_ARM_INIT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_arm_init.o}
+    ARM_DATA_OBJ=${STAGE90_ENTRY_DATA_OBJ:-$XNU_ASM_OBJ_OUT/data.o}
+    ARM_BCOPY_OBJ=${STAGE90_ENTRY_BCOPY_OBJ:-$XNU_ASM_OBJ_OUT/bcopy.o}
+    ARM_BZERO_OBJ=${STAGE90_ENTRY_BZERO_OBJ:-$XNU_ASM_OBJ_OUT/bzero.o}
     # `osfmk/arm/cpu.c`, and it is here because the device named it rather than because it looked
     # relevant: experiment-159's run reached `cpu_data_init()` and stopped there, and that function
     # is a field-by-field initialization of a `cpu_data_t` (`cpu.c:332-401`) whose only references
@@ -1849,7 +1880,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `stub_hit=cpu_data_init` into the *next* thing `arm_init` asks for. The rest of `cpu.o` is
     # stubbed as usual: the closure of `arm_init` is the whole kernel, so the image grows one object
     # at a time and each run reports the next edge.
-    ARM_CPU_OBJ=${STAGE90_ENTRY_CPU_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_cpu.o}
+    ARM_CPU_OBJ=${STAGE90_ENTRY_CPU_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_cpu.o}
     # `pexpert/arm/pe_init.c`, again named by the previous run rather than by inspection:
     # experiment-168's `stub_hit=PE_init_platform` is `arm_init.c:159`, and this object defines it.
     # It is not a leaf the way `cpu.o` is - `PE_init_platform` pulls in `DTInit` and the rest of
@@ -1857,21 +1888,21 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # the tree this project built, from inside XNU's own `arm_init`, with XNU's own page tables.
     # It is also 34927 bytes of text against experiment-168's 26744 bytes of headroom, which is why
     # `topOfKernelData` moved in the same experiment.
-    ARM_PE_INIT_OBJ=${STAGE90_ENTRY_PE_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_arm_pe_init.o}
+    ARM_PE_INIT_OBJ=${STAGE90_ENTRY_PE_INIT_OBJ:-$XNU_KERNEL_OBJ_OUT/pexpert_arm_pe_init.o}
     # `osfmk/arm/strlcpy.c`, named by experiment-169's run: with `pe_init.o` in the image,
     # `PE_init_platform` ran its body and stopped at `stub_hit=strlcpy`, which is its first call
     # that this image does not provide (`pe_init.c:302`, the pixel-format assignment - eight lines
     # before the `DTInit` call the previous experiment predicted). 68 bytes of text and no external
     # references of its own, so it is a leaf, and linking it is what puts the `DTInit` probe added
     # in entry_stubs.c in reach.
-    ARM_STRLCPY_OBJ=${STAGE90_ENTRY_STRLCPY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_strlcpy.o}
+    ARM_STRLCPY_OBJ=${STAGE90_ENTRY_STRLCPY_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_strlcpy.o}
     # `osfmk/arm/strlen.s`, and the one place this build links two objects in one experiment on
     # purpose rather than one. `nm -u osfmk_arm_strlcpy.o` is `memcpy` and `strlen`; `memcpy` is
     # already in the image, and `strlen` is a leaf in the assembly pool. Linking `strlcpy.o` alone
     # would spend a hardware run reporting a name the host already printed, and the object after it
     # - the one whose call the `DTInit` probe in entry_stubs.c is waiting for - would still not be
     # reached. So both are here: the edge the device named, and the one symbol that edge needs.
-    ARM_STRLEN_OBJ=${STAGE90_ENTRY_STRLEN_OBJ:-$REPO_ROOT/out/xnu_asm_obj/strlen.o}
+    ARM_STRLEN_OBJ=${STAGE90_ENTRY_STRLEN_OBJ:-$XNU_ASM_OBJ_OUT/strlen.o}
     # `osfmk/arm/strncpy.c`, named by experiment-185's `stub_hit=strncpy` - which is `locks.c:169`,
     # the fourth statement of `lck_mod_init`, reached now that the lock subsystem's own code runs.
     # 104 bytes of text, and its `nm -u` is `memcpy`, `memset` and `strnlen`: `memcpy` and `memset`
@@ -1882,9 +1913,9 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # It is also worth noting what this symbol is: it has been in the undefined list since the image
     # was first assembled and only became the *edge* when the code calling it became real. The
     # closure is not a queue.
-    ARM_STRNCPY_OBJ=${STAGE90_ENTRY_STRNCPY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_strncpy.o}
+    ARM_STRNCPY_OBJ=${STAGE90_ENTRY_STRNCPY_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_strncpy.o}
     # `osfmk/arm/strnlen.s`, the leaf `strncpy.c` needs - 184 bytes of text, no undefined references.
-    ARM_STRNLEN_OBJ=${STAGE90_ENTRY_STRNLEN_OBJ:-$REPO_ROOT/out/xnu_asm_obj/strnlen.o}
+    ARM_STRNLEN_OBJ=${STAGE90_ENTRY_STRNLEN_OBJ:-$XNU_ASM_OBJ_OUT/strnlen.o}
     # XNU 4570's own device-tree reader, `pexpert/gen/device_tree.c`, and this is the object whose
     # *absence* made `DTInit` a symbol experience-170's probe reported. It defines `DTInit`,
     # `DTFindEntry`, `DTGetProperty`, `DTLookupEntry`, `DTInitEntryIterator` and `DTIterateEntries`
@@ -1895,7 +1926,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # from the other side that the two are not interchangeable; this is the side where it matters,
     # because the caller here is 4570's own `pe_init.o` and the iterator API it uses
     # (`DTInitEntryIterator`) does not exist in 2050.
-    ARM_DEVICE_TREE_OBJ=${STAGE90_ENTRY_DEVICE_TREE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_gen_device_tree.o}
+    ARM_DEVICE_TREE_OBJ=${STAGE90_ENTRY_DEVICE_TREE_OBJ:-$XNU_KERNEL_OBJ_OUT/pexpert_gen_device_tree.o}
     # `pexpert/arm/pe_identify_machine.c`. Strictly this is the call `PE_init_platform` makes after
     # `DTInit` (`pe_init.c:311`), and the one this project's method would let a run name - but the
     # object above cannot produce a run worth doing on its own: 4570's `DTInit` is
@@ -1905,35 +1936,35 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # is `pe_arm_get_soc_base_phys()`, which finds `arm-io` in the tree, reads `device_type` and
     # `ranges`, and returns `ranges[1]` - so this is the object that turns "the reader is present"
     # into "the reader read this project's device tree".
-    ARM_PE_IDENTIFY_OBJ=${STAGE90_ENTRY_PE_IDENTIFY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_arm_pe_identify_machine.o}
+    ARM_PE_IDENTIFY_OBJ=${STAGE90_ENTRY_PE_IDENTIFY_OBJ:-$XNU_KERNEL_OBJ_OUT/pexpert_arm_pe_identify_machine.o}
     # `osfmk/device/subrs.c`, named by experiment-171's `stub_hit=strcmp`. The reader above compares
     # property names and values to walk a node (`device_tree.c:375` and `:144`) and `pe_identify_machine`
     # compares the SoC device type against Apple's board names (`:58` onward), so either of the two
     # ways that run could have got there needs this object to get any further.
-    ARM_SUBRS_OBJ=${STAGE90_ENTRY_SUBRS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_device_subrs.o}
+    ARM_SUBRS_OBJ=${STAGE90_ENTRY_SUBRS_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_device_subrs.o}
     # `osfmk/arm/strncmp.s`, named by experiment-172. It is the comparison the reader makes on the
     # `state` property of the cpu node it just found (`pe_identify_machine.c:117`), and it is the
     # last thing between the walk and the probe in entry_stubs.c: if `state` matches "running", the
     # reader goes on to read the frequencies out of the same node and then returns.
-    ARM_STRNCMP_OBJ=${STAGE90_ENTRY_STRNCMP_OBJ:-$REPO_ROOT/out/xnu_asm_obj/strncmp.o}
+    ARM_STRNCMP_OBJ=${STAGE90_ENTRY_STRNCMP_OBJ:-$XNU_ASM_OBJ_OUT/strncmp.o}
     # `pexpert/gen/pe_gen.c`, named by experiment-173's `stub_hit=pe_init_debug` - the last
     # statement of `PE_init_platform`, so the one symbol between that function and its return, and
     # therefore the one between the image and the `ml_parse_cpu_topology` probe that has been
     # waiting since experiment 171. 508 bytes of text, and it also defines `PE_putc`,
     # `PE_init_printf`, `PE_enter_debugger` and `PE_get_random_seed`, all of which are stubs today.
-    ARM_PE_GEN_OBJ=${STAGE90_ENTRY_PE_GEN_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_gen_pe_gen.o}
+    ARM_PE_GEN_OBJ=${STAGE90_ENTRY_PE_GEN_OBJ:-$XNU_KERNEL_OBJ_OUT/pexpert_gen_pe_gen.o}
     # `pexpert/gen/bootargs.c`, and this is `nm -u` on the object above, not a guess: `pe_init_debug`
     # is four `PE_parse_boot_argn` calls and a bitmask. Linking pe_gen.o alone would therefore
     # produce a run whose one possible outcome the host can already name, which is the same reason
     # strlcpy and strlen travelled together in experiment 170.
-    ARM_BOOTARGS_OBJ=${STAGE90_ENTRY_BOOTARGS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_gen_bootargs.o}
+    ARM_BOOTARGS_OBJ=${STAGE90_ENTRY_BOOTARGS_OBJ:-$XNU_KERNEL_OBJ_OUT/pexpert_gen_bootargs.o}
     # `pexpert/arm/pe_bootargs.c`, named by experiment-174's `stub_hit=PE_boot_args`: the whole file
     # is one accessor, `(char *)((boot_args *)PE_state.bootArgs)->CommandLine`. It travels alone,
     # and that is measured rather than assumed - `nm -u` on the object names `PE_state` and nothing
     # else, and `pexpert/arm/pe_init.o` (in this link since experiment 172) defines it as real
     # storage. So this object adds a definition and no obligation, which is the opposite of the
     # pe_gen/bootargs pair above.
-    ARM_PE_BOOTARGS_OBJ=${STAGE90_ENTRY_PE_BOOTARGS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_arm_pe_bootargs.o}
+    ARM_PE_BOOTARGS_OBJ=${STAGE90_ENTRY_PE_BOOTARGS_OBJ:-$XNU_KERNEL_OBJ_OUT/pexpert_arm_pe_bootargs.o}
     # `osfmk/arm/machine_routines.c`, named by experiment-176's `stub_hit=ml_parse_cpu_topology` -
     # which `osfmk/arm/arm_init.c:217` calls as the first thing after the platform expert is up.
     #
@@ -1942,25 +1973,25 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # before it added three to five. The linker resolves an object's references whether or not the
     # function making them ever runs, so linking it whole is what pulls those 56 in - and what the
     # run then measures is which of them XNU's own code reaches next.
-    ARM_MACHINE_ROUTINES_OBJ=${STAGE90_ENTRY_MACHINE_ROUTINES_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_machine_routines.o}
+    ARM_MACHINE_ROUTINES_OBJ=${STAGE90_ENTRY_MACHINE_ROUTINES_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_machine_routines.o}
     # `osfmk/arm/cpu_common.c`, named by experiment-177's `stub_hit=cpu_processor_alloc`. Small
     # again: 2428 bytes of text, 36 symbols, 31 references of which 17 are new. It defines
     # `cpu_processor_alloc` (`:472`), which for the boot CPU is `return &BootProcessor;`, and it
     # also defines `current_processor` and `cpu_number` - which is why the probe now stands one edge
     # further on, at `thread_bootstrap`, where the addresses `arm_init` just wrote can be read.
-    ARM_CPU_COMMON_OBJ=${STAGE90_ENTRY_CPU_COMMON_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_cpu_common.o}
+    ARM_CPU_COMMON_OBJ=${STAGE90_ENTRY_CPU_COMMON_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_cpu_common.o}
     # `osfmk/kern/thread.c`, named by experiment-178's `stub_hit=thread_bootstrap`. This is the
     # first object whose size changes the character of the step: 16944 bytes of text, 77 functions,
     # 161 references of which 135 are new. Whether "one object" is still the right unit at that size
     # is what this link measures.
-    ARM_KERN_THREAD_OBJ=${STAGE90_ENTRY_KERN_THREAD_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_thread.o}
+    ARM_KERN_THREAD_OBJ=${STAGE90_ENTRY_KERN_THREAD_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_thread.o}
     # `osfmk/kern/timer.c`, named by experiment-179's `stub_hit=timer_init` - the first call any
     # function in `thread.o` makes. Small: 320 bytes of text across 7 functions, 3 references, 1 of
     # them new. Needed because `thread_bootstrap` ends with three `timer_init()` calls; the object
     # after this one is `machine_routines_asm.o`, which defines `machine_set_current_thread` - the
     # last call in `thread_bootstrap`, and the one that writes the TPIDRPRW that `current_thread()`
     # reads back at `arm_init.c:241`.
-    ARM_KERN_TIMER_OBJ=${STAGE90_ENTRY_KERN_TIMER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_timer.o}
+    ARM_KERN_TIMER_OBJ=${STAGE90_ENTRY_KERN_TIMER_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_timer.o}
     # `osfmk/arm/machine_routines_asm.s`, named by experiment-180's `stub_hit=machine_set_current_thread` -
     # the last statement of `thread_bootstrap`. Assembled rather than compiled (`tools/assemble_arm_layer.sh`),
     # because it is Apple's assembly. It is where the thread really becomes current: the first
@@ -1968,14 +1999,14 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `current_thread()` (`osfmk/arm/cpu_data.h:52`) reads back - so linking this object is what makes
     # `arm_init.c:241`'s `thread = current_thread()` return the thread `thread_bootstrap` just made.
     # 2280 bytes of text, 76 symbols, 12 references of which 4 are new.
-    ARM_MACHINE_ROUTINES_ASM_OBJ=${STAGE90_ENTRY_MACHINE_ROUTINES_ASM_OBJ:-$REPO_ROOT/out/xnu_asm_obj/machine_routines_asm.o}
+    ARM_MACHINE_ROUTINES_ASM_OBJ=${STAGE90_ENTRY_MACHINE_ROUTINES_ASM_OBJ:-$XNU_ASM_OBJ_OUT/machine_routines_asm.o}
     # `osfmk/arm/rtclock.c`, named by experiment-181's `stub_hit=rtclock_early_init`. 2136 bytes of
     # text, 19 functions, 18 references of which 3 are new. `rtclock_early_init` is one call -
     # `PE_register_timebase_callback(timebase_callback)` - and that accessor is already real
     # (`pexpert/arm/pe_init.o`), and it *invokes* the callback immediately with
     # `gPEClockFrequencyInfo.timebase_frequency_hz` over 1. So linking this object makes
     # `timebase_callback` real, and it is the first code in the image to divide.
-    ARM_ARM_RTCLOCK_OBJ=${STAGE90_ENTRY_ARM_RTCLOCK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_rtclock.o}
+    ARM_ARM_RTCLOCK_OBJ=${STAGE90_ENTRY_ARM_RTCLOCK_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_rtclock.o}
     # `osfmk/kern/startup.c`, named by experiment-183's `stub_hit=kernel_early_bootstrap`. 2728 bytes
     # of text across 7 functions and 98 references, 72 of them new - the largest step since
     # `thread.o`, and the one that brings in the names of the kernel's own startup sequence:
@@ -1983,7 +2014,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `vm_mem_bootstrap`, `sched_init`, `machine_load_context`, `console_init`, `bsd_init`.
     # `kernel_early_bootstrap` itself (`startup.c:226`) is four statements: one boot-arg parse, then
     # `lck_mod_init()` and `timer_call_init()`.
-    ARM_KERN_STARTUP_OBJ=${STAGE90_ENTRY_KERN_STARTUP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_startup.o}
+    ARM_KERN_STARTUP_OBJ=${STAGE90_ENTRY_KERN_STARTUP_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_startup.o}
     # `osfmk/kern/timer_call.c`, named by experiment-184's `stub_hit=lck_mod_init` - not because
     # `lck_mod_init` is in it, but because it is the *next* thing `kernel_early_bootstrap`
     # (`startup.c:238`) asks for, one statement after the symbol the probe answered. 11321 bytes of
@@ -1992,7 +2023,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `lck_attr_setdefault`, `lck_grp_attr_setdefault`, `lck_grp_init`, then `timer_longterm_init`
     # and `timer_call_init_abstime`. It is the first edge in this image that lands in the lock
     # subsystem - none of which has run - which is why the step is measured before it is taken.
-    ARM_KERN_TIMER_CALL_OBJ=${STAGE90_ENTRY_KERN_TIMER_CALL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_timer_call.o}
+    ARM_KERN_TIMER_CALL_OBJ=${STAGE90_ENTRY_KERN_TIMER_CALL_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_timer_call.o}
     # `osfmk/kern/locks.c`, named by experiment-184's `stub_hit=lck_mod_init`. 5943 bytes of text
     # across 47 functions. `lck_mod_init` (`locks.c:140`) is short and has no missing callees:
     # one boot-arg parse, then `queue_init`, a `bzero`, a `strncpy` of "Compatibility APIs",
@@ -2000,14 +2031,14 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # of which this object also defines. It is the first code in this image that initializes a lock,
     # and it is linked with `timer_call.o` because the two are the same statement pair in
     # `kernel_early_bootstrap` and each was sized on its own before either was added.
-    ARM_KERN_LOCKS_OBJ=${STAGE90_ENTRY_LOCKS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_locks.o}
+    ARM_KERN_LOCKS_OBJ=${STAGE90_ENTRY_LOCKS_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_locks.o}
     # `osfmk/arm/locks_arm.c`, named by experiment-186's `stub_hit=lck_mtx_init_ext` - the last
     # statement of `lck_mod_init`. 9868 bytes of text across 64 functions and 37 references, so this
     # is a step the size of `thread.o` in exp-179 rather than the size of the last three, and it is
     # measured before it is taken. It is also where the mutex itself lives: `lck_mtx_lock`,
     # `lck_mtx_unlock`, `lck_mtx_ilk_unlock`, `mutex_pause`, `MutexSpin`, and the six `hw_atomic_*`
     # functions this file's neighbour `locks.o` referenced.
-    ARM_LOCKS_ARM_OBJ=${STAGE90_ENTRY_LOCKS_ARM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_locks_arm.o}
+    ARM_LOCKS_ARM_OBJ=${STAGE90_ENTRY_LOCKS_ARM_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_locks_arm.o}
     # `osfmk/arm/arm_timer.c`, named by experiment-187's `stub_hit=timer_call_get_priority_params`.
     # 1044 bytes of text across 11 functions and 168 bytes of data, 11 references - the cheapest
     # step since exp-186, and the first whose object is a *driver* rather than more of the kernel
@@ -2019,20 +2050,20 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # The object also carries `timer_queue_assign`, `timer_call_cpu`, `timer_intr`,
     # `timer_resort_threshold` and `quantum_timer_set_deadline`, all of which the image already
     # references.
-    ARM_ARM_TIMER_OBJ=${STAGE90_ENTRY_ARM_TIMER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_arm_timer.o}
+    ARM_ARM_TIMER_OBJ=${STAGE90_ENTRY_ARM_TIMER_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_arm_timer.o}
     # `osfmk/arm/cpuid.c`, named by experiment-188's `stub_hit=do_cpuid` - the first symbol
     # `cpu_init` asks for, and the statement in `arm_init` right after `kernel_early_bootstrap`.
     # 850 bytes of text across 9 functions and 10 references, and it resolves five things at once:
     # `do_cpuid`, `do_cacheid`, `do_mvfpid`, `do_debugid`, `cpuid_info` and `cache_info`. This is
     # the first object in the image whose work is reading the CPU - MIDR, CLIDR, CCSIDR and the
     # MVFR registers - rather than reading what XNU or the device tree computed.
-    ARM_ARM_CPUID_OBJ=${STAGE90_ENTRY_ARM_CPUID_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_cpuid.o}
+    ARM_ARM_CPUID_OBJ=${STAGE90_ENTRY_ARM_CPUID_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_cpuid.o}
     # `osfmk/arm/machine_cpuid.c`, which is what the line above is missing: all nine of cpuid.o's
     # `machine_*` references are here, and this object's own `nm -u` is empty. 220 bytes of text
     # across 9 functions and 24 bytes of `.bss`, so it is self-contained and costs nothing beyond
     # its size. It is linked in the same step rather than discovered in the next one because a
     # frontier that is only reachable through stubs is not a frontier.
-    ARM_ARM_MACHINE_CPUID_OBJ=${STAGE90_ENTRY_ARM_MACHINE_CPUID_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_machine_cpuid.o}
+    ARM_ARM_MACHINE_CPUID_OBJ=${STAGE90_ENTRY_ARM_MACHINE_CPUID_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_machine_cpuid.o}
     # `osfmk/kern/processor.c`, named by experiment-189's `stub_hit=processor_bootstrap`. 4784 bytes
     # of text, 96 of data and 1616 of `.bss` across 42 references, and it defines both
     # `processor_bootstrap` (`processor.c:120`) and `processor_init` (`processor.c:135`), so one
@@ -2041,14 +2072,14 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `processor_list` - the objects `sched_init` and the scheduler are about to start using. The
     # new obligation to watch is `processor_data_init`, which is in `processor_data.c` and is the
     # first symbol `processor_init` reaches that nothing defines, which is why the probe is there.
-    ARM_KERN_PROCESSOR_OBJ=${STAGE90_ENTRY_KERN_PROCESSOR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_processor.o}
+    ARM_KERN_PROCESSOR_OBJ=${STAGE90_ENTRY_KERN_PROCESSOR_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_processor.o}
     # `osfmk/kern/processor_data.c`, the first symbol experiment-190's `stub_hit=processor_data_init`
     # named. 72 bytes of text and two references (`memset`, `timer_init`), both already satisfied in
     # this image, so this is the smallest non-empty step in the sequence: it resolves
     # `processor_data_init` and adds nothing at all. The object is the `processor_data_t` at the end
     # of `struct processor` - `timer_init` over the idle, system and user states, and the debugger
     # state's `db_current_op`.
-    ARM_KERN_PROCESSOR_DATA_OBJ=${STAGE90_ENTRY_KERN_PROCESSOR_DATA_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_processor_data.o}
+    ARM_KERN_PROCESSOR_DATA_OBJ=${STAGE90_ENTRY_KERN_PROCESSOR_DATA_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_processor_data.o}
     # `osfmk/arm/machine_routines_common.c`, named by experiment-191's
     # `stub_hit=ml_set_interrupts_enabled`. 2923 bytes of text, 44 of data and 108 of `.bss` across
     # 18 references. Five of the eighteen are undefined in this image and become stubs -
@@ -2063,7 +2094,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # the object defines the symbol the exp-191 probe defined, and a link that sees two definitions
     # leaves a partial undefined-reference list - the failure that produced exp-190's wrong
     # measurement of 11 and 11.
-    ARM_MACHINE_ROUTINES_COMMON_OBJ=${STAGE90_ENTRY_MACHINE_ROUTINES_COMMON_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_machine_routines_common.o}
+    ARM_MACHINE_ROUTINES_COMMON_OBJ=${STAGE90_ENTRY_MACHINE_ROUTINES_COMMON_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_machine_routines_common.o}
     # `osfmk/arm/arm_vm_init.c`, named by experiment-192's `stub_hit=arm_vm_init` and measured
     # before the run that consumed it. 8176 bytes of text, 8 of data and 216 of `.bss` across 23
     # references - the largest object since `thread.o` in exp-179, and the first thing in this
@@ -2076,8 +2107,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # linked as one step the way `cpuid.o` and `machine_cpuid.o` were in exp-189. The header those
     # readers walk is defined in this image by `entry_macho.s`; see that file for why an ELF needs
     # one and why a zeroed stub for `_mh_execute_header` is a data abort rather than a slow path.
-    ARM_ARM_VM_INIT_OBJ=${STAGE90_ENTRY_ARM_VM_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_arm_vm_init.o}
-    LIBKERN_KERNEL_MACH_HEADER_OBJ=${STAGE90_ENTRY_KERNEL_MACH_HEADER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_kernel_mach_header.o}
+    ARM_ARM_VM_INIT_OBJ=${STAGE90_ENTRY_ARM_VM_INIT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_arm_vm_init.o}
+    LIBKERN_KERNEL_MACH_HEADER_OBJ=${STAGE90_ENTRY_KERNEL_MACH_HEADER_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_kernel_mach_header.o}
     # `osfmk/vm/vm_resident.c`, named by experiment-194's `stub_hit=vm_set_page_size`. The function
     # is twelve statements and 52 bytes with no calls in it, but its *object* is the largest this
     # sequence has linked: 31692 bytes of text, 104 of data and 5772 of `.bss` across 113
@@ -2088,7 +2119,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `set_mmu_ttb`, `set_mmu_ttb_alternate` and `flush_mmu_tlb` are real, and what follows is a
     # block of stores into `arm_vm_init.o`'s own globals. So the run reaches `pmap_bootstrap`, which
     # is `osfmk/arm/pmap.c`, and that is where the probe stands.
-    VM_VM_RESIDENT_OBJ=${STAGE90_ENTRY_VM_RESIDENT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_resident.o}
+    VM_VM_RESIDENT_OBJ=${STAGE90_ENTRY_VM_RESIDENT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_resident.o}
     # `osfmk/arm/pmap.c`, named by experiment-195's `stub_hit=pmap_bootstrap`. This is the pmap
     # proper - 45052 bytes of text, 72 of data, 1032 of `.bss` and 93 references - and the point at
     # which the kernel starts building page tables for memory that is not this image.
@@ -2107,7 +2138,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `pmap_bootstrap` probe in `entry_stubs.c` is compiled out (it is a second definition), and
     # the run no longer stops inside `pmap_bootstrap` at all - it stops at whatever the image
     # reaches next, which is the measurement.
-    ARM_PMAP_OBJ=${STAGE90_ENTRY_PMAP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_pmap.o}
+    ARM_PMAP_OBJ=${STAGE90_ENTRY_PMAP_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_pmap.o}
     # `osfmk/arm/lowmem_vectors.c`, named by experiment-197's `stub_hit=patch_low_glo_static_region`.
     # 72 bytes of text and 988 of data, and the data is the point again: `lowGlo` is an
     # *initialized* page-aligned structure full of self-referential pointers (`&version`, `&kmod`,
@@ -2116,7 +2147,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # image's boot args reach: `debug=0x144` is on the payload's command line, `arm_init.c:323-325`
     # tests `(debug & MIN_LOW_GLO_MASK) == MIN_LOW_GLO_MASK` with `MIN_LOW_GLO_MASK = 0x144`, and
     # the call follows `arm_vm_init`'s return.
-    ARM_LOWMEM_VECTORS_OBJ=${STAGE90_ENTRY_LOWMEM_VECTORS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_lowmem_vectors.o}
+    ARM_LOWMEM_VECTORS_OBJ=${STAGE90_ENTRY_LOWMEM_VECTORS_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_lowmem_vectors.o}
     # `osfmk/kern/printf.c`, named by experiment-198's `stub_hit=printf_init`. 5607 bytes of text,
     # 296 of `.bss` and 26 references - the largest step since `pmap.o`, and the first object this
     # project links whose subject is output.
@@ -2132,7 +2163,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # reached. `printf_init` reaches none of them: its two `simple_lock_init` calls are
     # `arm_usimple_lock_init`, which the image has had since the lock subsystem came in, and its
     # third statement is `bsd_log_init`.
-    ARM_KERN_PRINTF_OBJ=${STAGE90_ENTRY_KERN_PRINTF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_printf.o}
+    ARM_KERN_PRINTF_OBJ=${STAGE90_ENTRY_KERN_PRINTF_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_printf.o}
     # `bsd/kern/subr_log.c`, named by experiment-199's `stub_hit=bsd_log_init` - the first object in
     # this sequence from `bsd/` rather than `osfmk/`. 5851 bytes of text, 4316 of data, 12496 of
     # `.bss` and 42 references, which makes it the largest `.bss` and the widest reference set of
@@ -2145,7 +2176,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `tsleep`, `kernel_map`, `mach_vm_map_kernel`, `kalloc_canblock`, `selwakeup` and the two
     # `__firehose_*` calls all sit behind other functions in the file - so the run should pass
     # through and stop at `panic_init`, `arm_init.c:330`, back in `osfmk/`.
-    BSD_KERN_SUBR_LOG_OBJ=${STAGE90_ENTRY_BSD_SUBR_LOG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_subr_log.o}
+    BSD_KERN_SUBR_LOG_OBJ=${STAGE90_ENTRY_BSD_SUBR_LOG_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_subr_log.o}
     # `osfmk/kern/debug.c`, named by experiment-200's `stub_hit=panic_init`. 5549 bytes of text, 40
     # of data, 721 of `.bss` and 61 references. Only four statements of `panic_init` run, and the
     # interesting one is the first: `getuuidfromheader(&_mh_execute_header, &uuidlen)` walks *this
@@ -2153,7 +2184,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # has `ncmds = 2` and two `LC_SEGMENT` commands, so the search returns NULL and the
     # `uuid_unparse_upper` call behind it is not reached; `entry_frontier.py` reports it anyway,
     # because it does not model branches.
-    ARM_KERN_DEBUG_OBJ=${STAGE90_ENTRY_KERN_DEBUG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_debug.o}
+    ARM_KERN_DEBUG_OBJ=${STAGE90_ENTRY_KERN_DEBUG_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_debug.o}
     # `pexpert/arm/pe_consistent_debug.c`, named by experiment-201's
     # `stub_hit=PE_consistent_debug_inherit`. 394 bytes of text, 4 of `.bss`, 4 references, three of
     # them already satisfied - the smallest object this sequence has linked. Its function looks up
@@ -2165,13 +2196,13 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # therefore stop at the next statement of `arm_init`, which is `PE_init_kprintf` - a symbol in
     # no object linked here, and the same shape as experiment 201's prediction: a call that exists
     # in the source and is not reachable on this configuration.
-    PEXPERT_PE_CONSISTENT_DEBUG_OBJ=${STAGE90_ENTRY_PE_CONSISTENT_DEBUG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_arm_pe_consistent_debug.o}
+    PEXPERT_PE_CONSISTENT_DEBUG_OBJ=${STAGE90_ENTRY_PE_CONSISTENT_DEBUG_OBJ:-$XNU_KERNEL_OBJ_OUT/pexpert_arm_pe_consistent_debug.o}
     # `pexpert/arm/pe_kprintf.c`, named by experiment-202's `stub_hit=PE_init_kprintf`. 536 bytes of
     # text, 4 of data, 48 of `.bss` and 16 references. It also defines `PE_kputc` and
     # `disable_serial_output`, which this image has been carrying as generated *storage* stubs
     # (4 bytes each, sized from this very object) - so linking it turns both into the real variable,
     # and the generator stops stubbing them because pass 1 now sees them defined.
-    PEXPERT_PE_KPRINTF_OBJ=${STAGE90_ENTRY_PE_KPRINTF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_arm_pe_kprintf.o}
+    PEXPERT_PE_KPRINTF_OBJ=${STAGE90_ENTRY_PE_KPRINTF_OBJ:-$XNU_KERNEL_OBJ_OUT/pexpert_arm_pe_kprintf.o}
     # `pexpert/arm/pe_serial.c`, named by experiment-203's `stub_hit=serial_init`. 421 bytes of
     # text and **six references - every one of them already satisfied** by objects this image has
     # had since experiments 168-171 (`PE_parse_boot_argn`, `pe_arm_get_soc_base_phys`, `DTFindEntry`,
@@ -2190,7 +2221,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # It is linked anyway, because the point of the step is the *lookup*: `serial_init` is the first
     # XNU code to ask this project's device tree for a serial device, and the answer it gets is the
     # one that decides `PE_kputc` (`serial_putc` or `cnputc`).
-    PEXPERT_PE_SERIAL_OBJ=${STAGE90_ENTRY_PE_SERIAL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_arm_pe_serial.o}
+    PEXPERT_PE_SERIAL_OBJ=${STAGE90_ENTRY_PE_SERIAL_OBJ:-$XNU_KERNEL_OBJ_OUT/pexpert_arm_pe_serial.o}
     # `osfmk/console/video_console.c`, named by experiment-204's `stub_hit=initialize_screen`.
     # 27079 bytes of text, 4376 of data, 1360 of `.bss` and 31 references - the largest step since
     # `pmap.o`, and the object the goal statement puts out of scope ("ignore graphics for now").
@@ -2213,7 +2244,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # which is the same symbol experiment 204 predicted and did not get, one call frame deeper and
     # by a different route. Which of the two routes is worth being explicit about: if the stop is
     # `switch_to_serial_console`, XNU has decided this device has no framebuffer.
-    OSFMK_CONSOLE_VIDEO_OBJ=${STAGE90_ENTRY_VIDEO_CONSOLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_console_video_console.o}
+    OSFMK_CONSOLE_VIDEO_OBJ=${STAGE90_ENTRY_VIDEO_CONSOLE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_console_video_console.o}
     # `osfmk/console/serial_general.c`, named by experiment-205's `stub_hit=switch_to_serial_console`.
     # 824 bytes of text and 14 references - but `switch_to_serial_console` itself is three statements
     # and calls nothing at all:
@@ -2237,7 +2268,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `PE_init_platform`'s `pe_arm_init_interrupts`, which `arm_init.c` calls two calls later and
     # which that run never reached. `pe_arm_map_interrupt_controller` could not have got there in any
     # case: the tree has no `interrupt-controller`/`master` node on purpose.
-    OSFMK_CONSOLE_SERIAL_GENERAL_OBJ=${STAGE90_ENTRY_SERIAL_GENERAL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_console_serial_general.o}
+    OSFMK_CONSOLE_SERIAL_GENERAL_OBJ=${STAGE90_ENTRY_SERIAL_GENERAL_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_console_serial_general.o}
     # `osfmk/arm/io_map.c`, named by experiment-206's `stub_hit=io_map`. 360 bytes of text, no data
     # and no `.bss`, seven references, two definitions (`io_map` and `io_map_spec`). Five of the
     # seven are already real here - `panic` (exp-201), `pmap_map` / `pmap_map_bd` /
@@ -2269,7 +2300,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # source's, is `bcopy_phys` (`osfmk/arm/loose_ends.c`, not linked): two real `bcopy`s into the
     # new mapping and three real `ml_static_vtop` calls come first, and `CleanPoC_DcacheRegion` and
     # the `bcopy(running_signature, IOS_STATE, 8)` come after it.
-    OSFMK_ARM_IO_MAP_OBJ=${STAGE90_ENTRY_IO_MAP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_io_map.o}
+    OSFMK_ARM_IO_MAP_OBJ=${STAGE90_ENTRY_IO_MAP_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_io_map.o}
     # `osfmk/arm/loose_ends.c`, named by experiment-207's `stub_hit=bcopy_phys`. 3671 bytes of text
     # and one function of it is the step: `bcopy_phys` at offset 0. The rest is a grab bag this image
     # gets for free - `bzero_phys`, the `ml_phys_read*`/`ml_phys_write*` family, `ml_probe_read`,
@@ -2290,7 +2321,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # should be the run that finishes `cpu_machine_idle_init`'s exception-vector work. Its last call
     # is `clean_dcache`, which is `osfmk/arm/caches.o` (`osfmk_arm_caches.o`) - in the link *closure*
     # but not in this link, which are different things and this comment blurred them once.
-    OSFMK_ARM_LOOSE_ENDS_OBJ=${STAGE90_ENTRY_LOOSE_ENDS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_loose_ends.o}
+    OSFMK_ARM_LOOSE_ENDS_OBJ=${STAGE90_ENTRY_LOOSE_ENDS_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_loose_ends.o}
     # `osfmk/arm/caches_asm.s`, named by experiment-208's `stub_hit=CleanPoC_DcacheRegion`. 596 bytes
     # of text, ten references, and nineteen globals - the whole cache-maintenance surface:
     # `CleanPoC_Dcache*`, `CleanPoU_Dcache*`, `FlushPoC_Dcache*`, `FlushPoU_Dcache`, `clean_dcache64`,
@@ -2321,7 +2352,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # the *last* call of `cpu_machine_idle_init` (`cpu.c:594`), so this is the step that takes that
     # function to its final call - and the step after it is the one where it returns and `arm_init`
     # reaches `PE_init_platform(TRUE, &BootCpuData)`.
-    OSFMK_ARM_CACHES_ASM_OBJ=${STAGE90_ENTRY_CACHES_ASM_OBJ:-$REPO_ROOT/out/xnu_asm_obj/caches_asm.o}
+    OSFMK_ARM_CACHES_ASM_OBJ=${STAGE90_ENTRY_CACHES_ASM_OBJ:-$XNU_ASM_OBJ_OUT/caches_asm.o}
     # `osfmk/arm/caches.c`, named by experiment-209's `stub_hit=clean_dcache` - which is the *last*
     # call of `cpu_machine_idle_init` (`cpu.c:594`), so this is the object that lets that function
     # return. 2744 bytes of text, no data, no `.bss`, 26 references, 17 definitions: the
@@ -2352,7 +2383,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `interrupt-controller`/`master` node, and `pe_arm_init_debug` returns at its
     # `cpu-debug-interface` lookup. So the run after this one should be the first where **Phase 3's
     # `pe_arm_init_interrupts` is entered by XNU itself**.
-    OSFMK_ARM_CACHES_OBJ=${STAGE90_ENTRY_CACHES_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_caches.o}
+    OSFMK_ARM_CACHES_OBJ=${STAGE90_ENTRY_CACHES_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_caches.o}
     # `osfmk/prng/random.c`, named by experiment-210's `stub_hit=early_random`. 2488 bytes of text,
     # 488 of data, 20 of `.bss`, 26 references.
     #
@@ -2427,7 +2458,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `PE_get_random_seed` returned 64 and `entropy_readall` ran, which is only possible if the seed
     # was there. The finding behind it is a gap in the *simulated handoff contract*, the third of
     # its kind after `state` on the cpu nodes (experiment 193) and `device_type = "timer"`.
-    OSFMK_PRNG_RANDOM_OBJ=${STAGE90_ENTRY_PRNG_RANDOM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_random.o}
+    OSFMK_PRNG_RANDOM_OBJ=${STAGE90_ENTRY_PRNG_RANDOM_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_prng_random.o}
     # `osfmk/corecrypto/ccdbrg/src/ccdrbg_nisthmac.c`, named by experiment-211's
     # `stub_hit=ccdrbg_factory_nisthmac`. 1620 bytes of text, 24 of data, no `.bss`, 9 references,
     # 7 definitions.
@@ -2473,7 +2504,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # names this one. So linking this object is not by itself enough for a working DRBG; the step
     # that links `osfmk_corecrypto_ccsha1_src_ccsha1_eay.o` is the one that gives `ccsha1_eay_di` a
     # value, and until then every field read through it is zero.
-    OSFMK_CCDRBG_NISTHMAC_OBJ=${STAGE90_ENTRY_CCDRBG_NISTHMAC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_ccdbrg_src_ccdrbg_nisthmac.o}
+    OSFMK_CCDRBG_NISTHMAC_OBJ=${STAGE90_ENTRY_CCDRBG_NISTHMAC_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_corecrypto_ccdbrg_src_ccdrbg_nisthmac.o}
     # `osfmk/corecrypto/cchmac/src/cchmac_init.c`, named by experiment-212's `stub_hit=cchmac_init`.
     # 444 bytes of text, no data, no `.bss`, 4 references, 1 definition.
     #
@@ -2519,7 +2550,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # than reached, which is what experiment 212's doc said it should be, and it ends the stretch of
     # runs that pass on empty parameters: three fields of the same stand-in have now been observed to
     # be zero, one per experiment (`output_size`, `initial_state`, `compress`).
-    OSFMK_CCHMAC_INIT_OBJ=${STAGE90_ENTRY_CCHMAC_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_cchmac_src_cchmac_init.o}
+    OSFMK_CCHMAC_INIT_OBJ=${STAGE90_ENTRY_CCHMAC_INIT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_corecrypto_cchmac_src_cchmac_init.o}
     # `osfmk/corecrypto/ccsha1/src/ccsha1_eay.c`, **not** named by a stub hit - experiment 213's run
     # produced none, so this step is the first whose frontier is a *value* rather than a symbol. It is
     # the one experiment 212's doc said should be taken deliberately: 4932 bytes of text, defining
@@ -2556,7 +2587,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # nothing has linked it. `ccdigest_final_64be` and `ccsha1_initial_state` arrive as new stubs in
     # this step and are *not* reached first - the first is `di->final`, which `cchmac_init` does not
     # use, and the second is only ever a `memcpy` source.
-    OSFMK_CCSHA1_EAY_OBJ=${STAGE90_ENTRY_CCSHA1_EAY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_ccsha1_src_ccsha1_eay.o}
+    OSFMK_CCSHA1_EAY_OBJ=${STAGE90_ENTRY_CCSHA1_EAY_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_corecrypto_ccsha1_src_ccsha1_eay.o}
     # `osfmk/corecrypto/cchmac/src/cchmac_update.c`, named by experiment-214's
     # `stub_hit=cchmac_update`. **Four bytes of text**, the smallest object this link will ever carry,
     # and its whole content is one instruction:
@@ -2581,7 +2612,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # So the step after next should be the first in which a `ccdigest_*` helper runs to completion on
     # the device, and its prediction is to be made from that disassembly rather than from the
     # relocation list - which is the rule experiment 213 paid for.
-    OSFMK_CCHMAC_UPDATE_OBJ=${STAGE90_ENTRY_CCHMAC_UPDATE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_cchmac_src_cchmac_update.o}
+    OSFMK_CCHMAC_UPDATE_OBJ=${STAGE90_ENTRY_CCHMAC_UPDATE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_corecrypto_cchmac_src_cchmac_update.o}
     # `osfmk/corecrypto/ccdigest/src/ccdigest_update.c`, named by experiment-215's
     # `stub_hit=ccdigest_update` - which is also where the `b` of the step above landed. **280 bytes
     # of text, two indirect calls, one definition, one reference** (`memcpy`).
@@ -2624,7 +2655,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `cchmac_final` is 120 bytes and references `memcpy`; it is the last of the four `cchmac_*`
     # functions. After it, `di->final` is `ccdigest_final_64be` - which `nm` has reported as a function
     # stub since experiment 214 - and that is the prediction after this one, subject to the same rule.
-    OSFMK_CCDIGEST_UPDATE_OBJ=${STAGE90_ENTRY_CCDIGEST_UPDATE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_ccdigest_src_ccdigest_update.o}
+    OSFMK_CCDIGEST_UPDATE_OBJ=${STAGE90_ENTRY_CCDIGEST_UPDATE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_corecrypto_ccdigest_src_ccdigest_update.o}
     # `osfmk/corecrypto/cchmac/src/cchmac_final.c`, named by experiment-216's `stub_hit=cchmac_final`.
     # **120 bytes of text, no data, no `.bss`, 1 definition, 1 reference (`memcpy`), 2 indirect calls**
     # - 0x24, and a tail `bx r3` at 0x74 that is unreachable while the first one is a stub.
@@ -2659,7 +2690,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # symbols**, two indirect calls both through `di->compress`), the object that finally makes
     # `di->final` real; its stop will be past itself rather than inside itself, so its prediction will
     # come from `hmac_dbrg_update` again.
-    OSFMK_CCHMAC_FINAL_OBJ=${STAGE90_ENTRY_CCHMAC_FINAL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_cchmac_src_cchmac_final.o}
+    OSFMK_CCHMAC_FINAL_OBJ=${STAGE90_ENTRY_CCHMAC_FINAL_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_corecrypto_cchmac_src_cchmac_final.o}
     # `osfmk/corecrypto/ccsha1/src/ccdigest_final_64be.c`, named by experiment-217's
     # `stub_hit=ccdigest_final_64be` - the object that finally makes `di->final` real. **500 bytes of
     # text, no data, no `.bss`, 1 definition, 0 undefined symbols, 2 indirect calls** (0xb4 and 0x19c),
@@ -2702,7 +2733,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # The qualifier from experiment 214 still stands: the state it finalises started from
     # `ccsha1_initial_state`, still a zeroed stub, so the *machinery* completes and the *value* is not
     # SHA-1's.
-    OSFMK_CCDIGEST_FINAL_64BE_OBJ=${STAGE90_ENTRY_CCDIGEST_FINAL_64BE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_ccsha1_src_ccdigest_final_64be.o}
+    OSFMK_CCDIGEST_FINAL_64BE_OBJ=${STAGE90_ENTRY_CCDIGEST_FINAL_64BE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_corecrypto_ccsha1_src_ccdigest_final_64be.o}
     # `osfmk/corecrypto/cchmac/src/cchmac.c`, named by experiment-218's `stub_hit=cchmac`. **128
     # bytes of text, no data, no `.bss`, 1 definition, 4 references** - `cchmac_init`, `cchmac_update`
     # and `cchmac_final`, all three real as of experiment 217, and `cc_clear`, still a 12-byte stub.
@@ -2733,7 +2764,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # interesting prediction in the sequence and the most certain. The step after it will be
     # `osfmk_corecrypto_cc_src_cc_clear.o`, the first object in this stretch that is not in the
     # `cchmac`/`ccdigest` family.
-    OSFMK_CCHMAC_OBJ=${STAGE90_ENTRY_CCHMAC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_cchmac_src_cchmac.o}
+    OSFMK_CCHMAC_OBJ=${STAGE90_ENTRY_CCHMAC_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_corecrypto_cchmac_src_cchmac.o}
     # `osfmk/corecrypto/cc/src/cc_clear.c`, named by experiment-219's `stub_hit=cc_clear`. **20 bytes
     # of text, no data, no `.bss`, 1 definition, 1 reference**, and the whole of it is an argument
     # shuffle into a tail call:
@@ -2767,7 +2798,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `cc_clear` real, control returns to `cchmac` at 0x78, and `hmac_dbrg_update` continues at 0x4fc
     # with two further `cchmac` invocations (0x5a8 and 0x5cc) *before* `cc_cmp_safe` - and each of
     # those calls `cc_clear` again and therefore `memset_s` again.
-    OSFMK_CC_CLEAR_OBJ=${STAGE90_ENTRY_CC_CLEAR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_cc_src_cc_clear.o}
+    OSFMK_CC_CLEAR_OBJ=${STAGE90_ENTRY_CC_CLEAR_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_corecrypto_cc_src_cc_clear.o}
     # `osfmk/kern/memset_s.c`, named by experiment-220's `stub_hit=memset_s` - reached not from the
     # caller's next missing call but from inside `cchmac`, whose closing wipe is `cc_clear` and whose
     # `cc_clear` is a tail call to this. **80 bytes of text, no data, no `.bss`, 1 definition, 1
@@ -2807,7 +2838,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #      scalar path runs and no NEON instruction executes - but a later call with 32 or more would
     #      be the first NEON code in this project's history to run, and whether CPACR/FPEXC permit it
     #      in this CPU state is a question nothing has asked yet.
-    OSFMK_MEMSET_S_OBJ=${STAGE90_ENTRY_MEMSET_S_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_memset_s.o}
+    OSFMK_MEMSET_S_OBJ=${STAGE90_ENTRY_MEMSET_S_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_memset_s.o}
     # `osfmk/corecrypto/cc/src/cc_cmp_safe.c`, named by experiment-221's `stub_hit=cc_cmp_safe`.
     # **376 bytes of text, no data, no `.bss`, 1 definition, 0 undefined symbols** - so linking it
     # leaves *nothing* missing anywhere in the DRBG, and this is the last object of the corecrypto
@@ -2851,7 +2882,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `stub_hit=` would mean the DRBG's own health check fired - a finding, not a defect - and a run
     # stopping at some *other* symbol in the DRBG would mean the reading above is wrong, with the
     # symbol naming where.
-    OSFMK_CC_CMP_SAFE_OBJ=${STAGE90_ENTRY_CC_CMP_SAFE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_cc_src_cc_cmp_safe.o}
+    OSFMK_CC_CMP_SAFE_OBJ=${STAGE90_ENTRY_CC_CMP_SAFE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_corecrypto_cc_src_cc_cmp_safe.o}
     # `bsd/dev/unix_startup.c`, named by experiment-222's `stub_hit=bsd_scale_setup` - the first
     # object in this sequence that is not XNU's ARM or corecrypto layer, and the first that is reached
     # from `kernel_bootstrap` rather than from `arm_init`.
@@ -2885,7 +2916,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # The build reports 300 -> 304 function stubs and 61 -> 67 storage stubs, and the entry image's
     # file size moves for the first time since experiment 214. The undefined count goes **up**, which
     # is expected and is not a regression.
-    OSFMK_BSD_DEV_UNIX_STARTUP_OBJ=${STAGE90_ENTRY_BSD_DEV_UNIX_STARTUP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_dev_unix_startup.o}
+    OSFMK_BSD_DEV_UNIX_STARTUP_OBJ=${STAGE90_ENTRY_BSD_DEV_UNIX_STARTUP_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_dev_unix_startup.o}
     # `bsd/kern/bsd_init.c`, named by experiment-223's `stub_hit=bsd_exec_setup`. **3653 bytes of text,
     # 80 of data, 2720 of `.bss`** - the largest single object this link has taken on - and the first
     # step whose frontier is a *group*: it defines `bsd_exec_setup` (the symbol that stopped the last
@@ -2920,7 +2951,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # had been constant for nine steps, moves again. The headroom below `topOfKernelData` is large
     # (1.6 MB), so there is room; but from here the image's size and `.bss` bounds are numbers to read
     # in every table rather than to assume, because a single step can now move them.
-    BSD_KERN_BSD_INIT_OBJ=${STAGE90_ENTRY_BSD_KERN_BSD_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_bsd_init.o}
+    BSD_KERN_BSD_INIT_OBJ=${STAGE90_ENTRY_BSD_KERN_BSD_INIT_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_bsd_init.o}
     # `bsd/kern/kdebug.c`, named by experiment-224's `stub_hit=kernel_debug_string_early`. **21729 bytes
     # of text, 312 of data, 136 of `.bss`, 112 definitions, 104 references** - much the largest object
     # this link has taken on, and the only object in the build that defines the symbol.
@@ -2972,7 +3003,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # a duplicate definition. Retiring it is why the *empty-object* build has 472 undefined rather than
     # 471, and why 9 symbols resolve instead of 8. See `entry_stubs.c` for why the replacement is
     # equivalent and why that is worth stating.
-    BSD_KERN_KDEBUG_OBJ=${STAGE90_ENTRY_BSD_KERN_KDEBUG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kdebug.o}
+    BSD_KERN_KDEBUG_OBJ=${STAGE90_ENTRY_BSD_KERN_KDEBUG_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kdebug.o}
     # `osfmk/vm/vm_init.c`, named by experiment-225's `stub_hit=vm_mem_bootstrap`. **994 bytes of text,
     # no data, 24 of `.bss`, 29 definitions, 24 references.** It defines `vm_mem_bootstrap` (280 bytes)
     # and `vm_mem_init`, plus `vm_kernel_ready`, `kmem_ready`, `kmem_alloc_ready`, `kmapoff_pgcnt`,
@@ -3013,7 +3044,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # exercises the same grant, including the alignment requirements, which are met by construction
     # (the `:128` load is the 16-byte-aligned literal table at 0x00218dc0; the `:64` store base is
     # 0x0026c038 + r7 stepping by 64).
-    OSFMK_VM_VM_INIT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_init.o}
+    OSFMK_VM_VM_INIT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_INIT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_init.o}
     # `osfmk/vm/vm_compressor.c`, named by experiment-226's `stub_hit=vm_compressor_init_locks`.
     # **23260 bytes of text, 144 of data, 16248 of `.bss`, 206 definitions, 100 references** - the
     # largest object this link has taken on, and almost all of it arrived unused the last time a step
@@ -3034,7 +3065,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `vm_compressor_init_locks` itself: 88 bytes, `lck_grp_attr_setdefault`, `lck_grp_init`,
     # `lck_attr_setdefault` and a tail `lck_rw_init` - every one of them already real in the image.
     # The build measured 2 resolved, 36 added, 519 -> 553 undefined.
-    OSFMK_VM_VM_COMPRESSOR_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_COMPRESSOR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_compressor.o}
+    OSFMK_VM_VM_COMPRESSOR_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_COMPRESSOR_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_compressor.o}
     # `osfmk/vm/vm_map.c`, named by experiment-227's `stub_hit=vm_map_steal_memory`. **76439 bytes of
     # text, 52 of data, 416 of `.bss`, 202 definitions, 162 references** - nearly three times the
     # largest object linked so far. `vm_map_steal_memory` itself is 120 bytes and its three calls are
@@ -3079,7 +3110,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # image references it except `bsd_kern_uipc_mbuf.o`, which is not linked - so the step after this
     # one is that object, and it is a cheap one: the object defines 27 symbols and has no undefined
     # reference at all.
-    OSFMK_VM_VM_MAP_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map.o}
+    OSFMK_VM_VM_MAP_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_map.o}
     # `libkern/gen/OSAtomicOperations.c`, named by experiment-228's `stub_hit=OSCompareAndSwap16`.
     # **1104 bytes of text, no data, no `.bss`, 27 definitions, zero references** - the smallest
     # object linked since the crypto ones, and the first with nothing undefined. Every symbol it
@@ -3099,7 +3130,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #
     # Note what the object is *for* here: only `OSCompareAndSwap16` is on the path the run took. The
     # other nine came along because the image's undefined set is a set, not a path.
-    LIBKERN_GEN_OSATOMICOPERATIONS_OBJ=${STAGE90_ENTRY_LIBKERN_GEN_OSATOMICOPERATIONS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_gen_OSAtomicOperations.o}
+    LIBKERN_GEN_OSATOMICOPERATIONS_OBJ=${STAGE90_ENTRY_LIBKERN_GEN_OSATOMICOPERATIONS_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_gen_OSAtomicOperations.o}
     # `osfmk/vm/vm_resident.c`, by way of `memorystatus_pages_update` - named by experiment-229's
     # `stub_hit=memorystatus_pages_update`. That symbol is `bsd/kern/kern_memorystatus.c`, but the
     # *call* that reached it is not in pmap.c: `pmap_startup` is defined in `osfmk/vm/vm_resident.c`
@@ -3123,7 +3154,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `zone_bootstrap` - a stub, and the next call in the caller after `vm_page_bootstrap`. This is
     # the same string experiment 228 predicted and missed; it is a different frontier with a much
     # shorter argument this time, and the argument is the caller's own call list rather than a walk.
-    BSD_KERN_KERN_MEMORYSTATUS_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_MEMORYSTATUS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_memorystatus.o}
+    BSD_KERN_KERN_MEMORYSTATUS_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_MEMORYSTATUS_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_memorystatus.o}
     # **Experiment 230's prediction was `zone_bootstrap` and it was wrong - the fourth consecutive
     # miss, and this one is instructive because the right answer was one question away.**
     # `memorystatus_pages_update` is the first thing `bsd/kern/kern_memorystatus.c` runs, and its own
@@ -3143,7 +3174,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # **The prediction is `stub_hit=<whatever --root vm_pressure_response says after this object is
     # linked>`**, taken before the device is touched, with the plain walk from `kernel_bootstrap`
     # recorded beside it as the lower bound it is.
-    OSFMK_VM_VM_PAGEOUT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_PAGEOUT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_pageout.o}
+    OSFMK_VM_VM_PAGEOUT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_PAGEOUT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_pageout.o}
     # **Experiment 231's prediction was `zone_bootstrap` and it held** - the first prediction to hold
     # since experiment 227, after four consecutive misses, and the first in this sequence that was
     # not made by walking the call graph at all. It was made by reading two branches out of the
@@ -3167,7 +3198,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `.rodata.str1.1`, 128 definitions, 72 references**. The `.bss` is the largest single
     # contribution this link has taken - the zone table - and it is zeroed by the payload rather than
     # stored, so it costs image bytes and not file bytes.
-    OSFMK_KERN_ZALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_ZALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_zalloc.o}
+    OSFMK_KERN_ZALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_ZALLOC_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_zalloc.o}
     # **Experiment 232's prediction was `thread_call_setup` and it held** - two in a row, and the
     # first step in which the plain walk from `kernel_bootstrap` and the frontier-rooted walk gave the
     # *same* answer. They converged because the straight-line path is now real: `vm_mem_bootstrap`
@@ -3187,7 +3218,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # **The prediction is taken from the tool after this object is linked** - rooted at
     # `thread_call_setup` and from `kernel_bootstrap` both, as experiment 232 was, and recorded here
     # before the device is touched.
-    OSFMK_KERN_THREAD_CALL_OBJ=${STAGE90_ENTRY_OSFMK_KERN_THREAD_CALL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_thread_call.o}
+    OSFMK_KERN_THREAD_CALL_OBJ=${STAGE90_ENTRY_OSFMK_KERN_THREAD_CALL_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_thread_call.o}
     # **Experiment 233's prediction was `vm_object_bootstrap` and it held** - three in a row. It is
     # also the first stop since experiment 227 that is not inside one of four adjacent functions
     # (`vm_page_bootstrap`, `pmap_startup`, `memorystatus_pages_update`, `zone_bootstrap`): this one
@@ -3216,7 +3247,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # rather than after. **The prediction is `stub_hit=kmem_alloc_kobject`**, and the plain walk from
     # `kernel_bootstrap` agrees with it, which the plain walk could not do for either of the last two
     # steps.
-    OSFMK_VM_VM_OBJECT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_OBJECT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_object.o}
+    OSFMK_VM_VM_OBJECT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_OBJECT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_object.o}
     # **Experiment 234's prediction was `kmem_alloc_kobject` and it was wrong.** The device named
     # `snprintf`. Both are calls in `zinit`, 228 bytes apart, and what separates them is a runtime
     # flag no walk can read:
@@ -3540,7 +3571,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # unchanged. `__entry_image_end` and therefore `getlastaddr()`/`end_kern` do not move: the header
     # grew, so `__DATA`'s front moved up 64 bytes and it is 64 bytes shorter, with its *end* where it
     # was - which is why the payload needed no rebuild beyond reading the new `.bin`.
-    BSD_KERN_SUBR_PRF_OBJ=${STAGE90_ENTRY_BSD_KERN_SUBR_PRF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_subr_prf.o}
+    BSD_KERN_SUBR_PRF_OBJ=${STAGE90_ENTRY_BSD_KERN_SUBR_PRF_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_subr_prf.o}
     # `osfmk/vm/vm_kern.c` -> **9132 bytes of text, 674 of `.rodata.str1.1`, 8 of `.bss`, no
     # `.data`, 26 global definitions, 79 references**. The object 243's stop named: `kmem_init` is
     # 0x1ac bytes of it at offset 0x1e54, and the three that follow it in the boot are all here too -
@@ -3623,7 +3654,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # 14 references) - already built. It is a dispatcher: it calls `vm_map_store_init_ll` and
     # `vm_map_store_init_rb`, which are in `osfmk_vm_vm_map_store_ll.o` (776) and
     # `osfmk_vm_vm_map_store_rb.o` (5808), both built as well.
-    OSFMK_VM_VM_KERN_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_KERN_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_kern.o}
+    OSFMK_VM_VM_KERN_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_KERN_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_kern.o}
     # `osfmk/vm/vm_map_store.c` -> **908 bytes of text, 41 of `.rodata.str1.1`, 11 definitions, 14
     # references, no storage at all**. The object 244's stop named: `vm_map_store_init` is the
     # definition `vm_map_create` calls, and the answer to it is this file rather than a probe.
@@ -3662,7 +3693,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # already defined** by objects the image links. So 246's stop will be inside one of the eight
     # definitions or deeper, which is a prediction for its own disassembly rather than for an object
     # list.
-    OSFMK_VM_VM_MAP_STORE_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map_store.o}
+    OSFMK_VM_VM_MAP_STORE_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_map_store.o}
     # `osfmk/vm/vm_map_store_ll.c` -> **776 bytes of text, 8 definitions, and exactly two references,
     # both already defined**: `_consume_printf_args` (`bsd_kern_subr_prf.o`, linked since 235) and
     # `OSCompareAndSwapPtr` (`libkern_gen_OSAtomicOperations.o`, linked since 228). The object 245's
@@ -3713,7 +3744,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # Next: `vm_map_store_init_rb` is in `osfmk_vm_vm_map_store_rb.o` - 5808 bytes of text, 24
     # definitions, 4 references (`panic`, `vm_map_holes_zone`, `zalloc`, `zfree`) that are **all four
     # already defined**, so that step may also have nothing missing underneath it.
-    OSFMK_VM_VM_MAP_STORE_LL_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_LL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map_store_ll.o}
+    OSFMK_VM_VM_MAP_STORE_LL_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_LL_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_map_store_ll.o}
     # `osfmk/vm/vm_map_store_rb.c` -> **5808 bytes of text, 24 global definitions, 4 references**
     # (`panic`, `vm_map_holes_zone`, `zalloc`, `zfree`) - **all four already defined**, so this is the
     # second step in a row whose object has nothing missing underneath it. It is the largest object
@@ -3763,7 +3794,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # unlike the last three steps it brings a great deal with it (`vm_map_copy*`, `vm_map_protect`,
     # `vm_map_remove`, `vm_map_wire_kernel`, the `upl_*` family, and new `ipc_port_*` and
     # `memory_object_*` stubs).
-    OSFMK_VM_VM_MAP_STORE_RB_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_RB_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map_store_rb.o}
+    OSFMK_VM_VM_MAP_STORE_RB_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_RB_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_map_store_rb.o}
     # `osfmk/vm/vm_user.c` -> **16196 bytes of text, 25856 bytes of file, 91 references** - the object
     # `vm_allocate_kernel` is in, and the largest step since this sequence began in earnest. Unlike
     # 245, 246 and 247 it brings a great deal with it: `vm_map_copy_discard`, `vm_map_copy_extract`,
@@ -3804,7 +3835,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # (`kext_alloc_init`, `kext_alloc`, `kext_free`, `g_kext_map`) and four references, of which
     # `mach_vm_allocate_kernel` and `mach_vm_deallocate` are still stubs and `mach_vm_allocate_kernel`
     # is in the object this step links.
-    OSFMK_VM_VM_USER_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_USER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_user.o}
+    OSFMK_VM_VM_USER_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_USER_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_user.o}
     # `osfmk/kern/kext_alloc.c` -> **344 bytes of text, four definitions, four references**. The
     # object 248's stop named: `kext_alloc_init` is the function `vm_mem_bootstrap+0x1a4` calls, and
     # it is small enough that its whole closure can be read off the disassembly before the run.
@@ -3881,7 +3912,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # largest object in this sequence and twice 248's `vm_user.o`, so its closure cannot be read in
     # full from the disassembly the way 244-250 were; the prediction for 251 is about `vm_fault_init`'s
     # own closure rather than the fault path whose name the object carries.
-    OSFMK_KERN_KALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kalloc.o}
+    OSFMK_KERN_KALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KALLOC_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_kalloc.o}
     # 251: `osfmk_vm_vm_fault.o` - 30392 bytes of text (31667-byte object), 156 references, 58 global
     # definitions: the fault path (`vm_fault`, `vm_fault_page`, `vm_fault_enter`, `vm_fault_wire`/
     # `_unwire`, `vm_fault_copy`, `vm_pre_fault`, `kdp_lightweight_fault`, the `vm_page_validate_cs`/
@@ -3925,7 +3956,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # Next: `memory_manager_default_init` is in `osfmk_vm_memory_object.o` (9508 bytes of text, 58
     # references, 58 definitions) - and that same object also defines `memory_object_control_bootstrap`,
     # the *next* stub in `vm_mem_bootstrap` (`+0x254`), so one object may close two stops.
-    OSFMK_VM_VM_FAULT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_FAULT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_fault.o}
+    OSFMK_VM_VM_FAULT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_FAULT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_fault.o}
     # 252: `osfmk_vm_memory_object.o` - 9508 bytes of text, 58 references, 58 definitions: the
     # memory-object and memory-object-control layer, and (because the frontier asked for it) **both** of
     # the next two stops in `vm_mem_bootstrap`, `memory_manager_default_init` (`+0x244`) and
@@ -3967,7 +3998,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #
     # Next: `device_pager_bootstrap` is in `osfmk_vm_device_vm.o` - 1536 bytes of text, 28 references, 22
     # definitions - small enough to read in full. `vm_paging_map_init` (`+0x274`) is already real.
-    OSFMK_VM_MEMORY_OBJECT_OBJ=${STAGE90_ENTRY_OSFMK_VM_MEMORY_OBJECT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_memory_object.o}
+    OSFMK_VM_MEMORY_OBJECT_OBJ=${STAGE90_ENTRY_OSFMK_VM_MEMORY_OBJECT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_memory_object.o}
     # 253: `osfmk_vm_device_vm.o` - 1536 bytes of text, 28 references, 22 definitions: the device-pager
     # layer (`device_pager_init`/`_setup`/`_lookup`/`_map`/`_reference`/`_deallocate`/`_terminate`, the
     # `_data_*` family, `_populate_object`, `_synchronize`, `device_pager_ops` and three lock attrs).
@@ -4008,7 +4039,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # 251's fifteen boundaries (`cs_enforcement`, `cs_invalid_page`, `cs_validate_range`,
     # `vnode_pager_cs_check_validation_bitmap`, `panic_on_cs_killed`) are finally wanted from. Past it
     # in `kernel_bootstrap`: `vm_mem_init` (real), `oslog_init` (real), `telemetry_init` (STUB).
-    OSFMK_VM_DEVICE_VM_OBJ=${STAGE90_ENTRY_OSFMK_VM_DEVICE_VM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_device_vm.o}
+    OSFMK_VM_DEVICE_VM_OBJ=${STAGE90_ENTRY_OSFMK_VM_DEVICE_VM_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_device_vm.o}
     # 254: `bsd_kern_kern_cs.o` - 2120 bytes of text, 21 references - the code-signing subsystem
     # (`cs_init`, `cs_enforcement`, `cs_invalid_page`, `cs_debug`, `panic_on_cs_killed`, the trust-cache
     # machinery). Resolved 5, added 13 - and the 13 arrive together, which is what entering `bsd/kern`
@@ -4055,7 +4086,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #
     # Next: `ledger_credit` is in `osfmk_kern_ledger.o` - 8324 bytes of text, 35 references - a
     # *runtime* object, which fits where the frontier now is. Read the WHOLE callwalk output for 255.
-    BSD_KERN_KERN_CS_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_CS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_cs.o}
+    BSD_KERN_KERN_CS_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_CS_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_cs.o}
     # 255: `osfmk_kern_ledger.o` - 8324 bytes of text, 35 references - the ledger subsystem.
     # Resolved **19**, added 1 (`thread_block_reason`):
     #   resolved ledger_credit ledger_debit ledger_dereference ledger_disable_callback ledger_entry_add
@@ -4095,7 +4126,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # Image moved: 802176 (+16528), `.bss` 0x800c35c0-0x800f28c8, layout args 983040 -> 999424,
     # headroom **1103672** bytes, payload text 1294394. `persistent_write_attempted=0x00000000` in all
     # 25 contracts, `failure_mask=0x00000000` in all 87.
-    OSFMK_KERN_LEDGER_OBJ=${STAGE90_ENTRY_OSFMK_KERN_LEDGER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ledger.o}
+    OSFMK_KERN_LEDGER_OBJ=${STAGE90_ENTRY_OSFMK_KERN_LEDGER_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_ledger.o}
     # 257: the firehose, **ported rather than linked**. 254 and 255 stopped at `__firehose_buffer_create`
     # and 256 measured that no object in the tree defines it (`libkern/firehose/Makefile` has
     # `KERNELFILES =` empty). The implementation is Apple's own, from
@@ -4176,7 +4207,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `xnu_entry_stub_caller=0x8000dbdc`** - the stub hands `entry_stub_hit` its own `lr`, so
     # `caller - 4` = `0x8000dbd8` = **`kernel_bootstrap+0x198`**: the first stop past the firehose, and
     # the first inside `kernel_bootstrap`'s own body since 253's `cs_init`.
-    LIBKERN_OS_LOG_OBJ=${STAGE90_ENTRY_LIBKERN_OS_LOG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_os_log.o}
+    LIBKERN_OS_LOG_OBJ=${STAGE90_ENTRY_LIBKERN_OS_LOG_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_os_log.o}
     FIREHOSE_CONFIG_OBJ=${STAGE90_ENTRY_FIREHOSE_CONFIG_OBJ:-$REPO_ROOT/out/xnu_firehose_obj/firehose_kernel_config.o}
     # 259: the stop 258 predicted, linked. `telemetry_init` is `osfmk/kern/telemetry.c:120`, the
     # object is `out/xnu_kernel_obj/osfmk_kern_telemetry.o` (5482 bytes of text, 28 of data, 744 of
@@ -4214,7 +4245,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # headroom 1086584; payload text 1294466 -> 1310874. `kv_written == kv_in_dram == 0x39`, two
     # bytes shorter than 258's 0x3b because `telemetry_init` is two characters shorter than
     # `console_init` and the stub name is recorded verbatim.
-    OSFMK_KERN_TELEMETRY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_TELEMETRY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_telemetry.o}
+    OSFMK_KERN_TELEMETRY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_TELEMETRY_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_telemetry.o}
     # 260: `console_init`, the first target in `kernel_bootstrap`'s line that is not an allocator or
     # a lock group. It is `osfmk/console/serial_console.c:166` - note the directory: this is
     # `osfmk/console/`, which the manifest has listed all along
@@ -4247,7 +4278,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `topOfKernelData` and the headroom are all **unchanged** for the first time since 257.
     # `kv_written == kv_in_dram == 0x3b`, two bytes above 259's 0x39 - `stackshot_init` is two
     # characters longer than `console_init`, recorded verbatim as always.
-    OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ=${STAGE90_ENTRY_OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_console_serial_console.o}
+    OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ=${STAGE90_ENTRY_OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_console_serial_console.o}
     # 261: `stackshot_init`, and the first step in a while that is not cheap. The symbol is
     # `osfmk/kern/kern_stackshot.c` - **`kern_stackshot.o`, not `stackshot.o`**: `bsd/kern/stackshot.c`
     # (manifest line 79) is the syscall half, and the initialiser lives in the osfmk half (manifest
@@ -4283,7 +4314,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # bss end 0x800facc8, args +1032192, headroom 1069880; payload text 1327298 (+16384).
     # `kv_written == kv_in_dram == 0x37`, four below 260's 0x3b - `sched_init` is four characters
     # shorter than `stackshot_init`, recorded verbatim as always.
-    OSFMK_KERN_KERN_STACKSHOT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KERN_STACKSHOT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kern_stackshot.o}
+    OSFMK_KERN_KERN_STACKSHOT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KERN_STACKSHOT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_kern_stackshot.o}
     # 262: the scheduler, and **two objects rather than one** - the first time this frontier has linked
     # more than one, and the reason is a real one rather than convenience.
     #
@@ -4352,8 +4383,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `thread_block`, `thread_setrun`, `sched_tick`, `assert_wait`, `idle_thread`, `sched_startup` and
     # the rest - which had been stand-ins since this image first referenced them.
     # `kv_written == kv_in_dram == 0x3d`, six above 261's 0x37.
-    OSFMK_KERN_SCHED_PRIM_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SCHED_PRIM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sched_prim.o}
-    OSFMK_KERN_SCHED_MULTIQ_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SCHED_MULTIQ_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sched_multiq.o}
+    OSFMK_KERN_SCHED_PRIM_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SCHED_PRIM_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_sched_prim.o}
+    OSFMK_KERN_SCHED_MULTIQ_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SCHED_MULTIQ_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_sched_multiq.o}
     # 263: `ltable_bootstrap`, and the cheap shape again - 262's `osfmk_kern_ltable.o` measure:
     # `osfmk/kern/ltable.c` (manifest:567), 5175 bytes of text, 272 of bss, **19 references and all 19
     # already satisfied by this image**, so the link resolves `ltable_bootstrap` itself and **adds
@@ -4672,10 +4703,10 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # which an invalidate before the jump would settle). The step's own result does not depend on
     # the corrupt characters - the caller is confirmed by `+0x190`, by `_v`, by `_e`, and by the two
     # words read out of the buffer.
-    OSFMK_KERN_SYNC_SEMA_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SYNC_SEMA_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sync_sema.o}
-    OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
-    OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
-    OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    OSFMK_KERN_SYNC_SEMA_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SYNC_SEMA_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_sync_sema.o}
+    OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_ipc_ipc_importance.o}
+    OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_ipc_ipc_voucher.o}
+    OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_ipc_ipc_table.o}
     # 299: `kpc_thread_create` is a one-load function, and the stop moves one call down
     #
     # **The 298 run reported** `stub_hit=kpc_thread_create` at `thread_create_internal + 0x348`. One
@@ -4809,7 +4840,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # calls `thread_deallocate` and branches to `load_context` at +0x380 - the first time this walk
     # crosses into a context switch rather than a function call. And when the step that links
     # `bsd/kern/kern_sysctl.c` arrives, the `__DATA,__sysctl_set` section entry in `entry_macho.s`.
-    OSFMK_KERN_KPC_THREAD_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KPC_THREAD_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kpc_thread.o}
+    OSFMK_KERN_KPC_THREAD_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KPC_THREAD_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_kpc_thread.o}
     # 300: `priority.o`, and the stop leaves `thread_create_internal` entirely
     #
     # **The 299 run reported** `stub_hit=sched_set_thread_base_priority` at
@@ -4945,7 +4976,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
     # `xnu_entry_failures=0x00000000`, and the device returned to Android on its own
     # (`getprop ro.build.version.release` = 10).
-    OSFMK_KERN_PRIORITY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_PRIORITY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_priority.o}
+    OSFMK_KERN_PRIORITY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_PRIORITY_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_priority.o}
     # 301: `processor_up` runs real code, and the stop is the one name it calls that is not
     #
     # **The 300 run reported** `stub_hit=processor_up` at `load_context + 0x20`. One object defines
@@ -5035,7 +5066,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `timer_start`s - all real - into `machine_load_context` (`osfmk/arm/cswitch.s`), which is a stub
     # and **is the context switch itself**: it does not return, so that is the step where this walk
     # stops being a walk.
-    OSFMK_KERN_MACHINE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_MACHINE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_machine.o}
+    OSFMK_KERN_MACHINE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_MACHINE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_machine.o}
     # 302: the commpage, and the walk arrives at the context switch itself
     #
     # **The 301 run reported** `stub_hit=commpage_update_active_cpus` at `processor_up + 0xac`. One
@@ -5162,7 +5193,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # switches stacks and `eret`s into `kernel_bootstrap_thread`, so it **does not return**, the
     # caller-key idiom ends here, and what follows is not a stub to resolve but the first thread
     # actually running - and the first thing that thread does is `idle_thread_create`.
-    OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ=${STAGE90_ENTRY_OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_commpage_commpage.o}
+    OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ=${STAGE90_ENTRY_OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_commpage_commpage.o}
     # 303: `cswitch.o` is the context switch, and the walk becomes the first thread's execution
     #
     # **The 302 run stopped at `machine_load_context`**, the ARM assembly entry in
@@ -5254,7 +5285,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # **Next:** this is no longer an object frontier. After the hardware run, record the first real
     # function the restored thread reaches and start the next ledger block from that observed thread
     # execution, keeping every device touch behind the non-persistent preflight gate.
-    OSFMK_ARM_CSWITCH_OBJ=${STAGE90_ENTRY_OSFMK_ARM_CSWITCH_OBJ:-$REPO_ROOT/out/xnu_asm_obj/cswitch.o}
+    OSFMK_ARM_CSWITCH_OBJ=${STAGE90_ENTRY_OSFMK_ARM_CSWITCH_OBJ:-$XNU_ASM_OBJ_OUT/cswitch.o}
     # 304: `bsd_setthreadname`, and the object that defines it is `bsd/kern/proc_info.c`
     #
     # **The 303 run stopped at `bsd_setthreadname`**, reached through `thread_set_thread_name` from
@@ -5325,7 +5356,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # between it and the three above. (5) `thread_deallocate`'s panic - the ref-count early return
     # above. Any other stop means a real function on this path reaches a stub that reading did not
     # show, and the log will name it.
-    BSD_KERN_PROC_INFO_OBJ=${STAGE90_ENTRY_BSD_KERN_PROC_INFO_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_proc_info.o}
+    BSD_KERN_PROC_INFO_OBJ=${STAGE90_ENTRY_BSD_KERN_PROC_INFO_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_proc_info.o}
     # 308: `kern_monotonic.c` - and the prediction is a stop *outside* the object it links
     #
     # **The object that defines `mt_sched_update`, 307's stop, and the first step predicted to leave
@@ -5422,7 +5453,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # instrument's stand-ins have to go. Safety: 25 x `persistent_write_attempted=0x00000000`,
     # 87 x `failure_mask=0x00000000`, `xnu_entry_failures=0x00000000`, `xnu_entry_abort_entries`
     # 0x00000000, log 300987 bytes, and the device returned to Android on its own (release 10).
-    OSFMK_KERN_KERN_MONOTONIC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KERN_MONOTONIC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kern_monotonic.o}
+    OSFMK_KERN_KERN_MONOTONIC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KERN_MONOTONIC_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_kern_monotonic.o}
     # 309: **no object** - the instrument's own interrupt source, and the boot leaves the scheduler
     #
     # **The first step in this walk that links nothing, and it is the step that moved the frontier
@@ -5583,7 +5614,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # target of `kdp_raise_exception`'s tail branch), so 735 -> 733 undefined and 646 -> 647 function
     # stubs. Because `kdp_init` is one instruction, the stop is predicted to be the very next call
     # the image makes: **`kpc_init` at caller key 0x8000E640** (`bl kpc_init` at `0x8000e63c`).
-    OSFMK_DEVICE_DEVICE_INIT_OBJ=${STAGE90_ENTRY_OSFMK_DEVICE_DEVICE_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_device_device_init.o}
+    OSFMK_DEVICE_DEVICE_INIT_OBJ=${STAGE90_ENTRY_OSFMK_DEVICE_DEVICE_INIT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_device_device_init.o}
     # 313: `kpc_arm.c` - 3916 bytes of PMU code, and the step is one call wide
     #
     # **The object that defines `kpc_arch_init`, 312's stop, and the first step whose object is much
@@ -5683,7 +5714,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # should end with **`kpc_init` returning** and `kernel_bootstrap_thread` moving on to
     # **`ktrace_init`, caller key 0x8000E660** (`bl ktrace_init` at 0x8000e65c, the first stub after
     # `kpc_init` in the bootstrap thread's straight line).
-    OSFMK_ARM_KPC_ARM_OBJ=${STAGE90_ENTRY_OSFMK_ARM_KPC_ARM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_kpc_arm.o}
+    OSFMK_ARM_KPC_ARM_OBJ=${STAGE90_ENTRY_OSFMK_ARM_KPC_ARM_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_kpc_arm.o}
     # 314: `kpc_common.c` - the step whose `.text` closes exactly, and the first whose object has no
     #      effect on the string section at all
     #
@@ -5820,7 +5851,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # (b) that `bsd_early_init` is not reached because the run stops in `prng_cpu_init`'s one indirect
     # call, and (c) `ktrace_init`'s own `assert` firing, which would be a panic rather than a stub and
     # which the log would distinguish.
-    OSFMK_KERN_KPC_COMMON_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KPC_COMMON_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kpc_common.o}
+    OSFMK_KERN_KPC_COMMON_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KPC_COMMON_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_kpc_common.o}
     # 315: `kern_ktrace.c` - the prediction that named the key exactly, and the first step whose
     #      caller key is the *bootstrap thread's own* `bl` because the callee is a tail branch
     #
@@ -5932,7 +5963,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `tools/xnu_entry_callwalk.py --root PE_init_iokit` reports **no stub on its straight-line path** and
     # lists the indirect calls it could not follow (`getval`, `panic_trap_to_debugger`, `__doprnt`, i.e. a
     # kprintf path), so a run that stops earlier is possible and the tool says so rather than guessing.
-    BSD_KERN_KERN_KTRACE_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KTRACE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_ktrace.o}
+    BSD_KERN_KERN_KTRACE_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KTRACE_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_ktrace.o}
     # 330: `__cxa_atexit` and `__dso_handle` defined for real, and the whole constructor table runs
     #
     # **The step links nothing and changes no object.** 329 ended one instruction past the first of the
@@ -7011,7 +7042,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # chain cannot tell us in advance is which of the three comes first; what it can is that all three
     # names are already known, and the run will pick. The prediction will be quoted properly in the next
     # block, once the stop is resolved against the image.
-    LIBKERN_CXX_OSMETACLASS_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSMETACLASS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSMetaClass.o}
+    LIBKERN_CXX_OSMETACLASS_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSMETACLASS_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSMetaClass.o}
     #
     # **Measured: every count exact, `.text` closing in three terms with a fill band of +0xF, the 16 KB
     # boundary crossed exactly as predicted - and the stop named to the byte, including its offset.**
@@ -7125,7 +7156,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # The object: `.text` **0x408** plus a 4-byte COMDAT `.text._ZN8OSObject9MetaClassD0Ev`, `.bss`
     # **0x1C**, `.rodata` **0x84**, `.rodata.str1.1` **0xA3** (163), `__DATA, __data` **0x18**, `.init_array` **4**
     # (a **third** entry nothing runs - 318), **40 definitions** and **27 references**.
-    LIBKERN_CXX_OSDICTIONARY_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSDICTIONARY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSDictionary.o}
+    LIBKERN_CXX_OSDICTIONARY_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSDICTIONARY_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSDictionary.o}
     #
     # **Measured: all three counts exact, `.text` closing in three terms one byte above the prediction's top,
     # the step not moving `.data` or the boundary - and the stop landing on the exact call the prediction
@@ -7228,7 +7259,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # _ZN12OSCollection4initEv` - if the constructor returns, or to whatever the constructor's own body
     # reaches first. The counts and the `.text` terms are read the same way (by kind, created and retired
     # both written down), and `.text` now has 0x2AE0 of slack below the 16 KB boundary.
-    LIBKERN_CXX_OSOBJECT_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSOBJECT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSObject.o}
+    LIBKERN_CXX_OSOBJECT_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSOBJECT_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSObject.o}
     #
     # **Measured: all three counts exact, `.text` closing in three terms with the inputs exactly at the top
     # of the predicted range for the second step running, `.data` unmoved to the byte - and the stop is the
@@ -7328,8 +7359,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `beq` to +0x2D4, and `bl _ZN6OSKext24lookupKextWithIdentifierEP8OSString`, whose argument is the
     # symbol this step makes real, so the symbol should be built, used to look the kext up, and the stop
     # should be the first stub on that path.
-    LIBKERN_CXX_OSCOLLECTION_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSCOLLECTION_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSCollection.o}
-    LIBKERN_CXX_OSSYMBOL_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSSYMBOL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSSymbol.o}
+    LIBKERN_CXX_OSCOLLECTION_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSCOLLECTION_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSCollection.o}
+    LIBKERN_CXX_OSSYMBOL_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSSYMBOL_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSSymbol.o}
     # 331: `libkern/c++/OSString.cpp` - the object that defines 330's stop and two more stubs in the same
     #       body, and whose own initializer makes the table seven entries long
     #
@@ -7543,7 +7574,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # It also closes the last thing the 330 block left open: `-fapple-kext` was deferred because it would
     # need `_ZTV8OSString` from an unlinked object, and this step links exactly that object - so the flag is
     # now a re-baseline with nothing missing, and it is not needed for this stop either way.
-    LIBKERN_CXX_OSSTRING_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSSTRING_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSString.o}
+    LIBKERN_CXX_OSSTRING_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSSTRING_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSString.o}
     # 332: `libsa/lastkernelconstructor.c` - the constructor that is the only caller of
     #       `iokit_post_constructor_init`, and therefore the only way `OSKext::initialize()` runs
     #
@@ -7914,7 +7945,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # object behind it, `libkern/c++/OSArray.cpp`, is the only one that unblocks both paths at once. It is
     # also the object that defines the `OSSet`/`OSArray` container machinery `OSKext::initialize` builds
     # its seven registries out of.
-    IOKIT_KERNEL_IOCPU_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOCPU_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOCPU.o}
+    IOKIT_KERNEL_IOCPU_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOCPU_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOCPU.o}
     # 334: `libkern/c++/OSArray.cpp` - the container both paths stop on, and a step whose stop is *outside*
     #       the object it links
     #
@@ -8135,7 +8166,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # created is the first step of the walk whose `.text` should *shrink*, so it is also the step that tests
     # whether the fill term can be negative in the same closed arithmetic the last four steps used.
     #
-    LIBKERN_CXX_OSARRAY_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSARRAY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSArray.o}
+    LIBKERN_CXX_OSARRAY_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSARRAY_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSArray.o}
     # 335: `iokit/Kernel/IORegistryEntry.cpp` - the second call of `iokit_post_constructor_init`, the
     #       largest single step of the walk so far, and **the first step whose `.text` should shrink**
     #
@@ -8447,7 +8478,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `.init_array` entry. It is the same name four other `IORegistryEntry` methods reach
     # (`getChildIterator`, `getParentIterator`, `hasAlias`, `getNextObjectFlat`, `compareNames`,
     # `attachToParent`), so it is a step that unblocks the whole iteration half of the registry API at once.
-        IOKIT_KERNEL_IOREGISTRYENTRY_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOREGISTRYENTRY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IORegistryEntry.o}
+        IOKIT_KERNEL_IOREGISTRYENTRY_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOREGISTRYENTRY_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IORegistryEntry.o}
     # 336: `libkern/c++/OSCollectionIterator.cpp` - the object behind 335's stop, and a stop on the stub
     #       335 created
     #
@@ -8648,7 +8679,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # created, rather than one the image has carried since before the walk. It is also the shortest possible
     # step: `OSIterator` is an abstract base class with no data, so the constructor is a base-class chain and
     # a `MetaClass` call, and linking it should unblock `OSCollectionIterator`'s whole body in one move.
-    LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSCollectionIterator.o}
+    LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSCollectionIterator.o}
     # 337: `libkern/c++/OSIterator.cpp` - the object that defines all three names 335 added, and the step
     #       where 335's premature prediction comes true
     #
@@ -8878,7 +8909,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # - and every section above it - is expected to step to the next 16 KB boundary above the new end, which
     # is **0x8015C000** if the end lands where the object's size says and **0x80160000** if a fill or a
     # string pushes it over.
-    LIBKERN_CXX_OSITERATOR_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSITERATOR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSIterator.o}
+    LIBKERN_CXX_OSITERATOR_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSITERATOR_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSIterator.o}
     # 338: `iokit/Kernel/IOService.cpp` - the largest object of the walk, three 16 KB boundaries crossed, and a
     #      stop on the first still-stubbed call inside the biggest initializer in IOKit
     #
@@ -9138,7 +9169,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `OSData::free()` only runs one when `capacity == EXTERNAL` and a function was given
     # (`OSData.cpp:200-213`) - so the static is safe, and *that* is the kind of claim this project has learned
     # to check in the source rather than assume.
-    IOKIT_KERNEL_IOSERVICE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOSERVICE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOService.o}
+    IOKIT_KERNEL_IOSERVICE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOSERVICE_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOService.o}
     # 339: `libkern/c++/OSData.cpp` - the object whose call 338 stopped on, and a step whose stop is computed
     #      rather than entered
     #
@@ -9357,7 +9388,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # What is worth carrying forward is that after 340 the run will be inside the container-construction path,
     # where the next stop is as likely to be `OSDictionary`/`OSSet`/`OSArray` internals - all real since
     # 330/334 - as it is to be a new name.
-    LIBKERN_CXX_OSDATA_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSDATA_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSData.o}
+    LIBKERN_CXX_OSDATA_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSDATA_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSData.o}
     # 340: `libkern/c++/OSOrderedSet.cpp` - the first step whose stop is *not* in the object it links,
     #      and a stop one frame up that the straight-line tool names
     #
@@ -9456,7 +9487,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # return, and any `abort_entries=` non-zero means one of the four `blx` vtable dispatches in that range
     # faulted instead of stopping on a stub. `xnu_entry_callwalk.py` and `first_stub_call.py` are both run
     # against the built image before the device.
-    LIBKERN_CXX_OSORDEREDSET_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSORDEREDSET_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSOrderedSet.o}
+    LIBKERN_CXX_OSORDEREDSET_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSORDEREDSET_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSOrderedSet.o}
     # **Measured: the counts and the layout's `.text` are exact, one derived row has a sign error, and the
     # run did not stop on a stub at all - eight stub stops after 331, the walk leaves the idiom again on a
     # data abort at a zero it had written down in advance.** `842
@@ -9711,7 +9742,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #
     # Safety, as every run: `preflight_boot_check.sh --allow-xnu-entry` then
     # `run_and_capture.sh --allow-xnu-entry`, non-persistent `fastboot boot` only, nothing flashed.
-    LIBKERN_CXX_OSBOOLEAN_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSBOOLEAN_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSBoolean.o}
+    LIBKERN_CXX_OSBOOLEAN_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSBOOLEAN_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSBoolean.o}
     # **Measured: the zero is cured, the stop is the prediction 340 wrote and could not reach, and the two
     # numbers that were wrong were wrong in the same two ways as 340's - a derived row and a term's size.**
     # `839 symbol(s) undefined` / `734 function(s), 105 storage`. **The three kind columns are exact and the
@@ -9938,7 +9969,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `OSKext::initialize` returned *without* reaching its `OSSet::withCapacity` call - either that call is behind
     # a conditional this boot does not take, or a container stub earlier in its body was skipped - and a stop
     # naming anything inside `IOCatalogue`'s 60 functions means a call its relocations called real did not return.
-    LIBKERN_CXX_IOCATALOGUE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOCATALOGUE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOCatalogue.o}
+    LIBKERN_CXX_IOCATALOGUE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOCATALOGUE_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOCatalogue.o}
     # **Measured: all three counts exact, a seven-term `.text` closing to the byte, the size row mis-derived for the
     # third step running, and a stop the pre-run check moved - to a stub this step itself created.**
     # `832 symbol(s) undefined` / `729 function(s), 103 storage`, all three as predicted and now checked against
@@ -10204,7 +10235,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `0:32` reduced as a set, or the lexer produced something other than `NUMBER ':' NUMBER` for `0:32` - and a
     # stop naming anything else at all means a call this disassembly read as real did not return, with the caller
     # key saying which one.
-    LIBKERN_CXX_OSUNSERIALIZE_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSUNSERIALIZE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSUnserialize.o}
+    LIBKERN_CXX_OSUNSERIALIZE_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSUNSERIALIZE_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSUnserialize.o}
     IOKIT_KERNEL_CONFIGTABLES_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_CONFIGTABLES_OBJ:-$STAGE90_CONFIG_TABLES_OBJ}
     # **Measured: every count exact, a stop that is the predicted name *and* the predicted key, and the first
     # `.data` delta in the walk that the fill absorbed whole.** `831 symbol(s) undefined` /
@@ -10462,7 +10493,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # non-zero** means something dereferenced a zero on the way - the class 340 and 343 both produced; and a
     # stop at `iokit_post_constructor_init+0x20` instead of `+0x18` means `OSKext::initialize` returned without
     # reaching its `OSSet::withCapacity` call, i.e. 342's reading of that function is wrong.
-    LIBKERN_CXX_OSNUMBER_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSNUMBER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSNumber.o}
+    LIBKERN_CXX_OSNUMBER_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSNUMBER_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSNumber.o}
     # **Measured: every count exact, the stop is 342's deferred prediction through a four-frame chain, and
     # `realstubs.o` moves on both sections for the first time since 341.** `829 symbol(s) undefined` /
     # `728 function(s), 101 storage` - all three exactly as predicted, 728 + 101 = 829 as promised, and the
@@ -10724,7 +10755,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # the first one's return value gated on something and `OSKext::initialize` took a branch 342's reading of
     # it did not account for; and **`abort_entries` non-zero** would be a zero dereferenced on the way, the
     # class 340 and 343 both produced.
-    LIBKERN_CXX_OSSET_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSSET_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSSet.o}
+    LIBKERN_CXX_OSSET_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSSET_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSSet.o}
     # ## 346:
     #
     # `libkern/OSKextVersion.c` -> `libkern_OSKextVersion.o` (9476 bytes) defines this step's stop and one
@@ -11047,7 +11078,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # therefore large; **a stop inside `IOUserClient::initialize`** is ruled out by its 0x28-byte body above;
     # and **`abort_entries` non-zero** is a zero dereferenced on the way, the class 340 and 343 both produced.
     #
-    LIBKERN_OSKEXTVERSION_OBJ=${STAGE90_ENTRY_LIBKERN_OSKEXTVERSION_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_OSKextVersion.o}
+    LIBKERN_OSKEXTVERSION_OBJ=${STAGE90_ENTRY_LIBKERN_OSKEXTVERSION_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_OSKextVersion.o}
     # **Measured: every count exact, every derived address exact, the stop landed name and key, and
     # `realstubs.o` moved on all three of its sections by exactly the predicted amount for the first time.**
     #
@@ -11399,7 +11430,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # The falsifier is a stop at key 0x8011b118 - which would mean `_ZN12IORootParent10initializeEv` is real
     # after all - or a stop inside one of the fifteen, which `IOGetLastPageNumber`'s 8-byte
     # `mov r0, #0` / `bx lr` makes impossible unless the path into this object is not the one read here.
-    IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOMemoryDescriptor.o}
+    IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOMemoryDescriptor.o}
     #
     # **Measured: every count exact, every derived row exact, and the stop landed on the name and the key the
     # correction named.**
@@ -13633,15 +13664,15 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # it so that a failure to start is still a panic with a name rather than a silent no-driver boot.
     #
 
-    OSFMK_DEVICE_IOKIT_RPC_OBJ=${STAGE90_ENTRY_OSFMK_DEVICE_IOKIT_RPC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_device_iokit_rpc.o}
-    IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOPlatformExpert.o}
-    IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IODeviceTreeSupport.o}
-    IOKIT_KERNEL_IOSERVICEPM_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOSERVICEPM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOServicePM.o}
-    IOKIT_KERNEL_IOWORKLOOP_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOWORKLOOP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOWorkLoop.o}
-    IOKIT_KERNEL_IOCOMMANDGATE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOCOMMANDGATE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOCommandGate.o}
-    IOKIT_KERNEL_IOEVENTSOURCE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOEVENTSOURCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOEventSource.o}
-    OSFMK_VM_VM_SHARED_REGION_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_SHARED_REGION_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_shared_region.o}
-    OSFMK_KERN_SCHED_AVERAGE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SCHED_AVERAGE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sched_average.o}
+    OSFMK_DEVICE_IOKIT_RPC_OBJ=${STAGE90_ENTRY_OSFMK_DEVICE_IOKIT_RPC_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_device_iokit_rpc.o}
+    IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOPlatformExpert.o}
+    IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IODeviceTreeSupport.o}
+    IOKIT_KERNEL_IOSERVICEPM_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOSERVICEPM_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOServicePM.o}
+    IOKIT_KERNEL_IOWORKLOOP_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOWORKLOOP_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOWorkLoop.o}
+    IOKIT_KERNEL_IOCOMMANDGATE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOCOMMANDGATE_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOCommandGate.o}
+    IOKIT_KERNEL_IOEVENTSOURCE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOEVENTSOURCE_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOEventSource.o}
+    OSFMK_VM_VM_SHARED_REGION_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_SHARED_REGION_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_vm_shared_region.o}
+    OSFMK_KERN_SCHED_AVERAGE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SCHED_AVERAGE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_sched_average.o}
     # =============================================================================================
     # **363: the platform expert. The first step in this walk whose object Apple's tree does not
     # contain at all, and the first whose change is not "one more real implementation" but "a class
@@ -13926,7 +13957,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # lands in `out/xnu_platform_obj/`, beside the EABI runtime and the firehose, which are the two
     # other things in this image that are not Apple's. `src/platform/MSM8974PlatformExpert.cpp`
     # is the source and holds the argument for why the class has to exist.
-    STAGE90_PLATFORM_EXPERT_OBJ=${STAGE90_ENTRY_PLATFORM_EXPERT_OBJ:-$REPO_ROOT/out/xnu_platform_obj/MSM8974PlatformExpert.o}
+    STAGE90_PLATFORM_EXPERT_OBJ=${STAGE90_ENTRY_PLATFORM_EXPERT_OBJ:-$XNU_PLATFORM_OBJ_OUT/MSM8974PlatformExpert.o}
     # =============================================================================================
     # **457: the second out-of-manifest class, and the first driver this image links in.**
     #
@@ -13949,7 +13980,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # table's *last* entry (`last_kernel_constructor`, 332). This object is therefore inserted
     # immediately *before* the platform expert, so the table's order stays "Apple's six, then this
     # project's two, then the last one" - and the last one is still the last one.
-    STAGE90_ROOT_RESOURCE_OBJ=${STAGE90_ENTRY_ROOT_RESOURCE_OBJ:-$REPO_ROOT/out/xnu_platform_obj/MSM8974RootResource.o}
+    STAGE90_ROOT_RESOURCE_OBJ=${STAGE90_ENTRY_ROOT_RESOURCE_OBJ:-$XNU_PLATFORM_OBJ_OUT/MSM8974RootResource.o}
     # =============================================================================================
     # **492: the third out-of-manifest class, and the first one whose personality names a *device*
     # class.**
@@ -13969,7 +14000,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # reason 457's placement note gives: `MSM8974PlatformExpert.o` stays the last XNU-side input
     # before `entry_last_kernel_constructor.o`, so the constructor table's order is still "Apple's
     # six, then this project's three, then the last one".
-    STAGE90_TIMER_OBJ=${STAGE90_ENTRY_TIMER_OBJ:-$REPO_ROOT/out/xnu_platform_obj/MSM8974Timer.o}
+    STAGE90_TIMER_OBJ=${STAGE90_ENTRY_TIMER_OBJ:-$XNU_PLATFORM_OBJ_OUT/MSM8974Timer.o}
     # =============================================================================================
     # **493: the fourth out-of-manifest class, and the second under `IOPlatformDevice`.**
     #
@@ -13986,7 +14017,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # Same kind of translation unit as the three above, same flags, same directory, same `.init_array`
     # requirement - and it goes **between the timer and the platform expert**, so the constructor
     # table's order is still "Apple's six, then this project's four, then the last one".
-    STAGE90_GIC_OBJ=${STAGE90_ENTRY_GIC_OBJ:-$REPO_ROOT/out/xnu_platform_obj/MSM8974GIC.o}
+    STAGE90_GIC_OBJ=${STAGE90_ENTRY_GIC_OBJ:-$XNU_PLATFORM_OBJ_OUT/MSM8974GIC.o}
     # =============================================================================================
     # **861: the payload-owned block device 530 section 9's route roots the mount path at.**
     #
@@ -14003,7 +14034,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # block. It has no `.init_array` entry (it is not an IOKit class), so its LINK_OBJS position is
     # not load-bearing for the constructor table; it is placed immediately before
     # `STAGE90_ROOT_RESOURCE_OBJ` to keep this project's objects together.
-    STAGE90_ROOT_MEDIA_OBJ=${STAGE90_ENTRY_ROOT_MEDIA_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_root_media.o}
+    STAGE90_ROOT_MEDIA_OBJ=${STAGE90_ENTRY_ROOT_MEDIA_OBJ:-$XNU_PLATFORM_OBJ_OUT/stage90_root_media.o}
     # =============================================================================================
     # **364: the object that defines the stop 363 made reachable, and the step where the walk goes
     # back into the platform expert it just started.**
@@ -15101,93 +15132,93 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # the step that stops - and it is written down here so 369's block predicts it before its run
     # rather than after.
     #
-    OSFMK_PRNG_PRNG_YARROW_OBJ=${STAGE90_ENTRY_PRNG_YARROW_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_prng_yarrow.o}
-    OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ=${STAGE90_ENTRY_YARROWCORELIB_SMF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_port_smf.o}
-    OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ=${STAGE90_ENTRY_YARROWCORELIB_SHA1MOD_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_sha1mod.o}
-    OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ=${STAGE90_ENTRY_YARROWCORELIB_COMP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_comp.o}
-    OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ=${STAGE90_ENTRY_YARROWCORELIB_YARROWUTILS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_yarrowUtils.o}
-    OSFMK_PRNG_FIPS_SHA1_OBJ=${STAGE90_ENTRY_FIPS_SHA1_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_fips_sha1.o}
-    IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOPMPowerStateQueue.o}
-    IOKIT_KERNEL_IOCOMMAND_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOCOMMAND_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOCommand.o}
-    IOKIT_KERNEL_IOPOWERCONNECTION_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPOWERCONNECTION_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOPowerConnection.o}
-    BSD_KERN_KERN_MALLOC_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_MALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_malloc.o}
-    IOKIT_TESTS_TESTS_OBJ=${STAGE90_ENTRY_IOKIT_TESTS_TESTS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Tests_Tests.o}
-    OSFMK_KERN_WORK_INTERVAL_OBJ=${STAGE90_ENTRY_OSFMK_KERN_WORK_INTERVAL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_work_interval.o}
-    BSD_KERN_SYS_REASON_OBJ=${STAGE90_ENTRY_BSD_KERN_SYS_REASON_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_sys_reason.o}
-    OSFMK_IPC_IPC_KMSG_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_KMSG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_kmsg.o}
-    OSFMK_IPC_IPC_OBJECT_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_OBJECT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_object.o}
-    BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ=${STAGE90_ENTRY_BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_miscfs_specfs_spec_vnops.o}
-    BSD_KERN_KERN_AUTHORIZATION_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_AUTHORIZATION_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_authorization.o}
-    BSD_KERN_KERN_CREDENTIAL_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_CREDENTIAL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_credential.o}
-    BSD_KERN_KERN_PROC_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_PROC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_proc.o}
-    BSD_CONF_PARAM_OBJ=${STAGE90_ENTRY_BSD_CONF_PARAM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_conf_param.o}
-    BSD_KERN_KERN_SUBR_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_SUBR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_subr.o}
-    BSD_KERN_TTY_OBJ=${STAGE90_ENTRY_BSD_KERN_TTY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_tty.o}
-    BSD_KERN_KERN_OVERRIDES_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_OVERRIDES_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_overrides.o}
-    BSD_KERN_SYS_ULOCK_OBJ=${STAGE90_ENTRY_BSD_KERN_SYS_ULOCK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_sys_ulock.o}
-    SECURITY_MAC_PROCESS_OBJ=${STAGE90_ENTRY_SECURITY_MAC_PROCESS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/security_mac_process.o}
-    BSD_KERN_KERN_DESCRIP_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_DESCRIP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_descrip.o}
-    BSD_VFS_VFS_BIO_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_BIO_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_bio.o}
-    BSD_KERN_KERN_TIME_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_TIME_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_time.o}
-    BSD_VFS_VFS_CLUSTER_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_CLUSTER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_cluster.o}
-    BSD_KERN_KERN_SYNCH_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_SYNCH_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_synch.o}
-    BSD_KERN_UBC_SUBR_OBJ=${STAGE90_ENTRY_BSD_KERN_UBC_SUBR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_ubc_subr.o}
-    BSD_VFS_VFS_INIT_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_init.o}
-    BSD_VFS_VFS_SYSCALLS_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_SYSCALLS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_syscalls.o}
-    BSD_KERN_PROC_UUID_POLICY_OBJ=${STAGE90_ENTRY_BSD_KERN_PROC_UUID_POLICY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_proc_uuid_policy.o}
-    BSD_KERN_MCACHE_OBJ=${STAGE90_ENTRY_BSD_KERN_MCACHE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_mcache.o}
-    BSD_KERN_UIPC_MBUF_OBJ=${STAGE90_ENTRY_BSD_KERN_UIPC_MBUF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_uipc_mbuf.o}
-    BSD_KERN_KPI_MBUF_OBJ=${STAGE90_ENTRY_BSD_KERN_KPI_MBUF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kpi_mbuf.o}
-    BSD_NET_NET_STR_ID_OBJ=${STAGE90_ENTRY_BSD_NET_NET_STR_ID_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_net_str_id.o}
-    BSD_KERN_SUBR_EVENTHANDLER_OBJ=${STAGE90_ENTRY_BSD_KERN_SUBR_EVENTHANDLER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_subr_eventhandler.o}
-    BSD_KERN_KERN_AIO_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_AIO_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_aio.o}
-    BSD_KERN_SYS_PIPE_OBJ=${STAGE90_ENTRY_BSD_KERN_SYS_PIPE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_sys_pipe.o}
-    BSD_KERN_POSIX_SHM_OBJ=${STAGE90_ENTRY_BSD_KERN_POSIX_SHM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_posix_shm.o}
-    BSD_KERN_POSIX_SEM_OBJ=${STAGE90_ENTRY_BSD_KERN_POSIX_SEM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_posix_sem.o}
-    BSD_KERN_PTHREAD_SHIMS_OBJ=${STAGE90_ENTRY_BSD_KERN_PTHREAD_SHIMS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_pthread_shims.o}
-    BSD_KERN_SYS_GENERIC_OBJ=${STAGE90_ENTRY_BSD_KERN_SYS_GENERIC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_sys_generic.o}
-    BSD_VFS_VFS_QUOTA_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_QUOTA_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_quota.o}
-    SECURITY_MAC_VFS_OBJ=${STAGE90_ENTRY_SECURITY_MAC_VFS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/security_mac_vfs.o}
-    BSD_VFS_KPI_VFS_OBJ=${STAGE90_ENTRY_BSD_VFS_KPI_VFS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_kpi_vfs.o}
-    BSD_KERN_DECMPFS_OBJ=${STAGE90_ENTRY_BSD_KERN_DECMPFS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_decmpfs.o}
-    IOKIT_BSDDEV_IOKITBSDINIT_OBJ=${STAGE90_ENTRY_IOKIT_BSDDEV_IOKITBSDINIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_bsddev_IOKitBSDInit.o}
-    STAGE90_PTHREAD_FUNCTIONS_OBJ=${STAGE90_ENTRY_STAGE90_PTHREAD_FUNCTIONS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_pthread_functions.o}
-    STAGE90_CRYPTO_FUNCTIONS_OBJ=${STAGE90_ENTRY_STAGE90_CRYPTO_FUNCTIONS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_crypto_functions.o}
+    OSFMK_PRNG_PRNG_YARROW_OBJ=${STAGE90_ENTRY_PRNG_YARROW_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_prng_prng_yarrow.o}
+    OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ=${STAGE90_ENTRY_YARROWCORELIB_SMF_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_prng_YarrowCoreLib_port_smf.o}
+    OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ=${STAGE90_ENTRY_YARROWCORELIB_SHA1MOD_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_prng_YarrowCoreLib_src_sha1mod.o}
+    OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ=${STAGE90_ENTRY_YARROWCORELIB_COMP_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_prng_YarrowCoreLib_src_comp.o}
+    OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ=${STAGE90_ENTRY_YARROWCORELIB_YARROWUTILS_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_prng_YarrowCoreLib_src_yarrowUtils.o}
+    OSFMK_PRNG_FIPS_SHA1_OBJ=${STAGE90_ENTRY_FIPS_SHA1_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_prng_fips_sha1.o}
+    IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOPMPowerStateQueue.o}
+    IOKIT_KERNEL_IOCOMMAND_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOCOMMAND_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOCommand.o}
+    IOKIT_KERNEL_IOPOWERCONNECTION_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPOWERCONNECTION_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOPowerConnection.o}
+    BSD_KERN_KERN_MALLOC_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_MALLOC_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_malloc.o}
+    IOKIT_TESTS_TESTS_OBJ=${STAGE90_ENTRY_IOKIT_TESTS_TESTS_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Tests_Tests.o}
+    OSFMK_KERN_WORK_INTERVAL_OBJ=${STAGE90_ENTRY_OSFMK_KERN_WORK_INTERVAL_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_work_interval.o}
+    BSD_KERN_SYS_REASON_OBJ=${STAGE90_ENTRY_BSD_KERN_SYS_REASON_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_sys_reason.o}
+    OSFMK_IPC_IPC_KMSG_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_KMSG_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_ipc_ipc_kmsg.o}
+    OSFMK_IPC_IPC_OBJECT_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_OBJECT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_ipc_ipc_object.o}
+    BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ=${STAGE90_ENTRY_BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_miscfs_specfs_spec_vnops.o}
+    BSD_KERN_KERN_AUTHORIZATION_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_AUTHORIZATION_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_authorization.o}
+    BSD_KERN_KERN_CREDENTIAL_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_CREDENTIAL_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_credential.o}
+    BSD_KERN_KERN_PROC_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_PROC_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_proc.o}
+    BSD_CONF_PARAM_OBJ=${STAGE90_ENTRY_BSD_CONF_PARAM_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_conf_param.o}
+    BSD_KERN_KERN_SUBR_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_SUBR_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_subr.o}
+    BSD_KERN_TTY_OBJ=${STAGE90_ENTRY_BSD_KERN_TTY_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_tty.o}
+    BSD_KERN_KERN_OVERRIDES_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_OVERRIDES_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_overrides.o}
+    BSD_KERN_SYS_ULOCK_OBJ=${STAGE90_ENTRY_BSD_KERN_SYS_ULOCK_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_sys_ulock.o}
+    SECURITY_MAC_PROCESS_OBJ=${STAGE90_ENTRY_SECURITY_MAC_PROCESS_OBJ:-$XNU_KERNEL_OBJ_OUT/security_mac_process.o}
+    BSD_KERN_KERN_DESCRIP_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_DESCRIP_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_descrip.o}
+    BSD_VFS_VFS_BIO_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_BIO_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_vfs_vfs_bio.o}
+    BSD_KERN_KERN_TIME_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_TIME_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_time.o}
+    BSD_VFS_VFS_CLUSTER_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_CLUSTER_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_vfs_vfs_cluster.o}
+    BSD_KERN_KERN_SYNCH_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_SYNCH_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_synch.o}
+    BSD_KERN_UBC_SUBR_OBJ=${STAGE90_ENTRY_BSD_KERN_UBC_SUBR_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_ubc_subr.o}
+    BSD_VFS_VFS_INIT_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_INIT_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_vfs_vfs_init.o}
+    BSD_VFS_VFS_SYSCALLS_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_SYSCALLS_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_vfs_vfs_syscalls.o}
+    BSD_KERN_PROC_UUID_POLICY_OBJ=${STAGE90_ENTRY_BSD_KERN_PROC_UUID_POLICY_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_proc_uuid_policy.o}
+    BSD_KERN_MCACHE_OBJ=${STAGE90_ENTRY_BSD_KERN_MCACHE_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_mcache.o}
+    BSD_KERN_UIPC_MBUF_OBJ=${STAGE90_ENTRY_BSD_KERN_UIPC_MBUF_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_uipc_mbuf.o}
+    BSD_KERN_KPI_MBUF_OBJ=${STAGE90_ENTRY_BSD_KERN_KPI_MBUF_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kpi_mbuf.o}
+    BSD_NET_NET_STR_ID_OBJ=${STAGE90_ENTRY_BSD_NET_NET_STR_ID_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_net_str_id.o}
+    BSD_KERN_SUBR_EVENTHANDLER_OBJ=${STAGE90_ENTRY_BSD_KERN_SUBR_EVENTHANDLER_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_subr_eventhandler.o}
+    BSD_KERN_KERN_AIO_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_AIO_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_aio.o}
+    BSD_KERN_SYS_PIPE_OBJ=${STAGE90_ENTRY_BSD_KERN_SYS_PIPE_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_sys_pipe.o}
+    BSD_KERN_POSIX_SHM_OBJ=${STAGE90_ENTRY_BSD_KERN_POSIX_SHM_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_posix_shm.o}
+    BSD_KERN_POSIX_SEM_OBJ=${STAGE90_ENTRY_BSD_KERN_POSIX_SEM_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_posix_sem.o}
+    BSD_KERN_PTHREAD_SHIMS_OBJ=${STAGE90_ENTRY_BSD_KERN_PTHREAD_SHIMS_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_pthread_shims.o}
+    BSD_KERN_SYS_GENERIC_OBJ=${STAGE90_ENTRY_BSD_KERN_SYS_GENERIC_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_sys_generic.o}
+    BSD_VFS_VFS_QUOTA_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_QUOTA_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_vfs_vfs_quota.o}
+    SECURITY_MAC_VFS_OBJ=${STAGE90_ENTRY_SECURITY_MAC_VFS_OBJ:-$XNU_KERNEL_OBJ_OUT/security_mac_vfs.o}
+    BSD_VFS_KPI_VFS_OBJ=${STAGE90_ENTRY_BSD_VFS_KPI_VFS_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_vfs_kpi_vfs.o}
+    BSD_KERN_DECMPFS_OBJ=${STAGE90_ENTRY_BSD_KERN_DECMPFS_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_decmpfs.o}
+    IOKIT_BSDDEV_IOKITBSDINIT_OBJ=${STAGE90_ENTRY_IOKIT_BSDDEV_IOKITBSDINIT_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_bsddev_IOKitBSDInit.o}
+    STAGE90_PTHREAD_FUNCTIONS_OBJ=${STAGE90_ENTRY_STAGE90_PTHREAD_FUNCTIONS_OBJ:-$XNU_PLATFORM_OBJ_OUT/stage90_pthread_functions.o}
+    STAGE90_CRYPTO_FUNCTIONS_OBJ=${STAGE90_ENTRY_STAGE90_CRYPTO_FUNCTIONS_OBJ:-$XNU_PLATFORM_OBJ_OUT/stage90_crypto_functions.o}
     # 877: the HFS+ port's ten shims (experiments 869/871). Compiled by the same platform block as the
     # two tables above, with the bsd define set and the bsd import roots - the file includes `<sys/vnode.h>`,
     # `<sys/vfs_context.h>`, `<sys/ubc_internal.h>` and `<vm/vm_kern.h>`, so its view of those structs has
     # to be the kernel's rather than a copy of it (the reason `stage90_pthread_functions.c` is compiled
     # there too). It is linked HERE and not by the HFS sources it stands in for, because it defines
     # symbols the *rest of the kernel* - anything that calls the HFS entry points - reaches as well.
-    STAGE90_HFS_SHIMS_OBJ=${STAGE90_ENTRY_STAGE90_HFS_SHIMS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_hfs_shims.o}
+    STAGE90_HFS_SHIMS_OBJ=${STAGE90_ENTRY_STAGE90_HFS_SHIMS_OBJ:-$XNU_PLATFORM_OBJ_OUT/stage90_hfs_shims.o}
     # 439: `pseudo_inits[]`, generated per configuration by tools/gen_pseudo_inits.py and compiled by
     # the same platform block as the two tables above - so the object's *name* is the generator's
     # basename (`stage90_pseudo_inits.o`), while its *source* lives under the configuration that
     # derived it. One object path and one configuration at a time, like every other object here.
-    STAGE90_PSEUDO_INITS_OBJ=${STAGE90_ENTRY_STAGE90_PSEUDO_INITS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_pseudo_inits.o}
-    BSD_NET_NWK_WQ_OBJ=${STAGE90_ENTRY_BSD_NET_NWK_WQ_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_nwk_wq.o}
-    BSD_NET_DLIL_OBJ=${STAGE90_ENTRY_BSD_NET_DLIL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_dlil.o}
-    BSD_NET_KPI_PROTOCOL_OBJ=${STAGE90_ENTRY_BSD_NET_KPI_PROTOCOL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_kpi_protocol.o}
-    BSD_KERN_UIPC_SOCKET_OBJ=${STAGE90_ENTRY_BSD_KERN_UIPC_SOCKET_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_uipc_socket.o}
-    BSD_KERN_UIPC_DOMAIN_OBJ=${STAGE90_ENTRY_BSD_KERN_UIPC_DOMAIN_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_uipc_domain.o}
-    BSD_NET_IPTAP_OBJ=${STAGE90_ENTRY_BSD_NET_IPTAP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_iptap.o}
-    BSD_NETINET_FLOW_DIVERT_OBJ=${STAGE90_ENTRY_BSD_NETINET_FLOW_DIVERT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_netinet_flow_divert.o}
-    BSD_KERN_KERN_ACCT_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_ACCT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_acct.o}
-    BSD_KERN_KERN_MIB_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_MIB_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_mib.o}
-    BSD_DEV_ARM_KM_OBJ=${STAGE90_ENTRY_BSD_DEV_ARM_KM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_dev_arm_km.o}
-    BSD_NET_INIT_OBJ=${STAGE90_ENTRY_BSD_NET_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_init.o}
-    BSD_NET_CONTENT_FILTER_OBJ=${STAGE90_ENTRY_BSD_NET_CONTENT_FILTER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_content_filter.o}
-    BSD_NET_NECP_OBJ=${STAGE90_ENTRY_BSD_NET_NECP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_necp.o}
-    BSD_NET_NETWORK_AGENT_OBJ=${STAGE90_ENTRY_BSD_NET_NETWORK_AGENT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_network_agent.o}
-    BSD_NET_IF_UTUN_OBJ=${STAGE90_ENTRY_BSD_NET_IF_UTUN_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_if_utun.o}
-    BSD_NET_IF_IPSEC_OBJ=${STAGE90_ENTRY_BSD_NET_IF_IPSEC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_if_ipsec.o}
-    BSD_NET_NETSRC_OBJ=${STAGE90_ENTRY_BSD_NET_NETSRC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_netsrc.o}
-    BSD_NET_NTSTAT_OBJ=${STAGE90_ENTRY_BSD_NET_NTSTAT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_ntstat.o}
-    BSD_NETINET_TCP_CC_OBJ=${STAGE90_ENTRY_BSD_NETINET_TCP_CC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_netinet_tcp_cc.o}
-    BSD_NETINET_MPTCP_SUBR_OBJ=${STAGE90_ENTRY_BSD_NETINET_MPTCP_SUBR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_netinet_mptcp_subr.o}
-    OSFMK_VM_BSD_VM_OBJ=${STAGE90_ENTRY_OSFMK_VM_BSD_VM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_bsd_vm.o}
-    BSD_MISCFS_DEVFS_DEVFS_VFSOPS_OBJ=${STAGE90_ENTRY_BSD_MISCFS_DEVFS_DEVFS_VFSOPS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_miscfs_devfs_devfs_vfsops.o}
-    BSD_KERN_KERN_SIG_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_SIG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_sig.o}
+    STAGE90_PSEUDO_INITS_OBJ=${STAGE90_ENTRY_STAGE90_PSEUDO_INITS_OBJ:-$XNU_PLATFORM_OBJ_OUT/stage90_pseudo_inits.o}
+    BSD_NET_NWK_WQ_OBJ=${STAGE90_ENTRY_BSD_NET_NWK_WQ_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_nwk_wq.o}
+    BSD_NET_DLIL_OBJ=${STAGE90_ENTRY_BSD_NET_DLIL_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_dlil.o}
+    BSD_NET_KPI_PROTOCOL_OBJ=${STAGE90_ENTRY_BSD_NET_KPI_PROTOCOL_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_kpi_protocol.o}
+    BSD_KERN_UIPC_SOCKET_OBJ=${STAGE90_ENTRY_BSD_KERN_UIPC_SOCKET_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_uipc_socket.o}
+    BSD_KERN_UIPC_DOMAIN_OBJ=${STAGE90_ENTRY_BSD_KERN_UIPC_DOMAIN_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_uipc_domain.o}
+    BSD_NET_IPTAP_OBJ=${STAGE90_ENTRY_BSD_NET_IPTAP_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_iptap.o}
+    BSD_NETINET_FLOW_DIVERT_OBJ=${STAGE90_ENTRY_BSD_NETINET_FLOW_DIVERT_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_netinet_flow_divert.o}
+    BSD_KERN_KERN_ACCT_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_ACCT_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_acct.o}
+    BSD_KERN_KERN_MIB_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_MIB_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_mib.o}
+    BSD_DEV_ARM_KM_OBJ=${STAGE90_ENTRY_BSD_DEV_ARM_KM_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_dev_arm_km.o}
+    BSD_NET_INIT_OBJ=${STAGE90_ENTRY_BSD_NET_INIT_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_init.o}
+    BSD_NET_CONTENT_FILTER_OBJ=${STAGE90_ENTRY_BSD_NET_CONTENT_FILTER_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_content_filter.o}
+    BSD_NET_NECP_OBJ=${STAGE90_ENTRY_BSD_NET_NECP_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_necp.o}
+    BSD_NET_NETWORK_AGENT_OBJ=${STAGE90_ENTRY_BSD_NET_NETWORK_AGENT_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_network_agent.o}
+    BSD_NET_IF_UTUN_OBJ=${STAGE90_ENTRY_BSD_NET_IF_UTUN_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_if_utun.o}
+    BSD_NET_IF_IPSEC_OBJ=${STAGE90_ENTRY_BSD_NET_IF_IPSEC_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_if_ipsec.o}
+    BSD_NET_NETSRC_OBJ=${STAGE90_ENTRY_BSD_NET_NETSRC_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_netsrc.o}
+    BSD_NET_NTSTAT_OBJ=${STAGE90_ENTRY_BSD_NET_NTSTAT_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_net_ntstat.o}
+    BSD_NETINET_TCP_CC_OBJ=${STAGE90_ENTRY_BSD_NETINET_TCP_CC_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_netinet_tcp_cc.o}
+    BSD_NETINET_MPTCP_SUBR_OBJ=${STAGE90_ENTRY_BSD_NETINET_MPTCP_SUBR_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_netinet_mptcp_subr.o}
+    OSFMK_VM_BSD_VM_OBJ=${STAGE90_ENTRY_OSFMK_VM_BSD_VM_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_vm_bsd_vm.o}
+    BSD_MISCFS_DEVFS_DEVFS_VFSOPS_OBJ=${STAGE90_ENTRY_BSD_MISCFS_DEVFS_DEVFS_VFSOPS_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_miscfs_devfs_devfs_vfsops.o}
+    BSD_KERN_KERN_SIG_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_SIG_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_sig.o}
     # =============================================================================================
     # **434: `bsd/net/nwk_wq.c` - the object that retires `nwk_wq_init`, the first stop this walk
     # reaches *through* a table this image supplies, and the step whose own object starts a kernel
@@ -16345,7 +16376,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # The corrected run above is what settles this step: the fourteen bodies returned and the stop is
     # `dqinit`, one call further along the same line.**
     # ---------------------------------------------------------------------------------------------
-    BSD_VFS_VFS_CACHE_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_CACHE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_cache.o}
+    BSD_VFS_VFS_CACHE_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_CACHE_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_vfs_vfs_cache.o}
     # =============================================================================================
     # **424: `bsd/vfs/vfs_cache.c` - the object that retires `nchinit`, and the frontier becomes
     # `nspace_handler_init`: the third of 422's four consecutive new stubs.**
@@ -16400,7 +16431,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `proc_uuid_policy_init` (`+0x7CC`, key `0x8003B1C0`), which would mean `vfsinit` had returned;
     # a stop on one of the four added names; a `panic`.
     # =============================================================================================
-    BSD_VFS_VFS_SUBR_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_SUBR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_subr.o}
+    BSD_VFS_VFS_SUBR_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_SUBR_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_vfs_vfs_subr.o}
     # =============================================================================================
     # **423: `bsd/vfs/vfs_subr.c` - the object that retires `vntblinit`, and the frontier becomes
     # `nchinit`: the second of 422's four consecutive new stubs.**
@@ -20753,16 +20784,16 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # sha256 `ec3fe346f46d1065fe4e9f44883028bbddc5cfb055c15b6528fecfb6ff93d056`; log 301638 bytes, 3975
     # lines, last line `No errors detected`; and the device came back to Android on its own
     # (`MI 4LTE`, release 10).**
-    OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ=${STAGE90_ENTRY_YARROWCORELIB_PRNG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_prng.o}
-    LIBKERN_UUID_UUID_OBJ=${STAGE90_ENTRY_LIBKERN_UUID_UUID_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_uuid_uuid.o}
-    IOKIT_KERNEL_IOMAPPER_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOMAPPER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOMapper.o}
-    IOKIT_KERNEL_IORANGEALLOCATOR_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IORANGEALLOCATOR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IORangeAllocator.o}
-    BSD_KERN_BSD_STUBS_OBJ=${STAGE90_ENTRY_BSD_KERN_BSD_STUBS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_bsd_stubs.o}
-    IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOInterruptAccounting.o}
-    IOKIT_KERNEL_IOKITDEBUG_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOKITDEBUG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOKitDebug.o}
-    IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOPMinformeeList.o}
-    IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOPMrootDomain.o}
-    IOKIT_KERNEL_IOUSERCLIENT_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOUSERCLIENT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOUserClient.o}
+    OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ=${STAGE90_ENTRY_YARROWCORELIB_PRNG_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_prng_YarrowCoreLib_src_prng.o}
+    LIBKERN_UUID_UUID_OBJ=${STAGE90_ENTRY_LIBKERN_UUID_UUID_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_uuid_uuid.o}
+    IOKIT_KERNEL_IOMAPPER_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOMAPPER_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOMapper.o}
+    IOKIT_KERNEL_IORANGEALLOCATOR_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IORANGEALLOCATOR_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IORangeAllocator.o}
+    BSD_KERN_BSD_STUBS_OBJ=${STAGE90_ENTRY_BSD_KERN_BSD_STUBS_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_bsd_stubs.o}
+    IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOInterruptAccounting.o}
+    IOKIT_KERNEL_IOKITDEBUG_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOKITDEBUG_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOKitDebug.o}
+    IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOPMinformeeList.o}
+    IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOPMrootDomain.o}
+    IOKIT_KERNEL_IOUSERCLIENT_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOUSERCLIENT_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOUserClient.o}
     # 323: `libkern/c++/OSRuntime.cpp` - the object that defines `OSlibkernInit` (322's stop) and the C++
     #       runtime initialiser, the linker's `new`/`delete`, and the `__mod_init_func` scan
     #
@@ -20967,7 +20998,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # **`devsw_init`, caller key `0x8011B26C` = `StartIOKit+0xCC`** (`caller-4` = `0x8011b268: bl
     # 8011df4c <devsw_init>`). The named alternative: if the scan does find a section, the stop is inside
     # that path instead, and 324's own instrumentation will say which.
-    LIBKERN_CXX_OSRUNTIME_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSRUNTIME_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSRuntime.o}
+    LIBKERN_CXX_OSRUNTIME_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSRUNTIME_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSRuntime.o}
     # 322: `iokit/Kernel/IOLocks.cpp` - the object that defines `IOLockAlloc`, and the step that closes
     #       `IOLibInit` entirely
     #
@@ -21156,7 +21187,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `OSMetaClassBase::initialize()` at its offset 0x04 - one of the six names this step adds as a stub -
     # before `OSRuntimeInitializeCPP` (real from this step) and a conditional `panic`. Predicted stop
     # **`_ZN15OSMetaClassBase10initializeEv`, caller key `OSlibkernInit+0x8`**.
-    IOKIT_KERNEL_IOLOCKS_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOLOCKS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOLocks.o}
+    IOKIT_KERNEL_IOLOCKS_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOLOCKS_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOLocks.o}
     # 321: `iokit/Kernel/IOLib.cpp` - the object that defines `IOLibInit`, and the step where IOKit's
     #       allocator and thread wrappers become real
     #
@@ -21398,7 +21429,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # first `IOLockAlloc` returns, the second one at 0x12C is real too, `IOLibInit` runs off its epilogue,
     # and `StartIOKit` continues to the call 320 created as a stub: **predicted stop `OSlibkernInit`, caller
     # key `0x8011B268` = `StartIOKit+0xC8`**.
-    IOKIT_KERNEL_IOLIB_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOLIB_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOLib.o}
+    IOKIT_KERNEL_IOLIB_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOLIB_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOLib.o}
     # 320: `iokit/Kernel/IOStartIOKit.cpp` - the object that defines `StartIOKit`, the step that enters
     #       IOKit, and the first step where a mergeable contribution line that is *not* this object's moved
     #
@@ -21613,7 +21644,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `IOFreeAligned`, `IOFreeContiguous`, `IOKernelAllocateWithPhysicalRestrict`, `IODelay` and
     # `IOAlignmentToSize` among its definitions. It is the object that makes IOKit's allocator and thread
     # wrappers real, and it is where the frontier moves into the IORegistry.
-    IOKIT_KERNEL_IOSTARTIOKIT_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOSTARTIOKIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOStartIOKit.o}
+    IOKIT_KERNEL_IOSTARTIOKIT_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOSTARTIOKIT_OBJ:-$XNU_KERNEL_OBJ_OUT/iokit_Kernel_IOStartIOKit.o}
     # 319: `os/internal.c` - the object that defines `_os_trace_addr_in_text_segment`, and the step where
     #       the frame chain 316 entered five deep unwinds all the way back into `PE_init_iokit`
     #
@@ -21729,7 +21760,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `clock_initialize_calendar`, `devsw_init`, `version`, `gIOKitDebug`, `gIOKitTrace`, `gCanSleepTimeout`
     # and `PE_parse_boot_argn`. **So 320 is the step that enters IOKit**, and its added set is where the
     # count will move for the first time in a while.
-    LIBKERN_OS_INTERNAL_OBJ=${STAGE90_ENTRY_LIBKERN_OS_INTERNAL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_os_internal.o}
+    LIBKERN_OS_INTERNAL_OBJ=${STAGE90_ENTRY_LIBKERN_OS_INTERNAL_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_os_internal.o}
     # 318: `c++/OSKext.cpp` - the largest object in the walk, a build that refused the step, and a `B` symbol
     #       that is not a stand-in
     #
@@ -21872,7 +21903,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # alternative is **`__doprnt`'s indirect dispatch** (the format-conversion path), which is the one place
     # this walk is still blind, and the second alternative is that `addr` is NULL, which short-circuits to the
     # same early return and the same outcome.
-    LIBKERN_CXX_OSKEXT_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSKEXT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSKext.o}
+    LIBKERN_CXX_OSKEXT_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSKEXT_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_c++_OSKext.o}
     # 317: `OSKextLib.cpp` - a 1424-byte object that closes the `printf` diversion, and the first step
     #       whose prediction is about a *frame chain* rather than a call site
     #
@@ -22022,7 +22053,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # stand-in) and `beq 80004A0C` sends a zero straight to the `bl StartIOKit`; the nonzero path does its
     # DT lookups and `bl kernel_debug` and then `b 80004A0C`; and the function's own extent is 0x378, so
     # 0x80004A28 is inside it, not a neighbour. Four branches, one destination.
-    LIBKERN_OSKEXTLIB_OBJ=${STAGE90_ENTRY_LIBKERN_OSKEXTLIB_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_OSKextLib.o}
+    LIBKERN_OSKEXTLIB_OBJ=${STAGE90_ENTRY_LIBKERN_OSKEXTLIB_OBJ:-$XNU_KERNEL_OBJ_OUT/libkern_OSKextLib.o}
     # 316: `kern_newsysctl.c` - counts exact, and a stop prediction that named a call the run never reached
     #
     # **The object that defines `sysctl_early_init`, 315's stop.** `bsd_kern_kern_newsysctl.o`
@@ -22162,7 +22193,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # matches nothing and becomes an **orphan output section** - which the build's own layout report ("the
     # allocated output sections are exactly .bss .data .sysctl_set .text") is written to catch. And 106 new
     # stubs in one step would be the largest single jump in this walk, in both directions at once.
-    BSD_KERN_KERN_NEWSYSCTL_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_NEWSYSCTL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_newsysctl.o}
+    BSD_KERN_KERN_NEWSYSCTL_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_NEWSYSCTL_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_newsysctl.o}
     # 312: `kern_kpc.c` - the first step with `.data` and `__sysctl_set`, and four resolutions that
     #       were not in the undefined list to begin with
     #
@@ -22247,7 +22278,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # instructions in the object - `mrc p15, 0, r0, cr9, cr12, {0}` then `bx lr` - so it returns, and
     # the next call is **`kpc_common_init` at caller key 0x801027A0** (`bl kpc_common_init` at
     # 0x8010279c, the instruction after the one this run stopped on).
-    BSD_KERN_KERN_KPC_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KPC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_kpc.o}
+    BSD_KERN_KERN_KPC_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KPC_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_kpc.o}
 
     # 311: `kdp_udp.c` - 72 bytes of `bx lr`, and the step whose `.text` did not move at all
     #
@@ -22302,7 +22333,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # at 0x801027A0 as the alternative if `osfmk/arm/kpc_arm.o` turns out to be linked already.
     # `kpc_thread_init` is certainly not a stub and is not a candidate: `osfmk_kern_kpc_thread.o` has
     # been in `LINK_OBJS` since long before this walk reached `kpc_init`.
-    OSFMK_KDP_KDP_UDP_OBJ=${STAGE90_ENTRY_OSFMK_KDP_KDP_UDP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kdp_kdp_udp.o}
+    OSFMK_KDP_KDP_UDP_OBJ=${STAGE90_ENTRY_OSFMK_KDP_KDP_UDP_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kdp_kdp_udp.o}
     # 307: `ast.c` - 0x440 bytes, and the candidate is the first call `thread_invoke` makes
     #
     # **The object that defines the name 306 stopped on, and the first step whose prediction is a
@@ -22454,7 +22485,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # **`compute_averages` at caller 0x800A3178** - the name 305 named as a falsifier, arriving
     # three steps later by a different road - with the idle arm of `thread_select` as the
     # alternative. That is a reading, not a measurement; the run decides.
-    OSFMK_KERN_AST_OBJ=${STAGE90_ENTRY_OSFMK_KERN_AST_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ast.o}
+    OSFMK_KERN_AST_OBJ=${STAGE90_ENTRY_OSFMK_KERN_AST_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_ast.o}
     # 306: `sfi.c` - 0x54 bytes, and the stop is `ast_on` rather than the straight line
     #
     # **The object that defines the name 305 stopped on, and the first step in this walk whose
@@ -22589,7 +22620,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # is **exactly zero**. That equality is also the reason to distrust 305's recorded `.text`
     # 0x11CAE0: the same stub set rebuilt here measures 0x11CAA0, 0x40 lower, and a configuration
     # whose delta is exactly zero cannot have differed from it.
-    OSFMK_KERN_SFI_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SFI_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sfi.o}
+    OSFMK_KERN_SFI_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SFI_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_sfi.o}
     # 305: `thread_act.c` - the straight line runs to `device_service_create`
     #
     # **The object that defines the name 304 stopped on, and the first step in a while whose
@@ -22727,7 +22758,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # compiles) is the run that tests it - with `ast_on` (0x8009E5D0, 0x8009E618) and
     # `PE_cpu_signal_deferred` (behind `machine_signal_idle` at 0x8009E6D4) named as the
     # alternatives, both behind gates that need a *higher* priority or an idle processor.
-    OSFMK_KERN_THREAD_ACT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_THREAD_ACT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_thread_act.o}
+    OSFMK_KERN_THREAD_ACT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_THREAD_ACT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_thread_act.o}
     # 298: the orphan sections get names, and `__DATA,__sysctl_set` gets a segment
     #
     # **297 fixed what the orphans broke; this step stops them being orphans.** The same build output
@@ -23202,8 +23233,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # closes `thread_create_internal`. After that `kernel_thread_create` returns a real thread to
     # `kernel_bootstrap`, which calls `thread_deallocate` and branches to `load_context` at +0x380 - the
     # first time this walk crosses into a context switch rather than a function call.
-    BSD_KERN_KERN_FORK_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_FORK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_fork.o}
-    OSFMK_ARM_STATUS_OBJ=${STAGE90_ENTRY_OSFMK_ARM_STATUS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_status.o}
+    BSD_KERN_KERN_FORK_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_FORK_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_fork.o}
+    OSFMK_ARM_STATUS_OBJ=${STAGE90_ENTRY_OSFMK_ARM_STATUS_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_status.o}
     # 295: four more objects in `kernel_bootstrap`'s tail, and the walk reaches thread creation
     #
     # **The 294 run reported** `stub_hit=atm_init` at `kernel_bootstrap + 0x2d8`. The four stubs left
@@ -23338,10 +23369,10 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `ipc_thread_terminate` -> `io_free`. After those, `kernel_thread_create` returns a real thread to
     # `kernel_bootstrap`, which calls `thread_deallocate` on the throwaway and then `load_context` - the
     # first time this walk crosses into a context switch rather than a function call.
-    OSFMK_ATM_ATM_OBJ=${STAGE90_ENTRY_OSFMK_ATM_ATM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_atm_atm.o}
-    OSFMK_BANK_BANK_OBJ=${STAGE90_ENTRY_OSFMK_BANK_BANK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_bank_bank.o}
-    OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ=${STAGE90_ENTRY_OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_voucher_ipc_pthread_priority.o}
-    OSFMK_CORPSES_CORPSE_OBJ=${STAGE90_ENTRY_OSFMK_CORPSES_CORPSE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corpses_corpse.o}
+    OSFMK_ATM_ATM_OBJ=${STAGE90_ENTRY_OSFMK_ATM_ATM_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_atm_atm.o}
+    OSFMK_BANK_BANK_OBJ=${STAGE90_ENTRY_OSFMK_BANK_BANK_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_bank_bank.o}
+    OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ=${STAGE90_ENTRY_OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_voucher_ipc_pthread_priority.o}
+    OSFMK_CORPSES_CORPSE_OBJ=${STAGE90_ENTRY_OSFMK_CORPSES_CORPSE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_corpses_corpse.o}
     # 294: three objects for three stubs in a row, and the walk reaches the scheduler's door
     #
     # **The 293 run reported** `stub_hit=stack_init` at `thread_init + 0xd8`. That step also settled
@@ -23480,9 +23511,9 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `corpses_init` (`osfmk/corpses/corpse.c`) - four consecutive stubs in `kernel_bootstrap`'s tail,
     # the same shape as this step. After them: `kernel_thread_create` and `load_context`, the point
     # where XNU stops initialising structures and starts a thread.
-    OSFMK_KERN_STACK_OBJ=${STAGE90_ENTRY_OSFMK_KERN_STACK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_stack.o}
-    OSFMK_KERN_THREAD_POLICY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_THREAD_POLICY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_thread_policy.o}
-    OSFMK_ARM_PCB_OBJ=${STAGE90_ENTRY_OSFMK_ARM_PCB_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_pcb.o}
+    OSFMK_KERN_STACK_OBJ=${STAGE90_ENTRY_OSFMK_KERN_STACK_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_stack.o}
+    OSFMK_KERN_THREAD_POLICY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_THREAD_POLICY_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_thread_policy.o}
+    OSFMK_ARM_PCB_OBJ=${STAGE90_ENTRY_OSFMK_ARM_PCB_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_pcb.o}
     # 293: `bsd_kern.o`, a function that returns a constant, and the pad's first real test
     #
     # **The 292 run reported** `stub_hit=get_task_uniqueid` at `coalitions_adopt_task + 0x0dc`. The
@@ -23636,7 +23667,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `kernel_bootstrap`'s own tail: `atm_init`, `bank_init`, `ipc_pthread_priority_init`,
     # `corpses_init`, then `kernel_thread_create` and `load_context` - the first point in this whole
     # walk where XNU starts a thread rather than filling in a structure.
-    OSFMK_KERN_BSD_KERN_OBJ=${STAGE90_ENTRY_OSFMK_KERN_BSD_KERN_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_bsd_kern.o}
+    OSFMK_KERN_BSD_KERN_OBJ=${STAGE90_ENTRY_OSFMK_KERN_BSD_KERN_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_bsd_kern.o}
     # 292: `mac_mach.o`, and a prediction that leaves two functions entirely
     #
     # **The 291 run reported** `stub_hit=mac_exc_create_label` at `ipc_task_init + 0x0dc`. The object
@@ -23849,7 +23880,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `get_task_uniqueid`, if the prediction holds. A pleasant one if it does: the same object also
     # defines `get_task_crash_label`, one of the two names *this* step obliges, and it is 4488 bytes
     # of `.text`, 60 definitions and 34 references.
-    SECURITY_MAC_MACH_OBJ=${STAGE90_ENTRY_SECURITY_MAC_MACH_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/security_mac_mach.o}
+    SECURITY_MAC_MACH_OBJ=${STAGE90_ENTRY_SECURITY_MAC_MACH_OBJ:-$XNU_KERNEL_OBJ_OUT/security_mac_mach.o}
     # 291: `ipc_tt.o`, and a prediction that does not depend on which branch is taken
     #
     # **The 290 run reported** `stub_hit=ipc_task_init` at `task_create_internal + 0x224`. The object
@@ -24031,7 +24062,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # real work - the two arms of `if (parent == TASK_NULL)`, whose `host_get_special_port` arm is
     # real and whose `parent != TASK_NULL` arm is eight `ipc_port_copy_send`s - and then the nine
     # further stub calls `task_create_internal` makes at +0x300 and up.
-    OSFMK_KERN_IPC_TT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_IPC_TT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ipc_tt.o}
+    OSFMK_KERN_IPC_TT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_IPC_TT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_ipc_tt.o}
     # 290: `machine_task.o`, and an object whose whole function is empty
     #
     # **The 289 run reported** `stub_hit=machine_task_init` at `task_create_internal + 0x200`. The
@@ -24142,7 +24173,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # definitions - the two of them plus the whole `machine_*` context-switch surface). They are only
     # reached by `machine_task_set_state` and `machine_task_terminate`, which nothing on this path
     # calls, so `pcb.o` can wait until a `task_terminate` does.
-    OSFMK_ARM_MACHINE_TASK_OBJ=${STAGE90_ENTRY_OSFMK_ARM_MACHINE_TASK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_machine_task.o}
+    OSFMK_ARM_MACHINE_TASK_OBJ=${STAGE90_ENTRY_OSFMK_ARM_MACHINE_TASK_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_arm_machine_task.o}
     # 289: `task_policy.o`, and two new names that both turn out to be reachable
     #
     # **The 288 run reported** `stub_hit=task_watch_init` at `task_init+0xb0`, once the pad's
@@ -24258,7 +24289,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `task_create_internal`, which this image shows is `bl ipc_task_init` at 0x800bfde4, return
     # address **0x800bfde8 = task_create_internal + 0x224**. What could stop it first is the code
     # between the two calls - seven instructions of `mov`/`str`/`add` and one `vmov.i32`, no `bl`.
-    OSFMK_KERN_TASK_POLICY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_TASK_POLICY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_task_policy.o}
+    OSFMK_KERN_TASK_POLICY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_TASK_POLICY_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_task_policy.o}
     # 288: `task.o`, and the object the walk has been circling since 285
     #
     # **The 287 run reported** `stub_hit=init_task_ledgers` at `coalitions_init+0xe8`. The object
@@ -24366,7 +24397,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # added above it. So the prediction held where it was a prediction, and the five calls before the
     # stop - the two `lck_mtx_init`s, `zinit` (again, with 287's measurement covering its one stub),
     # `zone_change` and the four `lck_*` setup calls - all returned.
-    OSFMK_KERN_TASK_OBJ=${STAGE90_ENTRY_OSFMK_KERN_TASK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_task.o}
+    OSFMK_KERN_TASK_OBJ=${STAGE90_ENTRY_OSFMK_KERN_TASK_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_task.o}
     # 287: `init_task_ledgers`, and the step where the 16 KB boundary finally moves
     #
     # **The 286 run reported** `stub_hit=coalitions_init` at `kernel_bootstrap+0x1a8`. The object that
@@ -24457,7 +24488,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # was executed for the first time in this boot and returned, with `btlog_create` never called,
     # and `zone_change`, both `PE_parse_boot_argn` calls, `lck_grp_attr_setdefault`, `lck_grp_init`,
     # `lck_attr_setdefault` and `lck_mtx_init` all returned after it.
-    OSFMK_KERN_COALITION_OBJ=${STAGE90_ENTRY_OSFMK_KERN_COALITION_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_coalition.o}
+    OSFMK_KERN_COALITION_OBJ=${STAGE90_ENTRY_OSFMK_KERN_COALITION_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_coalition.o}
     # 286: `coalitions_init`, and the first prediction that is a *chain* rather than a name
     #
     # **The 285 run reported** `stub_hit=ntp_init` at `clock_config+0x6c`. Linking `ntptime.o` makes
@@ -24525,7 +24556,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `pmap_map_globals`; that `clock_init`'s tail call into `clock_oldinit` returns; and that
     # `ledger_init`'s tail call into `lck_grp_init` returns. Seven functions, four of them named in
     # advance as things that would *not* stop the run, and the stop came exactly one call later.
-    BSD_KERN_KERN_NTPTIME_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_NTPTIME_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_ntptime.o}
+    BSD_KERN_KERN_NTPTIME_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_NTPTIME_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_ntptime.o}
     # 285: `ntp_init`, and a step that is predicted to overshoot the symbol it links
     #
     # **The 284 run reported** `stub_hit=clock_oldconfig` at `clock_config+0x68`. The object that
@@ -24597,7 +24628,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # taken zero times because `clock_count` is a storage stand-in of four zero bytes. So two of the
     # 25 references this object added to the image - the two that are *storage* - are the ones that
     # decided the shape of the step, by being zero.
-    OSFMK_KERN_CLOCK_OLDOPS_OBJ=${STAGE90_ENTRY_OSFMK_KERN_CLOCK_OLDOPS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_clock_oldops.o}
+    OSFMK_KERN_CLOCK_OLDOPS_OBJ=${STAGE90_ENTRY_OSFMK_KERN_CLOCK_OLDOPS_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_clock_oldops.o}
     # 284: `clock_oldconfig`, and the first frontier that is *inside* the function it links
     #
     # **The 283 run reported** `stub_hit=clock_config` with `xnu_entry_stub_caller=0x800076c4`, which
@@ -24679,7 +24710,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # 16 KB and a step that does not shows almost nothing; `text size` and `__bss_start` are the
     # numbers that move monotonically, and they are the ones to predict with. 0x1be4 is also the
     # distance to the next step that will have to be read carefully.
-    OSFMK_KERN_CLOCK_OBJ=${STAGE90_ENTRY_OSFMK_KERN_CLOCK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_clock.o}
+    OSFMK_KERN_CLOCK_OBJ=${STAGE90_ENTRY_OSFMK_KERN_CLOCK_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_clock.o}
     # 283: `kernel_set_special_port`, and the frontier 280 first predicted - read at last
     #
     # **The plain run reported.** With the pad no longer executed - no checkpoint, no `--wrap`, just
@@ -24758,7 +24789,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `xnu_entry_stub_caller` inside one of those functions or their callees, and no `exception:`
     # line. A silence here would mean a real hang at the first stub-free stretch of the boot, which
     # would be a result in its own right and would be the first trustworthy one of those.
-    OSFMK_KERN_HOST_OBJ=${STAGE90_ENTRY_OSFMK_KERN_HOST_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_host.o}
+    OSFMK_KERN_HOST_OBJ=${STAGE90_ENTRY_OSFMK_KERN_HOST_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_host.o}
     # 280: `klist_init`, and a step that needed a size decision before it could be built.
     # 279's stop was `klist_init`, and the object that defines it is `bsd/kern/kern_event.c`
     # (manifest:34), `bsd_kern_kern_event.o` - the largest step this walk has taken by a wide margin:
@@ -24813,7 +24844,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `ipc_host_init`: 277 measured `+0x30`, and this is `+0x78`, because two whole functions ran in
     # between. `kernel_set_special_port` is `osfmk/kern/host.c`, and it is one of the eight names 277
     # added as a stub - so this step retires an obligation this walk created three experiments ago.
-    BSD_KERN_KERN_EVENT_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_EVENT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_event.o}
+    BSD_KERN_KERN_EVENT_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_EVENT_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_event.o}
     #
     # **280 did not measure that. The run stopped nowhere at all.** The build is exactly what the
     # prediction block describes - **10 resolved, 69 added** (863 -> 921 undefined, 789 -> 827
@@ -26659,7 +26690,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #
     # `waitq_init`'s own body calls only `hw_lock_init` and `waitq_lock`, both real, so there is no
     # stub between the entry of `ipc_mqueue_init` and its tail.
-    OSFMK_IPC_IPC_MQUEUE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_MQUEUE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_mqueue.o}
+    OSFMK_IPC_IPC_MQUEUE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_MQUEUE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_ipc_ipc_mqueue.o}
     #
     # **279 measured it, including the part that was the reason to write it down carefully.** The
     # build measured **5 resolved, 9 added**: 859 -> 863 undefined, 785 -> 789 function stubs, storage
@@ -26749,7 +26780,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # filled with a real `zinit("ipc ports", 128, ipc_port_max*128, 128)` in that run - the stand-in is
     # zeroed at payload start and written by real code before `ipc_port_alloc_special` ever sees it,
     # which is why reading a zeroed stand-in here is not a null-zone panic.
-    OSFMK_IPC_IPC_PORT_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_PORT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_port.o}
+    OSFMK_IPC_IPC_PORT_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_PORT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_ipc_ipc_port.o}
     #
     # **278 measured it, and both halves held.** The build measured **20 resolved, 19 added**:
     # 860 -> 859 undefined, 784 -> 785 function stubs, storage 76 -> 74, text 953220 -> 962244,
@@ -26840,7 +26871,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # eight `mac_exc_*` calls are on the exception-port paths and are not reached here: the object
     # itself defers label initialization (its own comment says so) so `realhost.exc_actions[i].label`
     # is set to NULL, not to a MAC label.
-    OSFMK_KERN_IPC_HOST_OBJ=${STAGE90_ENTRY_OSFMK_KERN_IPC_HOST_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ipc_host.o}
+    OSFMK_KERN_IPC_HOST_OBJ=${STAGE90_ENTRY_OSFMK_KERN_IPC_HOST_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_ipc_host.o}
     #
     # **277 measured it, and the prediction held exactly - both halves, and the counts to the unit.**
     # The build measured **16 resolved, 8 added**: 868 -> 860 undefined, 792 -> 784 function stubs,
@@ -26934,7 +26965,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # calls that built `ipc_kernel_map` and `ipc_kernel_copy_map`**, the `msg_ool_size_small` clamp
     # against `kalloc_max_prerounded`, and the two `ipc_kernel_copy_map` flags. 661 of 661 words of
     # `entry_kv` through `entry_stub_hit` still match the linked ELF (fifth build running).
-    SECURITY_MAC_LABEL_OBJ=${STAGE90_ENTRY_SECURITY_MAC_LABEL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/security_mac_label.o}
+    SECURITY_MAC_LABEL_OBJ=${STAGE90_ENTRY_SECURITY_MAC_LABEL_OBJ:-$XNU_KERNEL_OBJ_OUT/security_mac_label.o}
     # 275: `mac_policy_init`, and the stop is a tail call that reports its caller's caller - again.
     # 274's stop was `mac_policy_init`, and the object that defines it is `security/mac_base.c`
     # (manifest:664), `security_mac_base.o` - **10087 bytes of text, 1280 of data, 2120 of bss, 115
@@ -27007,7 +27038,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # as three clean lines), where 274's was mangled twice identically - the same source-level
     # reporter, two consecutive builds, two different outcomes, which is 272's caution arriving once
     # more: the entry image's report is not a function of its source either.
-    SECURITY_MAC_BASE_OBJ=${STAGE90_ENTRY_SECURITY_MAC_BASE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/security_mac_base.o}    # 274: `host_notify_init`, and the walk comes *back out* of `ipc_bootstrap` for the first time.
+    SECURITY_MAC_BASE_OBJ=${STAGE90_ENTRY_SECURITY_MAC_BASE_OBJ:-$XNU_KERNEL_OBJ_OUT/security_mac_base.o}    # 274: `host_notify_init`, and the walk comes *back out* of `ipc_bootstrap` for the first time.
     # 273's stop was `host_notify_init`, and the object that defines it is `osfmk/kern/host_notify.c`
     # (manifest:548), `osfmk_kern_host_notify.o` - **1616 bytes of text, 0 of data, 364 of bss, 18
     # definitions and 15 references**. **3 resolved** (`host_notify_init`, `host_notify_port_destroy`,
@@ -27087,7 +27118,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # the address is not. The frontier result does not depend on it: the stop is named by the stub's
     # own write and the caller by `_v`, and `mac_policy_init` is what `kernel_bootstrap+0x248` says it
     # must be.
-    OSFMK_KERN_HOST_NOTIFY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_HOST_NOTIFY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_host_notify.o}
+    OSFMK_KERN_HOST_NOTIFY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_HOST_NOTIFY_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_host_notify.o}
     # 273: `mk_timer_init`, and the frontier leaves its function - the prediction is a tail call's.
     # 272's stop was `mk_timer_init`, and the object that defines it is `osfmk/kern/mk_timer.c`
     # (manifest:572), `osfmk_kern_mk_timer.o` - **1577 bytes of text, 8 of data, 4 of bss, 12
@@ -27150,7 +27181,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `_w0=0x65303030` / `_w1=0x0a383331` = `000e138\n`, the two words 271's probe reads out of
     # `g_kv_buf`. The fifteenth consecutive prediction to hold, and the first whose answer lies in a
     # different function from the call under test.
-    OSFMK_KERN_MK_TIMER_OBJ=${STAGE90_ENTRY_OSFMK_KERN_MK_TIMER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_mk_timer.o}
+    OSFMK_KERN_MK_TIMER_OBJ=${STAGE90_ENTRY_OSFMK_KERN_MK_TIMER_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_mk_timer.o}
     # 267: `mig_init`, and **the step is 18 objects, because the datum it reads has 17 entries.**
     # 266's stop was `mig_init`. `osfmk/kern/ipc_kobject.c` (manifest:551) is the object that
     # defines it - 2404 bytes of text, 68 of data, 12376 of bss, six functions - and it is one
@@ -27226,7 +27257,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         "$(kserver_obj mach/mach_voucher_server.c)"
         "$(kserver_obj mach/mach_voucher_attr_control_server.c)"
     )
-    OSFMK_KERN_IPC_KOBJECT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_IPC_KOBJECT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ipc_kobject.o}
+    OSFMK_KERN_IPC_KOBJECT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_IPC_KOBJECT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_ipc_kobject.o}
 
     # 264: `waitq_bootstrap`, and the frontier closes on names 262 created. 263's stop was
     # `waitq_bootstrap`, and the seven `waitq_*` boundaries 262's scheduler link added
@@ -27318,11 +27349,11 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # headroom 2051128, payload size unchanged at 1392906. `kv_written == kv_in_dram == 0x35`, the
     # lowest recorded: the KV buffer is a fixed 45-byte prefix plus the stub's name verbatim, and
     # `mig_init` is eight characters.
-    OSFMK_IPC_IPC_SPACE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_SPACE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_space.o}
-    OSFMK_IPC_IPC_INIT_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_init.o}
-    OSFMK_KERN_WAITQ_OBJ=${STAGE90_ENTRY_OSFMK_KERN_WAITQ_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_waitq.o}
-    OSFMK_KERN_LTABLE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_LTABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ltable.o}
-    OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
+    OSFMK_IPC_IPC_SPACE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_SPACE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_ipc_ipc_space.o}
+    OSFMK_IPC_IPC_INIT_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_INIT_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_ipc_ipc_init.o}
+    OSFMK_KERN_WAITQ_OBJ=${STAGE90_ENTRY_OSFMK_KERN_WAITQ_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_waitq.o}
+    OSFMK_KERN_LTABLE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_LTABLE_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_ltable.o}
+    OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$XNU_KERNEL_OBJ_OUT/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -27781,7 +27812,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `entry_storage_driver_read` clause the link block carries after `xnu_arm_entry.elf` exists. A
     # check placed HERE would read the PREVIOUS arm's elf (the link below has not run yet), which is
     # the stale-artifact defect [[mi4-a-status-is-a-verdict-only-if-its-producer-delivered-one]] names.
-    platform_obj_fresh "$REPO_ROOT/out/xnu_platform_obj/stage90_platform_config_tables.o" \
+    platform_obj_fresh "$XNU_PLATFORM_OBJ_OUT/stage90_platform_config_tables.o" \
                        "$REPO_ROOT/src/platform/stage90_platform_config_tables.c"
     # **What this rule does not cover, said rather than left to look complete.** The other three
     # objects in that directory are `src/supply/stage90_pthread_functions.c`,
@@ -27917,7 +27948,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # handler data is then reachable by nothing at all, which pass 1's own undefined list checks
     # below (`locore_*` must appear there exactly never - a reference to one would have to come from
     # another object).
-    ARM_LOCORE_OBJ=${STAGE90_ENTRY_LOCORE_OBJ:-$REPO_ROOT/out/xnu_asm_obj/locore.o}
+    ARM_LOCORE_OBJ=${STAGE90_ENTRY_LOCORE_OBJ:-$XNU_ASM_OBJ_OUT/locore.o}
     require "$ARM_LOCORE_OBJ" "run ./tools/assemble_arm_layer.sh first - 466 is also the step that assembles the ARM layer with the configuration's own options, which is what stops locore.o calling two functions the configuration does not compile"
     ENTRY_LOCORE_OBJ="$OUT/xnu_arm_entry_locore.o"
     LOCORE_KEEP=(thread_bootstrap_return thread_exception_return thread_syscall_return)
@@ -29580,7 +29611,7 @@ verify_trace_symbols() {
     # is `site + 8` on this image would be `site + 4` on a `bl`, and a reader told the wrong one would
     # match the log against the wrong instruction. If a future compiler emits the call form, this
     # fails and the sentence it prints says what to re-read, which is the point of a check like this.
-    cpuo=$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_cpu.o
+    cpuo=$XNU_KERNEL_OBJ_OUT/osfmk_arm_cpu.o
     read -r nlr nlrbad <<<"$(arm-none-eabi-objdump -d "$cpuo" 2>/dev/null |
         awk '/<Idle_load_context>/ && $3 == "b" { n++; if (index(prev, "e1a0e00f") == 0) bad++ } { prev = $0 } END { printf "%d %d", n + 0, bad + 0 }')"
     [[ "${nlr:-0}" -ge 2 && "${nlrbad:-1}" == 0 ]] ||
@@ -29718,7 +29749,7 @@ verify_trace_symbols() {
     # matched as the instruction that materialises it: `mvn r?, #0x80000000` is `~SIGPdisabled` (the
     # clear, `hw_atomic_and`) and `mov r?, #0x80000000` is `SIGPdisabled` (the disable, `hw_atomic_or`).
     # If gcc ever restructures this, the clause fails and says which four facts to re-derive.
-    sigobj=$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_cpu_common.o
+    sigobj=$XNU_KERNEL_OBJ_OUT/osfmk_arm_cpu_common.o
     read -r sig_and sig_and_mvn sig_or sig_or_zero sig_or_set <<<"$(ext=$(arm-none-eabi-nm -S --defined-only "$sigobj" 2>/dev/null |
             awk '$4 == "cpu_signal_handler_internal" { printf "%d %d;", strtonum("0x" $1), strtonum("0x" $2) }')
         arm-none-eabi-objdump -d "$sigobj" 2>/dev/null | awk -v ext="$ext" '
@@ -29757,7 +29788,7 @@ verify_trace_symbols() {
     [[ "${sig_tail:-0}" == 1 && "${sig_arg:-0}" == 1 ]] ||
         layout_fail "cpu_signal_handler in $sigobj is not \`mov r0, #0; b cpu_signal_handler_internal\` (found tail=$sig_tail arg0=$sig_arg): 514's call is the platform's IPI arrival made explicit, and if that entry point is not the same call with the same argument, the sentence this step prints about 'what the arrival would have done' is not a fact about this image"
     # (`read` strips the trailing blank the `tr` leaves, so the expected string has none.)
-    read -r sph_refs <<<"$(arm-none-eabi-objdump -r "$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_machine_routines.o" 2>/dev/null |
+    read -r sph_refs <<<"$(arm-none-eabi-objdump -r "$XNU_KERNEL_OBJ_OUT/osfmk_arm_machine_routines.o" 2>/dev/null |
         awk '$3 == "cpu_signal_handler" { print $2 }' | sort -u | tr '\n' ' ')"
     [[ "$sph_refs" == "R_ARM_MOVT_ABS R_ARM_MOVW_ABS_NC" ]] ||
         layout_fail "ml_processor_register's own object references cpu_signal_handler with [$sph_refs] and not the address-materialising pair: the platform's IPI slot is where that function would be delivered through, and this step's claim that its call is what the arrival would have done rests on that store being there"
@@ -35834,7 +35865,7 @@ verify_trace_symbols() {
     # source this project already compiles - and 517's narrower pair (which 520's run refuted: its aborts
     # and its thread pointers are at 0xc82xxxxx, above the old 0xc1000000 ceiling) is gone. Read out of the
     # header rather than stated here, so a configuration whose map moved stops the build.
-    vm_param=$REPO_ROOT/external/xnu-4570.1.46/osfmk/mach/arm/vm_param.h
+    vm_param=$XNU/osfmk/mach/arm/vm_param.h
     [[ -f "$vm_param" ]] ||
         layout_fail "521's clause cannot read $vm_param: the guard's window has to be the kernel map's own bound, and 520's run is what it cost to guess it (every abort of that boot was refused and published as a zero) - fix the path, do not restate the numbers here"
     h_lo=$(awk '/^#define[ \t]+VM_MIN_KERNEL_ADDRESS[ \t]/ { v = $NF; sub(/\)$/, "", v); print v; exit }' "$vm_param")
@@ -36460,7 +36491,7 @@ verify_root_device() {
     #
     # `build_entry.sh`'s 436 block adds every `out/xnu_kernel_obj/*.o` to the link. Whichever build
     # ran last decides what the kernel *is*, and until 459 nothing recorded which build that was.
-    stamp=$REPO_ROOT/out/xnu_kernel_obj/config.stamp
+    stamp=$XNU_KERNEL_OBJ_OUT/config.stamp
     [[ -f $stamp ]] ||
         layout_fail "no $stamp, so this image's kernel came from a pool build that recorded nothing - the pool has to be rebuilt (see the 459 section of tools/build_xnu_arm_kernel.sh)"
     pool_config=$(awk '$1 == "config" { print $2 }' "$stamp")
