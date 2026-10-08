@@ -29592,8 +29592,13 @@ verify_trace_symbols() {
     bid=$(sym_addr bsdinit_task) || layout_fail "bsdinit_task is not in the linked image - 509's check needs the object whose call site the wrapper has to be reached from"
     bnext=$(sym_next "$bid") || true
     [[ -n "$bnext" ]] || layout_fail "no symbol follows bsdinit_task in the image, so its instruction range cannot be read"
-    arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$bid" --stop-address="$bnext" |
-        grep -q "bl[[:space:]]\+${wrap_a#0x} <__wrap_load_init_program>" ||
+    # The range is captured before it is grepped, deliberately. `objdump | grep -q` under
+    # `set -o pipefail` is a race: `grep -q` exits at the first match and closes the pipe while
+    # objdump is still writing, objdump takes SIGPIPE and the *pipeline* reports 141 even though the
+    # branch was found - so this clause would fail on a correct image whenever the reader happened to
+    # win. The check is the match, never the producer's exit status, so the producer is drained first.
+    bsdinit_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$bid" --stop-address="$bnext")
+    grep -q "bl[[:space:]]\+${wrap_a#0x} <__wrap_load_init_program>" <<<"$bsdinit_body" ||
         layout_fail "bsdinit_task ($bid..$bnext) does not branch to __wrap_load_init_program ($wrap_a) - either the OS's own call site went to the real loader (455's same-object case, a wrapper that can never run) or the flag list lost the name; both make a run with no xnu_live_exec_* records indistinguishable from a boot that never got there"
     say "  xnu_entry_509: load_init_program's body branches to panic ($panic_a) and its caller bsdinit_task branches to __wrap_load_init_program ($wrap_a), so xnu_live_exec_done_seq exists only when the OS loaded its init image - and the console line beside it is printed through the real printf"
 
@@ -29690,13 +29695,16 @@ verify_trace_symbols() {
     # is a precaution rather than a diagnosis.** The first build of this clause failed here, with the
     # sentence below, on an image whose disassembly contains the branch - and the identical command
     # re-run by hand, 200 times in a row, matched every time, as did a full re-build. The cause is
-    # therefore **not established**, and it is recorded as such: a one-off that recurs is a race, and
-    # the one race this file can name is the one it already carries twice - `set -o pipefail` (line 25)
-    # turns `objdump | grep -q` into a pipeline whose left side can die of SIGPIPE the moment `grep`
-    # exits on its match, reporting a successful match as exit 141 (the `strings ... | grep -q` note
-    # above, and the reader at 27287). A check that can fail without the artifact being wrong is worse
-    # than no check, because the sentence it prints is believed; this form has no pipe, so the exit
-    # status is `grep`'s and nothing else's.
+    # now **established** (938's rung, by the 509 clause below, which reproduced the same sentence
+    # deterministically *and* fixed it): `set -x` around the bare pipeline showed the shell taking
+    # **exit 141** at the pipeline itself, before the `$?` capture, i.e. `objdump` dying of SIGPIPE.
+    # `set -o pipefail` (line 25) turns `objdump | grep -q` into a pipeline whose left side dies of
+    # SIGPIPE the moment `grep` exits on its match, reporting a successful match as exit 141 (the
+    # `strings ... | grep -q` note above, and the reader at 27287) - and *whether it fires is a race*
+    # on the producer/reader speeds, which is exactly why "200 in a row by hand" won every time and the
+    # build did not. A check that can fail without the artifact being wrong is worse than no check,
+    # because the sentence it prints is believed; this form has no pipe, so the exit status is
+    # `grep`'s and nothing else's.
     atu_dis=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$atu" --stop-address="$atunext")
     grep -q "bl[[:space:]]\+${bwrap#0x} <__wrap_bsd_ast>" <<<"$atu_dis" ||
         layout_fail "ast_taken_user ($atu..$atunext) does not branch to __wrap_bsd_ast ($bwrap) - the AST delivery went to the real bsd_ast (455's same-object case) or the flag list lost the name, and either way nothing on the kernel's way out to user mode is recorded"
