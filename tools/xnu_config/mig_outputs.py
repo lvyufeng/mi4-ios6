@@ -130,6 +130,16 @@ def main():
     for _base, (_d, kinds) in found.items():
         if "user" in kinds:
             kinds.setdefault("header", None)
+    # ... and the same for the kernel-server half: every `%_server.c` rule is invoked as
+    # `-server $*_server.c -sheader $*_server.h` (osfmk/default_pager/Makefile:129-134 and the
+    # identical rule in osfmk/mach/Makefile), so a base with a `server` output also has a
+    # `X_server.h`.  Darwin-13's `default_pager_object` is the one base in either tree whose Makefile
+    # instead names the **base** header in `MIG_KSHDRS` (`default_pager_object.h`) while the rule
+    # still writes `default_pager_object_server.h` - osfmk/kern/ipc_kobject.c includes the latter, so
+    # without this the generated `.c` exists but the header it will not compile without does not.
+    for _base, (_d, kinds) in found.items():
+        if "server" in kinds:
+            kinds.setdefault("sheader", None)
     lines = ["# base\tdir\toutputs   -- from the MIG_* lists in XNU's Makefiles"]
     on_disk = 0
     for base in sorted(found):
@@ -138,7 +148,9 @@ def main():
         if not os.path.isfile(defs):
             continue
         on_disk += 1
-        kinds = {k for k in kinds if kinds[k] is not None} | ({"header"} if "user" in kinds else set())
+        kinds = {k for k in kinds if kinds[k] is not None} \
+            | ({"header"} if "user" in kinds else set()) \
+            | ({"sheader"} if "server" in kinds else set())
         lines.append(f"{base}\t{rel_dir}\t{','.join(sorted(kinds))}")
 
     text = "\n".join(lines) + "\n"
