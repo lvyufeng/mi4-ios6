@@ -726,16 +726,42 @@ residence keys. **That claim is NOT independently verifiable**: no 9edaa3b3 capt
 this arm's own reading — the USB ladder is gone and the run still does not return. The 9edaa3b3 return/
 stream-keys detail is treated as unproven and owed a re-press.
 
-**HONEST UNKNOWNS.** (a) Whether the run reached the SMEM probe at all is **unobservable** in an exit-2
-outcome with no log recovery — the 3 GB reading is still not delivered. (b) The wedge is now known to
-reproduce on an arm with the entire USB ladder removed and the identity-map bug fixed, which **narrows
-it to the idle path itself** (the `cpu_idle` re-arm / the pass after the 4th `wfi`), not to any USB code.
-(c) **The one structural difference from 909's own arms** (which are recorded as reaching ~13.4 s and
-returning; that is the prior record, cited not re-measured): they carry `RESIDENT=1` with
-`IDLE_NO_SLEEP=0` (the deep-idle path), while this arm carries `RESIDENT=1` at the same window with
-`IDLE_NO_SLEEP=1` (the no-sleep path) — and only the latter does not return. **So the next arm should be
-the 16 MB window with `IDLE_NO_SLEEP=0`** (909's own idle path, which returned), to separate "the wedge"
-from "the no-sleep path".
+**HONEST UNKNOWNS.** (a) Whether the run reached the SMEM probe at all is **unobserved** until the log
+is recovered (see the correction at the top of this section) — the 3 GB reading is still not delivered.
+(b) *Corrected:* the earlier text said the exit-2 result "narrows it to the idle path itself". **It does
+not** — an exit-2 outcome with no log says only that the run did not return, so this is open until the
+recovery. What *is* established is the negative: the whole USB ladder was removed and the run still did
+not return, so the USB stream poll is not the hang. (c) **The one structural difference from 909's own
+arms** (which are recorded as reaching ~13.4 s and returning; that is the prior record, cited not
+re-measured): they carry `RESIDENT=1` with `IDLE_NO_SLEEP=0` (the deep-idle path), while this arm carries
+`RESIDENT=1` at the same window with `IDLE_NO_SLEEP=1` (the no-sleep path) — and only the latter does not
+return. **So the next arm is the 16 MB window with `IDLE_NO_SLEEP=0`** (909's own idle path, which
+returned), to separate "the wedge" from "the no-sleep path" — but **only after the recovery**.
 
-**OWED:** the operator's power press to restore the device; then the `IDLE_NO_SLEEP=0` arm above; and
-the SMEM 3 GB reading, which needs a run that reaches the first idle pass **and returns**.
+**OWED:** (1) the operator's VolDown+Power → fastboot → TWRP → `cat /proc/last_kmsg` to recover
+`21086959`'s log (free; must precede any new press); (2) reading that log for `xnu_live_smem_*` and the
+stop point; (3) then the `IDLE_NO_SLEEP=0` A/B arm; and (4) the SMEM 3 GB reading.
+
+## 13. The runner's exit-2 text contradicted itself on log recoverability (2026-10-08)
+
+Reviewing §12's "log lost" claim against the tools found the *source* of the bad reading: the runner's
+own exit-2 block (`scripts/run_and_capture.sh`, the `no-return` branch) said two opposite things in
+four consecutive sentences. It tells the operator "Do NOT power-cycle before considering this: the
+payload's log lives in the top of DRAM and is lost on a cold boot" — correct — and then, one sentence
+later, "a failure to return means the log is likely **unrecoverable** anyway". The first sentence
+invites a read; the second tells the operator not to bother. §12 was written from the second sentence,
+which is why it declared the log lost one line after noting the WarmTWRP door.
+
+**The wrong half is the "unrecoverable anyway" sentence.** It is true only in the *watchdog* case (a
+payload-armed reset that reboots the SoC — though even then the buffer is cleared by the payload re-entry,
+not by the reset). It is false for the general case: what destroys the RAM console is a **cold** power
+transition (regulators off) or a **new `fastboot boot`** (the payload's `log_init` clears the buffer on
+entry). A **warm** reset does not, and the project's own recovery door —
+`VolDown+Power` → fastboot → `fastboot boot <twrp>` → `cat /proc/last_kmsg` — reads the *previous* run's
+console (this is the same door `experiment-910-usb-debug-map.md:51` names as "the escape").
+
+**The fix.** The exit-2 block now prints the recovery door explicitly, and names what actually destroys
+the log ("a cold power transition or a NEW `fastboot boot` — not every reset"), so a dark device is not
+mistaken for an empty one and a spent run's only evidence is not forfeited. This is the harness fixing
+the misreading at its source rather than only correcting the doc that inherited it. `rehearse_live_path.sh`
+cell `no-return` (which asserts the exit-2 block's own text) is the regression test.
