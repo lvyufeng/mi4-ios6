@@ -934,3 +934,38 @@ double-quoted `say` string, which bash would have run as a command substitution.
 block did not print it; it does now, beside `mapped`/`read_base`. Every one of the sixteen
 `xnu_live_smem_*` names the block reads is present in the built entry image (verified against
 `xnu_arm_entry.elf`), so the reader's names are a reading of the artifact, not a guess.
+
+## 18. The residency clause had no reader — and a resident boot that does not return is not a wedge (2026-10-08)
+
+**The reframing.** `armed-storage-21086959` did not return, and §12/§15 read that as "XNU is not
+resident." Reading the resident machinery back says otherwise. A resident arm carries `RESIDENT=1`
+with `POST_END_TICKS=0` — `entry_wdt_pet`'s block *requires* the seam's ending compiled out
+(`entry_trace.c:2602`) — and the 911 arms turn the whole USB ladder **off**. So a resident boot
+produces **no host enumeration by construction**: the host sees darkness. And §7's own rule
+([[mi4-907-xnu-in-the-recovery-partition]]) is that **darkness is not liveness**. The two together mean
+21086959's non-return is **exactly what a working resident XNU looks like** — a boot that stays in the
+idle loop and never comes back, because nothing ends it and nothing is left to enumerate.
+
+**The only liveness evidence is the pet.** The payload armed the SoC watchdog 25 s / 3 s before the
+jump (`stage90_hw_watchdog_arm`) and nothing disarms it; `entry_wdt_pet` FEEDS it at the idle wrapper's
+own site — `entry_trace.c:2220` on `IDLE_NO_SLEEP=1`, `:2874` on `IDLE_NO_SLEEP=0` — so **both** resident
+configurations are kept alive past the 25 s the watchdog would otherwise bite at. The pet publishes
+`xnu_live_wdt_pets` on every power-of-two pass. A log whose pet count **climbed** is a boot the watchdog
+did not bite: XNU was alive and looping. A count of **zero** beside a present `_map` is a pet that ran
+on pass 1 and died before its own count passed half-bark — a short life, not a wedge, read against
+`_countdown`/`_bark`.
+
+**And the runner read none of it.** `grep -n wdt run_and_capture.sh` returned nothing — the identical
+gap class as the SMEM block (§17): the evidence was published and the reader never read it. A new
+top-level block (guarded on `xnu_live_wdt_map`) now names the mapping the pet vouched for (its own
+install vs the GIC's `0xf9000000` block, which covers the watchdog's `0xf9017000` — the fallback is the
+*expected* path, not a failure) and prints **RESIDENT** (N feeds, watchdog did not bite), **RESIDENT,
+not yet fed** (the short life), or **UNREAD** (vouched for no mapping — neither resident nor dead).
+Three rehearsal fixtures, one per branch; battery green **20/0, 22/0 (+3 rows), 4/0**. Commit `d03893b`.
+
+**What this changes for the owed press.** Recovering 21086959's log is now the *decisive* reading of
+「保持在xnu里」, not a post-mortem: `xnu_live_wdt_pets` > 0 there means the run WAS resident (XNU alive,
+watchdog fed), and the 911 family's "non-return" is the success it was built to be — not the wedge. The
+IDLE_NO_SLEEP A/B (`cb4e17f1`) still discriminates: if 21086959 (no-sleep) shows pets and cb4e17f1
+(deep-idle) shows none/short, the wedge is in the deep-idle enter's cache-off window; if both show pets,
+the residence clause is MET and the remaining work is 911e, not the wedge.
