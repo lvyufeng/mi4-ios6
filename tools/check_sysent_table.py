@@ -87,6 +87,14 @@ refused, which is what says the comparison is a comparison and not a restatement
     ./tools/check_sysent_table.py --selftest
     ./tools/check_sysent_table.py                        # out/stage90/xnu_arm_entry.elf
     ./tools/check_sysent_table.py --elf out/stage90/xnu_arm_entry.elf --verbose
+    ./tools/check_sysent_table.py --tree external/xnu-hd2-darwin13/xnu    # the Darwin 13 layout
+
+**The `struct sysent` layout is per-tree, and the tool reads it from the tree.** 4570's 16-byte table
+with `munge_*` symbols is not Darwin 13's 24-byte table with NULL munger words; see `SYSENT_LAYOUTS`.
+`--tree` (or the tree-derived default) selects the stride, where `sy_call` sits, whether the munger word
+names a symbol or must be zero, and which `syscalls.master` the numbering comes from. The `--selftest`
+mutations are listed for the selected layout, so a run against one tree cannot report a hole that only
+exists in the other's.
 """
 
 import argparse
@@ -98,10 +106,55 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_ELF = os.path.join(REPO_ROOT, "out/stage90/xnu_arm_entry.elf")
-DEFAULT_MASTER = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/bsd/kern/syscalls.master")
+DEFAULT_TREE = os.path.join(REPO_ROOT, "external/xnu-4570.1.46")
 
 TABLE_SYMBOL = "sysent"
 COUNT_SYMBOL = "nsysent"
+
+# **`struct sysent` is two different layouts, one per tree, and the table this check reads is the one
+# the selected tree's `unix_syscall` indexes.** The 4570 port (Darwin 17) has `CONFIG_REQUIRES_U32_MUNGING`
+# set, so `bsd/sys/sysent.h:39-53` is `{ sy_call; sy_arg_munge32; sy_return_type; sy_narg; sy_arg_bytes }`
+# - 16 bytes - and `sy_arg_munge32` names a *real function* (`munge_www`, ... in `bsd/dev/i386/munge.s`).
+# Darwin 13 (`xnu-hd2-darwin13`) does not set that option: its `bsd/sys/sysent.h:42-53` reorders the
+# members (`{ sy_narg; sy_resv; sy_flags; sy_call; sy_arg_munge32; sy_arg_munge64; sy_return_type;
+# sy_arg_bytes }`), which makes the entry **24** bytes and moves `sy_call` to offset 4 - and its
+# `bsd/kern/makesyscalls.sh` `__arm__` arm defines **every** `munge_*` to `NULL` ("ARM does not need
+# mungers for BSD system calls"), so a D13 slot's munger word is a literal 0 and there is no such symbol
+# anywhere in the image. The claim the check makes is unchanged in both trees - the slot the fixture's
+# `r12` reaches must hold the wrapper, and the argument words must be the ones the fixture's registers
+# are - but *where* the words are, and what the munger word may be, are per-tree.
+#
+# The layout is a *table read from the tree's own header*, not guessed: `stride`, `call`, `munge32`,
+# `narg` and `argbytes` are the byte offsets, `mungers` says whether the munger word names a symbol
+# (`symbols`, 4570) or must be zero (`none`, D13), and `slot8` is the name `syscalls.master` gives the
+# `AUE_NULL` witness at index 8 - `enosys` in 4570's master (`:49`) and `nosys` in D13's (`:49`).
+SYSENT_LAYOUTS = {
+    # Darwin 17. `CONFIG_REQUIRES_U32_MUNGING` on; the munger word is `munge_*`'s address.
+    "4570": {
+        "stride": 16, "call": 0, "munge32": 4, "narg": 12, "argbytes": 14,
+        "mungers": "symbols", "slot8": "enosys",
+        "why": "xnu-4570.1.46/bsd/sys/sysent.h:39-53 with CONFIG_REQUIRES_U32_MUNGING, 16-byte sysent",
+    },
+    # Darwin 13. No `CONFIG_REQUIRES_U32_MUNGING`; the members are reordered (24-byte sysent) and the
+    # `__arm__` arm of `makesyscalls.sh` turns every munger into NULL.
+    "d13": {
+        "stride": 24, "call": 4, "munge32": 8, "narg": 0, "argbytes": 20,
+        "mungers": "none", "slot8": "nosys",
+        "why": "xnu-hd2-darwin13/xnu/bsd/sys/sysent.h:42-53 (reordered, 24-byte sysent) with the "
+               "`__arm__` arm of bsd/kern/makesyscalls.sh (every munge_* NULL)",
+    },
+}
+
+
+def select_layout(tree):
+    """The layout for `tree`, by the one discriminator the whole build uses ([[mi4-913-ios7-rebase-decision]]).
+
+    Darwin 13 ships the legacy private header `osfmk/sys/types.h`; Darwin 17 does not. This is the same
+    test `tools/xnu_tree_roots.sh` and `check_d13_board_staged.sh` make, so "which tree" is one
+    definition across the build and an entry link cannot disagree with it.
+    """
+    is_d13 = os.path.isfile(os.path.join(tree, "osfmk/sys/types.h"))
+    return ("d13" if is_d13 else "4570"), SYSENT_LAYOUTS["d13" if is_d13 else "4570"]
 
 # The syscalls the fixture makes, and the slot each one's wrapper has to occupy. The first is the one
 # the program's `r12` starts with; the second is the call whose *arguments* the armv7k munger marshals,
@@ -120,22 +173,19 @@ WRAPPED = [
 ]
 SYSCALL_INDEX, SYSCALL_NAME = WRAPPED[0]
 
-# `sizeof(struct sysent)` on this target. Nothing here *relies* on the number: it is the stride the
-# witnesses below either satisfy or do not, and a build that changed it would have to satisfy them at
-# the new stride.
-SYSENT_STRIDE = 16
-
 # (index, name) pairs, from `syscalls.master`'s own lines. Ten of them, so that the stride and the
 # numbering are both over-determined rather than assumed - and the last three are the ones the fixture
 # reaches, 20 and 197 being 177 entries apart so that no small error in the stride can leave both of
-# them satisfied.
+# them satisfied. **Index 8's name is per-tree** (`None`): 4570's master calls it `enosys` (`:49`) and
+# Darwin 13's calls it `nosys` (`:49`), so the name comes from the layout and the slot's *number* - the
+# witness property - is what is shared.
 WITNESSES = [
     (0, "nosys"),
     (1, "exit"),
     (2, "fork"),
     (3, "read"),
     (5, "open"),
-    (8, "enosys"),
+    (8, None),        # enosys on 4570, nosys on D13 - taken from the layout
     (20, "getpid"),
     (128, "rename"),
     (197, "mmap"),
@@ -200,16 +250,24 @@ MUNGERS = {
 # argument buffer, the child would still get 0, and the run's records would be identical. So the fact
 # is checked here, structurally, because the device cannot show it.
 #
-# The three words are the whole shape: the munger (offset 4), `sy_narg` (12, `int16_t`) and
-# `sy_arg_bytes` (14, `uint16_t`) - one 16-byte `struct sysent`.
+# The three words are the whole shape: the munger, `sy_narg` (`int16_t`) and `sy_arg_bytes`
+# (`uint16_t`) - one `struct sysent`, whose offsets are the layout's (`MUNGER_WORD_OFFSET` and the two
+# counts below are read from it, since 4570 and D13 place them differently).
+#
+# **On D13 the munger word in this set must still be zero and the munger claim is even sharper there:**
+# `unix_syscalls.c:353` is `if (callp->sy_narg) { ... uthread->uu_arg[i] = state->r[i]; ... }` and it
+# **never names a munger at all** - it copies `state->r[]` straight into `uu_arg`. So where 4570's
+# `unix_syscall` calls `sy_arg_munge32` and the *slot's word* chooses the register order, D13's arm reads
+# no munger word; the count is the whole of the register choice. That is the tree's own fact, and it is
+# why a D13 slot's munger word is NULL by construction (makesyscalls.sh's `__arm__` arm).
 NO_ARGUMENTS = {
     20: "getpid",     # 479: `{ int getpid(void); }` - nothing to marshal and no register read
     2: "fork",        # 505: `{ int fork(void) }` - and this one is what makes the child's zero come
                       #      from the register rather than from the buffer
 }
-MUNGER_WORD_OFFSET = 4
-NARG_OFFSET = 12
-ARG_BYTES_OFFSET = 14
+MUNGER_WORD_OFFSET = 4   # overwritten from the layout in `main` (`8` on D13) before any read
+NARG_OFFSET = 12         # likewise (`0` on D13)
+ARG_BYTES_OFFSET = 14    # likewise (`20` on D13)
 
 # **508: the slot whose *word count* is a claim about the fixture's registers.** `unix_syscall`
 # marshals `sy_narg` words - `arm_get_syscall_args` and the munger's own count - into `uu_arg`, and
@@ -225,11 +283,13 @@ ARGUMENT_WORDS = {
     7: ("wait4", 4, 16),
 }
 
-# `struct sysent` (`bsd/sys/sysent.h:45`) on this target, where the armv7k `#if` is on:
-# `sy_call`, `sy_arg_munge32`, `sy_return_type`, `sy_narg`, `sy_arg_bytes`. The munger is the second
-# word, the two counts are the last two members, and the stride above agrees with the five because the
-# first three are 4 bytes each and the last two are 2 - which is where `NARG_OFFSET` and
-# `ARG_BYTES_OFFSET` above come from.
+# **`struct sysent`'s member offsets are the layout's** (`SYSENT_LAYOUTS` at the top of this file), not
+# a constant here: 4570's table is `{ sy_call; sy_arg_munge32; sy_return_type; sy_narg; sy_arg_bytes }`
+# - 16 bytes, munger at 4, `sy_narg` at 12, `sy_arg_bytes` at 14 - and Darwin 13's reorders the members
+# to `{ sy_narg; sy_resv; sy_flags; sy_call; sy_arg_munge32; sy_arg_munge64; sy_return_type;
+# sy_arg_bytes }` - 24 bytes, `sy_call` at 4, munger at 8, `sy_narg` at 0, `sy_arg_bytes` at 20. The
+# three names below are the ones the reads in `collect` use; `main` sets them from the layout before any
+# read, so their values here are only a 4570 default that no D13 run ever sees.
 
 failures = []
 notes = []
@@ -316,13 +376,25 @@ def master_entries(path):
     return entries
 
 
-def collect(elf, master, mutate=None):
-    """Every way the image's table can disagree with the master and with the wrapper, as sentences."""
+def collect(elf, master, stride, call_off, munger_mode, slot8, mutate=None):
+    """Every way the image's table can disagree with the master and with the wrapper, as sentences.
+
+    `stride`, `call_off`, `munger_mode` and `slot8` are the selected tree's `struct sysent` (see
+    `SYSENT_LAYOUTS`): where the `sy_call` word is, whether the munger word beside it must name a
+    symbol (`"symbols"`, 4570) or must be zero (`"none"`, D13), and the name the master gives the
+    `AUE_NULL` witness at index 8. Every read below is `at + call_off` (or the munger/count offsets,
+    which move with the layout), never a bare slot index - a stride hard-coded to 16 read the wrong
+    words out of a D13 image on every slot past 0 and called the result the table's numbering.
+    """
     symbols = elf.symbols()
     wanted = [TABLE_SYMBOL, COUNT_SYMBOL]
     for _index, name in WRAPPED:
         wanted += [name, "__wrap_" + name]
-    wanted += list(MUNGERS.values())
+    # **The munger symbols are only wanted where the layout says they exist.** On D13 `makesyscalls.sh`
+    # defines every `munge_*` to NULL and there is no such symbol in the image at all, so requiring them
+    # would fail on the tree's own fact rather than on a defect.
+    if munger_mode == "symbols":
+        wanted += list(MUNGERS.values())
     for symbol in wanted:
         if symbol not in symbols:
             fail("the image defines no %s, so the table this check reads (or a wrapper it looks for) "
@@ -332,7 +404,7 @@ def collect(elf, master, mutate=None):
 
     table_va = symbols[TABLE_SYMBOL]
     count_va = symbols[COUNT_SYMBOL]
-    span = (max(index for index, _ in WITNESSES) + 1) * SYSENT_STRIDE
+    span = (max(index for index, _ in WITNESSES) + 1) * stride
     raw = elf.read(table_va, span)
     count_bytes = elf.read(count_va, 4)
     if raw is None or count_bytes is None:
@@ -347,8 +419,10 @@ def collect(elf, master, mutate=None):
     raw = bytes(state["table"])
     count = state["nsysent"]
 
-    say("sysent at 0x%08x, nsysent at 0x%08x = %d, stride %d, %d witnesses"
-        % (table_va, count_va, count, SYSENT_STRIDE, len(WITNESSES)))
+    say("sysent at 0x%08x, nsysent at 0x%08x = %d, stride %d (sy_call at +%d, %s mungers), "
+        "%d witnesses"
+        % (table_va, count_va, count, stride, call_off,
+           "symbol" if munger_mode == "symbols" else "NULL", len(WITNESSES)))
 
     for index, name in WRAPPED:
         if count <= index:
@@ -357,24 +431,25 @@ def collect(elf, master, mutate=None):
                  "%s" % (count, index, name))
 
     for index, name in WITNESSES:
+        want_name = slot8 if name is None else name
         want = master.get(index)
-        if want != name:
+        if want != want_name:
             fail("syscalls.master's line for %d names `%s` and this check expects `%s`: the number the "
                  "fixture's r12 carries and the number the master gives %s are two definitions of one "
-                 "decision and they have to agree" % (index, want, name, name))
+                 "decision and they have to agree" % (index, want, want_name, want_name))
             continue
         # **The address is the wrapper's when there is one.** `--wrap=X` renames every reference to
         # `X`, including an initialiser, so a slot that names a wrapped symbol holds `__wrap_X` - and
         # comparing it with `X` would call the image wrong for being right. `nm` is what says which
         # reference the link line produced, and index 20 is checked again below as the two-sided fact
         # this step's run depends on.
-        at = table_va + index * SYSENT_STRIDE
-        expected = "__wrap_" + name if ("__wrap_" + name) in symbols else name
-        got, = struct.unpack_from("<I", raw, index * SYSENT_STRIDE)
+        at = table_va + index * stride + call_off
+        expected = "__wrap_" + want_name if ("__wrap_" + want_name) in symbols else want_name
+        got, = struct.unpack_from("<I", raw, index * stride + call_off)
         if got != symbols[expected]:
-            fail("sysent[%d] at 0x%08x is 0x%08x and `%s` is at 0x%08x: the table's numbering or its "
-                 "stride is not the one `syscalls.master` gives, so the fixture's syscall number does "
-                 "not name the function this step documents"
+            fail("sysent[%d] at 0x%08x (its sy_call word) is 0x%08x and `%s` is at 0x%08x: the table's "
+                 "numbering or its stride is not the one `syscalls.master` gives, so the fixture's "
+                 "syscall number does not name the function this step documents"
                  % (index, at, got, expected, symbols[expected]))
 
     # **The wrappers' slots, which are the readings this step's device run depends on.** `--wrap=X`
@@ -382,31 +457,31 @@ def collect(elf, master, mutate=None):
     # not be the function. Both halves are stated, because the failure mode this replaces is the
     # silent one: a slot holding the real function produces no records at all.
     for index, name in WRAPPED:
-        got, = struct.unpack_from("<I", raw, index * SYSENT_STRIDE)
+        got, = struct.unpack_from("<I", raw, index * stride + call_off)
         wrapper = symbols["__wrap_" + name]
         real = symbols[name]
         if got == real:
-            fail("sysent[%d] holds the real %s (0x%08x) and not __wrap_%s (0x%08x): `--wrap` rewrites "
-                 "the initialiser in init_sysent.c, so this means the flag is not in the link line (or "
-                 "the table is not the one the dispatcher indexes) and the wrapper would never run - "
-                 "and a run with no %s records looks exactly like a wrapper that is not there"
+            fail("sysent[%d].sy_call holds the real %s (0x%08x) and not __wrap_%s (0x%08x): `--wrap` "
+                 "rewrites the initialiser in init_sysent.c, so this means the flag is not in the link "
+                 "line (or the table is not the one the dispatcher indexes) and the wrapper would never "
+                 "run - and a run with no %s records looks exactly like a wrapper that is not there"
                  % (index, name, real, name, wrapper, name))
         elif got != wrapper:
-            fail("sysent[%d] is 0x%08x, which is neither __wrap_%s (0x%08x) nor %s (0x%08x)"
+            fail("sysent[%d].sy_call is 0x%08x, which is neither __wrap_%s (0x%08x) nor %s (0x%08x)"
                  % (index, got, name, wrapper, name, real))
         else:
             summary.append("sysent[%d] = 0x%08x = __wrap_%s (%s is at 0x%08x)"
                            % (index, got, name, name, real))
 
-        # **And the munger word beside it, for the slot that has one.** The wrapper's presence says
-        # the call reaches this file; the munger says which registers the call is *handed* - and that
-        # is a claim about the ABI that lives in the image and in nothing else. The name is checked
-        # against `nm`, not written into a message: an image whose slot named `munge_wwwww` or
-        # `munge_wwwwl` would dispatch a call whose arguments the fixture's own header comment does
-        # not describe, and the device run would show a zero where `0x5a5a` is expected.
-        if index in MUNGERS:
+        # **And the munger word beside it.** On 4570 it names a munger and the name is checked against
+        # `nm`: an image whose slot named `munge_wwwww` or `munge_wwwwl` would dispatch a call whose
+        # arguments the fixture's own header comment does not describe, and the device run would show a
+        # zero where `0x5a5a` is expected. **On D13 the word is required to be zero**, because
+        # `makesyscalls.sh`'s `__arm__` arm defines every `munge_*` to NULL - the tree has no munger to
+        # name, so a non-zero word there would be a munger a D13 build cannot have produced.
+        if munger_mode == "symbols" and index in MUNGERS:
             want = MUNGERS[index]
-            at = index * SYSENT_STRIDE + MUNGER_WORD_OFFSET
+            at = index * stride + MUNGER_WORD_OFFSET
             got, = struct.unpack_from("<I", raw, at)
             if got != symbols[want]:
                 fail("sysent[%d].sy_arg_munge32 at 0x%08x is 0x%08x and `%s` is at 0x%08x: the "
@@ -418,6 +493,19 @@ def collect(elf, master, mutate=None):
             else:
                 summary.append("sysent[%d].sy_arg_munge32 = 0x%08x = %s, the munger the fixture's "
                                "registers are read by" % (index, got, want))
+        elif munger_mode == "none":
+            at = index * stride + MUNGER_WORD_OFFSET
+            got, = struct.unpack_from("<I", raw, at)
+            if got != 0:
+                fail("sysent[%d].sy_arg_munge32 at 0x%08x is 0x%08x, and on this tree it has to be 0: "
+                     "Darwin 13's `makesyscalls.sh` defines every `munge_*` to NULL under `__arm__` "
+                     "(`/* ARM does not need mungers for BSD system calls. */`), so no munger symbol "
+                     "exists in the image and a non-zero word here is not a name this build could have "
+                     "produced" % (index, table_va + at, got))
+            else:
+                summary.append("sysent[%d].sy_arg_munge32 = 0 - this tree's `__arm__` arm has no "
+                               "munger, and unix_syscalls.c copies `state->r[]` into `uu_arg` itself"
+                               % index)
 
     # **And the slots that read no register at all - the claim 505's fixture rests on.** See
     # `NO_ARGUMENTS`: `unix_syscall` marshals only when `sy_narg != 0`, so this is the word that decides
@@ -427,7 +515,7 @@ def collect(elf, master, mutate=None):
     # observable - `fork` never looks at `uu_arg`, so the child's zero and every record would be the
     # same.
     for index, name in sorted(NO_ARGUMENTS.items()):
-        at = index * SYSENT_STRIDE
+        at = index * stride
         munger, = struct.unpack_from("<I", raw, at + MUNGER_WORD_OFFSET)
         narg, = struct.unpack_from("<h", raw, at + NARG_OFFSET)
         argbytes, = struct.unpack_from("<H", raw, at + ARG_BYTES_OFFSET)
@@ -445,16 +533,16 @@ def collect(elf, master, mutate=None):
                            "value rather than an argument" % (index, name))
 
     # **And how many words a slot marshals, for the one slot where the count is a register claim.**
-    # See `ARGUMENT_WORDS`: `sy_narg` is what `unix_syscall` compares against zero before it calls
-    # `arm_get_syscall_args` at all, and it is also the count the munger is asked to copy. The failure
-    # this refuses is the one that reads as a fact about something else on the device: with three words
-    # marshalled, the fixture's fourth register (the `rusage` pointer, which it sets to 0 for this
-    # reason) never reaches the argument struct, `wait4_nocancel` reads the buffer's word at offset 12
-    # instead, and the `copyout` that word causes either faults or answers with an errno - which the
-    # fixture's own `cmp r0, #WAIT_PID` turns into a `udf #1` and a panic on `initproc`. A stop with a
-    # cause three files away is exactly the outcome this check exists to make unnecessary.
+    # See `ARGUMENT_WORDS`: `sy_narg` is what `unix_syscall` compares against zero before it marshals,
+    # and it is the count of registers copied. The failure this refuses is the one that reads as a fact
+    # about something else on the device: with three words marshalled, the fixture's fourth register
+    # (the `rusage` pointer, which it sets to 0 for this reason) never reaches the argument struct,
+    # `wait4_nocancel` reads the buffer's word at offset 12 instead, and the `copyout` that word causes
+    # either faults or answers with an errno - which the fixture's own `cmp r0, #WAIT_PID` turns into a
+    # `udf #1` and a panic on `initproc`. A stop with a cause three files away is exactly the outcome
+    # this check exists to make unnecessary.
     for index, (name, narg, argbytes) in sorted(ARGUMENT_WORDS.items()):
-        at = index * SYSENT_STRIDE
+        at = index * stride
         got_narg, = struct.unpack_from("<h", raw, at + NARG_OFFSET)
         got_bytes, = struct.unpack_from("<H", raw, at + ARG_BYTES_OFFSET)
         if got_narg != narg or got_bytes != argbytes:
@@ -471,9 +559,11 @@ def collect(elf, master, mutate=None):
                            "the fixture's r0..r3 are, copied contiguously into `uu_arg`"
                            % (index, name, got_narg, got_bytes))
 
-    # Every witness read back, for the log: an eight-line agreement is what makes the stride a reading.    for index, name in WITNESSES:
-        got, = struct.unpack_from("<I", raw, index * SYSENT_STRIDE)
-        expected = "__wrap_" + name if ("__wrap_" + name) in symbols else name
+    # Every witness read back, for the log: an eight-line agreement is what makes the stride a reading.
+    for index, name in WITNESSES:
+        want_name = slot8 if name is None else name
+        got, = struct.unpack_from("<I", raw, index * stride + call_off)
+        expected = "__wrap_" + want_name if ("__wrap_" + want_name) in symbols else want_name
         say("  sysent[%3d] = 0x%08x = %s (master line %d: %s)"
             % (index, got, expected, index, master.get(index)))
 
@@ -481,37 +571,78 @@ def collect(elf, master, mutate=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--elf", default=DEFAULT_ELF)
-    ap.add_argument("--master", default=DEFAULT_MASTER)
+    ap.add_argument("--tree", default=DEFAULT_TREE,
+                    help="the XNU tree whose `struct sysent` this image was built against; it selects "
+                         "the stride, the sy_call offset, the munger rule and the master file")
+    ap.add_argument("--master", default=None,
+                    help="the syscalls.master to compare numbering against (default: --tree's own)")
+    ap.add_argument("--layout", default=None, choices=sorted(SYSENT_LAYOUTS),
+                    help="force a struct sysent layout instead of deriving it from --tree (for a "
+                         "controlled comparison); the default derives it from the tree's own header")
     ap.add_argument("--selftest", action="store_true",
                     help="mutate the table in memory and require every mutation to be refused")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
+    # **The tree is the one definition of the layout, and it is read from the header on disk** rather
+    # than assumed. `--layout` lets a controlled comparison force the other one; nothing else may, so a
+    # check run against a D13 image cannot silently read it with 4570's struct.
+    tree = os.path.abspath(args.tree)
+    derived_name, derived = select_layout(tree)
+    layout_name = args.layout or derived_name
+    layout = SYSENT_LAYOUTS[layout_name]
+
+    master_path = args.master or os.path.join(tree, "bsd/kern/syscalls.master")
+
     if not os.path.isfile(args.elf):
         sys.exit("no %s - build the entry image first" % args.elf)
-    if not os.path.isfile(args.master):
-        sys.exit("no %s - the syscall numbering this check compares against is not there" % args.master)
+    if not os.path.isfile(master_path):
+        sys.exit("no %s - the syscall numbering this check compares against is not there"
+                 % master_path)
+
+    # The offsets the rest of this file reads are the layout's, set once here rather than written down
+    # at each use (they differ by tree: sy_narg is at 12 on 4570 and 0 on D13, the munger word at 4 and
+    # 8, sy_arg_bytes at 14 and 20).
+    global MUNGER_WORD_OFFSET, NARG_OFFSET, ARG_BYTES_OFFSET
+    MUNGER_WORD_OFFSET = layout["munge32"]
+    NARG_OFFSET = layout["narg"]
+    ARG_BYTES_OFFSET = layout["argbytes"]
 
     elf = Elf(args.elf)
-    master = master_entries(args.master)
+    master = master_entries(master_path)
     if not master:
         sys.exit("%s has no numbered syscall lines - this check has nothing to compare against"
-                 % args.master)
+                 % master_path)
 
-    collect(elf, master)
+    stride = layout["stride"]
+    call_off = layout["call"]
+    munger_mode = layout["mungers"]
+    slot8 = layout["slot8"]
+
+    collect(elf, master, stride, call_off, munger_mode, slot8)
 
     if args.selftest:
         # Each mutation is a way the image could be wrong that the checks above have an opinion about.
         # If one survives, the check is decorative and this is the only place that can say so.
-        offset = SYSCALL_INDEX * SYSENT_STRIDE
-        mmap_offset = WRAPPED[1][0] * SYSENT_STRIDE   # 197's slot, 177 entries away
-        poll_offset = WRAPPED[2][0] * SYSENT_STRIDE   # 230's slot, 33 entries past 197
-        read_offset = WRAPPED[3][0] * SYSENT_STRIDE   # 504: 3's slot, in the table's first words
-        open_offset = WRAPPED[4][0] * SYSENT_STRIDE   # 504: 5's slot, one entry on from it
-        exit_offset = WRAPPED[5][0] * SYSENT_STRIDE   # 505: 1's slot
-        fork_offset = WRAPPED[6][0] * SYSENT_STRIDE   # 505: 2's slot, the next entry
-        wait_offset = WRAPPED[7][0] * SYSENT_STRIDE   # 508: 7's slot, five entries on from 2
-        other = 24 * SYSENT_STRIDE         # another entry's slot, inside the checked span
+        # **Every offset is the slot's *sy_call* word**, which is `index * stride + call_off` - the
+        # mutations replace the function a slot dispatches to, so they belong where `sy_call` is, not at
+        # the slot base (`call_off` is 0 on 4570 and 4 on D13). The munger mutations below work from a
+        # slot's *base* + `MUNGER_WORD_OFFSET`, and are only listed where the layout has munger symbols.
+        def slot_base(index):
+            return index * stride
+        def slot_call(index):
+            return index * stride + call_off
+        offset = slot_call(SYSCALL_INDEX)
+        mmap_offset = slot_call(WRAPPED[1][0])    # 197's slot, 177 entries away
+        poll_offset = slot_call(WRAPPED[2][0])    # 230's slot, 33 entries past 197
+        read_offset = slot_call(WRAPPED[3][0])    # 504: 3's slot, in the table's first words
+        open_offset = slot_call(WRAPPED[4][0])    # 504: 5's slot, one entry on from it
+        exit_offset = slot_call(WRAPPED[5][0])    # 505: 1's slot
+        fork_offset = slot_call(WRAPPED[6][0])    # 505: 2's slot, the next entry
+        wait_offset = slot_call(WRAPPED[7][0])    # 508: 7's slot, five entries on from 2
+        other = slot_call(24)             # another entry's slot, inside the checked span
+        mmap_slot = slot_base(WRAPPED[1][0])   # 197's slot *base*, for its munger word
+        poll_slot = slot_base(WRAPPED[2][0])   # 230's slot base
         symbols = elf.symbols()
         wrapper = symbols["__wrap_" + SYSCALL_NAME]
         real = symbols[SYSCALL_NAME]
@@ -558,10 +689,10 @@ def main():
             put(state, mmap_offset, wrapper)
 
         def zero_the_munger(state):
-            put(state, mmap_offset + MUNGER_WORD_OFFSET, 0)
+            put(state, mmap_slot + MUNGER_WORD_OFFSET, 0)
 
         def the_wrapper_in_the_munger_slot(state):
-            put(state, mmap_offset + MUNGER_WORD_OFFSET, mmap_wrapper)
+            put(state, mmap_slot + MUNGER_WORD_OFFSET, mmap_wrapper)
 
         def the_real_poll(state):
             # 503's half of the defect `the_real_mmap` is about, and the one this step cannot do
@@ -577,7 +708,7 @@ def main():
             # six-argument munger would marshal three words the program's registers happen to hold (the
             # timeout among them in the wrong place) into a struct `poll` reads as three words - a
             # working kernel calling `poll` with a timeout the fixture never asked for.
-            put(state, poll_offset + MUNGER_WORD_OFFSET, symbols[MUNGERS[197]])
+            put(state, poll_slot + MUNGER_WORD_OFFSET, symbols[MUNGERS[197]])
 
         def the_real_read(state):
             # 504's copy of the defect `the_real_mmap` and `the_real_poll` are about: an image whose
@@ -636,7 +767,7 @@ def main():
             # as an argument on a call that has none - and *nothing observable changes*: `fork` never
             # looks at `uu_arg`, the child still returns 0 from the saved state's copy, and every record
             # in the run would be identical. That is why the claim is checked here, structurally.
-            struct.pack_into("<h", state["table"], fork_offset + NARG_OFFSET, 3)
+            struct.pack_into("<h", state["table"], slot_base(WRAPPED[6][0]) + NARG_OFFSET, 3)
 
         def the_real_wait4(state):
             # 508's copy of the defect the five above are about: an image whose slot holds `wait4`
@@ -656,12 +787,12 @@ def main():
             # *unattributable*: the panic names an address in a syscall three files away from the word
             # that was wrong. Both halves are moved, because either alone would leave a slot that says
             # one thing and does another.
-            struct.pack_into("<h", state["table"], wait_offset + NARG_OFFSET, 3)
-            struct.pack_into("<H", state["table"], wait_offset + ARG_BYTES_OFFSET, 12)
+            struct.pack_into("<h", state["table"], slot_base(WRAPPED[7][0]) + NARG_OFFSET, 3)
+            struct.pack_into("<H", state["table"], slot_base(WRAPPED[7][0]) + ARG_BYTES_OFFSET, 12)
 
         def one_entry_late(state):
             put(state, offset, 0)
-            put(state, offset + SYSENT_STRIDE, wrapper)
+            put(state, offset + stride, wrapper)
 
         def swapped_with_24(state):
             mine, theirs = word(state, offset), word(state, other)
@@ -680,9 +811,6 @@ def main():
             ("the real mmap in its slot", the_real_mmap),
             ("the real poll in its slot", the_real_poll),
             ("the mmap wrapper in each other's slot", each_wrapper_in_the_other_slot),
-            ("197's munger word zeroed", zero_the_munger),
-            ("the wrapper in 197's munger word", the_wrapper_in_the_munger_slot),
-            ("the six-argument munger in 230's slot", the_mmap_munger_in_polls_slot),
             ("the real read in its slot", the_real_read),
             ("the real open in its slot", the_real_open),
             ("the read and open wrappers in each other's slot", the_two_new_slots_swapped),
@@ -700,12 +828,31 @@ def main():
             ("nsysent below the mmap witness", lambda s: s.__setitem__("nsysent", 128)),
             ("nsysent below the last witness", lambda s: s.__setitem__("nsysent", 1)),
         ]
+        # **The munger-word mutations only exist on a tree whose slots have munger words.** On D13 the
+        # word is required to be 0, so `zero_the_munger` would mutate a word that is already 0 and
+        # survive - reading as a hole in the check - and `the_mmap_munger_in_polls_slot` would need
+        # `munge_wwwwwl`'s address, a symbol the tree does not define. Both are 4570-only; on D13 the
+        # word they move is covered by the "must be zero" clause above, whose own mutation is the
+        # non-zero word it refuses.
+        if munger_mode == "symbols":
+            mutations[5:5] = [
+                ("197's munger word zeroed", zero_the_munger),
+                ("the wrapper in 197's munger word", the_wrapper_in_the_munger_slot),
+                ("the six-argument munger in 230's slot", the_mmap_munger_in_polls_slot),
+            ]
+        else:
+            def a_nonzero_munger_word(state):
+                # **The D13 half of the munger claim**, and the only way it can be wrong: a slot whose
+                # munger word names something. This tree's `makesyscalls.sh` defines every `munge_*` to
+                # NULL, so a non-zero word here is a name this build cannot have produced.
+                put(state, mmap_slot + MUNGER_WORD_OFFSET, 0xdead0000)
+            mutations.append(("a non-zero munger word in 197's slot", a_nonzero_munger_word))
         survived = []
         for name, mutation in mutations:
             del failures[:]
             del notes[:]
             del summary[:]
-            collect(elf, master, mutate=mutation)
+            collect(elf, master, stride, call_off, munger_mode, slot8, mutate=mutation)
             if not failures:
                 survived.append(name)
         # **The table is read once more, unmutated, before anything is printed.** The mutations above
@@ -715,7 +862,7 @@ def main():
         del failures[:]
         del notes[:]
         del summary[:]
-        collect(elf, master)
+        collect(elf, master, stride, call_off, munger_mode, slot8)
         if survived:
             fail("--selftest: these mutations were accepted, so the checks above do not see them: "
                  + ", ".join(survived))

@@ -1141,6 +1141,32 @@ fi
 SEAM_POST_END_ON=0
 [[ $SEAM_POST_END_RUN -gt 0 || $SEAM_POST_END_TICKS -gt 0 ]] && SEAM_POST_END_ON=1
 SEAM_ON=$(( SEAM_POC | SEAM_MEASURE | SEAM_END_RUN | SEAM_POST_END_ON ))
+# ---------------------------------------------------- 942: **the seam is 4570's, and D13 refuses it here**
+#
+# **The one place the seam's tree is decided, and it is decided before anything is built.** The seam is
+# the interception of `FlushPoU_Dcache`'s exit call site (`caches_asm.s`) plus the cache/CleanPoC family
+# behind it (`entry_seam_flush`, `FlushPoC_DcacheRegion`, `platform_cache_idle_enter/_exit`). **D13
+# ships none of that** - no `caches.c` at all - so `FlushPoU_Dcache` and its call site do not exist on
+# that tree either, which is why the `--wrap` below is already gated on `$D13_TRACE -eq 0` and why
+# `entry_trace.c`'s entire seam body is `#if !STAGE90_ENTRY_D13`. A D13 build that arrives with any
+# seam switch on is a build whose record would name an arm whose every symbol this tree's C compiled
+# out: the `-D` is accepted, the object links, and the wrapper the record claims is simply not in the
+# image - the [[mi4-off-option-two-spellings]] / [[mi4-silence-is-a-reading-only-if-success-is-silent]]
+# class, a switch recorded on one side and inert on the other. It is refused **here**, where `SEAM_ON`
+# is the one value every seam flag folds into, rather than left to the 535 clause three hundred lines
+# below: that clause reads the linked image and does fail, but on a *missing wrapper* - the symptom.
+# This one names the cause - the tree does not have the seam - and fires on the switch, before the
+# build spends itself. (The 535 clause's own D13 gate remains, for a build that reaches it anyway.)
+if [[ $D13_TRACE -eq 1 && $SEAM_ON -eq 1 ]]; then
+    echo "STAGE90_XNU_SEAM_* is set on the D13 tree and the seam does not exist there:" >&2
+    echo "  STAGE90_XNU_SEAM_POC=$SEAM_POC STAGE90_XNU_SEAM_MEASURE=$SEAM_MEASURE STAGE90_XNU_SEAM_END_RUN=$SEAM_END_RUN STAGE90_XNU_POST_END_RUN=$SEAM_POST_END_RUN STAGE90_XNU_POST_END_TICKS=$SEAM_POST_END_TICKS -> SEAM_ON=$SEAM_ON" >&2
+    echo "  D13 ships no caches.c: no FlushPoU_Dcache, no FlushPoC_DcacheRegion, no" >&2
+    echo "  platform_cache_idle_enter/_exit, no FlushPoC_Dcache. entry_trace.c's whole seam body is" >&2
+    echo "  #if !STAGE90_ENTRY_D13, so nothing is compiled in and the record would name an arm the" >&2
+    echo "  image does not contain. The seam (533/535/572/678/686/690) is a 4570 rung." >&2
+    echo "  Set every STAGE90_XNU_SEAM_* and STAGE90_XNU_POST_END_* to 0 on D13." >&2
+    exit 1
+fi
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_SEAM_POC="$SEAM_POC")
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_SEAM_MEASURE="$SEAM_MEASURE")
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_SEAM_END_RUN="$SEAM_END_RUN")
@@ -29807,6 +29833,25 @@ verify_trace_symbols() {
         layout_fail "the objects in this pool reference machine_idle with [$mrefs] and 512's wrap is only sound while every reference is a call - an R_ARM_ABS32/MOVW/MOVT would be an address taken, and the wrapper could then be reached as a function pointer rather than as a call"
     say "  xnu_entry_512: machine_idle ($mid) is the kernel's own (defined in osfmk/arm/machine_routines_asm.s, not in pass 1's undefined set), all $inside branch(es) to its wrapper ($mwrap) are inside processor_idle ($pidle..$pidlenext) and none is elsewhere, and every reference to it in the pool is a call ($mrefs) - so an xnu_live_idle_* record is the kernel saying it had nothing to run"
 
+    # **D13 HAS NO `cpu_idle` AT ALL, SO 513-522 ARE 4570'S MACHINE.** 512 is the last step whose object
+    # exists on both trees (`machine_idle` is shared). Everything from 513 to 522 reads 4570's *three-door*
+    # idle (`cpu_idle`/`cpu_idle_exit`, `SetIdlePop`, `idle_enable`, `Idle_load_context`, `cpu_idle_wfi`)
+    # and the cache/CleanPoC/CleanPoU repair family (`platform_cache_idle_enter/_exit`, `CleanPoC_Dcache`,
+    # `cpu_signal_handler_internal`, `ml_get_timebase`, `up_style_idle_exit`, `FlushPoU_Dcache`) that only
+    # 4570's `caches.c`/`cpu_common.c`/`rtclock.c`/`locore.s` define, plus the offsets those clauses read
+    # out of `assym.s` (D13's genassym emits none of `CPU_INT_STATE`, `ACT_CPUDATAP`, `ACT_PCBDATA`,
+    # `EXC_CTX_SIZE`, `CPU_ISTACKPTR`, `TH_KSTACKPTR`). **D13 ships none of it** - `caches.c` does not
+    # exist, and D13's idle is `machine_idle` tested against `do_power_save` (`pmCPU.c:41`). So on D13 the
+    # whole block below, 513 through 522, is not read at all: it is compiled out with the skip *published*
+    # (the `say` just below), because a section that silently vanishes reads as "checked and passed" when
+    # it was never checked ([[mi4-silence-is-a-reading-only-if-success-is-silent]]). This is the
+    # 937/938/939/940/941 class - an asset pinned to 4570 - one level up: here it is a whole experiment,
+    # not one name. 518 and 519 below carry the same gate for the same reason; 523 onward (the storage
+    # ladder) is shared and is read on both trees.
+    if [[ $D13_TRACE -eq 1 ]]; then
+        say "  xnu_entry_513-522: SKIPPED on D13 - 513's door partition (cpu_idle/cpu_idle_exit, SetIdlePop, idle_enable, Idle_load_context, cpu_idle_wfi), 514-517's cache repair and frame reader (cpu_signal_handler_internal, platform_cache_idle_enter/_exit, CleanPoC_Dcache, CleanPoU_Dcache, FlushPoU_Dcache, ml_get_timebase), 518/519's interrupt- and idle-stack arms and 520-522's slot/watch/enable arms all read 4570's three-door idle and 4570's assym offsets. D13 ships no cpu_idle and no caches.c and its genassym emits none of CPU_INT_STATE/ACT_CPUDATAP/ACT_PCBDATA/EXC_CTX_SIZE/CPU_ISTACKPTR/TH_KSTACKPTR, so there is nothing to check and 937 already pruned these wraps (gated OUT, not renamed)."
+    else
+
     # **513's two wrappers, and their clause is the partition between them.** 512 read "the idle does
     # not sleep" off a pair of counts; the *reason* is a choice `cpu_idle` makes between three exits -
     # its first test (`(!idle_enable) || (cpu_signal & SIGPdisabled)`), its second (`!SetIdlePop()`),
@@ -36289,6 +36334,14 @@ verify_trace_symbols() {
     fi
 
 
+    fi
+    # ---------------------------------------------------------------- 523+: the storage ladder (shared)
+    #
+    # **Everything below this line is read on both trees.** 523's storage ladder, the registry/console
+    # probes, the sysent and vector checks and 463's virtual call are 4570-and-D13 code: the same
+    # symbols, the same linked image, and the `537`/`747` series' own tree gates where a rung is
+    # 4570-only live inside those blocks. The `$D13_TRACE` gate above closes only the 513-522 block.
+
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
     # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -
     # whatever the `IOPlatformExpert` metaclass's instance walk yields. That is only correct if
@@ -36341,6 +36394,23 @@ verify_trace_symbols() {
     # reaches it only from inside `IOService.cpp`.
     local same_object=(
         _ZN9IOService12matchPassiveEP12OSDictionaryj )
+    # **942: `kalloc_canblock` joins the same-object list on D13, and this is the same reading made by the
+    # other tree rather than a second reason.** 455's classifier asks whether any *branch* to the wrapper
+    # is in the linked image; a symbol whose only reference is a call from the object that also defines it
+    # is resolved by the linker and `--wrap` never sees it. On 4570 `kalloc_canblock` is called from
+    # across the pool and the census finds branches. On D13 its **only** in-tree callers are inside
+    # `osfmk/kern/kalloc.c` itself (`:560` `kalloc` and `:567` `kalloc_canblock_flags`/`kalloc_noblock`,
+    # two lines above and below the definition at `:301`/`:487`) - `grep -rl` over the whole D13 tree
+    # finds the name in exactly two files, and the other one (`bsd/dev/dtrace/dtrace_glue.c`) mentions it
+    # in a comment, not a call. So on D13 the flag produces a wrapper nothing branches to for the same
+    # structural reason `matchPassive` does, and dropping the flag would lose the record the allocator
+    # path is read through on the tree the project is now building. This is the same class as 936-941 -
+    # an asset's *shape* pinned to 4570 - and the list entry alone would be a claim in a comment
+    # ([[mi4-a-claim-in-a-comment-is-not-a-check]]), so the census below asserts the *reason* on D13:
+    # `kalloc_canblock` must land in the same-object bucket, which is the image saying no branch to the
+    # wrapper exists - and if one ever does (a cross-object caller appearing in the pool) the entry is
+    # wrong and the build refuses rather than quietly crediting the branch to the list.
+    [[ $D13_TRACE -eq 1 ]] && same_object+=( kalloc_canblock )
     local never_called=( sleep )
     # The fourth reading, added by 458 and **checked rather than listed**: a symbol the image
     # references only by taking its *address*, because the reference is a table entry. `--wrap`
@@ -36441,6 +36511,15 @@ verify_trace_symbols() {
     done
     if [[ ${#dead[@]} -gt 0 ]]; then
         layout_fail "these --wrap'd symbols have no branch to their wrapper anywhere in the linked image, so the wrapper can never run: ${dead[*]} - a same-object call is resolved by the linker and is invisible to --wrap. Add it to this check's same-object, never-called or by-address list with a reason, or drop the flag"
+    fi
+    # **942: and on D13 `kalloc_canblock` must be in exactly the bucket the list claims.** The entry above
+    # says the name's only in-tree callers are inside `kalloc.c` itself, so the image has no branch to
+    # `__wrap_kalloc_canblock`; the assertion is that the census reached the *same* conclusion, not that
+    # the list was edited. A build where a branch to the wrapper exists is a D13 pool with a cross-object
+    # `kalloc_canblock` caller - the list entry is then stale and this refuses instead of silently
+    # counting the branch under "same-object".
+    if [[ $D13_TRACE -eq 1 ]] && ! in_list kalloc_canblock "${only[@]}"; then
+        layout_fail "STAGE90_ENTRY_D13=1 and the census did not put kalloc_canblock in the same-object bucket: either a branch to __wrap_kalloc_canblock now exists in the linked image (a cross-object caller appeared in D13's pool and the 942 entry is stale - re-derive it rather than widen this one) or the name is missing from TRACE_LDFLAGS entirely (the allocator path is then recorded by nothing)"
     fi
     say "  xnu_entry_455: ${#TRACE_LDFLAGS[@]} --wrap'd symbols: $(( ${#TRACE_LDFLAGS[@]} - ${#only[@]} - ${#uncalled[@]} - ${#addr[@]} )) reached by a branch in this image, ${#only[@]} same-object-only (${only[*]:-none}), ${#uncalled[@]} never called here (${uncalled[*]:-none}), ${#addr[@]} by address only (${addr[*]:-none})"
 
@@ -36621,7 +36700,19 @@ verify_trace_symbols() {
     # implies, with the names, their order, `_pad` and `version` taken from Apple's own header - so
     # the check has no second definition of the layout to drift from. Its `--selftest` swaps and zeroes
     # words in a copy of the table and requires every mutation to be refused.
-    run python3 "$REPO_ROOT/tools/check_pthread_table_slots.py" --elf "$OUT/xnu_arm_entry.elf" || exit 1
+    # **942: THE TABLE DOES NOT EXIST ON D13, AND THE SKIP IS PUBLISHED.** `struct pthread_functions_s`
+    # and its shims are 4570's: `src/supply/stage90_pthread_functions.c` compiles itself out by the
+    # token the tree gives it (`#if !__has_include(<sys/pthread_shims.h>)` -> `STAGE90_PTHREAD_FUNCTIONS_OMITTED`,
+    # its own comment at `:205` says so), so the object is produced empty and `stage90_pthread_functions`
+    # is not a symbol in a D13 image - D13's `pthread_init` is a plain function with no table to fill.
+    # The tool would fail on a missing table, which is the *symptom*; the cause is the tree, and it is
+    # said here so the section does not read as one that ran and passed.
+    # ([[mi4-silence-is-a-reading-only-if-success-is-silent]])
+    if [[ $D13_TRACE -eq 1 ]]; then
+        say "  xnu_entry_473: SKIPPED on D13 - the pthread_functions table is 4570's (src/supply/stage90_pthread_functions.c compiles out on a tree without <sys/pthread_shims.h>), so a D13 image has no stage90_pthread_functions symbol to read and check_pthread_table_slots.py's subject does not exist here. D13's pthread_init is a plain function with no table."
+    else
+        run python3 "$REPO_ROOT/tools/check_pthread_table_slots.py" --elf "$OUT/xnu_arm_entry.elf" || exit 1
+    fi
 
     # **479: the syscall the fixture makes, and the slot the wrapper has to be in.** The fixture's
     # `svc #0x80` carries 20 in r12 and `getpid` at `sysent[20]` is what `unix_syscall` looks up; the
@@ -36634,7 +36725,16 @@ verify_trace_symbols() {
     # this build restates; its `--selftest` requires every mutation - the real function in the slot,
     # the wrapper one entry late, two entries swapped, the table shifted a word, `nsysent` truncated -
     # to be refused.
-    run python3 "$REPO_ROOT/tools/check_sysent_table.py" --elf "$OUT/xnu_arm_entry.elf" || exit 1
+    # **942: the `struct sysent` the tool reads is the SELECTED TREE's.** 4570's table is 16 bytes with
+    # `munge_*` symbols in the second word; Darwin 13's is 24 bytes, reorders the members (`sy_call` at
+    # +4, `sy_narg` at 0, no `CONFIG_REQUIRES_U32_MUNGING`) and its `makesyscalls.sh` `__arm__` arm
+    # defines every munger to NULL. So the tool is told which tree, and derives the stride, the
+    # `sy_call` offset, the munger rule and the master file from it (its own discriminator is the same
+    # `osfmk/sys/types.h` test this build uses). Its slot-0 `sy_call` and its `nsysent` were both in the
+    # D13 image all along; what was wrong was the *layout* the reader assumed, and the symptom named a
+    # missing `munge_*` symbol rather than a stride.
+    run python3 "$REPO_ROOT/tools/check_sysent_table.py" --elf "$OUT/xnu_arm_entry.elf" \
+        --tree "$XNU_TREE" || exit 1
 
     # **The panic route, read out of the image.** `PE_init_kprintf` stores a `movw`/`movt` pair - a
     # same-object address reference - into `PE_kputc`, and the census above cannot see that: it only
