@@ -59,12 +59,33 @@ REPO_ROOT=$(cd "$HERE/../.." && pwd)
 # Kept in one place so the check below and the filter cannot drift apart.
 ARM_ASM_EXCEPTIONS=(SLIDABLE)
 
+CONFIG=${1:-${XNU_KERNEL_CONFIG:-RELEASE}}
+# **The tree, because an exception is a claim about a configuration and the configuration is the
+# tree's (921c).** `SLIDABLE=1` is `4570 config/MASTER.arm:77`; Darwin-13 has no `SLIDABLE` at all
+# (`osfmk/conf/MASTER.arm`), so the same list applied to D13 named an option the configuration does
+# not set and the claim-check below refused every D13 assembly ("exception 'SLIDABLE' is not an
+# option of RELEASE"). The exception is *dropped* for a tree that does not declare it, rather than
+# the list being forked - a second copy of the list would be the "one value, two definitions" defect
+# this file exists to avoid. The tree is the one `make_defines.sh` reads, `XNU_TREE` included.
+XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
+# The MASTER files' directory is a property of the tree, not of this script (913): the modern tree
+# keeps them in `<tree>/config/`, Darwin-13 keeps the machine-independent ones in `<tree>/osfmk/conf/`.
+if [[ -f $XNU/config/MASTER ]]; then MASTER_DIR=$XNU/config; else MASTER_DIR=$XNU/osfmk/conf; fi
+TREE_EXCEPTIONS=()
+for e in "${ARM_ASM_EXCEPTIONS[@]}"; do
+    # An exception is applicable only if THIS tree's configuration declares the option - the same
+    # question the claim-check at the bottom would otherwise turn into a refusal.
+    if grep -qwE "$e" "$MASTER_DIR"/MASTER "$MASTER_DIR"/MASTER.arm 2>/dev/null; then
+        TREE_EXCEPTIONS+=("$e")
+    fi
+done
+
+# `--exceptions` reports the *tree-applicable* list: the check (check_asm_config.py) compares the
+# assembly's filtered list against this, so it must be the same set the filter below uses.
 if [[ ${1:-} == --exceptions ]]; then
-    printf '%s\n' "${ARM_ASM_EXCEPTIONS[@]}"
+    printf '%s\n' "${TREE_EXCEPTIONS[@]}"
     exit 0
 fi
-
-CONFIG=${1:-${XNU_KERNEL_CONFIG:-RELEASE}}
 
 # **The list is read once, into a variable, and the loop below iterates over that (488).** The form
 # this replaces was `done < <("$HERE/make_defines.sh" "$CONFIG")`, which is the defect class this
@@ -86,7 +107,7 @@ fi
 while IFS= read -r d; do
     [[ -n $d ]] || continue
     skip=0
-    for e in "${ARM_ASM_EXCEPTIONS[@]}"; do
+    for e in "${TREE_EXCEPTIONS[@]}"; do
         [[ $d == -D$e=* || $d == -D$e ]] && skip=1
     done
     [[ $skip -eq 0 ]] && printf '%s\n' "$d"
@@ -94,7 +115,7 @@ done <<<"$defines"
 
 # The exceptions are a claim about the configuration, so it is checked here: dropping a name that
 # the configuration no longer sets would silently stop the filter from doing anything.
-for e in "${ARM_ASM_EXCEPTIONS[@]}"; do
+for e in "${TREE_EXCEPTIONS[@]}"; do
     if ! grep -q -- "-D$e=" <<<"$defines" && ! grep -qw -- "-D$e" <<<"$defines"; then
         echo "arm_asm_defines.sh: exception '$e' is not an option of $CONFIG" >&2
         echo "  the exception list is a claim about the configuration; take the name off it" >&2

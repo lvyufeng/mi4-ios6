@@ -103,13 +103,36 @@ if ! "${CFLAGS[@]}" -S -o "$OUT/genassym.s" "$XNU/osfmk/arm/genassym.c" 2>"$OUT/
     exit 2
 fi
 
-# 2. Apple's scrape, character for character (osfmk/conf/Makefile.template:189).
-sed -e '/^[[:space:]]*DEFINITION__define__/!d;{N;s/\n//;}' \
-    -e 's/^[[:space:]]*DEFINITION__define__\([^:]*\):.*ascii.*"[\$$]*\([-0-9\#]*\)".*$/#define \1 \2/' \
-    -e 'p' \
-    -e 's/#//2' \
-    -e 's/^[[:space:]]*#define \([A-Za-z0-9_]*\)[[:space:]]*[\$$#]*\([-0-9]*\).*$/#define \1_NUM \2/' \
-    "$OUT/genassym.s" > "$OUT/assym.s"
+# 2. Apple's scrape, character for character — **from the selected tree (921c).** The marker in
+# `genassym.c` and the `sed` that reads it are a *pair*, and the pair changed between trees. 4570's
+# `osfmk/arm/genassym.c:107` emits `DEFINITION__define__<SYM>: .ascii "<VAL>"`, read by
+# `osfmk/conf/Makefile.template:189`; Darwin-13's `osfmk/arm/genassym.c:110` emits `#DEFINITION#\t.set`
+# / `#DEFINITION##define <SYM> <VAL>`, read by its own `osfmk/conf/Makefile.template:123`. Running
+# 4570's `sed` over D13's `genassym.s` matched nothing and the guard below refused the build with
+# "0 defines" — the honest failure, but the answer is the tree's own rule, not 4570's. The rule is
+# selected by the marker the *generated file* actually contains, so a tree that changes the marker
+# again is a wrong-answer refusal here rather than a silent empty `assym.s`.
+if grep -q 'DEFINITION#' "$OUT/genassym.s"; then
+    # Darwin-13 (osfmk/conf/Makefile.template:123), with ONE adaptation and it is a property of this
+    # harness rather than of the tree: that rule reads `genassym.o`, where the marker survives as
+    # `#DEFINITION#` inside a string literal, while this step reads clang's `-S` text (the C file
+    # "compiles to ASSEMBLY, not to an object" above) and clang renders the marker's leading `#` as
+    # the ARM comment character `@`, giving `@DEFINITION#`. So the match drops the leading `#` and
+    # the strip is `^.*DEFINITION#`; every other clause is the tree's.
+    sed -e '/DEFINITION#/!d' -e 's/^.*DEFINITION#//' -e 's/\$$//' -e 'p' \
+        -e 's/#//2' -e 's/[^A-Za-z0-9_]*\([A-Za-z0-9_]*\)/ \1_NUM/2' \
+        "$OUT/genassym.s" > "$OUT/assym.s"
+    ASSYM_RULE=darwin13
+else
+    # 4570 : (osfmk/conf/Makefile.template:189), verbatim.
+    sed -e '/^[[:space:]]*DEFINITION__define__/!d;{N;s/\n//;}' \
+        -e 's/^[[:space:]]*DEFINITION__define__\([^:]*\):.*ascii.*"[\$$]*\([-0-9\#]*\)".*$/#define \1 \2/' \
+        -e 'p' \
+        -e 's/#//2' \
+        -e 's/^[[:space:]]*#define \([A-Za-z0-9_]*\)[[:space:]]*[\$$#]*\([-0-9]*\).*$/#define \1_NUM \2/' \
+        "$OUT/genassym.s" > "$OUT/assym.s"
+    ASSYM_RULE=4570
+fi
 
 n=$(grep -c '^#define' "$OUT/assym.s" || true)
 # A scrape that matched nothing leaves an empty file, which would make every assembly file fail with
@@ -119,10 +142,19 @@ if [[ ${n:-0} -lt 100 ]]; then
     exit 1
 fi
 
-# The three names locore.s fails on when assym.s is absent, checked by name rather than by count.
-for sym in ASSIST_RESET_HANDLER CPU_DATA_ENTRIES CPU_DATA_PADDR; do
+# The names locore.s fails on when assym.s is absent, checked by name rather than by count. **The set
+# is the tree's (921c):** `ASSIST_RESET_HANDLER`, `CPU_DATA_ENTRIES` and `CPU_DATA_PADDR` are the three
+# 4570's `osfmk/arm/genassym.c` defines for its locore; Darwin-13's `genassym.c` defines none of them.
+# Asking D13 for a 4570 name would refuse a correct `assym.s`, so the check asks for the names the
+# *selected tree's* genassym.c actually emits — a name that tree does not define is not this tree's
+# locore contract. The non-empty floor below (100) is what still guards the general case.
+ASSYM_REQUIRED=()
+if [[ $ASSYM_RULE == 4570 ]]; then
+    ASSYM_REQUIRED=(ASSIST_RESET_HANDLER CPU_DATA_ENTRIES CPU_DATA_PADDR)
+fi
+for sym in "${ASSYM_REQUIRED[@]}"; do
     grep -q "^#define $sym " "$OUT/assym.s" || { echo "assym.s has no $sym" >&2; exit 1; }
 done
 
 echo "generated $n defines in $OUT/assym.s"
-echo "  from $(wc -l < "$OUT/genassym.s") lines of genassym.s (Apple's sed, osfmk/conf/Makefile.template:189)"
+echo "  from $(wc -l < "$OUT/genassym.s") lines of genassym.s (Apple's sed rule: $ASSYM_RULE)"
