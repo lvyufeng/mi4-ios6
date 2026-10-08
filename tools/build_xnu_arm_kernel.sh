@@ -59,7 +59,12 @@ XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
 SHIMS=$REPO_ROOT/src/shims
 SHIMS_ARM=$REPO_ROOT/src/shims_arm
 MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
-MIG_KSERVER=${MIG_KSERVER_OUT:-$REPO_ROOT/out/mach_headers/kserver}
+# The kserver variant goes BESIDE `$MIG_HEADERS`, not at a fixed root: the two are different outputs
+# of the SAME `.defs` set (the `-DKERNEL_SERVER` half), so pairing one tree's headers with another
+# tree's kserver is `one value, two definitions`.  Deriving the default from `$MIG_HEADERS` makes a
+# per-tree `MIG_HEADERS` carry its own kserver automatically; the 4570 default is byte-identical to
+# the old fixed path, so this changes nothing on the base tree.
+MIG_KSERVER=${MIG_KSERVER_OUT:-$MIG_HEADERS/kserver}
 OUT=${XNU_KERNEL_OBJ_OUT:-$REPO_ROOT/out/xnu_kernel_obj}
 MANIFEST=${MANIFEST:-$REPO_ROOT/out/xnu_arm_manifest.txt}
 
@@ -108,6 +113,39 @@ HFS_PORT=${STAGE90_XNU_HFS:-0}
 # produced was `sys/_types/_u_int.h not found`, from a force-include, naming neither the component
 # nor the missing root.
 COMPONENT_LIST=(osfmk bsd libkern iokit pexpert security san)
+
+# **The import order** - which is a property of the TREE, and derived from the one list above so it
+# cannot drift from it.  A file sees its own component's headers first (the `COMP_ROOTS` head below)
+# and the other components after, and the order of "the others" decides which header wins when two
+# components ship the same path.
+#
+# Apple's own order is by **curation**, not by component: `INCFLAGS_IMPORT = -I$(OBJROOT)/EXPORT_HDRS/%`
+# (`makedefs/MakeInc.def:463`), where `EXPORT_HDRS/<component>/` holds only the headers that component
+# *exports* (`EXPORT_MI_LIST`/`EXPORT_MD_LIST`; see tools/gen_export_headers.sh).  BSD's exported
+# POSIX headers all land under `EXPORT_HDRS/bsd/`, so in Apple's build they beat any component's
+# private copy of the same path.  This build imports the **raw source trees** instead - the curated
+# roots are incomplete and were measured worse (2026-09-17, in gen_export_headers.sh) - so the same
+# resolution has to be reproduced by putting `bsd` ahead of the others in the import chain.
+#
+# The shape this fixes (913/916, Darwin-13): the 2013 tree ships a **legacy private
+# `osfmk/sys/types.h`** whose guard is `_SYS_TYPES_H_` - the SAME guard the modern
+# `bsd/sys/types.h` uses.  With osfmk ahead, a libkern/libsa file's `#include <sys/types.h>` resolves
+# to the legacy header, which defines the guard and the old `time_t`/`dev_t`/`daddr_t`, so
+# `bsd/sys/types.h`'s entire modern body (gid_t, uid_t, off_t, mode_t, …) is skipped - the ~1800
+# `unknown type name` sites.  Apple never sees it: its osfmk import is the curated export, where that
+# private header is not exported.  **4570 ships no `osfmk/sys/types.h`**, so the condition below is
+# false on the base tree and the order is exactly Apple's COMPONENT_LIST - every 4570 object stays as
+# it was (the one place this can move a 4570 file is the five paths bsd and osfmk share there, and
+# the build re-measures those rather than assuming).
+if [[ -f $XNU/osfmk/sys/types.h ]]; then
+    COMPONENT_IMPORT_ORDER=(bsd)
+    for _c in "${COMPONENT_LIST[@]}"; do
+        [[ $_c == bsd ]] || COMPONENT_IMPORT_ORDER+=("$_c")
+    done
+    unset _c
+else
+    COMPONENT_IMPORT_ORDER=("${COMPONENT_LIST[@]}")
+fi
 
 # The EABI runtime, which is not in the manifest and is not Apple's. `armv7-unknown-netbsd-eabi`
 # (and `armv7-none-eabi` before it) lowers an aggregate copy to `__aeabi_memcpy4`, where a Darwin
@@ -205,7 +243,15 @@ if [[ $ONLY_PLATFORM -eq 0 ]]; then
     # that claims to have HFS.
     _hfs_extra=()
     [[ $HFS_PORT -eq 1 ]] && _hfs_extra=(--extra "$HFS_FILES")
+    # `--generated-dir` and `--device-table` are named explicitly, not left to `list_sources.py`'s
+    # defaults, because those defaults are pinned to the BASE tree's `out/` roots.  A build pointed
+    # at another tree would otherwise resolve its MIG `_server.c` sources (and its device conditions)
+    # into 4570's directories - the `one value, two definitions` class.  The values derived here equal
+    # the defaults on 4570 (MIG_KSERVER/MIG_HEADERS/DEVICE_TABLE all default to the same paths), so
+    # the base tree's manifest is byte-identical; on another tree they follow its own roots.
     LS_MESSAGE=$("$TOOLS_DIR/xnu_config/list_sources.py" "$CONFIG" --xnu "$XNU" --write "$MANIFEST" \
+                 --generated-dir "$MIG_KSERVER:$MIG_HEADERS:$REPO_ROOT/out/xnu_generated/bsd" \
+                 --device-table "$DEVICE_TABLE" \
                  "${_hfs_extra[@]}" 2>&1) || {
         echo "$LS_MESSAGE" >&2
         exit 2
@@ -1015,9 +1061,18 @@ while read -r src; do
     # directory holds `string.h`, `stdlib.h` and a `sys/` for the bootloader context, and putting
     # it on the path costs 4 files by shadowing the real ones (tools/gen_libsa_export.sh exports
     # the three type headers Apple actually exports, and only those).
-    SRC_COMPONENT=$(printf '%s' "${src#"$XNU"/}" | cut -d/ -f1)
+    # `component_of` is the ONE definition of "which component is this file built in", and this line
+    # used to be a second one - a naive first-path-segment cut. They agree for every file inside
+    # `$XNU`, and disagree for the MIG-generated sources, which live OUTSIDE it: the cut yields the
+    # empty string (the path does not start with `$XNU/`, so `cut` hands back the leading empty
+    # field), while `component_of` correctly answers `osfmk` (their `.defs` are osfmk's). With
+    # `bsd`-first import ordering (see COMPONENT_IMPORT_ORDER) the empty string made a generated
+    # server's `-I` chain start at bsd, so `<arm/locks.h>` resolved to `bsd/arm/locks.h` and died on
+    # its `#include <ARM/hw_lock_types.h>`. On 4570 the reorder is the identity, so the empty string
+    # was invisible; correcting it here is required for D13 and inert for 4570.
+    SRC_COMPONENT=$(component_of "$src")
     COMP_IMPORT=()
-    for _c in "${COMPONENT_LIST[@]}"; do
+    for _c in "${COMPONENT_IMPORT_ORDER[@]}"; do
         [[ $_c == "$SRC_COMPONENT" ]] && continue
         COMP_IMPORT+=(-I"$XNU/$_c")
     done
@@ -1223,7 +1278,7 @@ RT_INCLUDES=()
 for _inc in "${INCLUDES[@]}"; do
     if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
         RT_INCLUDES+=(-I"$XNU/osfmk")
-        for _c in "${COMPONENT_LIST[@]}"; do
+        for _c in "${COMPONENT_IMPORT_ORDER[@]}"; do
             [[ $_c == osfmk ]] && continue
             RT_INCLUDES+=(-I"$XNU/$_c")
         done
@@ -1355,7 +1410,7 @@ PL_MESSAGE=$("$TOOLS_DIR/check_platform_lists.py" --file "${PLATFORM_SOURCES[@]}
 PLATFORM_C_SOURCES=("$REPO_ROOT/src/platform/stage90_platform_config_tables.c")
 PL_OUT=${XNU_PLATFORM_OBJ_OUT:-$REPO_ROOT/out/xnu_platform_obj}
 PL_ROOTS=(-I"$XNU/iokit")
-for _c in "${COMPONENT_LIST[@]}"; do
+for _c in "${COMPONENT_IMPORT_ORDER[@]}"; do
     [[ $_c == iokit ]] && continue
     PL_ROOTS+=(-I"$XNU/$_c")
 done
