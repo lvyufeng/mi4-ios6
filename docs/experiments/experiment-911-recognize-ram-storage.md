@@ -610,3 +610,50 @@ reaching XNU before this press. The whole family is gated behind this fix.**
 **The goal is NOT met and nothing in the 911 family should be pressed again until the fix lands.** The
 residence wall (909) is untouched and still gates observability. The 909 event arms (`cabba670` etc.)
 carry `RESIDENT=1` but NO window change, so they are NOT affected by this regression.
+
+## 11. THE FIX — the identity map is bounded by the WINDOW, clamped below the alias base (2026-10-08)
+
+**§9's cause is fixed, and the fix was pressed twice — once too small, once correct.**
+
+The payload's entry-window identity loop (`src/mmu.c`'s `build_identity_table`) ran
+`window_off < STAGE90_XNU_ENTRY_SIZE` (= `memSize`). That is the wrong quantity: `memSize` is what XNU
+is **told**; the identity map is what the payload and `_start` **dereference** before XNU installs its
+own tables. A raised window therefore walked the loop into the alias descriptors.
+
+**Change.** A new macro `STAGE90_XNU_ENTRY_IDENTITY_LIMIT` in the generated `xnu_arm_entry.h`
+(`build_entry.sh` substitutes it), consumed as the loop bound in `src/mmu.c`, plus two refusals: a
+`#error` in `mmu.c` and a `layout_fail` in `build_entry.sh` that both fire if
+`ENTRY_BASE + IDENTITY_LIMIT > STAGE90_HIGH_ALIAS_BASE`. **This is PAYLOAD-side only** — `src/mmu.c`
+is not linked into the entry image, so `xnu_arm_entry.bin` stays `1d3ae364…` byte-identical while
+`stage90.bin` / `stage90-qcdt.img` move.
+
+**THE VALUE — and the first edit was the WRONG value, measured.** Bound to
+`ENTRY_DATA_LIMIT + ENTRY_TABLE_BYTES` (9 MB), pressed as `armed-window-b97fcd2a`: the alias selftest
+PASSED (`kernel_entry ok`, `memSize=0x5e500000`) but the run faulted at the boundary itself —
+`data abort: dfar=0x80900000 dfsr=0x805 lr=0x800086c4`. **A too-small bound is its own fault**: XNU's
+`_start` writes bootstrap page tables upward from `topOfKernelData`, and the payload's own globals live
+past the image. **The correct bound is the WHOLE WINDOW, clamped below `0xc0000000`**:
+`IDENTITY_LIMIT = min(ENTRY_SIZE, 0xc0000000 - ENTRY_BASE)`. At window `0x5e500000` that is
+`0x40000000` — VA identity `[0x80000000, 0xc0000000)` — every byte `_start` touches, and not one byte of
+the alias.
+
+**PRESSED — `armed-window-aac38c50` (2026-10-08), and the fix holds:**
+```
+MI4IOS6_STAGE90_XNU mmu high alias selftest ok
+MI4IOS6_STAGE90_XNU xnu_entry_args_memSize=0x5e500000
+MI4IOS6_STAGE90_XNU xnu_entry_status=0x90000001
+MI4IOS6_STAGE90_XNU xnu_entry_entering_at=0x80000074
+MI4IOS6_STAGE90_XNU stage90 xnu_entry: jumping to XNU's _start
+```
+The payload walks the entire pre-jump path — MMU selftest, PE discovery, the arm_vm_init full-pmap
+window, the loader, and the copy to `0x80000000` — and jumps. **The 911 family is unblocked.** (The
+`data abort: dfar=0xdeadc000` / `0xc0800000` lines are the payload's **deliberate** high-VA handler
+probes at magic addresses, published as `..._data_abort_handler_dfar` and handled; they are not fatal.)
+
+**OPEN, and it is the next question:** this window arm produces **no XNU console output after the jump**
+(the log ends at the jump; no `BSD root`, no `md0`, no `xnu_live_door_seq`). The 16 MB arms reached the
+OS; a `0x5e500000` `memSize` does not. So the raised window is now *reachable* but does not (yet) boot
+XNU to the OS — the `memSize`/window value and the free-region question (912) are back on the table, and
+the next arm isolates the window at a value that both clears the alias and boots. **The 3 GB reading
+(§10) is NOT delivered by this arm** — `entry_smem_probe` publishes no `xnu_live_smem_*` here, which is
+itself the reading that no idle pass ran.

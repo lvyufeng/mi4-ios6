@@ -1,6 +1,23 @@
 #include "stage90.h"
 #include "xnu_arm_entry.h"   /* the entry image's base, size and layout - see the STAGE90_XNU_ENTRY bits */
 
+/*
+ * **The 2026-10-08 press (experiment 911) as a build refusal.** `build_identity_table` maps the
+ * image high-alias window at `STAGE90_HIGH_ALIAS_BASE` (0xc0000000) and, under `STAGE90_XNU_ENTRY`,
+ * the entry-window identity map. The identity loop runs AFTER the alias loop, so if the identity map
+ * reaches the alias base it overwrites the alias L1 descriptors and `mmu_high_alias_selftest` then
+ * reads identity DRAM instead of the aliased payload - which is exactly what killed the first press,
+ * before XNU's `_start`. Both macros are visible only here (the window is in the generated
+ * `xnu_arm_entry.h`, the alias base in `stage90.h`), so this is the only place the pair can be
+ * checked; the same-shaped guards in `stage90.h:80-88` cover a DIFFERENT pair and gave false
+ * confidence. The identity map is bounded by `STAGE90_XNU_ENTRY_IDENTITY_LIMIT` (what the payload
+ * dereferences), not by `STAGE90_XNU_ENTRY_SIZE` (what XNU is handed), so a raised window does not
+ * trip this; a grown image or layout that pushes the identity map into the alias does.
+ */
+#if STAGE90_XNU_ENTRY && (STAGE90_XNU_ENTRY_BASE + STAGE90_XNU_ENTRY_IDENTITY_LIMIT) > STAGE90_HIGH_ALIAS_BASE
+#error "the XNU entry-window identity map reaches the image high-alias window: build_identity_table()'s identity loop would overwrite the alias L1 descriptors and mmu_high_alias_selftest would fail (experiment 911)"
+#endif
+
 #define L1_SECTION_COUNT       4096u
 #define L1_SECTION_SIZE        0x00100000u
 #define L1_SECTION_MASK        0xfff00000u
@@ -5468,12 +5485,25 @@ static void build_identity_table(void)
      * The window XNU's entry image is copied to and runs from. The identity table otherwise stops
      * at 2 MB, so without this the copy itself would fault.
      *
-     * A loop, not a list of sections: the window is a property of the image (build_entry.sh
-     * computes it and writes it into xnu_arm_entry.h, and the payload's boot_args tell XNU the same
-     * `memSize`), so an image that outgrows one section count must not need an edit here. This was
-     * two hard-coded sections until experiment 175.
+     * **THE BOUND IS WHAT THE PAYLOAD DEREFERENCES, NOT `memSize` - and the two are different
+     * things, which is what the 2026-10-08 press found.** `STAGE90_XNU_ENTRY_SIZE` is the window
+     * XNU is TOLD (it becomes `boot_args.memSize` at xnu_entry_jump.c:150); this identity map is
+     * what the payload and `_start` DEREFERENCE *before* XNU installs its own tables. XNU's
+     * `start.s:198-207` then rebuilds the page tables from `memSize` (`mapveqp` emits one 1 MB
+     * section per MB of `memSize`), so the payload never needs to map past the region it touches:
+     * the image + BSS, the boot_args page, the device tree, and the first page-table page XNU
+     * writes at `topOfKernelData` (`STAGE90_XNU_ENTRY_TABLE_BYTES` of it). Bounding the loop by
+     * `memSize` instead - which is how it read until experiment 911 - made a raised window
+     * (`STAGE90_XNU_ENTRY_SIZE >= 0xc0000000 - STAGE90_XNU_ENTRY_BASE`) overlap the high-alias
+     * window at `STAGE90_HIGH_ALIAS_BASE` (0xc0000000) and OVERWRITE its L1 descriptors, because
+     * this loop runs after the alias loop; `mmu_high_alias_selftest` then read identity PA
+     * `0xc06e4648` instead of the aliased `0x6e4648` and the payload refused to enter XNU.
+     *
+     * A loop, not a list of sections: the limit is a property of the layout (xnu_arm_entry.h), so
+     * an image that outgrows one section count must not need an edit here. This was two hard-coded
+     * sections until experiment 175.
      */
-    for (uint32_t window_off = 0u; window_off < STAGE90_XNU_ENTRY_SIZE;
+    for (uint32_t window_off = 0u; window_off < STAGE90_XNU_ENTRY_IDENTITY_LIMIT;
          window_off += L1_SECTION_SIZE) {
         map_section_dram(STAGE90_XNU_ENTRY_BASE + window_off, STAGE90_XNU_ENTRY_BASE + window_off);
     }

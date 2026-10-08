@@ -28889,6 +28889,30 @@ while (( ENTRY_SIZE < ENTRY_DT_OFFSET + ENTRY_DT_MAX )); do ENTRY_SIZE=$((ENTRY_
     echo "        a window the payload does not have (912)." >&2
     exit 1; }
 
+# The bound of the payload's OWN entry-window identity map (`mmu.c`'s `build_identity_table`), a
+# DIFFERENT thing from the window `memSize` XNU is handed. **It must cover the WHOLE window** - every
+# byte the payload or `_start` can touch under the payload's page tables before XNU installs its own:
+# the image + BSS, the boot_args page, the tree, `_start`'s own bootstrap page tables (which `mapveqp`
+# writes upward from `topOfKernelData`), and the payload globals the idle/workloop wrappers keep
+# writing. It is CLAMPED below the image high-alias window at `STAGE90_HIGH_ALIAS_BASE` (0xc0000000,
+# stage90.h), never shrunk, because the identity loop runs AFTER the alias loop: an identity map that
+# reached the alias base would OVERWRITE the alias L1 descriptors and `mmu_high_alias_selftest` would
+# read identity PA instead of the aliased payload - `memSize=0x5e500000` made the loop reach VA
+# `0xc06xxxxx` and the selftest read `0xc06e4648` for the expected `0x6e4648` (the 2026-10-08 press,
+# experiment 911). So the window XNU is TOLD can be as large as the goal wants while the payload's map
+# stops at the alias base; the two are decoupled by clamping, NOT by shrinking `memSize`.
+#
+# **A too-small bound is its own fault, and the first fix was exactly that**: bounding by
+# `ENTRY_DATA_LIMIT + ENTRY_TABLE_BYTES` (9 MB) got the payload as far as the SMEM probe but faulted at
+# the boundary itself - `data abort: dfar=0x80900000 ... lr=0x800086c4` - as `_start`'s tables and the
+# payload's post-`/memory` DT allocation wrote one section past it. The window is the payload's whole
+# unmapped world, so the map covers the window.
+ENTRY_IDENTITY_LIMIT=$ENTRY_SIZE
+(( ENTRY_BASE + ENTRY_IDENTITY_LIMIT > 0xc0000000 )) && ENTRY_IDENTITY_LIMIT=$((0xc0000000 - ENTRY_BASE))
+# Rounded up a section because the map loop steps by `L1_SECTION_SIZE`. It can only grow the map, so
+# the alias-base refusal below is what catches a rounding that crossed the line.
+ENTRY_IDENTITY_LIMIT=$(align_up $ENTRY_IDENTITY_LIMIT 0x100000)
+
 # --- the invariants that make the layout safe ---------------------------------------------------
 #
 # Both failure modes are silent corruption with no cause in the log, so both are refused here. An
@@ -28905,6 +28929,17 @@ layout_fail() { say "FAIL: $*" >&2; exit 1; }
     layout_fail "the tree buffer at $ENTRY_DT_OFFSET (+$ENTRY_DT_MAX) reaches topOfKernelData at $ENTRY_DATA_LIMIT, where XNU writes its own boot page tables"
 (( ENTRY_DT_OFFSET + ENTRY_DT_MAX <= ENTRY_SIZE )) ||
     layout_fail "the tree buffer at $ENTRY_DT_OFFSET (+$ENTRY_DT_MAX) is outside the $ENTRY_SIZE window"
+# The payload's entry-window IDENTITY map must stay below the image high-alias window, or its loop
+# overwrites the alias descriptors (`mmu.c`'s `build_identity_table`, identity loop after alias loop).
+# **This is the 2026-10-08 press (experiment 911) as a build refusal.** The identity limit is now the
+# whole window clamped to the alias base (see above), so for any window short of the alias base this
+# holds by construction; the refusal is kept because it is the check that fires if a future image or
+# clamp edit grows `ENTRY_IDENTITY_LIMIT` past the base - which is exactly the clobber the press
+# measured (`mmu_high_alias_selftest` read identity PA `0xc06e4648` instead of the aliased `0x6e4648`).
+# Equality is safe for the *alias* (its own loop caps at `STAGE90_IMAGE_ALIAS_LIMIT`), but not for the
+# identity loop, so the bound is `<=` on the base.
+(( ENTRY_BASE + ENTRY_IDENTITY_LIMIT <= 0xc0000000 )) ||
+    layout_fail "the entry-window identity map reaches $((ENTRY_BASE + ENTRY_IDENTITY_LIMIT)) at or past the image high-alias base 0xc0000000, whose L1 descriptors mmu.c's alias loop owns - the identity loop would overwrite them (experiment 911)"
 
 # **The fifth invariant is the one experiment 296 found broken: nothing inside the memset range may
 # be initialized data.** `bss_end` bounding the image is not enough on its own, because the payload
@@ -36708,6 +36743,11 @@ cat > "$OUT/xnu_arm_entry.h" <<'EOF'
  */
 #define STAGE90_XNU_ENTRY_BASE       @ENTRY_BASE@
 #define STAGE90_XNU_ENTRY_SIZE       @ENTRY_SIZE@
+/* The payload's OWN identity-map bound (below the window `memSize`): what the payload and `_start`
+ * dereference under this image's page tables, not the whole span XNU is handed. `mmu.c`'s
+ * `build_identity_table` maps `[ENTRY_BASE, ENTRY_BASE + IDENTITY_LIMIT)`; keeping it clear of the
+ * `STAGE90_HIGH_ALIAS_BASE` window is what the 2026-10-08 press was about. */
+#define STAGE90_XNU_ENTRY_IDENTITY_LIMIT  @IDENTITY_LIMIT@
 #define STAGE90_XNU_ENTRY_ENTRY      @ENTRY@
 #define STAGE90_XNU_ENTRY_BSS_START  @BSS_START@
 #define STAGE90_XNU_ENTRY_BSS_END    @BSS_END@
@@ -36729,6 +36769,7 @@ EOF
 
 for pair in \
     ENTRY_BASE=$ENTRY_BASE ENTRY_SIZE=$ENTRY_SIZE ENTRY=$entry \
+    IDENTITY_LIMIT=$ENTRY_IDENTITY_LIMIT \
     BSS_START=$bss_start BSS_END=$bss_end BIN_BYTES=$bin_size \
     ARGS_OFFSET=$ENTRY_ARGS_OFFSET DATA_LIMIT=$ENTRY_DATA_LIMIT DT_OFFSET=$ENTRY_DT_OFFSET \
     TABLE_BYTES=$ENTRY_TABLE_BYTES DT_MAX=$ENTRY_DT_MAX ARGS_BYTES=$ARGS_BYTES \
@@ -36740,15 +36781,15 @@ left=$(grep -o '@[A-Z0-9_]*@' "$OUT/xnu_arm_entry.h" | sort -u | tr '\n' ' ' || 
 [[ -z "$left" ]] ||
     layout_fail "the generated header still has the placeholder(s) $left - a name in the substitution list above does not match the body"
 macros=$(grep -c '^#define STAGE90_XNU_' "$OUT/xnu_arm_entry.h" || true)
-[[ "$macros" == 14 ]] ||
-    layout_fail "the generated header has $macros STAGE90_XNU_ definitions and 459's payload needs 14 - a value was dropped from the body"
+[[ "$macros" == 15 ]] ||
+    layout_fail "the generated header has $macros STAGE90_XNU_ definitions and the payload needs 15 - a value was dropped from the body"
 # Both `|| true`s are load-bearing, and they are 455's defect class exactly: `grep` exits 1 when it
 # matches nothing, this script runs under `set -e` and `pipefail`, and the *success* case - no
 # placeholder left in the header - would end the build with status 1 and nothing printed. The first
 # draft of this check did that. The say-line below is the other half: it makes the check visible when
 # it passes, which is how the next defect in this pair gets found by reading the build instead of by
 # noticing that a run is missing.
-say "  xnu_entry_459: the generated header carries all 14 STAGE90_XNU_ definitions and no @NAME@ placeholder, so the payload's layout numbers are this link's"
+say "  xnu_entry_459: the generated header carries all 15 STAGE90_XNU_ definitions and no @NAME@ placeholder, so the payload's layout numbers are this link's"
 
 say
 say "entry base   $ENTRY_BASE"
