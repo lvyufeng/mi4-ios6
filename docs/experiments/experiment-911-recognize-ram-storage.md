@@ -842,3 +842,41 @@ was never pressed), and a code audit this session did not pin a single faulting 
 section asserts is **what each arm's own frozen config says** and **which paths have and have not been
 pressed** — read from `records/revert-set.txt` and `out/stage90/frozen/` — which is enough to correct the
 A/B's framing and to name the unvaried variable; it is not enough to name the fault.
+
+## 16. The cache-geometry hypothesis for the wedge is FALSIFIED (2026-10-08)
+
+Before pressing anything, the wedge was attacked from the code side. A subagent audit surfaced a
+candidate that would have been the best possible find — a genuine, build-fixable defect — so it was
+checked to the end rather than left as a hunch. **It is not the defect.** Recording it so it is not
+re-investigated.
+
+**The hypothesis.** `__wrap_platform_cache_idle_enter` calls Apple's `CleanPoC_Dcache`
+(`osfmk/arm/caches_asm.s:126-159`) to write the D-cache back to DRAM before the window opens. That
+function is a **compile-time** set/way loop: it walks `1 << (MMU_NSET+MMU_I7SET)` and increments ways at
+`1 << MMU_I7WAY` (`:137-139`), then the same for the L2 (`:150-152`). If those constants did not match
+this SoC's Krait caches, the "clean to PoC" would under-cover and leave dirty lines — precisely the
+stale-line wedge the run shows. The suspicion was concrete: the ARMA7 geometry block
+(`proc_reg.h:305-331`, the block this port builds with — `build_xnu_arm_kernel.sh:409 -DARMA7=1`) says
+the L1 is `MMU_CSIZE=15` = **32 KB / 128 sets**, but experiment 196 measured this device's real L1 as
+`0xa007e01a` = **64 sets × 4 ways × 64 B = 16 KB** (`experiment-196-…-selecting-no-way.md:60`) — a
+factor-of-2 set-count mismatch.
+
+**Why it is falsified — two independent reasons.**
+
+1. **The way bits are correct, and 196 is not about this function.** Experiment 196 fixed the
+   *payload's own* whole-cache flush (`stages/stage90/cache_ops.c`), whose way field sat at the wrong
+   bit (`log2(line)+log2(ways)` = bit 8) so *no way was ever selected*. Apple's `caches_asm.s` copy is
+   the opposite case: it uses `MMU_I7WAY = 30`, and 196's own text states the rule — "`32 - log2(ways)`,
+   the way right-justified at bit 31 … for this device's 4-way L1 that is bit 30" (`:34-38`). Apple's
+   copy *already has the correct way bits*. There is no analogous defect in it.
+2. **The set range is a superset, and the extras are no-ops.** ARMA7's 128-set walk is wider than the
+   device's 64 sets, but `c7,c10,2` on a set index beyond the implemented range is a no-op (no fault, no
+   effect), and a *wider* walk still covers every real set. Over-covering a maintenance operation is
+   harmless; the reported `_sctlr`/`_datap` values (correct cache-on, wrong cache-off) are the usual
+   cache-off-read artifact, present in the working 908 run too, not a symptom of an under-flush.
+
+**What is left.** The falsification does not nominate a replacement fault; it removes one candidate and
+sharpens the field. R14's window-or-`wfi` remains the standing hypothesis, and `IDLE_CACHE_ENABLE=1`
+(§15) remains the one variable no press has varied. This is the third code-side dead end for the wedge
+(audit this session; the R7 pet fault; the R9 install refusal) — the fault is in the idle machinery the
+instrumentation wraps, and naming it needs the presses, not more reading.
