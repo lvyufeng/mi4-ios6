@@ -50,36 +50,36 @@ re-derived name by name. That is the next rung.
 ## What moved
 
 `tools/host_ramdisk_macho_check.py`, one function. No tree edit, no device, no other file.
-## Appendix — the 86-object census (for the next rung)
+## Appendix — the 86-object census, and why it is NOT a rename table
 
 Of the 263 distinct objects `build_entry.sh` names through the derived pools, **86 are in no `_d13`
-pool**. Censused against D13's own 744 objects:
+pool**. The tempting reading — "same basename, new directory" — is a **trap**, and comparing defined
+symbols shows it:
 
-- **~20 are ARM/PE seed objects with a clean D13 path**: `pexpert_arm_pe_{init,identify_machine,
-  bootargs,kprintf,serial}.o` → `pexpert_arm_common_pe_*.o`; `osfmk_arm_machine_task.o` →
-  `osfmk_kern_task.o`; console → `osfmk_console_arm_serial_console.o`.
-- **~53 are genuinely absent from Darwin-13** — iOS 7 predates them or restructured them:
-  `osfmk_kern_{waitq,telemetry,coalition,kern_stackshot,work_interval,sched_multiq,kern_monotonic}.o`,
-  `osfmk_ipc_ipc_voucher.o`, `osfmk_corpses_corpse.o`, the whole `osfmk_corecrypto_*` and
-  `osfmk_prng_*` trees (moved to `bsd/dev/random/` and `libkern/crypto/corecrypto/`),
-  `osfmk_arm_{caches,cpu_common,cpuid,lowmem_vectors,io_map,strlcpy,strncpy}.o`, and the assembly
-  leaves `data.o`, `caches_asm.o`, `strlen.o`, `strncmp.o`, `strnlen.o`.
+| 4570 object | D13 same-basename object | symbols 4570 has that D13's lacks |
+|---|---|---|
+| `pexpert_arm_pe_init.o` | `pexpert_arm_common_pe_init.o` | **33** — `gPEClockFrequencyInfo`, `gPlatformECID`, `gTargetTypeBuffer`, `gPanicBase`, … |
+| `pexpert_arm_pe_identify_machine.o` | `pexpert_arm_common_pe_identify_machine.o` | **34** — `gPESoCBasePhys`, `gPicBase`, `gTimerBase`, `gSocPhys`, … |
+| `osfmk_console_serial_console.o` | `osfmk_console_arm_serial_console.o` | **11** — `console_ring_try_empty`, `nmi_counter`, … |
+| `osfmk_arm_machine_task.o` | `osfmk_kern_task.o` | 5 — `machine_task_{get,set}_state`, … |
 
-So the closure re-derivation is **three** kinds, not one:
+The D13 `common/` objects are the **generic** PE; the **ARM/board-specific symbols live in D13's
+board PE** (`pexpert/arm/pe_qsd8250_leo.c`, the HD2 fork's board file — the analogue of our MSM8974
+board PE). So the closure is **per-symbol**, not per-object, and it must be re-derived from D13's own
+object graph.
 
-1. **Clean path renames (~20).** The object exists under a new path: `pexpert_arm_pe_{init,
-   identify_machine,bootargs,kprintf,serial}.o` → `pexpert_arm_common_pe_*.o`; `osfmk_arm_machine_task.o`
-   → `osfmk_kern_task.o`; `osfmk_console_{serial,video}_console.o` →
-   `osfmk_console_arm_serial_console.o`.
-2. **Symbols that moved into a C object.** `data.s` does not exist in D13; `gVirtBase`/`gPhysBase`
-   are now `B` symbols in `osfmk_arm_arm_vm_init.o` (`nm`: `0000000c B gPhysBase`, `00000010 B
-   gVirtBase`). The closure slot for `data.o` splits: some of its symbols have a new object, some do
-   not.
-3. **Symbols with no D13 home at all (~53).** `RTClockData`, `CpuDataEntries`, `BootCpuData` — the
-   rest of 4570 `data.s`'s per-CPU data — appear **nowhere** in Darwin-13 (`grep -rn` empty). Nor do
-   `data.s`, `caches_asm.s`, `strlen.s`, `strncmp.s`, `strnlen.s` exist (D13's ARM `.s` inventory is
-   38 files, none of them these). D13's per-CPU data and timer model genuinely differs, so these must
-   be **supplied by the project** (a stub or a D13-appropriate definition), not re-pointed.
+What the per-symbol view already establishes:
 
-Which of kind 3 need a stub and which the D13 kernel defines under another name is the next rung's
-first question — and it is the rung's size, because kind 3 is where the two models diverge.
+- **re-point** (symbol has a D13 definer): `gVirtBase`/`gPhysBase` → `osfmk_arm_arm_vm_init.o`
+  (`nm`: `B gPhysBase`, `B gVirtBase`); `ExceptionVectorsBase` → `exctramps.o`; `intstack`/`debstack`/
+  `debstack_top` → `locore.o`.
+- **supply** (no D13 definer): `RTClockData`, `CpuDataEntries`, `BootCpuData` — the rest of 4570
+  `data.s`'s per-CPU data — appear **nowhere** in D13 (an index of all **31 849** defined D13 symbols
+  has no entry). Likewise the `strlen`/`strncmp`/`strnlen`/`caches_asm` `.s` files (D13's ARM `.s`
+  inventory is 38 files, none of them these) and the iOS-7-absent C objects
+  (`osfmk_kern_{waitq,telemetry,coalition,work_interval}` etc.).
+
+The next rung's first artifact is a `symbol -> defining D13 object` index over all `_d13` pools
+(`arm-none-eabi-nm --defined-only … | sort -u`), and its first move is to seed the `entry_closure.py`
+walk from **D13's own** `arm_init.o` undefined set rather than 4570's seed list — because the question
+is not "where did this object go" but "what does D13's `arm_init` actually need".
