@@ -1504,6 +1504,7 @@ run python3 "$REPO_ROOT/tools/check_block_result_slots.py" --verbose || exit 1
 say "== compiling the symbols start.s needs =="
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
     -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
+    ${STUB_DEFINES_TRACE[@]+"${STUB_DEFINES_TRACE[@]}"} \
     -c "$BOOT_DIR/entry_stubs.c" -o "$OUT/xnu_arm_entry_stubs.o"
 # **481: the timer's owner.** Compiled in every build rather than only in a traced one, because the
 # registration it performs is not instrumentation - it is the step - and because a build with
@@ -36620,6 +36621,12 @@ verify_trace_symbols() {
 # So the five names are checked against the linked image and against the undefined list, which is
 # where a misspelling shows up as a new line. This runs in every entry build, not only traced ones,
 # because the probe is compiled into `entry_stubs.c` unconditionally - only its caller is traced.
+# **937/938: and on D13 it is the negative reading that is checked, because the probe is gated OUT.**
+# The whole probe is `#if !STAGE90_ENTRY_D13` in `entry_stubs.c` (D13's resource mechanism is not
+# 4570's), so on D13 the assertion flips: none of the five names may be in the image, and neither
+# 4570 global may exist. That is a reading too, and it is the one that catches a gate that failed to
+# compile the probe out - a name that is *present* on D13 means the probe was built after all.
+D13_TRACE_PROBE=$D13_TRACE
 verify_registry_probe() {
     local sym type
     for sym in _ZN9IOService18getResourceServiceEv \
@@ -36627,6 +36634,15 @@ verify_registry_probe() {
                _ZNK7OSArray8getCountEv \
                _ZNK7OSArray20getNextIndexOfObjectEPK15OSMetaClassBasej \
                _ZNK8OSObject7releaseEv; do
+        if [[ $D13_TRACE_PROBE -eq 1 ]]; then
+            # The three IOKit methods are shared (D13 has them); only the probe's *use* is gated, so a
+            # present-and-function symbol here is fine - only a misspelling that made a stub is not.
+            type=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
+                   awk -v s="$sym" '$3 == s { print $2; found = 1 } END { exit(found ? 0 : 1) }') || type=""
+            [[ -z $type || $type == T || $type == t ]] ||
+                layout_fail "$sym is defined as '$type' in this D13 image, which is neither absent nor a function - the shared IOKit methods must be real or genuinely absent, never a stand-in"
+            continue
+        fi
         type=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
                awk -v s="$sym" '$3 == s { print $2; found = 1 } END { exit(found ? 0 : 1) }') ||
             layout_fail "entry_registry_probe calls $sym, which the linked image does not define - it would resolve to a generated stub that stops the boot at the instrument"
@@ -36636,13 +36652,27 @@ verify_registry_probe() {
             layout_fail "$sym is in the undefined list *and* defined in the image - the doubled-underscore shape 455 found, where the instrument calls a generated stub instead of the real function"
     done
     for sym in gIOResourceMatchedKey gIOBSDKey; do
+        if [[ $D13_TRACE_PROBE -eq 1 ]]; then
+            # 938: D13 has *neither* global (its resource matching is `gIOResourceMatchKey`). A `T`
+            # here is the generated stub the link invents for a name nothing defines - the exact
+            # failure this gate exists to prevent - so presence in any form is the refusal.
+            type=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
+                   awk -v s="$sym" '$3 == s { print $2; found = 1 } END { exit(found ? 0 : 1) }') || type=""
+            [[ -z $type ]] ||
+                layout_fail "$sym is defined as '$type' in this D13 image, but D13's IOService.cpp defines no such global and the 456 probe is gated out (-DSTAGE90_ENTRY_D13): a symbol here means the probe was compiled in anyway, or a generated stub took its place"
+            continue
+        fi
         type=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
                awk -v s="$sym" '$3 == s { print $2; found = 1 } END { exit(found ? 0 : 1) }') ||
             layout_fail "entry_registry_probe reads $sym, which the linked image does not define"
         [[ $type == B || $type == b || $type == D || $type == d ]] ||
             layout_fail "entry_registry_probe reads $sym, which the image defines as '$type' and not as storage"
     done
-    say "  xnu_entry_456: the registry probe's five names are real symbols in the image and none of them is in the undefined list"
+    if [[ $D13_TRACE_PROBE -eq 1 ]]; then
+        say "  xnu_entry_456: the D13 image carries NEITHER 4570 registry global (gIOResourceMatchedKey/gIOBSDKey absent, as D13's own IOService.cpp has neither) and no IOKit method became a stand-in - the 456 probe is compiled out, which is this tree's reading"
+    else
+        say "  xnu_entry_456: the registry probe's five names are real symbols in the image and none of them is in the undefined list"
+    fi
 }
 verify_registry_probe
 
@@ -36658,6 +36688,17 @@ verify_console_state() {
     local sym type
     for sym in cons_ops_index disable_serial_output disableConsoleOutput PE_kputc \
                kernel_debugger_entry_count; do
+        # **938: `kernel_debugger_entry_count` is the one 4570-only name in this census** (D13's
+        # `osfmk/kern/debug.c` has no such counter), and `entry_os_state_record` is `#if
+        # !STAGE90_ENTRY_D13` around it - so on D13 the checked reading is its ABSENCE, exactly as
+        # 456's two globals are. The other four are in both trees.
+        if [[ $D13_TRACE_PROBE -eq 1 && $sym == kernel_debugger_entry_count ]]; then
+            type=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
+                   awk -v s="$sym" '$3 == s { print $2; found = 1 } END { exit(found ? 0 : 1) }') || type=""
+            [[ -z $type ]] ||
+                layout_fail "$sym is defined as '$type' in this D13 image, but D13's debug.c defines no such counter and the console census is gated out (-DSTAGE90_ENTRY_D13): a symbol here means the gate did not compile it out, or a generated stand-in took its place"
+            continue
+        fi
         type=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
                awk -v s="$sym" '$3 == s { print $2; found = 1 } END { exit(found ? 0 : 1) }') ||
             layout_fail "the console capture reads $sym, which the linked image does not define - it would resolve to a generated stand-in and the reading would be zero"
@@ -36666,7 +36707,11 @@ verify_console_state() {
         grep -qx "$sym" "$OUT/xnu_arm_entry_undef.txt" &&
             layout_fail "$sym is in the undefined list *and* defined in the image - the doubled-underscore shape 455 found, where the instrument reads a generated stand-in instead of the real global"
     done
-    say "  xnu_entry_458: the console capture's five names are real storage symbols in the image and none of them is in the undefined list"
+    if [[ $D13_TRACE_PROBE -eq 1 ]]; then
+        say "  xnu_entry_458: the console capture's four shared names are real storage symbols, and the 4570-only kernel_debugger_entry_count is absent (its census line is gated out) - this tree's reading"
+    else
+        say "  xnu_entry_458: the console capture's five names are real storage symbols in the image and none of them is in the undefined list"
+    fi
 }
 verify_console_state
 verify_trace_symbols

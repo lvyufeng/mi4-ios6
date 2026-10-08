@@ -2630,7 +2630,12 @@ extern uint32_t cons_ops_index;               /* `D`, serial_console.c:130 */
 extern uint32_t disable_serial_output;        /* `D`, pexpert/arm/pe_kprintf.c:20 */
 extern int      disableConsoleOutput;         /* `B`, bsd/dev/arm/km.c:46 */
 extern void   (*PE_kputc)(char c);            /* `B`, pexpert/arm/pe_kprintf.c:17 */
+/* **938: `kernel_debugger_entry_count` is 4570's - D13's `osfmk/kern/debug.c` defines no such
+ * counter (the whole name is absent from the tree). It is read here for the console census and, like
+ * the 456 probe, is compiled out on D13: the other four console globals are in both trees. */
+#if !STAGE90_ENTRY_D13
 extern uint32_t kernel_debugger_entry_count;  /* `B`, osfmk/kern/debug.c */
+#endif
 
 static void entry_os_state_record(void)
 {
@@ -2638,7 +2643,9 @@ static void entry_os_state_record(void)
     entry_write_kv("xnu_live_console_kputc", (uint32_t)(uintptr_t)PE_kputc);
     entry_write_kv("xnu_live_console_noserial", disable_serial_output);
     entry_write_kv("xnu_live_console_noconout", (uint32_t)disableConsoleOutput);
+#if !STAGE90_ENTRY_D13
     entry_write_kv("xnu_live_console_dbgcnt", kernel_debugger_entry_count);
+#endif
 }
 
 /*
@@ -6695,7 +6702,16 @@ __attribute__((noinline)) void entry_slot_tb_note(struct entry_slot_tb_keys *k, 
     entry_live_write(k->k_calls, k->calls);
 }
 
+/* **938: the tree switch, defaulted.** `STAGE90_ENTRY_D13` arrives on this file's command line only
+ * when the build selects Darwin 13 (`build_entry.sh`'s `STUB_DEFINES_TRACE`); on 4570 and in a
+ * no-trace build it is undefined, and the `#ifndef` makes it 0 so every gate below compiles the probe
+ * in - 4570's object is byte-identical. */
+#ifndef STAGE90_ENTRY_D13
+#define STAGE90_ENTRY_D13 0
+#endif
+#if !STAGE90_ENTRY_D13
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);
+#endif
 /*
  * Experiment 454. One call per entry into the two IOKit deadline sleeps, from their wrappers. `site`
  * is the wrapper's own `lr` - the function that asked IOKit to wait - and `now` is the counter read in
@@ -6733,8 +6749,12 @@ void entry_note_iolock(uint32_t ent, uint32_t site, uint32_t thread, uint32_t lo
     entry_live_write("xnu_live_iolock_dl_hi", dl_hi);
     entry_live_write("xnu_live_iolock_now", now);
     /* 456: the registry reading, taken in the wait itself - see `entry_registry_probe`. After the
-     * records above, so the wait's own identity stays the first thing the log says about this call. */
+     * records above, so the wait's own identity stays the first thing the log says about this call.
+     * **938: compiled out on D13** - the probe reads 4570's `gIOResourceMatchedKey`/`gIOBSDKey`, which
+     * D13's resource mechanism does not have (see the gate on the probe's own definition). */
+#if !STAGE90_ENTRY_D13
     entry_registry_probe(g_iolock_calls, site);
+#endif
 }
 
 /*
@@ -6884,6 +6904,19 @@ extern void *_ZNK15IORegistryEntry12copyPropertyEPK8OSSymbol(void *, const void 
 extern uint32_t _ZNK7OSArray8getCountEv(void *);
 extern uint32_t _ZNK7OSArray20getNextIndexOfObjectEPK15OSMetaClassBasej(void *, const void *, uint32_t);
 extern void _ZNK8OSObject7releaseEv(void *);
+/*
+ * **938: the 456 probe is 4570's resource mechanism, and D13 implements resource matching
+ * differently.** The three globals it reads are 4570's: `gIOResourceMatchedKey` (the `"IOResourceMatched"`
+ * symbol `copyExistingServices` sets on the resources root, `IOService.cpp:3751`), `gIOBSDKey`, and the
+ * `IOResourceMatched` array the probe walks for `"IOBSD"`. **D13 has none of them** - its
+ * `IOResources::matchPropertyTable` (`IOService.cpp:4458`) reads `gIOResourceMatchKey` as an `OSString`
+ * or `OSSet` and tests membership with `getProperty(str)`, and there is no `gIOBSDKey` and no
+ * `gIOResourceMatchedKey` anywhere in the tree (`grep -rn` = empty; the D13 object's only resource
+ * symbol is `gIOResourceMatchKey`). So the probe's reading is a *different mechanism* on D13, not a
+ * renamed symbol, and rather than fabricate one this whole probe - its call site in `entry_note_iolock`,
+ * its seven live keys and `g_reg_*` - is compiled out under the tree switch. `entry_note_iolock`'s own
+ * records (454) are unchanged. */
+#if !STAGE90_ENTRY_D13
 extern void *gIOResourceMatchedKey;
 extern void *gIOBSDKey;
 
@@ -6927,6 +6960,7 @@ __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_
     if (keys)
         _ZNK8OSObject7releaseEv(keys);
 }
+#endif /* !STAGE90_ENTRY_D13 - the 456 registry probe is 4570's resource mechanism; D13's differs */
 
 /*
  * One call per matching dictionary built by the four factory overloads in `entry_trace.c`. `name` is
