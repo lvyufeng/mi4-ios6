@@ -154,6 +154,25 @@ else
     COMPONENT_IMPORT_ORDER=("${COMPONENT_LIST[@]}")
 fi
 
+# **The C++ dialect is the tree's too (922).** `CXX_ARGS` below pins no `-std`, so `clang++` picks
+# its own default - gnu++14 today - and the 2013-era Darwin-13 C++ was never written for it. Eight of
+# D13's C++ files begin with a brace-initializer whose value does not fit the declared type
+# (`int foo = {self->reserved | 0xC0000000};` - `[-Wc++11-narrowing]`, an *error* since clang 16 and
+# a warning/*pass* in the Xcode-5 clang that built D13), and two (`S5L8930XIO`, `AppleARMNMI`) reach
+# IOKit headers whose `UINT32_MAX` is defined only under the legacy `stdint.h` the dialect selects.
+# Measured: D13 C++ is **82/96 with the default, 93/96 under `gnu++98`** - the dialect D13's era
+# actually used (Xcode 5's default).
+#
+# It is gated on the SAME filesystem test that discriminates the two trees above (D13 ships the
+# legacy `osfmk/sys/types.h`, 4570 does not), so the flag is **absent on 4570 and every 4570 object is
+# unchanged** - which it must be, because gnu++98 *regresses* 4570: one file (`IOPMrootDomain.cpp`)
+# uses a genuine C++11 construct and fails only under the old dialect. So the fix is to give each tree
+# the dialect it was written for, not to impose one on both.
+CXX_STD_FLAGS=()
+if [[ -f $XNU/osfmk/sys/types.h ]]; then
+    CXX_STD_FLAGS=(-std=gnu++98)
+fi
+
 # The EABI runtime, which is not in the manifest and is not Apple's. `armv7-unknown-netbsd-eabi`
 # (and `armv7-none-eabi` before it) lowers an aggregate copy to `__aeabi_memcpy4`, where a Darwin
 # target lowers it to `memcpy` - so the ELF path needs four symbols Apple's tree never mentions.
@@ -1291,7 +1310,7 @@ while read -r src; do
     CPP_FORCE=()
     CXX_EXTRA=()
     case "$src" in
-        *.cpp) CXX_EXTRA=("${CXX_ARGS[@]}" "${EXTRA_CXX_FLAGS[@]}"); CPP_FORCE=("${CPP_FORCE[@]}") ;;
+        *.cpp) CXX_EXTRA=("${CXX_ARGS[@]}" "${CXX_STD_FLAGS[@]}" "${EXTRA_CXX_FLAGS[@]}"); CPP_FORCE=("${CPP_FORCE[@]}") ;;
         *)     CXX_EXTRA=("${CC_ARGS[@]}") ;;
     esac
     # Bounded. A file that sends clang into a loop must cost seconds, not the whole session: one
@@ -1617,7 +1636,7 @@ fi
 
 for _src in "${PLATFORM_SOURCES[@]}"; do
     _o="$PL_OUT/$(basename "${_src%.cpp}").o"
-    if timeout "$PER_FILE_TIMEOUT" "${CXX_ARGS[@]}" "${EXTRA_CXX_FLAGS[@]}" "${PL_COMPAT_INCLUDES[@]}" "${FORCE_INCLUDES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CXX_ARGS[@]}" "${CXX_STD_FLAGS[@]}" "${EXTRA_CXX_FLAGS[@]}" "${PL_COMPAT_INCLUDES[@]}" "${FORCE_INCLUDES[@]}" \
            "${PL_COMPAT_DEFINES[@]}" "${CONFIG_DEFINES[@]}" "${DEFINES[@]}" "${PL_COMP_DEFINES[@]}" "${EXTRA_DEFINES[@]}" "${PL_INCLUDES[@]}" \
            -c "$_src" -o "$_o" 2>"$PL_OUT/$(basename "${_src%.cpp}").log"; then
         rm -f "$PL_OUT/$(basename "${_src%.cpp}").log"

@@ -80,7 +80,20 @@ def _master_dirs():
     reader that opens only `osfmk/conf/MASTER` sees two devices where the configuration has sixteen —
     and `bsd_init.c`'s `#include <loop.h>` then has no header to include.
     """
-    root = os.environ.get("XNU_TREE") or os.path.join(REPO_ROOT, "external", "xnu-4570.1.46")
+    return master_dirs(os.environ.get("XNU_TREE"))
+
+
+def master_dirs(root):
+    """The MASTER directories under an explicit `root` (the argument form of `_master_dirs`).
+
+    `_master_dirs` reads `XNU_TREE` from the environment, which is right when the caller has already
+    exported it - but `list_sources.py` carries its tree as an **argument** (`--xnu`, experiment 916),
+    and setting the env just to ask a path question would be a second place the tree is named. So the
+    rule lives here once and both spellings call it: `_master_dirs()` for the env-driven callers,
+    `master_dirs(root)` for an explicit one.
+    """
+    if not root:
+        root = os.path.join(REPO_ROOT, "external", "xnu-4570.1.46")
     if os.path.isfile(os.path.join(root, "config", "MASTER")):
         return [os.path.join(root, "config")]
     dirs = []

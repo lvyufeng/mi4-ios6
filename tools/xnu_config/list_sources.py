@@ -34,6 +34,8 @@ import re
 import subprocess
 import sys
 
+import devices
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 
@@ -64,23 +66,38 @@ DEFAULT_COMPONENTS = ["osfmk", "bsd", "libkern", "iokit", "pexpert", "security"]
 def expand_options(xnu, config):
     """The option names a configuration selects, via the ported doconf pipeline.
 
-    XNU_MASTER_LOCAL, if set, names a fragment that can declare extra configurations - the same
-    role Apple's doconf gives MASTER.local. See tools/xnu_config/minimal/.
+    **The union over every MASTER dir the TREE declares (922).** The modern tree (4570) keeps ONE
+    `config/MASTER`, so `make_defines.sh` reads it and this is a single expansion - the identity.
+    The 2013-era Darwin-13 tree splits the declarations per component, and the attributes are split
+    with them: `osfmk/conf/MASTER.arm` names the ARM attributes, but **`iokit/conf/MASTER:62`
+    declares `options IOKITCPP ... # <iokitcpp>` and `libkern/conf/MASTER:59` declares
+    `LIBKERNCPP # <libkerncpp>`**. A reader that expands only `osfmk/conf` never resolves those
+    attributes, so `iokit/conf/files`'s `optional iokitcpp` rows (`IORegistryEntry.cpp`,
+    `IOService.cpp`, ...) and `libkern/conf/files`'s `optional libkerncpp` rows (`OSObject.cpp`,
+    `OSMetaClass.cpp`, ...) are never selected - **the C++ spine of IOKit is silently dropped from the
+    manifest**, and the platform block's C++ objects then have ~225-271 undefined C++ symbols each
+    with no object to supply them. This is the same per-component-declaration defect 920 fixed for
+    the device table, in its option half; the device half already unions (devices.configuration_lines).
+
+    The union is Apple's "one global table": `config` builds a single option set from every MASTER in
+    its search path, so a name declared in any component resolves. The first dir that declares a line
+    wins by construction here (a `set`), which matters only for a name declared twice, and matches
+    `device_table.py`'s override rule.
     """
     env = {**os.environ, "XNU_TREE": xnu}
     if os.environ.get("XNU_MASTER_LOCAL"):
         env["XNU_MASTER_LOCAL"] = os.environ["XNU_MASTER_LOCAL"]
-    out = subprocess.run(
-        [os.path.join(HERE, "make_defines.sh"), config],
-        capture_output=True, text=True, check=True,
-        env=env,
-    ).stdout
     names = set()
-    for line in out.splitlines():
-        if not line.startswith("-D"):
-            continue
-        name = line[2:].split("=", 1)[0]
-        names.add(name)
+    for d in devices.master_dirs(xnu):
+        out = subprocess.run(
+            [os.path.join(HERE, "make_defines.sh"), config],
+            capture_output=True, text=True, check=True,
+            env={**env, "XNU_MASTER_DIR": d},
+        ).stdout
+        for line in out.splitlines():
+            if not line.startswith("-D"):
+                continue
+            names.add(line[2:].split("=", 1)[0])
     return names
 
 
