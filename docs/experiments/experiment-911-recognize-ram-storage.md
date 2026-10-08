@@ -764,4 +764,29 @@ console (this is the same door `experiment-910-usb-debug-map.md:51` names as "th
 the log ("a cold power transition or a NEW `fastboot boot` — not every reset"), so a dark device is not
 mistaken for an empty one and a spent run's only evidence is not forfeited. This is the harness fixing
 the misreading at its source rather than only correcting the doc that inherited it. `rehearse_live_path.sh`
-cell `no-return` (which asserts the exit-2 block's own text) is the regression test.
+cell `no-return` (which asserts the exit-2 block's own text) is the regression test. **Landed as
+`50a2186`** (the §13 finding as `69c0f95`, the §12 correction as `5f2458a`).
+
+## 14. The rehearsal's `no-fastboot-after-reboot` cell was failing on the harness's clock, not on the runner (2026-10-08)
+
+Running `tools/rehearse_live_path.sh` after the §13 fix returned **19 ok, 1 failed**, the failure being
+`FAIL no-fastboot-after-reboot  exit 124, promised 1 / did not say (either stream): device did not appear
+in fastboot`. `124` is `timeout`'s own status, and the harness runs each live cell under `timeout 120`.
+
+The row is a **measurement defect**, not a runner defect — the number it reported was an artifact of how it
+was taken (`mi4-measurement-defects`). Measured this session:
+
+- **The gate alone is ~59 s**, compute-bound (`user` ≈ `real`), spread across the linked-disassembly clauses
+  (the biggest single wall-clock gaps are ~4 s; 33,799 traced commands, no one step dominant). It is
+  re-run for *every* live cell and it grows each time a linked clause is added.
+- The `no-fastboot-after-reboot` state (device in adb, `no_fastboot`) takes the `MODE == adb` branch, whose
+  reboot-bootloader wait is a **hardcoded** `for _ in $(seq 1 30); do … sleep 2; done` = **60 s**, which no
+  env override shortens (unlike `RETURN_TIMEOUT` / `FB_AMBIG_WAIT`, which this battery *does* shorten).
+- So the cell costs ~59 + 60 + a few ≈ **122 s**, just past 120 → SIGTERM → `exit 124`.
+
+**Run standalone with the cap lifted, the cell is correct**: `exit 1`, stderr `run_and_capture: device did
+not appear in fastboot` — the exact text the cell promises. It dies at `run_and_capture.sh:3184`, far above
+the §13 exit-2 block at `:3596`, so the §13 edit is not merely unreachable in this cell — the cell's own
+promised behaviour reproduces with the edit present. The cap is raised to **`timeout 180`** with the
+measurement recorded in place, and the cell now passes. **A `FAIL … exit 124` in this battery is this
+budget until proven otherwise.**

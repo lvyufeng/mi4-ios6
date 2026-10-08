@@ -555,10 +555,25 @@ run_state() {
   # is measured against, so it is shortened here for the same reason `RETURN_TIMEOUT` is - and it has
   # to stay *longer than one poll* (the runner sleeps 2 s), or the wait's refetch would never happen
   # and 618's cell would be testing the refusal path while claiming to test the wait.
+  # **`timeout 180`, not 120, and the reason is a cell that was failing on the clock rather than on
+  # its reading.** The `no-fastboot-after-reboot` state (device in adb, `no_fastboot`) makes the runner
+  # take BOTH of its slowest host-side steps before it dies: the gate, then the `MODE == adb` branch's
+  # reboot-bootloader wait. Measured this session: the gate alone is **~59 s**, compute-bound (the
+  # linked-disassembly clauses walk the payload's own objdump), and the reboot loop is a *hardcoded*
+  # `for _ in $(seq 1 30); do ... sleep 2; done` = **60 s** that no env override shortens (unlike
+  # `RETURN_TIMEOUT`/`FB_AMBIG_WAIT`, which this battery does shorten). Run standalone with the cap
+  # lifted, the cell is correct - `exit 1`, `device did not appear in fastboot` - but at 59 + 60 + a
+  # few seconds it lands at ~122 s, just past 120, so the harness SIGTERMed it and the row read
+  # `exit 124`. That is a verdict about this file's budget and not about the runner, and it is the
+  # shape `mi4-measurement-defects` records: the number the row reported was an artifact of how it was
+  # taken. 180 s clears the 119 s floor with room for the gate to grow (it grows every time a linked
+  # clause is added, and it is the growing half), and it is still small enough that a genuinely hung
+  # cell is caught. Do not read a `FAIL ... exit 124` below as a runner defect until this budget is
+  # ruled out - 124 is this `timeout`'s own status, not the runner's.
   local ident_before
   ident_before=$(tree_identity)
   LOGFILE=$logfile RETURN_TIMEOUT=6 CAPTURE_WAIT=1 FB_AMBIG_WAIT=3 \
-    timeout 120 bash "$RUNNER" "${GATE_ARGS[@]}" "${EXPECT_ARM[@]}" > "$out" 2> "$err"
+    timeout 180 bash "$RUNNER" "${GATE_ARGS[@]}" "${EXPECT_ARM[@]}" > "$out" 2> "$err"
   local code=$?
   # **The two reads that bracket the state, and the reason they are here rather than at the end.** The
   # identity is taken immediately before and immediately after the runner call, so what it witnesses is
