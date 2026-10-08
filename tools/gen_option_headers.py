@@ -236,25 +236,35 @@ def device_headers_by_component():
         return {}
     out = {}
     for component in COMPONENTS:
-        path = os.path.join(XNU, component, "conf", "files")
-        if not os.path.isfile(path):
-            continue
+        # Both `conf/files` and `conf/files.<arch>`: Apple's `mkmakefile` walks the file table it
+        # was given, and that table is the union. Reading only `conf/files` missed every device whose
+        # only `optional` line is arch-specific — exactly Darwin-13's `vc`, whose `serial_console.c`
+        # rows live in `osfmk/conf/files.arm`, so `vc.h` was generated (`gen_device_headers.py` reads
+        # both) but force-included by nothing, which `check_device_conditions.py` correctly refused.
+        # `check_device_conditions.conditions()` and `list_sources.py` already read both, so this was
+        # the one walker with a second definition of "the file list". Measured: for 4570 RELEASE the
+        # six extra `osfmk/conf/files.arm` conditions (`ec eisa hi_res_clock himem ln profile`) are
+        # neither devices nor options, so this changes the 4570 membership not at all.
         rows = []
-        for line in open(path, encoding="utf-8", errors="replace"):
-            line = line.split("#", 1)[0].strip()
-            if not line or line.startswith("OPTIONS/"):
+        for fname in ("files", "files.arm"):
+            path = os.path.join(XNU, component, "conf", fname)
+            if not os.path.isfile(path):
                 continue
-            parts = line.split()
-            if len(parts) < 3 or parts[1] not in ("optional", "standard"):
-                continue
-            words = parts[2:]
-            if words and words[0] == "not":
-                words = words[1:]
-            if not words:
-                continue
-            cond = words[0].lower()
-            if cond in declared and f"{cond}.h" not in rows:
-                rows.append(f"{cond}.h")
+            for line in open(path, encoding="utf-8", errors="replace"):
+                line = line.split("#", 1)[0].strip()
+                if not line or line.startswith("OPTIONS/"):
+                    continue
+                parts = line.split()
+                if len(parts) < 3 or parts[1] not in ("optional", "standard"):
+                    continue
+                words = parts[2:]
+                if words and words[0] == "not":
+                    words = words[1:]
+                if not words:
+                    continue
+                cond = words[0].lower()
+                if cond in declared and f"{cond}.h" not in rows:
+                    rows.append(f"{cond}.h")
         if rows:
             out[component] = rows
     return out

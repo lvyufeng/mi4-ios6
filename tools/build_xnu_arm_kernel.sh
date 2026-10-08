@@ -205,7 +205,7 @@ if [[ $ONLY_PLATFORM -eq 0 ]]; then
     # that claims to have HFS.
     _hfs_extra=()
     [[ $HFS_PORT -eq 1 ]] && _hfs_extra=(--extra "$HFS_FILES")
-    LS_MESSAGE=$("$TOOLS_DIR/xnu_config/list_sources.py" "$CONFIG" --write "$MANIFEST" \
+    LS_MESSAGE=$("$TOOLS_DIR/xnu_config/list_sources.py" "$CONFIG" --xnu "$XNU" --write "$MANIFEST" \
                  "${_hfs_extra[@]}" 2>&1) || {
         echo "$LS_MESSAGE" >&2
         exit 2
@@ -397,6 +397,20 @@ while IFS= read -r d; do
     [[ -n $d ]] && CONFIG_DEFINES+=("$d")
 done <<<"$defines"
 
+# A conditional device define chosen by the TREE, not by its name (913), the same way
+# `select_master.sh` picks the MASTER dir by layout. `-DMONOTONIC=1` is 4570's
+# `osfmk/kern/kern_monotonic.c optional monotonic`; the 2013-era Darwin-13 (iOS 7) tree has **no
+# kern_monotonic.c** and no `monotonic` condition at all, so defining it there both exposes a
+# condition the tree never tests and makes `xnu_config/device_table.py` (which reads `XNU_TREE`)
+# refuse the build with "an override for a name that is not a device of RELEASE". Chosen from the
+# tree's own conf/files: for 4570 the grep matches and this is `-DMONOTONIC=1` exactly as before, so
+# nothing about the 4570 arm on disk changes.
+if grep -q 'kern_monotonic\.c' "$XNU/osfmk/conf/files" 2>/dev/null; then
+    MONOTONIC_DEFINE=(-DMONOTONIC=1)
+else
+    MONOTONIC_DEFINE=()
+fi
+
 DEFINES=(
     "${CONFIG_DEFINES[@]}"
     # MACH_KERNEL_PRIVATE is NOT here. It is per-component, and putting it here was this build's
@@ -405,7 +419,7 @@ DEFINES=(
     # declarations collide with bsd/libkern/libkern.h's, so defining it globally broke every BSD
     # translation unit that includes <sys/systm.h> - 127 files in the minimal configuration.
     -DXNU_KERNEL_PRIVATE=1 -DKERNEL_PRIVATE=1
-    -DMACH_BSD=1 -DPRIVATE=1 -DKPC=1 -DMONOTONIC=1 -DXPR_DEBUG=0 -DLOCK_PRIVATE=1
+    -DMACH_BSD=1 -DPRIVATE=1 -DKPC=1 "${MONOTONIC_DEFINE[@]}" -DXPR_DEBUG=0 -DLOCK_PRIVATE=1
     -DARMA7=1 -DKERNEL=1 -D__arm__=1 -DCONFIG_EMBEDDED=1 -D__ARM_L2CACHE_SIZE_LOG__=21
     # `__ARM__`, and the case is the whole point. `bsd/kern/kern_sysctl.c:2772` is
     # `#if defined(__ARM__)`, and the build defined only the compiler's lowercase `__arm__` - so the

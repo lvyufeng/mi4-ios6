@@ -259,7 +259,14 @@ def main():
     # `out/xnu_device/` said `#define NETHER 1` — and `-I$OPTION_HEADERS` comes first, so the device
     # header was shadowed and `#if NETHER > 0` in `bsd/kern/bsd_init.c:890` stayed a silent zero
     # while the manifest built `bsd/net/ether_if_module.c`.
-    option_dir = os.path.join(REPO_ROOT, "out", "xnu_options", CONFIG)
+    # The options-header directory, from the same selector its writer uses (`gen_option_headers.py`'s
+    # `OUT_ROOT`), so a build pointed at another tree's headers (`XNU_OPTION_HEADERS_OUT`, 913) is
+    # checked against *its* `meta_features.h` and not the default tree's. A hardcoded `out/xnu_options`
+    # here made the vc/device-header check read 4570's meta_features against Darwin-13's device
+    # headers and report a missing force-include that was only a directory mismatch.
+    option_dir = os.path.join(
+        os.environ.get("XNU_OPTION_HEADERS_OUT", os.path.join(REPO_ROOT, "out", "xnu_options")),
+        CONFIG)
     device_dir = headers_mod.out_dir(CONFIG)
     if os.path.isdir(option_dir):
         both = sorted(set(os.listdir(option_dir)) & set(os.listdir(device_dir)))

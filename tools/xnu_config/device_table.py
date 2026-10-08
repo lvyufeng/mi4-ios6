@@ -81,6 +81,23 @@ OVERRIDES = {
 }
 
 
+def effective_overrides(conds):
+    """OVERRIDES, minus any entry whose condition the TREE's own file lists do not test.
+
+    The `monotonic` override exists for 4570, where `osfmk/kern/kern_monotonic.c` is
+    `optional monotonic` and the build script defines it by hand. The 2013-era Darwin-13 (iOS 7)
+    tree has **no** `kern_monotonic.c` and no `monotonic` line anywhere, so carrying the override
+    there is a decision about nothing - exactly what the check in `main()` reports. Binding it to
+    the tree's own file lists (the same by-layout, not by-name rule `select_master.sh` uses for the
+    MASTER directory) lets one harness drive both trees without a fork. On 4570 the condition is
+    present, so this returns OVERRIDES unchanged.
+    """
+    out = dict(OVERRIDES)
+    if "monotonic" not in conds:
+        out.pop("monotonic", None)
+    return out
+
+
 def derived(config):
     """condition -> 1, for every device the configuration declares — `dtab` membership."""
     return {name.lower(): 1 for name, _number, _init, _kind in devices_mod.devices(config)}
@@ -89,7 +106,7 @@ def derived(config):
 def table(config):
     """The whole table: the derived devices plus the overrides."""
     out = dict(derived(config))
-    for name, (value, _reason) in OVERRIDES.items():
+    for name, (value, _reason) in effective_overrides(conditions()).items():
         out[name] = value
     return out
 
@@ -160,6 +177,7 @@ def main():
     hand = hand_set_defines()
     decl = devices_mod.devices(args.config)
     decl_names = {name.lower() for name, _n, _i, _k in decl}
+    OVER = effective_overrides(conds)
     TABLE = table(args.config)
 
     # The check that would have caught `monotonic`: any condition the build defines by hand must be
@@ -176,7 +194,7 @@ def main():
     # An override that names a device of the configuration is the derived value and an opinion about
     # it, and the opinion would win silently. The configuration is the specification, so an override
     # of a declared device is a disagreement unless it says 1, and a `1` override is redundant.
-    for name, (value, reason) in sorted(OVERRIDES.items()):
+    for name, (value, reason) in sorted(OVER.items()):
         if name in decl_names:
             disagreements.append(
                 f"{name}: this file overrides a device the {args.config} configuration declares "
@@ -186,7 +204,7 @@ def main():
     # The same defect in the other direction: an override for a name no configuration declares and
     # no file list tests. `xpr_debug`'s *file* list line is what keeps it alive, so a name with
     # neither is dead weight that reads as a decision.
-    for name in sorted(OVERRIDES):
+    for name in sorted(OVER):
         if name not in decl_names and name not in conds:
             disagreements.append(f"{name}: an override for a name that is not a device of "
                                  f"{args.config} and is not tested by any conf/files line - it "
@@ -210,10 +228,10 @@ def main():
 
     lines = ["# condition\tvalue\treason"]
     for name in sorted(TABLE):
-        if name in decl_names and name not in OVERRIDES:
+        if name in decl_names and name not in OVER:
             reason = f"device of {args.config} (config/MASTER)"
-        elif name in OVERRIDES:
-            reason = OVERRIDES[name][1]
+        elif name in OVER:
+            reason = OVER[name][1]
         else:
             reason = "the build script defines it" if name in hand else "chosen here"
         lines.append(f"{name}\t{TABLE[name]}\t{reason}")
