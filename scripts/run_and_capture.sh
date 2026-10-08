@@ -2955,7 +2955,7 @@ summarise_log() {
     # section installed and `_read_base` names which VA did (`0xe0000000` if the high alias took,
     # `0x0fa00000` if only the identity) - so it is printed above the banks, where it answers "did the
     # probe run at all" before "what did it find". A `_mapped=0` is a reading, not a failed run.
-    say "  xnu_live_smem_mapped=$(keyval smem_mapped) read_base=$(keyval smem_read_base)"
+    say "  xnu_live_smem_mapped=$(keyval smem_mapped) read_base=$(keyval smem_read_base) toc_allocated=$(keyval smem_toc_allocated)"
     smem_banks=$(keyval smem_banks)
     smem_total=$(keyval smem_total_bytes)
     smem_part=$(keyval smem_part_seen)

@@ -967,6 +967,7 @@ mk_sleeper_log() {
     # greps, so those rows stay green.
     if [[ $base == smem-banks || $base == smem-2g || $base == smem-mismatch ]]; then
       printf ' xnu_live_smem_mapped=0x00000001\n xnu_live_smem_read_base=0xe0000000\n'
+      printf ' xnu_live_smem_toc_allocated=0x00000003\n'
       printf ' xnu_live_smem_ptable_found=0x00000001\n'
       printf ' xnu_live_smem_ptable_off=0x00000008\n'
       printf ' xnu_live_smem_ptable_len=0x00000004\n'
