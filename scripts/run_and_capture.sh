@@ -3596,6 +3596,25 @@ if [[ $DRY_RUN -eq 0 && $RETURNED -eq 0 ]]; then
   say "produced. If the payload armed its watchdog, the reboot that returns the device"
   say "would have preserved the log - so a failure to return means the log is likely"
   say "unrecoverable anyway, but waiting is free and power-cycling is not."
+  # **The tripwire: a non-returning run's log is RECOVERABLE, and this used to under-sell that.**
+  # A dark run's console can still be read back: the project's own recovery door is
+  # `VolDown+Power` into fastboot, `fastboot boot <twrp>`, then `cat /proc/last_kmsg`, which reads the
+  # *previous* run's RAM console (`ram_console` at `0xde500000`). The block above says the log is
+  # "likely unrecoverable" on the strength of the watchdog case, and that is only the case where the
+  # payload *has* armed one - a run that stops without a reset (a residence/self-end arm) can often be
+  # read back, and the 911 residence press (`armed-storage-21086959`, 2026-10-08) was written off as
+  # "log lost" one line after this text invited a power-cycling read. The two statements were one file
+  # disagreeing with itself. What actually destroys the log is a **cold** transition (regulators off) or
+  # a **new `fastboot boot`** (the payload clears the buffer on entry); a **warm** reset does not. So the
+  # door below is worth trying first, and this prints it so the operator does not forfeit a run's only
+  # evidence by treating a dark device as an empty one.
+  say ""
+  say "BUT: a non-returning run's log may still be recoverable. What destroys it is a cold power"
+  say "transition or a NEW \`fastboot boot\` (the payload clears the buffer on entry) - not every"
+  say "reset. Try the TWRP door this file already uses, BEFORE any new press:"
+  say "  VolDown+Power -> fastboot -> \`fastboot boot <twrp>\` -> cat /proc/last_kmsg"
+  say "which returns the *previous* run's RAM console. The watchdog sentence above is the case"
+  say "where this fails (a payload-armed reset), not the general one."
   exit 2
 fi
 
