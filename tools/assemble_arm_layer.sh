@@ -261,11 +261,21 @@ while read -r src; do
     # run, so on a clean tree the list was stale and only 2 of the 22 symbols were renamed - and on
     # the *next* run the same command renamed 22. A build step whose result depends on how many times
     # it has been run is the project's oldest defect. The exclusion is now a name, not a list.
+    #
+    # **926: this covers the object's UNDEFINED references too, not just its definitions.** A D13 `.s`
+    # file does not only define `_x` names it then calls; it also *refers to* C symbols the C build
+    # emits unprefixed, written with Apple's underscore (`.extern _sleh_abort`, `bl _panic`). Renaming
+    # only the definitions left `traps_lo.o` with `U _sleh_abort` against `trap.o`'s `T sleh_abort`,
+    # `cache.o` with `U _arm_dcache_inv_all` against `cpufunc-v7.o`'s `T arm_dcache_inv_all`, and 12
+    # more - visible only when those objects are pulled into the entry closure, which is why the
+    # defect surfaced at the D13 link and not at the assembly step. An undefined symbol carries its
+    # own name, so `--redefine-sym` fixes the reference with no change to what is defined. Same rule,
+    # both directions. (`nm` prints the type a `--defined-only` listing would suppress, so one pass.)
     args=()
     while IFS= read -r sym; do
         [[ $sym == "_start" ]] && continue
         args+=(--redefine-sym "$sym=${sym#_}")
-    done < <("$NM" --defined-only "$OUT/$name.o" 2>/dev/null | awk '$2 ~ /^[TDBR]$/ && $3 ~ /^_[a-zA-Z]/ {print $3}')
+    done < <("$NM" "$OUT/$name.o" 2>/dev/null | awk '($1 == "U" && $2 ~ /^_[a-zA-Z]/) || ($2 ~ /^[TDBR]$/ && $3 ~ /^_[a-zA-Z]/) { print ($1 == "U") ? $2 : $3 }' | sort -u)
     if [[ ${#args[@]} -gt 0 ]]; then
         "$OBJCOPY" "${args[@]}" "$OUT/$name.o"
         renamed=$((renamed + ${#args[@]}))
