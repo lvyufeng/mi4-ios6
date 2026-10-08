@@ -35,11 +35,34 @@ SCRIPT_DIR=$PWD
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 SRC_DIR=$REPO_ROOT/src
 
-XNU=$REPO_ROOT/external/xnu-4570.1.46
-if [[ ! -d $XNU ]]; then
-  echo "xnu-4570.1.46 not present at $XNU" >&2
+# **936: the tree follows the build, and the file that defines `_start` follows the tree.**
+# This script hard-pinned `XNU=external/xnu-4570.1.46` and always assembled `osfmk/arm/start.s` into
+# `out/stage90/xnu_arm_start.o` - the object the entry link takes `_start` from. On Darwin 13 that is
+# doubly wrong: D13 **ships no `start.s`** (its `_start` is `osfmk/arm/locore.s`'s `EnterARM(_start)`),
+# and the pinned 4570 `start.s` drags in a symbol D13 defines nowhere - `gPhysSize`, via 4570's
+# `globals_asm.h`, which is `LOAD_ADDR_GEN_DEF`'d but never used by the `_start` path. The entry link
+# then had a spurious undefined object with no safe stand-in. Sourcing `tools/xnu_tree_roots.sh` - the
+# one place `XNU_TREE -> XNU_OBJ_SUFFIX -> every root` is written down (933) - makes `XNU` follow the
+# build; `XNU_OBJ_SUFFIX` empty on 4570 makes this byte-identical there.
+. "$REPO_ROOT/tools/xnu_tree_roots.sh"
+XNU=$XNU_TREE
+# The two trees put `_start` in different files and name it differently (`start.s`'s `_start` vs
+# `locore.s`'s `_start`, which D13's `asm_help.h`'s `EnterARM` writes as the same ELF name). The
+# discriminator is the pivot's own (`osfmk/sys/types.h`), and the entry file is chosen from it.
+if [[ -f $XNU/osfmk/sys/types.h ]]; then
+  ENTRY_SRC=$XNU/osfmk/arm/locore.s
+  ENTRY_NAME=locore
+  D13_ENTRY=1
+else
+  ENTRY_SRC=$XNU/osfmk/arm/start.s
+  ENTRY_NAME=start
+  D13_ENTRY=
+fi
+if [[ ! -f $ENTRY_SRC ]]; then
+  echo "no $ENTRY_SRC - the tree at $XNU has no entry file for its kind" >&2
   exit 2
 fi
+ENTRY_OBJ_NAME=xnu_arm_start.o   # the name the entry link has always taken; kept so `LINK_OBJS` is not respelled
 
 DO_LOCORE=0
 VERBOSE=0
@@ -124,7 +147,13 @@ DEFINES=(
 )
 
 INCLUDES=(
-  # assym.s first: start.s and locore.s both do #include "assym.s".
+  # **936: on D13 the generated `assym.s` must come first, and on 4570 it must not be here at all.**
+  # D13's `locore.s` does `#include <assym.s>` (angle brackets) and reads `BOOT_ARGS_*` - names only
+  # the *generated* assym carries; `src/entry/assym.s` carries 4570's `BA_*` spelling, not these. On
+  # 4570 the entry file is `start.s`, which does `#include "assym.s"` and reads `BA_*` from
+  # `src/entry/assym.s`; adding the generated dir would change which file it resolves and is not done,
+  # so 4570's include list is character-for-character what it was.
+  ${D13_ENTRY:+-I$XNU_ASSYM_OUT/$CONFIG}
   -I$SRC_DIR/entry
   # The generated OPTIONS headers. `<mach_kdp.h>` is one of them and start.s includes it
   # unconditionally, so without this the entry image does not assemble at all.
@@ -162,11 +191,36 @@ report() {
   arm-none-eabi-nm -u "$obj" 2>/dev/null | awk '{print "  " $2}'
 }
 
-echo "== osfmk/arm/start.s =="
-if assemble_one "$XNU/osfmk/arm/start.s" "$OUT_DIR/xnu_arm_start.o" 2>"$OUT_DIR/xnu_arm_start.log"; then
+# **936: D13's entry file is written with Apple's underscore convention, and this build is ELF.**
+# `-D__NO_UNDERSCORES__` makes `EXT()`/`LEXT()` emit unprefixed names (so 4570's `start.s`, which uses
+# them, is already right), but it does **not** touch `EnterARM` in D13's `asm_help.h` - which always
+# writes `_ ## function` - nor the literal `_intstack`/`_debstack` globals D13's `locore.s` names by
+# hand. So D13's `_start` comes out as `__start` and its stack symbols as `_intstack`, none of which
+# resolve against the C definitions or the script's `ENTRY(_start)`. `tools/assemble_arm_layer.sh` has
+# the same pass for the same reason ("ten of the manifest's assembly files do not use `EXT()`"); this
+# is its rule applied to the entry file: rename `_x` -> `x`, **except** `__start`, which is D13's
+# `_start` and must become `_start`. 4570's file is de-underscored from the outset, so this is a
+# no-op there (`nm` finds no `_`-prefixed globals) and its object is byte-identical.
+deunderscore() {
+  local obj=$1 args=() sym
+  while IFS= read -r sym; do
+    case "$sym" in
+      __start)  args+=(--redefine-sym "$sym=_start") ;;
+      _[a-zA-Z]*) args+=(--redefine-sym "$sym=${sym#_}") ;;
+    esac
+  done < <(arm-none-eabi-nm "$obj" 2>/dev/null | awk '($1 == "U" && $2 ~ /^_[a-zA-Z]/) || ($2 ~ /^[TDBR]$/ && $3 ~ /^_[a-zA-Z]/) { print ($1 == "U") ? $2 : $3 }' | sort -u)
+  if [[ ${#args[@]} -gt 0 ]]; then
+    arm-none-eabi-objcopy "${args[@]}" "$obj"
+    echo "de-underscored ${#args[@]} symbol(s) for the ELF link"
+  fi
+}
+
+echo "== osfmk/arm/$ENTRY_NAME.s (this tree's \`_start\`) =="
+if assemble_one "$ENTRY_SRC" "$OUT_DIR/$ENTRY_OBJ_NAME" 2>"$OUT_DIR/xnu_arm_start.log"; then
   echo "assembles: yes"
+  deunderscore "$OUT_DIR/$ENTRY_OBJ_NAME"
   echo
-  report "$OUT_DIR/xnu_arm_start.o"
+  report "$OUT_DIR/$ENTRY_OBJ_NAME"
 else
   echo "assembles: no"
   grep -E "error" "$OUT_DIR/xnu_arm_start.log" | head -10
