@@ -409,6 +409,34 @@ extern void FlushPoC_Dcache(void);
 #endif
 
 /*
+ * ------------------------------------------------------- 937: this instrument's 4570-only half, gated
+ *
+ * **Every arm below from 512 through 535 measures 4570's idle machinery, and Darwin 13 does not have
+ * it.** D13 ships no `osfmk/arm/caches.c` at all (the file that defines `platform_cache_idle_enter`/
+ * `_exit`), no `cpu_idle`/`Idle_context`/`Idle_load_context`, no `caches_asm.s` (so no `FlushPoU_
+ * Dcache`/`FlushPoC_DcacheRegion`/`CleanPoC_Dcache`), no `idle_enable`, no `up_style_idle_exit`, and
+ * neither the seam's `ml_get_timebase` nor the four standalone wraps this gate also covers
+ * (`os_reason_create`, `uart_putc`, `kdebug_free_early_buf`, `copyin_word`, `timer_call_enter_with_
+ * leeway`, `timer_call_quantum_timer_enter`, `IORegistryEntry::getChildCount`). The build's own
+ * `D13_TRACE` drops their `--wrap`s and defines `STAGE90_ENTRY_D13`; the bodies guarded below would,
+ * without it, each reference an undefined `__real_<name>` and a helper's symbol D13 never defines.
+ *
+ * **What is *not* gated, and why.** The D13 image is the same *stage* - 925's `<entry>` walks the same
+ * boot - so `machine_idle` (D13 defines it in `osfmk/arm/machine_routines_asm.s:61`), the BSD/syscall
+ * arms (`open`/`read`/`fork`/`exit`/`psignal`/`poll`), the timer setup, the boot tail, and the whole
+ * 909/910/911 resident-and-probe block stay: they are the *entry*'s readings, shared by both trees,
+ * and `entry_stubs.c`'s publishers (which `entry_trace.o` calls) are unchanged. This switch is exactly
+ * the set of names `nm` finds undefined in every D13 pool object - the "`fiq_context_init` twenty
+ * times over" that rung 936 named.
+ *
+ * **4570 neutrality.** `D13_TRACE` is 0 on 4570, so `STAGE90_ENTRY_D13` is never defined, the
+ * `#ifndef` sets it to 0, and every `#if !STAGE90_ENTRY_D13` block below is compiled in - 4570's object
+ * is byte-identical. */
+#ifndef STAGE90_ENTRY_D13
+#define STAGE90_ENTRY_D13 0
+#endif
+
+/*
  * ------------------------------------------------------------- 535: the seam inside the exit, as a switch
  *
  * **The switch is the *interception*, not a flag inside a hook that is always linked.** With
@@ -1513,9 +1541,15 @@ int __wrap_poll(void *proc, void *uap, int *retval)
      * the two lines 514 adds report differences rather than totals. They are statics in this wrapper
      * rather than globals because nothing else reads them and no record needs them: the console line
      * is the reading, and it is printed in the same invocation that took them. */
+    /* **937: the park's window snapshots are the 514 repair's, and D13 has no repair to bound.**
+     * They are only read by the report block below (the `w_*` differences) and the repair note that
+     * block prints, so on D13 both the snapshot and its report are compiled out together and these
+     * declarations go with them - an unused static local is `-Werror=unused-variable`. */
+#if !STAGE90_ENTRY_D13
     static uint32_t snap_calls, snap_door, snap_sip, snap_sip_true, snap_wfi, snap_wfi_fast,
                     snap_wfi_ticks;
     static uint32_t snap_valid;
+#endif
     uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
     const uint32_t *given = (const uint32_t *)uap;
     uint32_t fds = 0xFFFFFFFFu, nfds = 0xFFFFFFFFu, timeout = 0xFFFFFFFFu;
@@ -1529,7 +1563,7 @@ int __wrap_poll(void *proc, void *uap, int *retval)
     }
 
     if (timeout >= (uint32_t)ENTRY_PARK_MIN_MS && park_printed == 0u) {
-#if !STAGE90_XNU_IDLE_NO_SLEEP
+#if !STAGE90_XNU_IDLE_NO_SLEEP && !STAGE90_ENTRY_D13
         /* Declared inside the guard, because on 594's arm nothing reads it: `-Wall -Wextra -Werror`
          * is on, and an unused declaration would be a build that refuses the arm rather than one that
          * reports it. **The guard holds three statements, not two** - `rb = entry_counter();`, the
@@ -1542,6 +1576,7 @@ int __wrap_poll(void *proc, void *uap, int *retval)
         uint32_t rb;
 #endif
 
+        #if !STAGE90_ENTRY_D13
         snap_calls = g_idle_calls;
         snap_door = g_door_exits;
         snap_sip = g_sip_calls;
@@ -1550,6 +1585,18 @@ int __wrap_poll(void *proc, void *uap, int *retval)
         snap_wfi_fast = g_wfi_fast_calls;
         snap_wfi_ticks = g_wfi_ticks;
         snap_valid = 1u;
+#endif /* !STAGE90_ENTRY_D13 - the 514 snapshot, 4570-only */
+
+        /* **937: D13's park report is the shared line only.** Everything 512-519 prints *after* the
+         * park call (the block that begins `if (timeout >= ... && park_printed == 0u)` below) reads
+         * `cpu_idle`/`Idle_context`/`SetIdlePop`/`platform_cache_idle_*` counters - the idle block this
+         * tree does not ship - and, worse, names `idle_enable` and `up_style_idle_exit`, neither of
+         * which exists in any D13 object, so referencing them is a hard link error rather than a zero.
+         * That whole report block is therefore compiled out below. What stays is the shared part: the
+         * snapshot/repair block here (already gated) and `entry_note_poll`, which is written above
+         * unconditionally. D13 does have a park - it is `machine_idle`, whose wrapper above is shared -
+         * and the 512 line plus `machine_idle`'s own `do_power_save` reading are the true observations
+         * on this tree; a D13 idle census is a later rung, not this one, whose job is to close the link. */
 
         /* **The repair, and it is one call.** `cpu_signal_handler_internal(FALSE)` is the kernel's own
          * clearing of `SIGPdisabled` on the calling CPU - the thing the platform's IPI delivery would
@@ -1559,7 +1606,7 @@ int __wrap_poll(void *proc, void *uap, int *retval)
          * as the kernel left them) rather than from the payload, so `getCpuDatap()` is the kernel's own
          * answer about the CPU this process is running on and not this file's guess. The counter is
          * read either side so the repair's own cost is on the record rather than in a claim. */
-#if !STAGE90_XNU_IDLE_NO_SLEEP
+#if !STAGE90_XNU_IDLE_NO_SLEEP && !STAGE90_ENTRY_D13
         rb = entry_counter();
         cpu_signal_handler_internal(0);
         /* **The note is inside the guard, and the first draft of 594 had it outside.** The repair's own
@@ -1583,6 +1630,7 @@ int __wrap_poll(void *proc, void *uap, int *retval)
                     (retval != 0) ? (uint32_t)*retval : 0xFFFFFFFFu, before, after);
 
     if (timeout >= (uint32_t)ENTRY_PARK_MIN_MS && park_printed == 0u) {
+#if !STAGE90_ENTRY_D13
         void *me = current_proc();
         uint32_t pid = (me != 0) ? (uint32_t)proc_pid(me) : 0xFFFFFFFFu;
         /* 513's two lines, on the same event as 512's for the same reason and printed *after* it, so
@@ -1739,6 +1787,7 @@ int __wrap_poll(void *proc, void *uap, int *retval)
                "where a fault in the idle code is Apple's own 'sleh_abort at interrupt context'\n",
                g_idlestack_calls, g_idlestack_sp_first, g_idlestack_sp_last, g_idlestack_top,
                g_idlestack_istackptr, g_idlestack_winhi, g_idlestack_inwin, (int)(g_idlestack_winhi - g_idlestack_winlo));
+#endif /* !STAGE90_ENTRY_D13 - the 512-519 idle census report, 4570-only */
     }
 
     return error;
@@ -1865,7 +1914,14 @@ int __wrap_read(void *proc, void *uap, void *retval)
      * The two reads of the user's buffer, both through the kernel's own copy path, both taken with
      * the length the fixture asked for. `word` is a `uint64_t` because `copyin_word` requires one and
      * zero-extends a 32-bit read into it; only the low word is published, which is the word.
+     *
+     * **937: on D13 the copy path is not `copyin_word` at all** (`osfmk/arm/bcopyinout.s` spells only
+     * the `copyin`/`copyout` family; there is no `copyin_word`), so the two word readings are compiled
+     * out and the record carries the `0xFFFFFFFF` sentinels for them - which is the same distinction
+     * the rest of this file draws: an absent reading is a reading, and the fixture's buffer word did
+     * not stop existing. The `_copy_before`/`_copy_after` fields are D13's `EFAULT`-equivalent.
      */
+#if !STAGE90_ENTRY_D13
     if (buf != 0u) {
         uint64_t word = 0;
 
@@ -1873,9 +1929,11 @@ int __wrap_read(void *proc, void *uap, void *retval)
         if (copy_before == 0u)
             word_before = (uint32_t)word;
     }
+#endif
 
     error = __real_read(proc, uap, retval);
 
+#if !STAGE90_ENTRY_D13
     if (buf != 0u) {
         uint64_t word = 0;
 
@@ -1883,6 +1941,7 @@ int __wrap_read(void *proc, void *uap, void *retval)
         if (copy_after == 0u)
             word_after = (uint32_t)word;
     }
+#endif
     if (retval != 0) {
         const uint32_t *words = (const uint32_t *)retval;
         lo = words[0];
@@ -2012,6 +2071,14 @@ void __wrap_machine_idle(void)
     uint32_t pid = 0xFFFFFFFFu;
     uint32_t cpsr;
     void *now;
+#if STAGE90_ENTRY_D13
+    /* **937: D13 has no `idle_enable`; its analogue is `do_power_save`.** That is the word D13's own
+     * `machine_idle` tests before it will `wfi` (`osfmk/arm/machine_routines_asm.s:63`'s
+     * `LOAD_ADDR(r0, do_power_save)` / `teq r0, #0`), and it is defined in `osfmk/arm/pmCPU.c:41`. So
+     * the record's `_en` field names the door's cause on this tree too, with D13's own value rather
+     * than a stand-in 0 - which is what keeps the reading a reading. */
+    extern int do_power_save;
+#endif
 
     __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
 
@@ -2023,7 +2090,17 @@ void __wrap_machine_idle(void)
      * pass - the exit wrapper is not entered at all on a pass that reaches the `wfi`, and the
      * `SetIdlePop` wrapper is not entered on a pass that leaves by the first test. See 513's block in
      * `entry_stubs.c`. */
-    entry_note_idle(caller, thread, pid, cpsr, entry_counter(), (uint32_t)idle_enable);
+    /* **The two trees spell the idle door's cause with different words, and the 4570 path stays a
+     * direct read.** `en` is a macro so that on 4570 the argument is textually `(uint32_t)idle_enable`
+     * - the same expression this call carried before 937 - and the object is byte-identical; on D13 it
+     * is `do_power_save`, the word D13's `machine_idle` itself tests. */
+#if STAGE90_ENTRY_D13
+#define EN_IDLE_ENABLE ((uint32_t)do_power_save)
+#else
+#define EN_IDLE_ENABLE ((uint32_t)idle_enable)
+#endif
+    entry_note_idle(caller, thread, pid, cpsr, entry_counter(), EN_IDLE_ENABLE);
+#undef EN_IDLE_ENABLE
 
     /* 518: the interrupt handler's stack is moved off the top of the interrupt stack, where the frame
      * of an interrupt taken on that stack is built. This wrapper is the place for it: it is entered on
@@ -2103,10 +2180,17 @@ extern void entry_slot_tb_note(struct entry_slot_tb_keys *k, uint32_t before, ui
 #ifndef STAGE90_XNU_RESIDENT
 #define STAGE90_XNU_RESIDENT 0
 #endif
-#if STAGE90_XNU_RESIDENT
+#if STAGE90_XNU_RESIDENT && !STAGE90_ENTRY_D13
 __attribute__((noinline)) static void entry_wdt_pet(uint32_t calls);
 #endif
 
+/* **937: the 513-535 idle block is 4570-only and is compiled out on D13.** It begins here and runs to
+ * the end of the seam's `_seam_end_run`; everything between measures `cpu_idle`/`Idle_context`/
+ * `Idle_load_context`/`SetIdlePop`/`platform_cache_idle_enter`/`_exit`/`FlushPoU_Dcache`, none of which
+ * D13 ships. The declarations between the `#if` markers are still parsed (they are plain `extern`s and
+ * cost nothing), but every *body* is inside the gate. The one exception is `__wrap_machine_idle`
+ * above, which is D13's own shared entry and stays. */
+#if !STAGE90_ENTRY_D13
 void __real_Idle_load_context(void) __attribute__((noreturn));
 void __wrap_Idle_load_context(void) __attribute__((noreturn));
 
@@ -3330,6 +3414,7 @@ __attribute__((naked)) void __wrap_FlushPoU_Dcache(void)
 }
 
 #endif /* STAGE90_XNU_SEAM_POC || STAGE90_XNU_SEAM_MEASURE */
+#endif /* !STAGE90_ENTRY_D13 - end of the 513-535 idle-and-seam block, 4570-only */
 
 /*
  * Experiment 517. **The one C caller that runs between the interrupt handler's dispatch and the return
@@ -3357,6 +3442,7 @@ __attribute__((naked)) void __wrap_FlushPoU_Dcache(void)
  * spells r12 `ip` and r14 `lr` per instruction, and a matcher written against `r[0-9]+` read 0 on a
  * body that plainly loads every field.)
  */
+#if !STAGE90_ENTRY_D13
 uint64_t __real_ml_get_timebase(void);
 uint64_t __wrap_ml_get_timebase(void)
 {
@@ -3387,6 +3473,7 @@ uint64_t __wrap_ml_get_timebase(void)
 
     return t;
 }
+#endif /* !STAGE90_ENTRY_D13 - ml_get_timebase is 4570-only */
 
 int __real_fork(void *proc, void *uap, int *retval);
 int __wrap_fork(void *proc, void *uap, int *retval)
@@ -3520,7 +3607,14 @@ int __wrap_wait4(void *proc, void *uap, int *retval)
     after = entry_counter();
 
     if (status_ptr != 0u) {
+#if !STAGE90_ENTRY_D13
         copy_error = (uint32_t)copyin_word(status_ptr, &word, 4u);
+#else
+        /* 937: D13 has no `copyin_word`; the wait status is left unread (the `0xFFFFFFFF` sentinel)
+         * rather than dereferenced - the user pointer has no kernel translation under XNU's tables
+         * here, which is the whole reason XNU uses a copy routine for it. */
+        copy_error = 0xFFFFFFFFu;
+#endif
     }
 
     entry_note_wait_returned(seq, (uint32_t)error,
@@ -3929,6 +4023,7 @@ int __wrap_timer_call_enter(void *call, uint64_t deadline, uint32_t flags)
  * wrapper is gone and what replaced it is a claim in `tools/check_timer_sources.py`: it reads this
  * tree's callers of `timer_call_enter1` and refuses the build if the family ever gains one here, which
  * is the event that would make this omission wrong. */
+#if !STAGE90_ENTRY_D13
 int __real_timer_call_enter_with_leeway(void *call, void *param1, uint64_t deadline,
                                         uint64_t leeway, uint32_t flags, uint32_t ratelimited);
 
@@ -3956,6 +4051,7 @@ int __wrap_timer_call_quantum_timer_enter(void *call, void *param1, uint64_t dea
     entry_timebase_note_timer_enter(3u, (uint32_t)(uintptr_t)call, deadline, 0u);
     return r;
 }
+#endif /* !STAGE90_ENTRY_D13 - the two leeway/quantum timer entries are 4570-only */
 
 void __real_timer_call_setup(void *call, void *func, void *param0);
 
@@ -4338,12 +4434,14 @@ void __wrap_vcputc(int l, int u, int c)
     __real_vcputc(l, u, c);
 }
 
+#if !STAGE90_ENTRY_D13
 void __real_uart_putc(char c);
 void __wrap_uart_putc(char c)
 {
     entry_os_console_char((int)(unsigned char)c, 2u);
     __real_uart_putc(c);
 }
+#endif /* !STAGE90_ENTRY_D13 - D13's serial sink is not `uart_putc` (only `vcputc` is shared) */
 
 /* ----------------------------------------------------- the IODT plane, and the root-device chain (461) */
 /*
@@ -4425,8 +4523,33 @@ extern void *entry_xnu_child_entry(const void *self, const void *plane)
     __asm__("_ZNK15IORegistryEntry13getChildEntryEPK15IORegistryPlane");
 extern void *entry_xnu_child_set(const void *self, const void *plane)
     __asm__("_ZNK15IORegistryEntry20getChildSetReferenceEPK15IORegistryPlane");
+#if STAGE90_ENTRY_D13
+/* **937: D13's `IORegistryEntry` has no `getChildCount` at all** - `grep -rn getChildCount` across the
+ * whole D13 tree is empty - so this name cannot be declared there. Its child count is read the way the
+ * 4570 header documents the 4570 method ("written in terms of the second"): the child *set*'s own
+ * `OSArray::getCount` (`osfmk/libkern/c++/OSArray.cpp`, defined in the D13 pool). The callers below
+ * are unchanged: they pass the entry and the plane and get a count, because the helper does the
+ * `getChildSetReference` step for them - so D13 measures the same number the 4570 arm does, through
+ * the object the number actually lives in rather than through a method D13 does not compile.
+ *
+ * `getChildSetReference` is non-virtual and defined in `IORegistryEntry.cpp` (`:824` in 4570), which
+ * is the property that makes it callable by name: a vtable slot would be a same-object reference
+ * `--wrap` never sees (455). The `OSArray` reference is the return of that call and is *not* owned
+ * here (the header: "returns a reference, not a copy", the OS's own `fromPath` walk relies on the
+ * same), so it is read and dropped with no `release`. */
+extern void *entry_xnu_child_set(const void *self, const void *plane)
+    __asm__("_ZNK15IORegistryEntry20getChildSetReferenceEPK15IORegistryPlane");
+extern unsigned int entry_xnu_array_count(const void *set)
+    __asm__("_ZNK7OSArray8getCountEv");
+static unsigned int entry_xnu_child_count(const void *self, const void *plane)
+{
+    const void *set = entry_xnu_child_set(self, plane);
+    return (set != 0) ? entry_xnu_array_count(set) : 0u;
+}
+#else
 extern unsigned int entry_xnu_child_count(const void *self, const void *plane)
     __asm__("_ZNK15IORegistryEntry13getChildCountEPK15IORegistryPlane");
+#endif
 
 void *__real__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_(
         const char *path, const void *plane, char *buf, int *len, void *from);
@@ -5428,6 +5551,7 @@ void __wrap_sleh_abort(void *regs, int type)
 extern void entry_note_osreason(uint32_t caller, uint32_t ns, uint32_t code, uint32_t ret);
 extern void entry_note_loadmachfile(uint32_t caller, uint32_t header, uint32_t ret);
 
+#if !STAGE90_ENTRY_D13
 void *__real_os_reason_create(uint32_t osr_namespace, uint64_t osr_code);
 void *__wrap_os_reason_create(uint32_t osr_namespace, uint64_t osr_code)
 {
@@ -5437,6 +5561,7 @@ void *__wrap_os_reason_create(uint32_t osr_namespace, uint64_t osr_code)
     entry_note_osreason(caller, osr_namespace, (uint32_t)osr_code, (uint32_t)(uintptr_t)r);
     return r;
 }
+#endif /* !STAGE90_ENTRY_D13 - D13 has no `os_reason_create` */
 
 /* `load_machfile(struct image_params *, struct mach_header *, thread_t, vm_map_t *, load_result_t *)`
  * - five pointers, so no register-pair question and every argument is a word. The third is reported
@@ -5495,12 +5620,14 @@ void __wrap_OSKextRemoveKextBootstrap(void)
     __real_OSKextRemoveKextBootstrap();
 }
 
+#if !STAGE90_ENTRY_D13
 void __real_kdebug_free_early_buf(void);
 void __wrap_kdebug_free_early_buf(void)
 {
     entry_note_boot_tail(1u, (uint32_t)(uintptr_t)__real_kdebug_free_early_buf);
     __real_kdebug_free_early_buf();
 }
+#endif /* !STAGE90_ENTRY_D13 - D13's boot tail has no `kdebug_free_early_buf` (index 1 is its gap) */
 
 void __real_serial_keyboard_init(void);
 void __wrap_serial_keyboard_init(void)

@@ -122,6 +122,19 @@ FIQ_CTX_WRAP=()
 # `__real_fiq_context_init` call is an ordinary undefined reference the stub generator would size from
 # nothing. Absent the switch, `entry_timebase.c` compiles the wrapper out entirely.
 [[ ${#FIQ_CTX_WRAP[@]} -gt 0 ]] && STUB_DEFINES+=(-DSTAGE90_ENTRY_FIQ_CTX=1)
+# **937: the same class as 934/935/936, now the whole 4570 idle-trace instrument.** `entry_trace.c`'s
+# 513-535 arms do not measure the *entry* - they measure 4570's idle machinery: `platform_cache_idle_
+# enter/exit` (`osfmk/arm/caches.c`, which **D13 does not ship**), `cpu_idle`/`Idle_context`/`Idle_load_
+# context`, `SetIdlePop`, `cpu_idle_wfi`/`wfi_inst`, `idle_enable`, `up_style_idle_exit`, plus the seam's
+# `FlushPoU_Dcache`/`FlushPoC_DcacheRegion`/`CleanPoC_Dcache` (`caches_asm.s`), and the standalone
+# `ml_get_timebase`, `os_reason_create`, `uart_putc`, `copyin_word`, `kdebug_free_early_buf`,
+# `cpu_signal_handler_internal`, `IORegistryEntry::getChildCount`. `grep` for every one across the whole
+# D13 tree is empty, and D13 ships no `caches.c` at all. So each `--wrap` rewrites a reference nothing
+# defines and its `__real_` half leaves the name undefined in pass 1 - `fiq_context_init` (934) twenty
+# times over. `D13_TRACE` (the pivot's own discriminator, `osfmk/sys/types.h`) gates that instrument out:
+# the wrap list loses its 4570-only members and `entry_trace.c` compiles those bodies out.
+D13_TRACE=0
+[[ -f $XNU_TREE/osfmk/sys/types.h ]] && D13_TRACE=1
 # `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s the seventy symbols listed in
 # `TRACE_LDFLAGS` below - `kalloc_canblock`,
 # `lck_grp_alloc_init`, `kernel_memory_allocate`, `vm_page_wait`, `thread_block`, (447)
@@ -253,6 +266,31 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     # from the tail. `entry_trace.c` carries the argument; `tools/check_boot_completion.py` reads
     # Apple's own order out of `startup.c` and fails the build if the wrappers' order, the position of
     # either exclusion, or the exclusivity of those five call sites stops matching it.
+fi
+# **937: and the wrap list is pruned to the tree.** On D13 the twelve 4570-only members above are
+# dropped - each names a function D13 neither defines nor calls, so its `--wrap` would rewrite a
+# reference nothing makes and leave `__real_` undefined. The rest (the IOKit, BSD, timer and boot-tail
+# wraps) are in both trees and stay. `D13_TRACE` also reaches `entry_trace.c`'s compile line below,
+# where the matching wrapper bodies, their helper blocks and their report lines are compiled out under
+# the one switch `STAGE90_ENTRY_D13`; the file's own `#ifndef` makes the switch well-defined when the
+# build does not set it. On 4570 `D13_TRACE` is 0, nothing is dropped, and the switch is never defined.
+STUB_DEFINES_TRACE=()
+if [[ $D13_TRACE -eq 1 ]]; then
+    D13_ONLY_WRAPS=(--wrap=Idle_load_context --wrap=SetIdlePop --wrap=cpu_idle_wfi
+                   --wrap=platform_cache_idle_enter --wrap=platform_cache_idle_exit
+                   --wrap=ml_get_timebase --wrap=os_reason_create --wrap=uart_putc
+                   --wrap=kdebug_free_early_buf --wrap=timer_call_enter_with_leeway
+                   --wrap=timer_call_quantum_timer_enter --wrap=FlushPoU_Dcache)
+    _937_kept=()
+    for _w in ${TRACE_LDFLAGS[@]+"${TRACE_LDFLAGS[@]}"}; do
+        _drop=0
+        for _d in "${D13_ONLY_WRAPS[@]}"; do [[ $_w == "$_d" ]] && _drop=1; done
+        (( _drop == 0 )) && _937_kept+=("$_w")
+    done
+    echo "  937: ${#TRACE_LDFLAGS[@]} trace wrap(s) -> ${#_937_kept[@]} for D13 (dropped $(( ${#TRACE_LDFLAGS[@]} - ${#_937_kept[@]} )) 4570-only target(s))"
+    TRACE_LDFLAGS=("${_937_kept[@]}")
+    unset -v _937_kept _w _d _drop
+    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1)
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
@@ -1120,7 +1158,13 @@ SEAM_ON=$(( SEAM_POC | SEAM_MEASURE | SEAM_END_RUN | SEAM_POST_END_ON ))
 # `--wrap` only when the tracer is in the image and the arm is on: the wrapper is `entry_trace.c`'s, so
 # a wrap without that object is an undefined reference, and a wrap with the flag off would be an
 # interception the config record says is not there.
-[[ $ENTRY_TRACE -eq 1 && $SEAM_ON -eq 1 ]] && TRACE_LDFLAGS+=(--wrap=FlushPoU_Dcache)
+# **937: and NOT on D13, because the whole seam body is `#if !STAGE90_ENTRY_D13` in `entry_trace.c`.**
+# D13 ships no `FlushPoU_Dcache` (no `caches.c` at all), so its call site does not exist either; adding
+# the wrap here would re-introduce the very 4570-only target the prune above drops (this line runs
+# *after* 937's prune, so the prune alone would not catch it) and `__wrap_FlushPoU_Dcache` would be a
+# reference to a function nothing defines and nothing calls. The seam is a 4570 rung (533/535/572/678);
+# on D13 `D13_TRACE` is 1 and this flag is simply not added.
+[[ $ENTRY_TRACE -eq 1 && $SEAM_ON -eq 1 && $D13_TRACE -eq 0 ]] && TRACE_LDFLAGS+=(--wrap=FlushPoU_Dcache)
 #
 # **The name every clause that reads a *call site* of this routine has to expect, defined once.**
 # `--wrap` renames the callee, so a clause written against the unwrapped name counts 0 calls in a
@@ -1729,6 +1773,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_USB_ENUM="$USB_ENUM" \
         -DSTAGE90_XNU_USB_STREAM="$USB_STREAM" \
         -DSTAGE90_XNU_SMEM_PROBE="$SMEM_PROBE" \
+        ${STUB_DEFINES_TRACE[@]+"${STUB_DEFINES_TRACE[@]}"} \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
 fi
