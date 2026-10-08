@@ -18,10 +18,12 @@
 #      Qualcomm-Krait processor class (the MSM8960_TOUCHPAD precedent, one generation on).
 #   2. `../nokextd/IOS7NoKextd035.h` - widen its guard from "must be LEO" to "must be a board"
 #      (LEO or MSM8974_CANCRO), so the gate's `NO_KEXTD=1` reaches the new board.
+#   3. `osfmk/mach/arm/asm.h` - guard the `#define SLIDABLE 1` (experiment 924), so the ELF build's
+#      `-DSLIDABLE=0` selects the non-slidable `LOAD_ADDR_GEN_DEF` the EABI assembler can take.
 #
-# Both edits carry the `MSM8974_CANCRO` sentinel and are idempotent: a second run is a no-op.
+# All three edits carry the `MSM8974_CANCRO` sentinel and are idempotent: a second run is a no-op.
 #
-# `tools/check_d13_board_staged.sh` (in `make check`) re-derives these two facts and refuses drift.
+# `tools/check_d13_board_staged.sh` (in `make check`) re-derives these facts and refuses drift.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -73,6 +75,36 @@ new = ("#if !defined(BOARD_CONFIG_QSD8250_LEO) && !defined(BOARD_CONFIG_MSM8974_
 assert old in s, "the nokextd guard is not the expected text - refusing to widen it blind"
 open(p, "w").write(s.replace(old, new))
 print("IOS7NoKextd035.h: widened the board guard to LEO or MSM8974_CANCRO")
+PY
+fi
+
+# --- 3. mach/arm/asm.h: let `-DSLIDABLE=0` win (experiment 924) ------------------------------------
+# The ARM `.s` files are assembled here with clang's **ELF** assembler, which has no
+# `.section __DATA,__nl_symbol_ptr` / `.indirect_symbol` — the SLIDABLE `LOAD_ADDR_GEN_DEF` form. The
+# non-slidable branch is selected by `-DSLIDABLE=0` (in `tools/assemble_arm_layer.sh`), but the tree's
+# `#ifdef _ARM_ARCH_7 / #define SLIDABLE 1` overrode that flag (clang sets `__ARM_ARCH_7A__`, which
+# `arm/arch.h:15` turns into `_ARM_ARCH_7`). The `#ifndef` lets a Darwin build keep the default (1)
+# and an ELF build choose 0. This is the same class of fix as the two above: a tree that assumes
+# Apple's toolchain, given the one guard the ELF toolchain needs.
+if grep -q "$MARK" "$XNU/osfmk/mach/arm/asm.h"; then
+    echo "asm.h: $MARK already present (no-op)"
+else
+    python3 - "$XNU/osfmk/mach/arm/asm.h" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = "#ifdef _ARM_ARCH_7\n#define SLIDABLE 1\n#endif"
+new = ("/* MSM8974_CANCRO (924): a command-line `-DSLIDABLE=0` must win. The Darwin assembler wants the\n"
+       " * SLIDABLE non-lazy-pointer form, so the default stays 1, but this project assembles the ARM layer\n"
+       " * with clang's ELF assembler, which has no `.section __DATA,__nl_symbol_ptr` / `.indirect_symbol`,\n"
+       " * and takes the position-dependent branch below by passing `-DSLIDABLE=0`. Previously the\n"
+       " * unconditional `#define` here overrode that flag; the `#ifndef` lets a Darwin build be unchanged\n"
+       " * (default 1) and an ELF build choose 0. */\n"
+       "#ifdef _ARM_ARCH_7\n#ifndef SLIDABLE\n#define SLIDABLE 1\n#endif\n#endif")
+assert old in s, "the asm.h SLIDABLE guard is not the expected text - refusing to guard it blind"
+assert s.count(old) == 1, "the asm.h SLIDABLE guard appears more than once - refusing to guess"
+open(p, "w").write(s.replace(old, new))
+print("asm.h: guarded the SLIDABLE default so -DSLIDABLE=0 wins")
 PY
 fi
 

@@ -75,7 +75,20 @@ OUT=${XNU_ASM_OBJ:-$REPO_ROOT/out/xnu_asm_obj}
 # The size is spelled here and in `entry_stubs.c` (the array) and the build compares the two against the
 # object's own immediate, because a mismatch would be an array that does not cover the region the idle
 # thread actually uses.
-IDLE_STACK=${STAGE90_XNU_IDLE_STACK:-1}
+#
+# **The default reads the tree, not this project.** The collision the patch fixes is a property of a
+# `cswitch.s` whose `Idle_context` borrows `cpu_data->istackptr`; a tree with no `CPU_ISTACKPTR`
+# anywhere has no interrupt stack to borrow from, and its `cswitch.s` has no `Idle_context` for the
+# patch to match. Darwin-13 is that tree: it transplants a context-switch scheme that runs the idle
+# thread on its own `TH_PCB_ISS` (the idle thread is an ordinary `kernel_thread_create` thread). So the
+# default is `1` for the 4570 line and `0` for D13, decided by the tree rather than by a hand-set
+# value that would silently make the build stop on "did not match Idle_context".
+if grep -rq 'CPU_ISTACKPTR' "$XNU/osfmk/arm" 2>/dev/null; then
+    IDLE_STACK_DEFAULT=1
+else
+    IDLE_STACK_DEFAULT=0
+fi
+IDLE_STACK=${STAGE90_XNU_IDLE_STACK:-$IDLE_STACK_DEFAULT}
 IDLE_STACK_SIZE=${STAGE90_XNU_IDLE_STACK_SIZE:-16384}
 case "$IDLE_STACK" in
     0|1) ;;
@@ -261,5 +274,5 @@ done < "$MANIFEST"
 
 echo
 echo "assemble: $ok ok, $fail failed; $translated file(s) translated, $renamed symbol(s) de-underscored"
-echo "          519: STAGE90_XNU_IDLE_STACK=$IDLE_STACK, size $IDLE_STACK_SIZE; Idle_context patched into $idle_patched object(s) (expected 1)"
+echo "          519: STAGE90_XNU_IDLE_STACK=$IDLE_STACK, size $IDLE_STACK_SIZE; Idle_context patched into $idle_patched object(s) (expected $IDLE_STACK)"
 echo "objects in $OUT"

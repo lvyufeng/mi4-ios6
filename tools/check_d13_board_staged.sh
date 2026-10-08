@@ -1,6 +1,7 @@
 #!/bin/bash
-# Re-derive experiment 923's board staging: the D13 tree carries `BOARD_CONFIG_MSM8974_CANCRO` and
-# the nokextd gate accepts it.  Source-half, no compiler, no device - it reads the tree files.
+# Re-derive the staged D13 tree edits: `BOARD_CONFIG_MSM8974_CANCRO` is accepted at the board gates
+# (923), and `asm.h` guards the `SLIDABLE` default so `-DSLIDABLE=0` wins (924).  Source-half, no
+# compiler, no device - it reads the tree files.
 #
 # The property: the build defines `-DBOARD_CONFIG_MSM8974_CANCRO` and the tree must both (a) map it
 # to a processor class (else `__ARM_PROCESSOR_CLASS_*` is undefined and locore.s takes the wrong
@@ -57,6 +58,26 @@ if grep -q -- '-DBOARD_CONFIG_MSM8974_CANCRO' "$REPO_ROOT/tools/build_xnu_arm_ke
     echo "build_xnu_arm_kernel.sh: defines -DBOARD_CONFIG_MSM8974_CANCRO"
 else
     echo "check_d13_board_staged: FAIL - the build does not define BOARD_CONFIG_MSM8974_CANCRO" >&2
+    fail=1
+fi
+
+# (d) asm.h guards the SLIDABLE default (experiment 924).  Without it the tree's `#define SLIDABLE 1`
+#     forces the Mach-O non-lazy-pointer `LOAD_ADDR_GEN_DEF` and every ARM `.s` that loads a global
+#     fails in clang's ELF assembler.  The two halves are checked together: the guard must be present
+#     *and* the assembler must still pass `-DSLIDABLE=0`, or the guard protects nothing.
+asm=$XNU/osfmk/mach/arm/asm.h
+if grep -q '#ifndef SLIDABLE' "$asm" &&
+   awk '/#ifdef _ARM_ARCH_7/{f=1} f&&/#ifndef SLIDABLE/{print; exit}' "$asm" | grep -q . ; then
+    echo "asm.h: the SLIDABLE default is guarded so -DSLIDABLE=0 can win"
+else
+    echo "check_d13_board_staged: FAIL - asm.h forces SLIDABLE under _ARM_ARCH_7" >&2
+    note "re-run tools/stage_d13_board.sh (external/ is re-provisionable)"
+    fail=1
+fi
+if grep -q -- '-DSLIDABLE=0' "$REPO_ROOT/tools/assemble_arm_layer.sh"; then
+    echo "assemble_arm_layer.sh: passes -DSLIDABLE=0"
+else
+    echo "check_d13_board_staged: FAIL - the assembler does not pass -DSLIDABLE=0" >&2
     fail=1
 fi
 

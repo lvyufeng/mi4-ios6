@@ -22,6 +22,9 @@ Four constructs, each verified against the EABI assembler before being written d
 | `.section __DATA, __const` | `.section .rodata,"a",%progbits` | `osfmk/arm/data.s:100` |
 | `.const` | `.section .rodata,"a",%progbits` | `osfmk/arm/WKdmData_new.s:29` |
 | `.thumb_func name` | `.thumb_func` (bare; applies to the next label) | `lz4_decode_armv7NEON.s:133` |
+| `EnterARM(foo)` / `EnterThumb(foo)` | `.code N` + `.globl _foo` + `.align 4` + `_foo:` | `hw_lock.s`, `machine_routines_asm.s` |
+| `ldm<cond>fd` / `stm<cond>fd` | `ldmia<cond>` / `stmia<cond>` | `bcopyinout.s` (14 sites) |
+| `ldr<cond>[b]t` / `str<cond>[b]t` | `ldr[b]t<cond>` / `str[b]t<cond>` | `bcopyinout.s` (13 sites) |
 | `.macro NAME` + `$N` in the body, invoked as `NAME a,b` | `.macro NAME p0,p1` + `\\pN\\()` | `machine_routines_asm.s:570` (9 sites), `lz4_decode_armv7NEON.s` (10 sites) |
 
 The last one is the substantive one and it is **general**: any parameterless `.macro` whose body
@@ -54,6 +57,57 @@ SIMPLE = [
     (re.compile(r"^(\s*)\.thumb_func\s+[A-Za-z_.][A-Za-z0-9_.]*\s*$", re.M),
      r"\1.thumb_func"),
 ]
+
+# The D13-only entry macros `arm/asm_help.h:53,59` — `EnterARM(foo)` / `EnterThumb(foo)` — expand to
+# a `.code`/`.globl`/`.align`/label block, and `EnterThumb`'s block contains `.thumb_func _ ##function`,
+# the Mach-O-only spelling the rule above rewrites. That rule runs **before** the preprocessor, so it
+# never sees the expansion; expanding the macro here closes the gap without a tree edit.
+#
+# **`EnterThumb` is not always thumb.** Two assembly files redefine it, under guards of opposite
+# polarity, and both conditions are decided by this build's own flags (`ARMA7=1` sets `_ARM_ARCH_7`,
+# and `__ARM_ARCH == 7` follows):
+#
+#   machine_routines_asm.s:  #if __ARM_ARCH == 7   -> TRUE  here  -> EnterThumb is redefined as EnterARM
+#   hw_lock.s:               #ifndef _ARM_ARCH_7   -> FALSE here  -> EnterThumb stays the thumb form
+#
+# So the translator reads which guard the file uses and expands accordingly, and the same pass deletes
+# the `#undef`/`#define EnterThumb EnterARM` pair, so neither reaches clang as a redefinition.
+ENTER_ARM = re.compile(r"^([ \t]*)EnterARM\(([A-Za-z_][A-Za-z0-9_]*)\)[^\n]*$", re.M)
+ENTER_THUMB = re.compile(r"^([ \t]*)EnterThumb\(([A-Za-z_][A-Za-z0-9_]*)\)[^\n]*$", re.M)
+# The `#undef EnterThumb` / `#define EnterThumb EnterARM` pair, under whichever `#if` precedes it.
+ENTER_THUMB_ALIAS = re.compile(
+    r"^[ \t]*#undef[ \t]+EnterThumb[ \t]*\n[ \t]*#define[ \t]+EnterThumb[ \t]+EnterARM[ \t]*\n",
+    re.M)
+# The `#if` that guards the alias, so its polarity can be read: `#if __ARM_ARCH == 7` is TRUE for an
+# ARMv7 build; `#ifndef _ARM_ARCH_7` is FALSE for one.
+ALIAS_ARM_TRUE = re.compile(
+    r"#if[ \t]+__ARM_ARCH[ \t]*==[ \t]*7\b[^\n]*\n[ \t]*#undef[ \t]+EnterThumb")
+
+
+def translate_entries(text):
+    """Expand the D13 entry macros, resolving `EnterThumb`'s two-guard alias."""
+    arm_coded = bool(ALIAS_ARM_TRUE.search(text))
+    text = ENTER_THUMB_ALIAS.sub("", text)
+    arm = ".code 32\n\\1.globl _\\2\n\\1.align 4\n\\1_\\2:"
+    thumb = ".code 16\n\\1.thumb_func\n\\1.globl _\\2\n\\1.align 4\n\\1_\\2:"
+    text, n1 = ENTER_ARM.subn(arm, text)
+    text, n2 = ENTER_THUMB.subn(arm if arm_coded else thumb, text)
+    return text, n1 + n2
+
+# The two spellings the D13 `bcopyinout.s` uses that this ELF/LLVM assembler rejects, in the *other*
+# order. Both are **unambiguous mnemonics**: `ldm<cond>fd` is `ldmia<cond>` (`full descending` is the
+# ARM name for the `ia` addressing when the base is `sp`), and `ldr<cond>[b]t` is `ldr[b]t<cond>` (the
+# condition codes come *after* the `t`). The suffix is `b?t|b`: the user-mode forms are `t` (word) and
+# `bt` (byte), and a bare conditional byte load/store is `b`. Neither is a semantic change, and both
+# are rewrites of spelling, so they sit with the other dialect rules and are counted. Checked against
+# every mnemonic the file actually uses 2026-10-08 — 27 failing lines, all covered by these patterns.
+COND = r"(?:eq|ne|cs|cc|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al)"
+BLOCK_FD = re.compile(r"\b(ldm|stm)(%s)fd\b" % COND)
+USER_T = re.compile(r"\b(ldr|str)(%s)(b?t|b)\b" % COND)
+
+
+def translate(text):
+    counted = []
 
 # `NAME` at the start of a line, preceded by a `.macro NAME` with nothing after it.
 # `[ \t]*` and not `\s*` for the indent: `\s` matches newlines, so `^(\s*)\.macro` swallowed the
@@ -105,6 +159,14 @@ def translate(text):
         text, n = pattern.subn(repl, text)
         counted.append(n)
     text, n = translate_macros(text)
+    counted.append(n)
+    text, n = translate_entries(text)
+    counted.append(n)
+    # `ldm<cond>fd` -> `ldmia<cond>`, `ldr<cond>[b]t` -> `ldr[b]t<cond>`. Both reorder the condition
+    # code relative to the addressing/`t` suffix, which is the whole of the difference.
+    text, n = BLOCK_FD.subn(lambda m: "%sia%s" % (m.group(1), m.group(2)), text)
+    counted.append(n)
+    text, n = USER_T.subn(lambda m: "%s%s%s" % (m.group(1), m.group(3), m.group(2)), text)
     counted.append(n)
     return text, counted
 
