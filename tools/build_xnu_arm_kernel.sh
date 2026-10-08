@@ -56,6 +56,12 @@ TOOLS_DIR=$PWD
 REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
 
 XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
+# The non-MIG generated headers (`bsd/sys/sysproto.h` from makesyscalls.sh, `libkern/version.h`).
+# Defined here rather than beside its use below because the **manifest** needs it too: `list_sources.py
+# --generated-dir` resolves the generated `_server.c`/`init_sysent.c` sources against it, and a
+# manifest that names another tree's generated sources is the same one-value-two-definitions shape as
+# the MIG root.  Default is the base tree's root, so 4570 is unchanged.
+GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
 SHIMS=$REPO_ROOT/src/shims
 SHIMS_ARM=$REPO_ROOT/src/shims_arm
 MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
@@ -250,7 +256,7 @@ if [[ $ONLY_PLATFORM -eq 0 ]]; then
     # the defaults on 4570 (MIG_KSERVER/MIG_HEADERS/DEVICE_TABLE all default to the same paths), so
     # the base tree's manifest is byte-identical; on another tree they follow its own roots.
     LS_MESSAGE=$("$TOOLS_DIR/xnu_config/list_sources.py" "$CONFIG" --xnu "$XNU" --write "$MANIFEST" \
-                 --generated-dir "$MIG_KSERVER:$MIG_HEADERS:$REPO_ROOT/out/xnu_generated/bsd" \
+                 --generated-dir "$MIG_KSERVER:$MIG_HEADERS:$GENERATED/bsd" \
                  --device-table "$DEVICE_TABLE" \
                  "${_hfs_extra[@]}" 2>&1) || {
         echo "$LS_MESSAGE" >&2
@@ -604,8 +610,8 @@ DEFINES=(
 
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
-# tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.
-GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
+# tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.  (`$GENERATED` is
+# defined at the top, because the manifest needs it too - see there.)
 # Per configuration: see tools/gen_option_headers.py. RELEASE and STAGE90_BOOT disagree on 20 of
 # these macros, so one shared directory silently gives whichever build was generated last its own
 # values - which is what happened, and it surfaced as a duplicate-symbol error in the link.
