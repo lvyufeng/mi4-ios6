@@ -29712,7 +29712,23 @@ verify_trace_symbols() {
         layout_fail "511's instrument calls bsd_ast through \`__real_\` and the pass-1 undefined set contains it - nothing in this image defines it, so the state the run reads back would be a fact about the stand-in and not about the kernel"
     bast=$(sym_addr bsd_ast) || layout_fail "bsd_ast is not in the linked image - the function whose return is the kernel's return to user mode is not here, so 511 has no route to measure"
     bwrap=$(sym_addr __wrap_bsd_ast) || layout_fail "__wrap_bsd_ast is not in the linked image - --wrap=bsd_ast did not link, and the run's absence of xnu_live_ast_* records would say nothing about the boot"
-    atu=$(sym_addr ast_taken_user) || layout_fail "ast_taken_user is not in the linked image - 511's clause needs the function the AST is delivered from to read the call site out of"
+    # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
+    # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
+    # `ast_taken_user`**: its arm return path (`cswitch.s:144` `thread_exception_return`) delivers by
+    # calling **`ast_taken`** (`ast.c:102`), whose BSD arm calls `bsd_ast` at `:161`. The property this
+    # clause checks is unchanged - the branch to the wrapper is inside the kernel's own AST delivery on
+    # the way back to user mode - but the name it reads that branch out of is per-tree. And on D13 a
+    # re-pointed `ast_taken_user` is itself a defect: it would mean a name D13 lacks was fabricated.
+    if [[ $D13_TRACE -eq 1 ]]; then
+        atu=$(sym_addr ast_taken) || layout_fail "ast_taken is not in the linked image - on D13 it is the function the return-to-user path delivers the AST through (D13's ast.c has no ast_taken_user), so 511's clause has no range to read the branch out of"
+        if sym_addr ast_taken_user >/dev/null 2>&1; then
+            layout_fail "ast_taken_user IS defined in this D13 image, but D13's ast.c has no such function (ast_taken delivers and calls bsd_ast at :161) - a name here means it was fabricated into the image and 511's call site is not the one this tree's boot runs"
+        fi
+        atu_name=ast_taken
+    else
+        atu=$(sym_addr ast_taken_user) || layout_fail "ast_taken_user is not in the linked image - 511's clause needs the function the AST is delivered from to read the call site out of"
+        atu_name=ast_taken_user
+    fi
     atunext=$(sym_next "$atu") || true
     [[ -n "$atunext" ]] || layout_fail "no symbol follows ast_taken_user in the image, so its instruction range cannot be read"
     # **The reader captures the disassembly into a variable instead of piping into `grep -q`, and that
@@ -29731,7 +29747,7 @@ verify_trace_symbols() {
     # `grep`'s and nothing else's.
     atu_dis=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$atu" --stop-address="$atunext")
     grep -q "bl[[:space:]]\+${bwrap#0x} <__wrap_bsd_ast>" <<<"$atu_dis" ||
-        layout_fail "ast_taken_user ($atu..$atunext) does not branch to __wrap_bsd_ast ($bwrap) - the AST delivery went to the real bsd_ast (455's same-object case) or the flag list lost the name, and either way nothing on the kernel's way out to user mode is recorded"
+        layout_fail "$atu_name ($atu..$atunext) does not branch to __wrap_bsd_ast ($bwrap) - the AST delivery went to the real bsd_ast (455's same-object case) or the flag list lost the name, and either way nothing on the kernel's way out to user mode is recorded"
     # **And the wrap cannot reach a continuation slot, which is why this function and not the one next
     # to it.** `thread_exception_return` is the *other* half of this path and it is deliberately not
     # wrapped: it is a `thread_continue_t`, an address stored into a PCB and jumped to by machinery that
@@ -29743,7 +29759,7 @@ verify_trace_symbols() {
         awk '/[[:space:]]bsd_ast$/ && $0 !~ /bsd_init_done/ { print $2 }' | sort -u | tr '\n' ' ')
     [[ "$brefs" == "R_ARM_CALL " ]] ||
         layout_fail "the objects in this pool reference bsd_ast with [$brefs] and 511's wrap is only sound while every reference is a call - an R_ARM_ABS32/MOVW/MOVT would be an address taken, and --wrap rewrites those too, so the wrapper's address could end up in a continuation slot that a thread is jumped to and never returns from"
-    say "  xnu_entry_511: bsd_ast is the kernel's own (defined in bsd/kern/kern_sig.c, not in pass 1's undefined set), its only caller ast_taken_user ($atu) is in a different object and branches to the wrapper ($bwrap), and every reference to it in the pool is a call ($brefs) - so the record around it is the kernel's own return path to user mode and no continuation slot can hold the wrapper"
+    say "  xnu_entry_511: bsd_ast is the kernel's own (defined in bsd/kern/kern_sig.c, not in pass 1's undefined set), its only caller $atu_name ($atu) is in a different object and branches to the wrapper ($bwrap), and every reference to it in the pool is a call ($brefs) - so the record around it is the kernel's own return path to user mode and no continuation slot can hold the wrapper"
 
     # **512's wrapper, and its clause is that the record's call site is the kernel's own "nothing to
     # run".** `machine_idle` is defined in `osfmk/arm/machine_routines_asm.s` and called from
