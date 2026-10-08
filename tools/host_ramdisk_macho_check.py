@@ -577,15 +577,31 @@ def dev_path_strings(blob, K):
 
 
 def arm_pgshift():
-    """The kernel's page shift, from the file that defines it for this architecture.
+    """The kernel's page shift, from whichever header *this tree* defines it in.
 
     `mmap`'s length is rounded up to a page by `vm_map_enter`, so the fixture's request is "one page"
-    only if the kernel's page is 4096 - and on this target it is: `osfmk/arm/proc_reg.h`'s
-    `ARM_PGSHIFT` is 12 for `__arm__`, where the arm64 file's is 14. The length is read from here
-    rather than written as `0x1000` so that the fixture's claim is compared with the kernel's own
-    definition of a page instead of with a literal that happens to agree with it.
+    only if the kernel's page is 4096 - and on this target it is: `ARM_PGSHIFT` is 12 for `__arm__`,
+    where the arm64 file's is 14. The length is read out of the kernel's own source rather than
+    written as `0x1000`, so the fixture's claim is compared with the kernel's definition of a page
+    instead of with a literal that happens to agree with it.
+
+    **The header moved, and this follows it.** 4570 defines `ARM_PGSHIFT` in
+    `osfmk/arm/proc_reg.h:605`; Darwin-13 moved it to `osfmk/mach/arm/vm_param.h:22` (which 4570 also
+    ships but only consumes through `PAGE_SHIFT`). The two locations are tried in that order rather
+    than one path being pinned, so a source-level read of the page size works on either tree - the
+    same "follow the selected tree" rule the rest of this port uses. `XNU` is already
+    `XNU_TREE`-selected (:52), so selecting the tree here selects the header.
     """
-    return hdr_define(os.path.join(XNU, "osfmk/arm/proc_reg.h"), "ARM_PGSHIFT")
+    for rel in ("osfmk/arm/proc_reg.h", "osfmk/mach/arm/vm_param.h"):
+        path = os.path.join(XNU, rel)
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        if re.search(r"^\s*#\s*define\s+ARM_PGSHIFT\b", text, re.M):
+            return hdr_define(path, "ARM_PGSHIFT")
+    sys.exit("ARM_PGSHIFT is defined in neither osfmk/arm/proc_reg.h nor "
+             "osfmk/mach/arm/vm_param.h in %s - the header it lives in has moved again" % XNU)
 
 
 def init_pid():
