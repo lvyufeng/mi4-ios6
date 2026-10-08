@@ -32,6 +32,7 @@
 #   ./tools/gen_mach_headers.sh                 -> out/mach_headers/ (the MIG output)
 #   ./tools/gen_option_headers.py               -> out/xnu_options/ (the OPTIONS/ macros)
 #   ./tools/gen_libkern_version.sh              -> out/xnu_generated/libkern/version.h
+#   ./tools/gen_confdep.py                      -> out/xnu_generated/confdep.h (Darwin-13 only; no-op on 4570)
 #   ./tools/gen_bsd_headers.sh                  -> out/xnu_generated/bsd/sys/sysproto.h
 #   ./tools/xnu_config/list_sources.py RELEASE --write out/xnu_arm_manifest.txt
 #

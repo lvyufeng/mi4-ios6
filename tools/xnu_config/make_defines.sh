@@ -27,6 +27,25 @@ export XNU_MASTER_LOCAL=${XNU_MASTER_LOCAL:-}
 
 "$HERE/expand.sh" "${1:?usage: make_defines.sh CONFIG}" \
     | awk '
+        # Apple*s grammar is `Opt_list: Opt_list COMMA Option` (parser.y:437-438), so a top-level
+        # comma separates **two options**, not one value: `options TIMEZONE=0, PST=0` (`bsd/conf/
+        # MASTER:81`) is `opt[]` with two entries, and mkmakefile.c:269-272 writes them as two
+        # flags, `-DTIMEZONE=0 -DPST=0`. Emitting one `-DTIMEZONE=0, PST=0` made `param.c:85`*s
+        # `struct timezone tz = { TIMEZONE, PST }` expand to `{ 0, PST=0 }` with `PST` undeclared -
+        # a compile error on Darwin-13 and silent on 4570, which has no such line. A comma **inside
+        # double quotes** is a value*s own (`KAUTH_CRED_PRIMES="{5, 17, 97}"` is one option), so the
+        # split tracks quote state rather than splitting on every comma.
+        function split_unquoted(s, arr,    i, m, c, q, cur, n) {
+            m = length(s); q = 0; cur = ""; n = 0
+            for (i = 1; i <= m; i++) {
+                c = substr(s, i, 1)
+                if (c == "\"") { q = 1 - q; cur = cur c; continue }
+                if (c == "," && q == 0) { arr[++n] = cur; cur = ""; continue }
+                cur = cur c
+            }
+            arr[++n] = cur
+            return n
+        }
         $1 == "options" {
             # Everything after `options`, not the last field - and this was a real bug rather than
             # a style choice. `options CONFIG_NMBCLUSTERS="((1024 * 256) / MCLBYTES)"` has a value
@@ -41,11 +60,18 @@ export XNU_MASTER_LOCAL=${XNU_MASTER_LOCAL:-}
             # Trim any trailing whitespace.
             sub(/[[:space:]]+$/, "", name)
             if (name == "") next
-            # NAME="expr" -> NAME=expr. The quotes are the config tool*s, not the compiler*s.
-            gsub(/"/, "", name)
-            # A value may still contain spaces (`((1024 * 256) / MCLBYTES)`); the shell keeps it as
-            # one word because make_defines.sh emits one define per line and the caller reads lines.
-            if (index(name, "=") > 0) print "-D" name
-            else                      print "-D" name "=1"
+            n = split_unquoted(name, parts)
+            for (k = 1; k <= n; k++) {
+                s = parts[k]
+                sub(/^[[:space:]]+/, "", s)
+                sub(/[[:space:]]+$/, "", s)
+                if (s == "") continue
+                # NAME="expr" -> NAME=expr. The quotes are the config tool*s, not the compiler*s.
+                gsub(/"/, "", s)
+                # A value may still contain spaces (`((1024 * 256) / MCLBYTES)`); the shell keeps it
+                # as one word because make_defines.sh emits one define per line, one per option.
+                if (index(s, "=") > 0) print "-D" s
+                else                   print "-D" s "=1"
+            }
         }
     ' | sort -u

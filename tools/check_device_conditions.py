@@ -223,11 +223,25 @@ def main():
     # (3) the headers vs the sources.
     readers = macro_readers(["N" + c.upper() for c in decl])
     for macro, sites in sorted(readers.items()):
-        if macro not in headers:
-            problems.append(
-                f"{macro} is read by the tree ({len(sites)} site(s), first {sites[0]}) and no "
-                f"generated header defines it - `#if {macro} > 0` is then 0 and the guard is off, "
-                f"silently")
+        if macro in headers:
+            continue
+        # **A header is required only for an EMITTED device.** `mkheaders.c`'s `headers()` walks the
+        # *file table* and writes `<cond>.h` for every `conf/files` need word that names a device in
+        # `dtab` — so the emitted set is an **intersection** (see `gen_device_headers.py`), not the
+        # whole declaration. A device the configuration declares but **no `conf/files` line tests**
+        # has no header by that rule, and `#if N<COND> > 0` is 0 **by design**: Darwin-13's `vol` is
+        # `pseudo-device vol` in `bsd/conf/MASTER` and a member of RELEASE's `BASE`, but the 2013
+        # tree no longer ships a `vol` driver — no source, no need word — and `bsd/dev/arm/conf.c`'s
+        # bdevsw row already takes the `eno_opcl` branch at `:287`. Requiring a header here was this
+        # check reading "declared" where the emitter reads "emitted"; the strict form fired the
+        # moment the per-component union (920) made `vol` *visible* rather than *absent*.
+        cond = macro[1:].lower()
+        if cond not in emitted:
+            continue
+        problems.append(
+            f"{macro} is read by the tree ({len(sites)} site(s), first {sites[0]}) and no "
+            f"generated header defines it - `#if {macro} > 0` is then 0 and the guard is off, "
+            f"silently")
     included = header_includers({f"{c}.h" for c in decl})
     for name in sorted(included):
         cond = name[:-2]

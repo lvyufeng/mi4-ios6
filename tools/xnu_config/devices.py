@@ -55,6 +55,10 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 
+# The components whose MASTER dirs are searched, in the order a line is first seen. Matches the
+# `COMPONENTS` list `device_table.py` and `list_sources.py` use.
+COMPONENTS = ["osfmk", "bsd", "libkern", "iokit", "pexpert", "libsa", "security", "san"]
+
 # `device NAME [NUMBER] [init FUNC]` and `pseudo-device NAME [NUMBER] [init FUNC]` — the four
 # alternatives `parser.y:207-229` accepts for `pseudo-device`. `device` shares the Dev/NUMBER/INIT
 # shape and no configuration in the tarball uses it, but a configuration that did would be silently
@@ -64,13 +68,49 @@ NUMBER_RE = re.compile(r"^(\d+)\s*(.*)$")
 INIT_RE = re.compile(r"^init\s+(\S+)\s*$")
 
 
+def _master_dirs():
+    """Every MASTER directory the TREE declares, by layout (the rule 913/918 use).
+
+    **The device set is declared per component too, and this function is the fix for that.** The
+    modern tree (4570) keeps ONE `config/MASTER` in every component's search path, so this returns a
+    single directory and the union below is the identity. The 2013-era Darwin-13 tree splits the
+    declarations: `osfmk/conf/MASTER.arm` has `pseudo-device com 2 / vc 1`, while **`bsd/conf/MASTER`
+    carries `loop`, `pty`, `ptmx`, `ether`, `bpfilter`, `mdevdevice`, `fsevents`, `random`,
+    `vndevice`** and more. Apple's `config` builds **one global `dtab`** from all of them, so a
+    reader that opens only `osfmk/conf/MASTER` sees two devices where the configuration has sixteen —
+    and `bsd_init.c`'s `#include <loop.h>` then has no header to include.
+    """
+    root = os.environ.get("XNU_TREE") or os.path.join(REPO_ROOT, "external", "xnu-4570.1.46")
+    if os.path.isfile(os.path.join(root, "config", "MASTER")):
+        return [os.path.join(root, "config")]
+    dirs = []
+    seen = set()
+    for comp in COMPONENTS:
+        d = os.path.join(root, comp, "conf")
+        if os.path.isfile(os.path.join(d, "MASTER")) and d not in seen:
+            seen.add(d)
+            dirs.append(d)
+    return dirs
+
+
 def configuration_lines(config, expand=None):
-    """The expanded configuration's lines, from the pipeline the manifest and the array both read."""
+    """The expanded configuration's lines, the union over every MASTER dir the tree declares.
+
+    Each directory is expanded by the same `expand.sh` the manifest and the array read, with
+    `XNU_MASTER_DIR` selecting it. The first directory that declares a line wins (the `COMPONENTS`
+    order), so a name declared in two components resolves once — the same "the configuration is the
+    answer" rule `device_table.py` applies to its overrides. On a tree with one MASTER dir this is
+    exactly the single expansion it was before.
+    """
     script = expand or os.path.join(HERE, "expand.sh")
-    proc = subprocess.run([script, config], capture_output=True, text=True)
-    if proc.returncode != 0:
-        sys.exit(f"expand.sh {config} failed:\n{proc.stderr}")
-    return proc.stdout.split("\n")
+    lines = []
+    for d in _master_dirs():
+        env = dict(os.environ, XNU_MASTER_DIR=d)
+        proc = subprocess.run([script, config], capture_output=True, text=True, env=env)
+        if proc.returncode != 0:
+            sys.exit(f"expand.sh {config} (XNU_MASTER_DIR={d}) failed:\n{proc.stderr}")
+        lines.extend(proc.stdout.split("\n"))
+    return lines
 
 
 def devices(config, expand=None):

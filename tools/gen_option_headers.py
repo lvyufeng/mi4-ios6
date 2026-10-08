@@ -140,13 +140,29 @@ OPTION_RE = re.compile(r"^OPTIONS/(\S+)\s+(optional|standard)\s+(.*)$")
 
 
 def configured_options():
-    """The configuration's option names, which is what `opt` holds when mkmakefile.c runs."""
-    defines = subprocess.run([os.path.join(HERE, "xnu_config", "make_defines.sh"), CONFIG],
-                             capture_output=True, text=True, check=True).stdout
+    """The configuration's option names, which is what `opt` holds when mkmakefile.c runs.
+
+    **The set is the UNION over every MASTER dir the tree declares, and this was a real defect.**
+    Apple's `mkheaders.c` runs **once over the whole configuration** — `opt[]` is global — so the
+    option set is the union of all components' MASTERs. Reading one directory (the modern tree's
+    single `config/MASTER`, or Darwin-13's `osfmk/conf/MASTER`) gets the wrong answer on a tree that
+    splits the declarations: **Darwin-13 declares `INET` in `bsd/conf/MASTER`**, so a single-dir read
+    reported `INET` **absent**, `gen_option_headers.py` wrote `inet.h` containing `#define INET 0`,
+    and that header — force-included through `bsd/meta_features.h` — **overrode the command line's
+    `-DINET=1`**, so `bsd/net/if_loop.c`'s `#if INET` went false and `apple_hwcksum_tx` was
+    undeclared. On 4570 there is one MASTER dir, so the union is that one expansion and this is the
+    identity.
+    """
+    sys.path.insert(0, os.path.join(HERE, "xnu_config"))
+    import devices as _devices
     names = set()
-    for line in defines.split():
-        if line.startswith("-D"):
-            names.add(line[2:].split("=")[0])
+    for d in _devices._master_dirs():
+        env = dict(os.environ, XNU_MASTER_DIR=d)
+        defines = subprocess.run([os.path.join(HERE, "xnu_config", "make_defines.sh"), CONFIG],
+                                 capture_output=True, text=True, check=True, env=env).stdout
+        for line in defines.split():
+            if line.startswith("-D"):
+                names.add(line[2:].split("=")[0])
     return names
 
 
