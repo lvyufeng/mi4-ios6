@@ -706,7 +706,10 @@ spending `armed-storage-cb4e17f1` (a new press) before recovering this one would
 console and destroy the only evidence this arm produced. So the order is: (1) operator VolDown+Power →
 fastboot → TWRP → `cat /proc/last_kmsg` for `21086959`; (2) read whether it reached the SMEM probe
 (`xnu_live_smem_*`) and where it stopped; (3) *then* decide whether the no-sleep A/B arm is still the
-right next press.
+right next press. **§15 answers (3) from the arms' own records: `cb4e17f1` carries the same
+`IDLE_NO_SLEEP=0` / `IDLE_CACHE_ENABLE=0` config the 909 wedging arms carry, so it is predicted to wedge
+the same way — and `armed-storage-cabba670` (909 arm 6, `IDLE_NO_SLEEP=1`) is the built, parked arm that
+actually removes the wedging window.**
 
 **WHAT THIS DOES AND DOES NOT SAY.** It **does not confirm** the pre-press hypothesis that
 `entry_usb_stream_poll` was the hang. The USB-off arm does not return *either*, and it reaches further
@@ -793,3 +796,50 @@ budget until proven otherwise.**
 
 **The full battery is green again**: `20 ok, 0 failed` (live path, was 19/1), `15 ok, 0 failed` (the
 reader), `4 ok, 0 failed` (the path argument), `EXIT=0`. Landed as `112767c`.
+
+## 15. The owed A/B arm is predicted to wedge like 909's — it carries the same idle config (2026-10-08)
+
+Auditing the ladder before the press, from the arms' own records, found that the owed arm **`cb4e17f1`
+carries the *same* deep-idle configuration the 909 residence arms 2–4 wedged with**, so correcting the
+A/B comparison below is not a nit — it changes what the next press can conclude.
+
+**The measured config pair.** `out/stage90/xnu_arm_entry-config.txt` (the live arm) reads
+`STAGE90_XNU_RESIDENT=1`, `STAGE90_XNU_IDLE_NO_SLEEP=0`, **`STAGE90_XNU_IDLE_CACHE_ENABLE=0`**,
+`STAGE90_XNU_SMEM_PROBE=1`. That is exactly the triple §12's paragraph was comparing against 909 — and
+909's arms 2–4 (§ R12/R14) put the death **inside the 5th `platform_cache_idle_enter`'s cache-off window**
+(`platform_cache_disable()` + `CleanPoU_Dcache()`) **or its `wfi`**, *because* `IDLE_CACHE_ENABLE=0` leaves
+that window open. R14 names the window as `IDLE_CACHE_ENABLE=0` in so many words
+(`experiment-909-residence-rung.md:577`).
+
+**And `IDLE_CACHE_ENABLE=1` has never been pressed.** Grepping every arm record in `records/revert-set.txt`
+finds only `IDLE_CACHE_ENABLE-0` — no arm in this project's history carries `=1`. So the lever 522 built to
+**close** that window (the enter-side re-enable, `entry_trace.c:2385-2387`) has an armed code path, a
+switch, and a doc, and has never been through a boot.
+
+**What this corrects in §12.** §12 read the owed arm as "909's own deep-idle path … if it returns like 909,
+`entry_smem_probe` runs on idle pass 1 and delivers the 3 GB bank reading." That comparison is **off by one
+arm**: 909's *returning* runs (the 05:32/07:00 captures) ended normally — the 07:00 one shows
+`idlestack_calls=0x5` / `pcx_entered=0x4`, i.e. it **wedged on the 5th pass**, it did not "return like 909"
+in the sense the sentence meant. `cb4e17f1` shares 909's config, so it is **predicted to wedge the same way**
+— which means a press of it now is a **second instrument on an already-observed wedge**, not the residence
+fix §12 assumed.
+
+**What the wedged arm still does.** `entry_smem_probe` is called **before** the pet and before the deep-idle
+tail in `__wrap_Idle_load_context`, so it runs on **idle pass 1** and publishes `xnu_live_smem_*` there —
+*before* the ~13 s wedge. So even a wedging `cb4e17f1` press delivers the 3 GB bank reading this session
+cannot otherwise obtain. The press is still worth its cost; it is just mislabelled as a residence test.
+
+**The genuine residence lever is already built and parked — `armed-storage-cabba670` (909 arm 6).** It is
+`IDLE_NO_SLEEP=1`, which **removes the window** rather than repairing it: `cpu_signal_handler_internal(FALSE)`
+is not called, `SIGPdisabled` stays set, `cpu_idle` leaves by door 1, and
+`platform_cache_idle_enter`/`wfi`/`exit` are **never entered** (`experiment-909-residence-rung.md:611-616`).
+If the wedge is the window, this arm is `RESIDENT=1` + pet that returns for as long as the pet holds the
+watchdog off — the closest arm in the set to 「保持在xnu里」. It is owed a press and would be a stronger
+residence test than `cb4e17f1`. **The naming is inverted**: `cb4e17f1` (`IDLE_NO_SLEEP 1→0`) is labelled the
+residence A/B but tests the *sleeping* path; `cabba670` (arm 6, `IDLE_NO_SLEEP=1`) is labelled an instrument
+but is the *residence* attempt.
+
+**Honest scope.** The wedged arm's *cause* is still a hypothesis: R14's window-or-`wfi` is unproven (arm 5
+was never pressed), and a code audit this session did not pin a single faulting instruction. What this
+section asserts is a **config identity between the owed arm and the wedging arm**, read from the records —
+which is enough to predict the outcome and to re-order the owed presses, and not enough to name the fault.
