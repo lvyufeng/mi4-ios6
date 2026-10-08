@@ -74,6 +74,19 @@ size_t strlen(const char *s);
 size_t strnlen(const char *s, size_t n);
 int strcmp(const char *a, const char *b);
 int strncmp(const char *a, const char *b, size_t n);
+/* `strncasecmp` is here for `bsd/nfs/nfs_node.c:347`
+ *
+ *     cmp = nfs_case_insensitive(mp) ? strncasecmp : strncmp;
+ *
+ * which takes the function's **address** - so it needs a declaration even though clang's unchecked
+ * builtins would silently accept a call to it by name. The kernel's definition is
+ * `osfmk/device/subrs.c:241`, the one place Apple declares it for a kernel context
+ * (`osfmk/libsa/string.h:84`), transcribed here for the same reason the five BSD-legacy names above
+ * are: this file *is* the kernel's `<string.h>` in this build, reaching `nfs_node.c` through
+ * `bsd/libkern/libkern.h:76` (`<string.h>`) via `sys/systm.h:114`. Measured 2026-10-08: nfsclient is
+ * **on** for Darwin-13 (`bsd/conf/MASTER.arm:55` `RELEASE = [ BASE NETWORKING NFS ... ]`), so
+ * `nfs_node.c` compiles here for the first time - the 4570 line never selected it. */
+int strncasecmp(const char *a, const char *b, size_t n);
 char *strncpy(char *dst, const char *src, size_t n);
 char *strcpy(char *dst, const char *src);
 char *strchr(const char *s, int c);

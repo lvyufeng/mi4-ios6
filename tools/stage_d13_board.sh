@@ -20,6 +20,8 @@
 #      (LEO or MSM8974_CANCRO), so the gate's `NO_KEXTD=1` reaches the new board.
 #   3. `osfmk/mach/arm/asm.h` - guard the `#define SLIDABLE 1` (experiment 924), so the ELF build's
 #      `-DSLIDABLE=0` selects the non-slidable `LOAD_ADDR_GEN_DEF` the EABI assembler can take.
+#   4. `libkern/kxld/kxld_object.h` - add the comma the upstream attribute clause is missing
+#      (experiment 925), so the four kxld files compile.
 #
 # All three edits carry the `MSM8974_CANCRO` sentinel and are idempotent: a second run is a no-op.
 #
@@ -105,6 +107,30 @@ assert old in s, "the asm.h SLIDABLE guard is not the expected text - refusing t
 assert s.count(old) == 1, "the asm.h SLIDABLE guard appears more than once - refusing to guess"
 open(p, "w").write(s.replace(old, new))
 print("asm.h: guarded the SLIDABLE default so -DSLIDABLE=0 wins")
+PY
+fi
+
+# --- 4. libkern/kxld/kxld_object.h: the missing comma (experiment 925) ---------------------------------
+# `__attribute__((nonnull(1,2,4) visibility("hidden")))` is missing the comma between its two clauses,
+# so clang stops at `expected ')'` and the four kxld files cannot compile. It is an **upstream**
+# transcription defect: `xnu-2050.18.24`, `apple-xnu-rel-2050` and `xnu-upstream` all carry it
+# un-comma'd at their own `:59`, while Darwin-17 (4570) fixed it to `nonnull(1,2,4), visibility(...)`.
+# So the fix is the one Apple made, applied one release early: add the comma.
+if grep -q "$MARK" "$XNU/libkern/kxld/kxld_object.h"; then
+    echo "kxld_object.h: $MARK already present (no-op)"
+else
+    python3 - "$XNU/libkern/kxld/kxld_object.h" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = "__attribute__((nonnull(1,2,4) visibility(\"hidden\")))"
+new = "/* MSM8974_CANCRO (925): the comma between the two attribute clauses was missing upstream (it is\n" \
+      " * un-comma'd in xnu-2050 and xnu-upstream too); Darwin-17 fixed it. Add it, so kxld compiles. */\n" \
+      "    __attribute__((nonnull(1,2,4), visibility(\"hidden\")))"
+assert old in s, "the kxld_object.h attribute clause is not the expected text - refusing to patch blind"
+assert s.count(old) == 1, "the attribute clause appears more than once - refusing to guess"
+open(p, "w").write(s.replace(old, new))
+print("kxld_object.h: added the missing comma in the nonnull/visibility attribute")
 PY
 fi
 

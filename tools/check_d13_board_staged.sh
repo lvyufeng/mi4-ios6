@@ -81,5 +81,16 @@ else
     fail=1
 fi
 
+# (e) kxld_object.h carries the comma the upstream attribute clause is missing (experiment 925).
+#     Without it all four kxld files fail at `expected ')'`.
+kxld=$XNU/libkern/kxld/kxld_object.h
+if grep -q 'nonnull(1,2,4), visibility' "$kxld"; then
+    echo "kxld_object.h: the nonnull/visibility attribute clause is comma-corrected"
+else
+    echo "check_d13_board_staged: FAIL - kxld_object.h is missing the attribute comma" >&2
+    note "re-run tools/stage_d13_board.sh (external/ is re-provisionable)"
+    fail=1
+fi
+
 [[ $fail -eq 0 ]] || exit 1
 echo "check_d13_board_staged: ok"
