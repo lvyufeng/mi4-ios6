@@ -1592,10 +1592,33 @@ done
 PL_BSD_COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" bsd) )
 mkdir -p "$PL_OUT"
 pl_fail=0
+
+# **The platform block's Darwin-13 compat, tree-derived (921).** Our `src/platform/*.cpp` were written
+# against the modern tree's IOKit surface, and two spellings differ on Darwin-13:
+#
+#   * `APPLE_KEXT_OVERRIDE` — 4570's `OSMetaClass.h:106` defines it; Darwin-13 does not define it at
+#     all, so every `virtual ... APPLE_KEXT_OVERRIDE` declaration is a syntax error. Supplied by
+#     `src/platform/msm8974_build_compat.h`, gated so it is inert where the tree already defines it.
+#   * `ABSOLUTETIME_SCALAR_TYPE` — Darwin-13 declares `options ABSOLUTETIME_SCALAR_TYPE` in
+#     `bsd/conf/MASTER:85`, so its BSD units see `AbsoluteTime` as the scalar `UInt64` and call the
+#     real `absolutetime_to_nanoseconds(uint64_t, uint64_t *)`. The platform block is `iokit` and
+#     takes only `iokit/conf/MASTER`'s defines (experiment 918), so without the define it sees the
+#     `UnsignedWide` struct and the wrapping macro, whose `__OSAbsoluteTime` won't take a `uint64_t`.
+#     Forced here to the same scalar spelling the BSD half and 4570 use.
+#
+# Both are gated on the tree (`grep`/`-f`), so 4570 takes neither and its platform objects are
+# unchanged. The force-include goes FIRST, so a file's own `#include <IOKit/...>` follows it.
+PL_COMPAT_INCLUDES=()
+PL_COMPAT_DEFINES=()
+if [[ -f $XNU/bsd/conf/MASTER ]] && grep -q 'ABSOLUTETIME_SCALAR_TYPE' "$XNU/bsd/conf/MASTER"; then
+    PL_COMPAT_INCLUDES=(-include "$REPO_ROOT/src/platform/msm8974_build_compat.h")
+    PL_COMPAT_DEFINES=(-DABSOLUTETIME_SCALAR_TYPE=1)
+fi
+
 for _src in "${PLATFORM_SOURCES[@]}"; do
     _o="$PL_OUT/$(basename "${_src%.cpp}").o"
-    if timeout "$PER_FILE_TIMEOUT" "${CXX_ARGS[@]}" "${EXTRA_CXX_FLAGS[@]}" "${FORCE_INCLUDES[@]}" \
-           "${CONFIG_DEFINES[@]}" "${DEFINES[@]}" "${PL_COMP_DEFINES[@]}" "${EXTRA_DEFINES[@]}" "${PL_INCLUDES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CXX_ARGS[@]}" "${EXTRA_CXX_FLAGS[@]}" "${PL_COMPAT_INCLUDES[@]}" "${FORCE_INCLUDES[@]}" \
+           "${PL_COMPAT_DEFINES[@]}" "${CONFIG_DEFINES[@]}" "${DEFINES[@]}" "${PL_COMP_DEFINES[@]}" "${EXTRA_DEFINES[@]}" "${PL_INCLUDES[@]}" \
            -c "$_src" -o "$_o" 2>"$PL_OUT/$(basename "${_src%.cpp}").log"; then
         rm -f "$PL_OUT/$(basename "${_src%.cpp}").log"
     else

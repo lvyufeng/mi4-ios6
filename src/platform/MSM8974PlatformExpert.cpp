@@ -77,6 +77,26 @@
  * build that left it out would be an undefined symbol and a loud link failure, not a silent zero. */
 extern "C" void entry_live_write(const char *key, uint32_t value);
 
+/* `IORegistryEntry::getChildCount(plane)` is a 4570 addition (`IORegistryEntry.h:520`); Darwin-13
+ * has only `getChildIterator`/`getChildEntry` (`IORegistryEntry.h:513-532`). 4570's `getChildCount`
+ * is `getChildSetReference(plane)->getCount()` (`IORegistryEntry.cpp:1505-1513`), but
+ * `getChildSetReference` is **private** in both trees, so the count has to come through the public
+ * API. `getChildIterator(plane)` enumerates the same children in the same plane; counting that
+ * iterator yields the identical number (both are the plane's child set). The iterator is retained
+ * (`IORegistryEntry.h:519`: "must be released when the iteration is finished"), so it is released
+ * after the walk. A file-local helper keeps the two call sites identical across trees rather than
+ * "#if the tree" at each. `entry` is non-null at both sites (behind `if( provider != 0 ... )`) and a
+ * zero iterator is handled, so no tree-specific branch is needed. */
+static uint32_t msm8974_child_count( IORegistryEntry * entry, const IORegistryPlane * plane )
+{
+    OSIterator * it = entry->getChildIterator( plane );
+    if( it == 0 ) return 0u;
+    uint32_t n = 0u;
+    while( it->getNextObject() != 0 ) n++;
+    it->release();
+    return n;
+}
+
 class MSM8974PlatformExpert : public IODTPlatformExpert
 {
     OSDeclareDefaultStructors(MSM8974PlatformExpert);
@@ -138,7 +158,7 @@ MSM8974PlatformExpert::start( IOService * provider )
      * object if the reading above is of the right entry, which is a check rather than a comment. */
     g_pexpert_starts++;
     if( provider != 0 && gIODTPlane != 0 )
-        kids_before = provider->getChildCount( gIODTPlane );
+        kids_before = msm8974_child_count( provider, gIODTPlane );
     entry_live_write( "xnu_live_pexpert_seq", g_pexpert_starts );
     entry_live_write( "xnu_live_pexpert_prov", (uint32_t)(uintptr_t) provider );
     entry_live_write( "xnu_live_pexpert_kids_before", kids_before );
@@ -146,7 +166,7 @@ MSM8974PlatformExpert::start( IOService * provider )
     ok = super::start( provider );
 
     if( provider != 0 && gIODTPlane != 0 )
-        kids_after = provider->getChildCount( gIODTPlane );
+        kids_after = msm8974_child_count( provider, gIODTPlane );
     entry_live_write( "xnu_live_pexpert_kids_after", kids_after );
 
     if( !ok ) return( false );
