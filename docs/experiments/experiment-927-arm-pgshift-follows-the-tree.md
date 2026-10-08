@@ -50,3 +50,22 @@ re-derived name by name. That is the next rung.
 ## What moved
 
 `tools/host_ramdisk_macho_check.py`, one function. No tree edit, no device, no other file.
+## Appendix — the 86-object census (for the next rung)
+
+Of the 263 distinct objects `build_entry.sh` names through the derived pools, **86 are in no `_d13`
+pool**. Censused against D13's own 744 objects:
+
+- **~20 are ARM/PE seed objects with a clean D13 path**: `pexpert_arm_pe_{init,identify_machine,
+  bootargs,kprintf,serial}.o` → `pexpert_arm_common_pe_*.o`; `osfmk_arm_machine_task.o` →
+  `osfmk_kern_task.o`; console → `osfmk_console_arm_serial_console.o`.
+- **~53 are genuinely absent from Darwin-13** — iOS 7 predates them or restructured them:
+  `osfmk_kern_{waitq,telemetry,coalition,kern_stackshot,work_interval,sched_multiq,kern_monotonic}.o`,
+  `osfmk_ipc_ipc_voucher.o`, `osfmk_corpses_corpse.o`, the whole `osfmk_corecrypto_*` and
+  `osfmk_prng_*` trees (moved to `bsd/dev/random/` and `libkern/crypto/corecrypto/`),
+  `osfmk_arm_{caches,cpu_common,cpuid,lowmem_vectors,io_map,strlcpy,strncpy}.o`, and the assembly
+  leaves `data.o`, `caches_asm.o`, `strlen.o`, `strncmp.o`, `strnlen.o`.
+
+So the closure re-derivation is two jobs, and they are different kinds: **re-point** the ~20 that
+exist under a new path, and **supply** the ~53 the tree no longer ships — either from the D13 object
+that now defines their symbols, or from the project's stubs. Which of the 53 have a D13 home and
+which need a stub is the first question of the next rung.
