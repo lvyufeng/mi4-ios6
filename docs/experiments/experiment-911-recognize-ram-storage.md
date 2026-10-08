@@ -928,3 +928,9 @@ rehearsal cell** — narration nothing had run — so a `smem-notable` fixture n
 project's own `check_backtick_messages` caught a real defect in that narration: a backtick inside a
 double-quoted `say` string, which bash would have run as a command substitution. Battery green:
 **20/0, 19/0 (+the smem-notable row), 4/0**.
+
+**And one line further (`8b58fe5`).** The `ptable_found=0` narration told the reader to check
+`xnu_live_smem_toc_allocated` (the TOC census that separates "wrong SMEM base" from "no table") but the
+block did not print it; it does now, beside `mapped`/`read_base`. Every one of the sixteen
+`xnu_live_smem_*` names the block reads is present in the built entry image (verified against
+`xnu_arm_entry.elf`), so the reader's names are a reading of the artifact, not a guess.
