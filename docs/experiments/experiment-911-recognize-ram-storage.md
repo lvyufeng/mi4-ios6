@@ -680,24 +680,33 @@ power press. Because the payload's log lives in the top of DRAM (`ram_console`, 
 **lost its log** — so this arm's readings are the *absence of a return*, not a captured log.
 
 **WHAT THIS DOES AND DOES NOT SAY.** It **does not confirm** the pre-press hypothesis that
-`entry_usb_stream_poll` was the 9edaa3b3 hang. The USB-off arm does not return *either* — and it reaches
-further into the wrapper (`__wrap_Idle_load_context` calls `entry_smem_probe` **after**
-`entry_usb_stream_poll`, and `entry_wdt_pet` after that), so a USB stream that had hung would have left
-the SMEM probe and the pet un-run *and the device returning* (the 9edaa3b3 observation); removing it did
-**not** restore a return. That is the opposite of the hypothesis's prediction. **The residence wedge
-(909 R9/R10: the run stops between the 4th `wfi` return and the 5th pass, ~13.4 s in, with no fault, no
-panic, no further publishes) is therefore the live explanation, and it is not caused by the USB ladder.**
-The USB stream may have been a *second* symptom; it was not the cause of the non-return.
+`entry_usb_stream_poll` was the hang. The USB-off arm does not return *either*, and it reaches further
+into the wrapper (`__wrap_Idle_load_context` calls `entry_smem_probe` **after** `entry_usb_stream_poll`,
+and `entry_wdt_pet` after that), so a hang at the stream poll would have left the SMEM probe and the pet
+un-run. Removing the stream did **not** restore a return, which is the opposite of the hypothesis's
+prediction — so the hang is **not the stream poll specifically**. **The residence wedge (909 R9/R10: the
+run stops between the 4th `wfi` return and the 5th pass, ~13.4 s in, with no fault, no panic, no further
+publishes) is the live explanation, and the whole USB ladder was not its cause.**
+
+**A RECORD-KEEPING CAVEAT, stated because the earlier draft leaned on it.** The prior session's summary
+described the 9edaa3b3 press as having *returned* with five `xnu_live_usb_stream_*` records and no SMEM /
+residence keys. **That claim is NOT independently verifiable**: no 9edaa3b3 capture was saved
+(`out/stage90/captures/` holds only `911c-press-20261008-001300`), and the parked log this run preserved
+(`/tmp/cancro-last_kmsg.txt.prev.54`) is **neither** that arm — it carries `xnu_live_usb_*` probe keys but
+**no** stream/enum/dev keys — **nor** this arm. **The conclusion does not rest on it**: it rests only on
+this arm's own reading — the USB ladder is gone and the run still does not return. The 9edaa3b3 return/
+stream-keys detail is treated as unproven and owed a re-press.
 
 **HONEST UNKNOWNS.** (a) Whether the run reached the SMEM probe at all is **unobservable** in an exit-2
 outcome with no log recovery — the 3 GB reading is still not delivered. (b) The wedge is now known to
 reproduce on an arm with the entire USB ladder removed and the identity-map bug fixed, which **narrows
 it to the idle path itself** (the `cpu_idle` re-arm / the pass after the 4th `wfi`), not to any USB code.
-(c) The 909 arms carried `RESIDENT=1` and reached ~13.4 s *and returned*; this arm also carries
-`RESIDENT=1` at the same window and does not — the one structural difference is that 909 ran the USB
-ladder with `IDLE_NO_SLEEP=0` (the deep-idle path), while this arm runs `IDLE_NO_SLEEP=1`. **So the next
-arm should be the 16 MB window with `IDLE_NO_SLEEP=0`** (909's own idle path, which returned), to
-separate "the wedge" from "the no-sleep path".
+(c) **The one structural difference from 909's own arms** (which are recorded as reaching ~13.4 s and
+returning; that is the prior record, cited not re-measured): they carry `RESIDENT=1` with
+`IDLE_NO_SLEEP=0` (the deep-idle path), while this arm carries `RESIDENT=1` at the same window with
+`IDLE_NO_SLEEP=1` (the no-sleep path) — and only the latter does not return. **So the next arm should be
+the 16 MB window with `IDLE_NO_SLEEP=0`** (909's own idle path, which returned), to separate "the wedge"
+from "the no-sleep path".
 
 **OWED:** the operator's power press to restore the device; then the `IDLE_NO_SLEEP=0` arm above; and
 the SMEM 3 GB reading, which needs a run that reaches the first idle pass **and returns**.
