@@ -104,8 +104,19 @@ ENTRY_STUBS_C = os.path.join(BOOT_DIR, "entry_stubs.c")
 ENTRY_IRQ_C = os.path.join(BOOT_DIR, "entry_irq.c")
 PAYLOAD_GIC_C = os.path.join(REPO_ROOT, "src/gic.c")
 PAYLOAD_FIQ_PROBE_C = os.path.join(REPO_ROOT, "src/xnu_msm8974_fiq_probe.c")
-ASSYM = os.path.join(REPO_ROOT, "out/xnu_assym/STAGE90_XNU/assym.s")
+DEFAULT_TREE = os.path.join(REPO_ROOT, "external/xnu-4570.1.46")
+# **945: the assym directory follows the tree** (`_d13` iff the tree ships `osfmk/sys/types.h`), the
+# same suffix `build_entry.sh` derives - `out/xnu_assym_d13/…` is a different file from
+# `out/xnu_assym/…`. On D13 the `INTERRUPT_*` words this file reads are absent; claims 3-5 are skipped
+# before they are read (see `compare`), so the empty read is never a false failure.
+ASSYM = os.path.join(REPO_ROOT, "out/xnu_assym", "STAGE90_XNU", "assym.s")
 ARM_VM_INIT_C = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/osfmk/arm/arm_vm_init.c")
+
+
+def assym_for(tree):
+    """The assym.s this tree's build writes: `out/xnu_assym[_d13]/STAGE90_XNU/assym.s`."""
+    suffix = "_d13" if os.path.isfile(os.path.join(tree, "osfmk/sys/types.h")) else ""
+    return os.path.join(REPO_ROOT, "out/xnu_assym" + suffix, "STAGE90_XNU", "assym.s")
 
 OBJDUMP = "arm-none-eabi-objdump"
 NM = "arm-none-eabi-nm"
@@ -312,7 +323,7 @@ def source_index(text, needle):
     return index
 
 
-def gather(image):
+def gather(image, assym_path=None):
     facts = {
         "header_text": read(ENTRY_GIC_H),
         "probe_text": read(ENTRY_GIC_C),
@@ -320,7 +331,7 @@ def gather(image):
         "payload_text": read(PAYLOAD_GIC_C),
         "irq_text": read(ENTRY_IRQ_C),
         "payload_fiq_text": read(PAYLOAD_FIQ_PROBE_C),
-        "assym_text": read(ASSYM),
+        "assym_text": read(assym_path or ASSYM),
         "vm_init_text": read(ARM_VM_INIT_C),
     }
     facts["header"] = defines(facts["header_text"])
@@ -752,7 +763,7 @@ def claim_guards(facts, failures, notes):
                         "a span that is not the two windows" % (t_a, first_probe, t_b, elapsed))
 
 
-def claim_live_table(facts, failures, notes):
+def claim_live_table(facts, failures, notes, d13=False):
     """
     484's own finding, and the one that stopped its first run: **the table a device mapping goes into
     is the table the MMU walks now, and there is exactly one spelling of which table that is.**
@@ -781,7 +792,17 @@ def claim_live_table(facts, failures, notes):
     probe = facts["probe_text"]
 
     vm = facts["vm_init_text"]
-    if "cpu_ttep = boot_ttep + ARM_PGBYTES * 4;" not in vm \
+    if d13:
+        # **945: the premise is 4570's template.** `cpu_ttep = boot_ttep + ARM_PGBYTES * 4` and its
+        # `bcopy` are how 4570's `arm_vm_init.c` builds the system table as a copy of the boot table;
+        # D13's `arm_vm_init.c` has no such arithmetic (grep finds neither line), so the reason this
+        # clause reads it - "the console's latch reaches the live table" - is a claim about 4570's
+        # page-table setup, not D13's. The mapper-side half below (`entry_stubs.c`'s live-table read,
+        # the shared rule, the published keys) is this project's code and stays live on both trees.
+        notes.append("arm_vm_init.c: on D13 the `boot_ttep + ARM_PGBYTES * 4` system-table copy is "
+                     "4570's template and is not asserted here; the live-table rule this claim is "
+                     "really about is read out of entry_stubs.c below")
+    elif "cpu_ttep = boot_ttep + ARM_PGBYTES * 4;" not in vm \
             or "bcopy(boot_tte, cpu_tte, ARM_PGBYTES * 4);" not in vm:
         failures.append("arm_vm_init.c no longer computes the system table as `boot_ttep + "
                         "ARM_PGBYTES * 4` and copies the boot table into it: the reason the console's "
@@ -851,17 +872,29 @@ def claim_live_table(facts, failures, notes):
                                 "table was live" % key)
 
 
-def compare(facts, mutate=None):
+def compare(facts, mutate=None, d13=False):
     if mutate:
         facts = mutate_facts(facts, mutate)
     failures, notes = [], []
     claim_offsets(facts, failures, notes)
     claim_bases(facts, failures, notes)
     claim_candidates(facts, failures, notes)
-    claim_vector(facts, failures, notes)
-    claim_dispatch(facts, failures, notes)
+    # **945: claims 3-5 are 4570's machine - SKIPPED on D13 (published by the caller).** claim_vector
+    # asserts what vector slots 6 and 7 hold and claim_dispatch disassembles Apple's
+    # `fleh_irq_handler`/`fleh_decirq_handler` dispatcher and its five `assym.s` `INTERRUPT_*` words.
+    # **Darwin 13 has none of that**: its `assym.s` declares no `INTERRUPT_HANDLER`/`_NUB`/`_SOURCE`/
+    # `_TARGET`/`_REFCON`, its `machine_routines_asm.o` defines no `fleh_irq_handler`/
+    # `fleh_decirq_handler` (grep -rl in the D13 tree is 0 for both; they are 4570-only), and its IRQ
+    # path is its own (`osfmk/arm/traps_lo.s` + `trap.c`, with `exctramps.s`'s vector page `.long
+    # _fleh_irq`), not the `locore_fleh_irq` entry 482/483 stage. The routing experiment 482 decides is
+    # therefore 4570's - a published skip (the 937/944 shape), not a rename. Claims 1, 2, 6 and 7 are
+    # about *this repository's* files (entry_gic.h/the payload's GIC map, the probe, its guards and the
+    # live table) and stay live on both trees.
+    if not d13:
+        claim_vector(facts, failures, notes)
+        claim_dispatch(facts, failures, notes)
     claim_guards(facts, failures, notes)
-    claim_live_table(facts, failures, notes)
+    claim_live_table(facts, failures, notes, d13=d13)
     return failures, notes
 
 
@@ -1092,24 +1125,50 @@ MUTATIONS = (
 )
 
 
-def selftest(facts):
+# **945: the mutations that break the 4570-only claims** - the ones 482's subject owns and D13 does
+# not have. On D13 `claim_vector`/`claim_dispatch` are skipped (no D13 dispatcher), and
+# `claim_live_table`'s `arm_vm_init.c` premise is skipped (D13 has no `boot_ttep + ARM_PGBYTES * 4`
+# copy) - so these mutations cannot be refused and are not *expected* to be. Every other mutation must
+# still be refused. Listing them here (rather than a silent filter) keeps the skip honest: a mutation
+# that stopped being refused on the 4570 path is still a failure there.
+D13_SKIPPED_MUTATIONS = frozenset((
+    "slot6_moved", "slot6_is_the_reporting_stub", "slot6_is_neither", "flag_removed",
+    "slot7_is_apples", "reporting_handler_dispatches", "reporting_handler_stops_reporting",
+    "assym_handler_moved", "header_handler_moved", "dispatch_load_dropped", "dispatch_blx_dropped",
+    "dispatch_window_short", "dispatch_order_swapped", "decrementer_path_reads_the_handler",
+    "decrementer_path_stops_calling_rtclock", "the_justification_is_gone",
+))
+
+
+def selftest(facts, d13=False):
     accepted = []
+    ran = 0
     for name in MUTATIONS:
-        failures, _notes = compare(facts, mutate=name)
+        if d13 and name in D13_SKIPPED_MUTATIONS:
+            continue
+        ran += 1
+        failures, _notes = compare(facts, mutate=name, d13=d13)
         if not failures:
             accepted.append(name)
             print("      ACCEPTED: %s" % name, file=sys.stderr)
     if accepted:
         print("FAIL: %d of %d mutations were not refused: %s"
-              % (len(accepted), len(MUTATIONS), ", ".join(accepted)), file=sys.stderr)
+              % (len(accepted), ran, ", ".join(accepted)), file=sys.stderr)
         return 1
-    say("  --selftest: all %d mutations were refused" % len(MUTATIONS))
+    if d13:
+        say("  --selftest: all %d mutations were refused (%d of 482's vector/dispatch mutations are"
+            " 4570-only and skipped with claims 3-5 on D13)"
+            % (ran, len(D13_SKIPPED_MUTATIONS)))
+    else:
+        say("  --selftest: all %d mutations were refused" % ran)
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     parser.add_argument("--image", default=None, help="the linked entry image")
+    parser.add_argument("--tree", default=DEFAULT_TREE,
+                        help="the XNU tree, to select the layout (default: 4570)")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -1119,12 +1178,25 @@ def main():
               file=sys.stderr)
         return 1
 
-    facts = gather(args.image)
+    # **945: the same `osfmk/sys/types.h` discriminator the whole build uses.** On D13 claims 3-5
+    # (the vector slots and Apple's IRQ dispatcher) are skipped, because D13 has neither the
+    # `fleh_irq_handler`/`fleh_decirq_handler` dispatcher nor the `INTERRUPT_*` assym words - see
+    # `compare`.
+    d13 = os.path.isfile(os.path.join(args.tree, "osfmk/sys/types.h"))
+
+    facts = gather(args.image, assym_path=assym_for(args.tree))
 
     if args.selftest:
-        return selftest(facts)
+        return selftest(facts, d13=d13)
 
-    failures, notes = compare(facts)
+    if d13:
+        say("  xnu_entry_945: SKIPPED on D13 - 482's vector-slot state (slots 6/7) and Apple's")
+        say("          fleh_irq_handler/fleh_decirq_handler IRQ dispatcher are 4570's machine; Darwin 13")
+        say("          has neither (no fleh_irq_handler/fleh_decirq_handler, no INTERRUPT_* assym words,")
+        say("          its IRQ path is traps_lo.s + trap.c). The GIC-register, probe, guard and")
+        say("          live-table claims still run below.")
+
+    failures, notes = compare(facts, d13=d13)
     if args.verbose:
         for note in notes:
             say("    " + note)

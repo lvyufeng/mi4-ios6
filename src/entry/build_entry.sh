@@ -37375,10 +37375,10 @@ fi
 # blind - `r5` is read from `cpu_data`+180, and this image has never stored a handler there. A wrapper
 # or a slot change cannot be seen before the link, and neither can a body that no longer has that
 # shape.
-run python3 "$REPO_ROOT/tools/check_gic_routing.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
-    || exit 1
-run python3 "$REPO_ROOT/tools/check_gic_routing.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
-    || exit 1
+run python3 "$REPO_ROOT/tools/check_gic_routing.py" --image "$OUT/xnu_arm_entry.elf" \
+    --tree "$XNU_TREE" --verbose || exit 1
+run python3 "$REPO_ROOT/tools/check_gic_routing.py" --image "$OUT/xnu_arm_entry.elf" \
+    --tree "$XNU_TREE" --selftest || exit 1
 
 # **483's six claims, and the one boundary they share with the block above.** This check is about the
 # chain and not about the numbers: that the second-level handler is installed through Apple's own
