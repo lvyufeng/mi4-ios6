@@ -3130,6 +3130,46 @@ summarise_log() {
     say "  ---- no xnu_live_rootmedia_ keys: this image has no card root media (predates 903/911d), so ----"
     say "  ---- the storage clause is read from the mount elsewhere, not from a card capacity here ----"
   fi
+
+  # ---------------------------------------------------------------------------------------------
+  # The OS-entry clause: the kernel's OWN load of its init - the one reading that is not the fixture.
+  # ---------------------------------------------------------------------------------------------
+  #
+  # **The fifth unread family, and the oldest.** Every record this runner reads before now is a
+  # syscall the fixture made (open/read/getpid/wait, the goal block above) or a stub the kernel
+  # reached behind it. `xnu_live_exec_*` (entry_stubs.c:4966, 509) is the first that is the kernel's
+  # own act, and the block's own header says why its *presence* is the finding: `load_init_program`
+  # returns on every success arm, and its only other way out of the body is
+  # `panic("Process 1 exec of %s failed")` - so `xnu_live_exec_done_seq` exists **iff** the OS loaded
+  # its init image. It is the sentence under the console's last line (`attempting to load
+  # /sbin/launchd`), and the goal's 「进入操作系统」 turns on it. `_who` is `proc_pid(initproc)` (1) and
+  # `_done_current` is `proc_pid(current_proc())` (0 = kernproc: the loader runs on the kernel task,
+  # not in the process it loads) - two numbers that say *where* the loader was, not just that it ran.
+  # Guarded on `exec_seq`; every rehearsed log (none carry `xnu_live_exec_`) takes the else.
+  local exec_seq
+  exec_seq=$(keyval exec_seq)
+  if [[ -n $exec_seq ]]; then
+    say ""
+    say "  the OS's own init load, from the kernel (entry_note_exec): the OS-entry clause's reading"
+    say "  xnu_live_exec_seq=$exec_seq who=$(keyval exec_who) proc=$(keyval exec_proc) caller=$(keyval exec_caller)"
+    local exec_done
+    exec_done=$(keyval exec_done_seq)
+    if [[ -z $exec_done ]]; then
+      say "  UNREAD  the kernel ENTERED load_init_program but no xnu_live_exec_done_seq is here: the"
+      say "        load did not return. On this structure the only way out of its body without returning"
+      say "        is panic(\"Process 1 exec failed\") - so look for that panic, or a death before it"
+    else
+      say "  xnu_live_exec_done_seq=$exec_done done_who=$(keyval exec_done_who) done_current=$(keyval exec_done_current)"
+      say "  => OS ENTERED: the kernel's load of /sbin/launchd RETURNED (exec_done_seq present, the only"
+      say "     exit that is not a panic), so XNU reached and completed its own init exec. who=$(keyval exec_who)"
+      say "     / done_current=$(keyval exec_done_current) say the loader ran on the kernel task (0=kernproc)"
+      say "     on behalf of init (1), which is the mechanism, not a fault"
+    fi
+  else
+    say ""
+    say "  ---- no xnu_live_exec_ keys: this image predates 509's exec instrument, so the OS-entry ----"
+    say "  ---- reading is the console's own 'attempting to load /sbin/launchd' line, not a record here ----"
+  fi
 }
 
 # The port the phone is on, resolved once and only when this file is going to touch the device: it

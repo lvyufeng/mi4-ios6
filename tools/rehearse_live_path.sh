@@ -1037,6 +1037,17 @@ mk_sleeper_log() {
     if [[ $base == card-refused ]]; then
       printf ' xnu_live_rootmedia_card_raw_registered=0x00000000\n xnu_live_rootmedia_card_raw_refused=0x00000001\n'
     fi
+    # **The OS-entry clause's states.** `exec-done` is the kernel's init load having returned (the
+    # only exit that is not a panic); `exec-entered` is the load entered and NOT returned - the panic
+    # or the death before it. They differ in one line (`_done_seq`).
+    if [[ $base == exec-done ]]; then
+      printf ' xnu_live_exec_seq=0x00000001\n xnu_live_exec_who=0x00000001\n xnu_live_exec_proc=0x00000000\n'
+      printf ' xnu_live_exec_caller=0x00000000\n xnu_live_exec_done_seq=0x00000001\n'
+      printf ' xnu_live_exec_done_who=0x00000001\n xnu_live_exec_done_current=0x00000000\n'
+    fi
+    if [[ $base == exec-entered ]]; then
+      printf ' xnu_live_exec_seq=0x00000001\n xnu_live_exec_who=0x00000001\n xnu_live_exec_proc=0x00000000\n'
+    fi
   } > "$out"
 }
 
@@ -1214,6 +1225,12 @@ reader_state card-16g      "=> STORAGE MET: a 16 GB part, as the goal names." \
 reader_state card-32g      "=> STORAGE MET: a 32 GB part, as the goal names."
 reader_state card-refused  "the raw-card unit was NOT registered" \
                               "the storage clause is not read here"
+# **The OS-entry clause's reader, one state per branch.** `exec-done` is the OS having completed its
+# own init exec (the goal's 「进入操作系统」), `exec-entered` the load entered and not returned. They
+# differ in one line. The absent line is proven by `predicted` (no exec keys).
+reader_state exec-done     "=> OS ENTERED: the kernel's load of /sbin/launchd RETURNED" \
+                              "the loader ran on the kernel task (0=kernproc)"
+reader_state exec-entered  "the kernel ENTERED load_init_program but no xnu_live_exec_done_seq is here"
 # **The three states 609 added, one per clause that read absence as a fact about the machine.** Each is
 # the *same log* as the FAIL it replaces, plus the channel's own `capped` record, so the difference in
 # the reader's output is attributable to the channel and nothing else. Without these the three UNREAD
