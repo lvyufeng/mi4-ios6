@@ -65,7 +65,21 @@ pool**. Censused against D13's own 744 objects:
   `osfmk_arm_{caches,cpu_common,cpuid,lowmem_vectors,io_map,strlcpy,strncpy}.o`, and the assembly
   leaves `data.o`, `caches_asm.o`, `strlen.o`, `strncmp.o`, `strnlen.o`.
 
-So the closure re-derivation is two jobs, and they are different kinds: **re-point** the ~20 that
-exist under a new path, and **supply** the ~53 the tree no longer ships — either from the D13 object
-that now defines their symbols, or from the project's stubs. Which of the 53 have a D13 home and
-which need a stub is the first question of the next rung.
+So the closure re-derivation is **three** kinds, not one:
+
+1. **Clean path renames (~20).** The object exists under a new path: `pexpert_arm_pe_{init,
+   identify_machine,bootargs,kprintf,serial}.o` → `pexpert_arm_common_pe_*.o`; `osfmk_arm_machine_task.o`
+   → `osfmk_kern_task.o`; `osfmk_console_{serial,video}_console.o` →
+   `osfmk_console_arm_serial_console.o`.
+2. **Symbols that moved into a C object.** `data.s` does not exist in D13; `gVirtBase`/`gPhysBase`
+   are now `B` symbols in `osfmk_arm_arm_vm_init.o` (`nm`: `0000000c B gPhysBase`, `00000010 B
+   gVirtBase`). The closure slot for `data.o` splits: some of its symbols have a new object, some do
+   not.
+3. **Symbols with no D13 home at all (~53).** `RTClockData`, `CpuDataEntries`, `BootCpuData` — the
+   rest of 4570 `data.s`'s per-CPU data — appear **nowhere** in Darwin-13 (`grep -rn` empty). Nor do
+   `data.s`, `caches_asm.s`, `strlen.s`, `strncmp.s`, `strnlen.s` exist (D13's ARM `.s` inventory is
+   38 files, none of them these). D13's per-CPU data and timer model genuinely differs, so these must
+   be **supplied by the project** (a stub or a D13-appropriate definition), not re-pointed.
+
+Which of kind 3 need a stub and which the D13 kernel defines under another name is the next rung's
+first question — and it is the rung's size, because kind 3 is where the two models diverge.
