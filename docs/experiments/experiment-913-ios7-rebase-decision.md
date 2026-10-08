@@ -81,3 +81,38 @@ Nothing on the device changes; this is host-side, reversible, no press. The meas
 *Provenance: local tree inspection (`MasterVersion` files, `find osfmk/arm`), `rootfs.hfs` read-only
 mount by the recon agent, GitHub API reads; device read-only (`adb shell`, no press, `33e80afe`
 absent).*
+
+## 6. The harness retarget, and the number it prices the pivot (2026-10-08)
+
+`external/xnu-hd2-darwin13` (`MasterVersion 13.0.0`) is now driven by the **same** harness, with five
+adapters and no fork of the harness itself. Each is a *path* adapter — it changes which name resolves
+where, never a declaration:
+
+| where | what | why |
+|---|---|---|
+| `tools/xnu_config/select_master.sh` | MASTER dir picked by **layout** (`<tree>/config/MASTER` else `<tree>/osfmk/conf/MASTER`), `XNU_MASTER_DIR` override | the 2013 tree keeps `MASTER{,.arm}` in `osfmk/conf/`, not `config/` |
+| `src/shims_arm/sys/_types/_u_int.h` | copy of the `u_int` fragment | Darwin-13 has no `bsd/sys/_types/_u_int.h` |
+| `src/shims_arm/arm/simple_lock.h` | forwarder to `arm/lock.h` | Darwin-13 answers `decl_simple_lock_data` from `arm/lock.h` |
+| `src/shims_arm/platforms.h` + `cputypes.h` | `#define arm 1` (`platforms.h` includes `cputypes.h`) | Apple's config generates both (`build_cputypes`, `osfmk/conf/Makefile:45-50` makes `platforms.h` a **symlink** to `cputypes.h`); `kern/ast.h:67` and `kern/thread.h:103` need them |
+| `src/shims_arm/mi4ios6_build_config.h` | `u_char`, `u_short` (and earlier `uint_t`, `u_long`) | the BSD-legacy spellings the ARM files use, off the entry path |
+| `src/shims_arm/string.h` | `san/memintrinsics.h` include made `__has_include`-conditional | Darwin-13 has no `san/` and uses `__nosan_*` nowhere |
+
+`XNU_OPTION_HEADERS_OUT` + `XNU_TREE` point `tools/gen_option_headers.py` at the new tree; it writes
+`out/xnu_options_d13/{RELEASE}/` (147 headers, 41 options — including `mach_rt.h`, `time_stamp.h`).
+Nothing was written into the external tree.
+
+**The number.** With `XNU_TREE=external/xnu-hd2-darwin13/xnu`:
+
+- **full tree: 19 of 20** `osfmk/arm/*.c` compile (syntax) under our `armv7-none-eabi` toolchain.
+- The one failure is **`ios7lab_fault_witness.c`**, which needs an HD2-internal header
+  (`IOS7LeoThreadState061API.h`) — an HD2 lab file, not Apple's.
+- `XNU_ARM_EXCLUDE_HD2=1` (a new probe switch that skips TUs containing `IOS7Leo*`/`ios7leo_*`/
+  `ios7lab_*`/`leo_user_frontier`/`ios7_compat` markers) reports **15 of 15** — the **generic ARM
+  layer compiles 100%**. The 5 skipped are the HD2-licensed board files (`arm_init.c`, `trap.c`,
+  `model_dep.c`, `status.c` are HD2-*edited*; `ios7lab_fault_witness.c` is HD2-*new*), which the
+  license forbids compiling anyway — we model their *shape*.
+- **4570 regression: 32 of 32 unchanged**, `make check` exit 0, `make_defines.sh RELEASE` still 108.
+
+So the pivot's risk is **not the kernel core** — Darwin-13's ARM layer is green under our toolchain.
+The remaining work is the parts that were never in the tree: an **msm8974 PE** (§4.3), the **two-bank
+map** (§4.4), and **AMFI** (§4.5). The reframed plan is `docs/experiments/experiment-914-*`.

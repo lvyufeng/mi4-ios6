@@ -141,7 +141,16 @@ void bzero(void *dst, size_t n);
  * against each other, and that is the whole reason this project has a fixed define table per
  * component. The include is unconditional, and every name in the header is `static inline`, so a
  * translation unit that does not use them emits nothing.
+ *
+ * **913: the include is now conditional on the header EXISTING.** `san/memintrinsics.h` arrives in
+ * the Darwin-17 (2016) tree; the Darwin-13 tree this project is pivoting to has no `san/` at all
+ * and **references `__nosan_*` nowhere** (`grep -r __nosan_ xnu-hd2-darwin13/xnu` is empty). So
+ * requiring it there fails 20 of 20 for a name the tree never uses. `__has_include` makes the two
+ * trees one build: 4570 resolves the header and this is byte-identical to before; Darwin-13 skips a
+ * file it would not have had. This is a path adapter, not a behaviour change on either tree.
  */
+#if __has_include(<san/memintrinsics.h>)
 #include <san/memintrinsics.h>
+#endif
 
 #endif

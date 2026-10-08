@@ -3,7 +3,19 @@
 set -euo pipefail
 # The XNU tree to read MASTER files from.
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-MD=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}/config
+XNU_ROOT=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
+# The MASTER files' directory is a property of the TREE, not of this script (913). The modern tree
+# (4570) keeps them in `<tree>/config/`; the 2013-era Darwin-13 tree keeps them in
+# `<tree>/osfmk/conf/`, with `<tree>/config/` holding only `MasterVersion`. Picking by the layout
+# that exists - rather than by the tree's name - is what lets one harness drive both; the caller
+# still selects the tree, and `XNU_MASTER_DIR` overrides the choice outright.
+if [[ -n ${XNU_MASTER_DIR:-} ]]; then
+    MD=$XNU_MASTER_DIR
+elif [[ -f $XNU_ROOT/config/MASTER ]]; then
+    MD=$XNU_ROOT/config
+else
+    MD=$XNU_ROOT/osfmk/conf
+fi
 SYS=$1
 # A configuration can also be declared in a local fragment, which is how Apple's own doconf
 # documents MASTER.local. The declarations are the `#  NAME = [ ... ]` comment lines, so a fragment

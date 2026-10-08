@@ -182,8 +182,21 @@ fi
 ok=0
 fail=0
 failed=()
+skipped=()
+# Files a tree may carry that are NOT part of Apple's generic ARM layer (913). The HD2 lab tree
+# adds experiment TUs and edits the core ones with board-specific hooks — `ios7lab_fault_witness.c`
+# is a whole HD2 file, and `arm_init.c`/`trap.c`/`model_dep.c`/`status.c` carry `ios7leo_*` /
+# `ios7lab_*` / `IOS7Leo*` bodies. They carry **no reuse license** (only the generic winocm ARM core
+# does), so they are inspection-only: our port models their *shape*, never compiles their bytes.
+# The switch names the marker, not a file list, so a new HD2 file is skipped without a harness edit.
+# Off by default — the tree's own compile count is what the probe must report first.
+EXCLUDE_HD2=${XNU_ARM_EXCLUDE_HD2:-0}
 for src in "$XNU"/osfmk/arm/*.c; do
     name=$(basename "$src" .c)
+    if [[ $EXCLUDE_HD2 -eq 1 ]] && grep -qE 'IOS7Leo|ios7leo_|ios7lab_|leo_user_frontier|ios7_compat' "$src"; then
+        skipped+=("$name")
+        continue
+    fi
     if "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" \
          -c "$src" -o "$OUT/$name.o" 2>"$OUT/$name.log"; then
         ok=$((ok + 1))
@@ -195,6 +208,9 @@ for src in "$XNU"/osfmk/arm/*.c; do
 done
 
 echo
+if [[ ${#skipped[@]} -gt 0 ]]; then
+    printf 'osfmk/arm: skipped %d non-Apple (HD2 lab) TU(s): %s\n' "${#skipped[@]}" "${skipped[*]}"
+fi
 echo "osfmk/arm: $ok of $((ok + fail)) compile to objects"
 
 if [[ $fail -gt 0 ]]; then
