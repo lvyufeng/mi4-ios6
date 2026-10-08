@@ -675,9 +675,38 @@ bytes `e9a24717…` sent = the bytes the gate read). The bounded 180 s wait expi
 4a2fe00b not listed`, `host log 58 -> 58 enumerations`, `port 3-10: 58 -> 58, any id` — **no re-entry in
 any mode**. A further ~4 minutes of polling (adb and fastboot) stayed empty, and `lsusb` shows no
 `cancro` device at all. **No brick** (nothing was flashed), but the device is dark until the operator's
-power press. Because the payload's log lives in the top of DRAM (`ram_console`, base `0xde500000`) and
-`log_init` clears it on every entry, a run that does not return before the operator's power press has
-**lost its log** — so this arm's readings are the *absence of a return*, not a captured log.
+power press. **The log is NOT lost by that press** — see the correction below; it is lost only by a
+power *cycle*, and this arm's log is recoverable, so this arm's readings are provisionally the *absence
+of a return*, not a captured log, and the recovery (owed) can upgrade them.
+
+**⚠️ CORRECTION (2026-10-08): "lost its log" is wrong, and it was leaning on the wrong reading.** The
+previous paragraph asserted the log is lost by the operator's power press. The runner's own exit-2 text
+says the opposite (`run_and_capture.sh:3594`): the payload's log "lives in the top of DRAM and is lost
+on a **cold boot**" — a power *cycle*, not a press — and 910's map names the recovery door explicitly
+(`experiment-910-usb-debug-map.md:51`): the escape is the operator's **VolDown+Power → fastboot →
+`fastboot boot <twrp>` → `cat /proc/last_kmsg`**, which reads the *previous* run's RAM console
+(`ram_console`, base `0xde500000`). So the log from this arm is still in DRAM and is **recoverable**;
+recovering it is **free** (a read) and costs no run, and it is the cheap step that would answer what the
+exit-2 outcome cannot. Nothing in this arm's record should be read as "the log is gone".
+
+**And that correction falsifies §12's headline.** The section title and the paragraph below say "the
+wedge is the live explanation". **Without the recovered log that is a hypothesis, not a reading** — a
+run that does not return tells us only that it did not return; it does not tell us it reached XNU's
+idle loop at all, let alone that it wedged there. The one thing the exit-2 outcome rules out is that
+`entry_usb_stream_poll` *alone* was the hang (the USB ladder is gone and it still did not return) —
+everything past that, including whether the SMEM probe ran and whether the 3 GB bank list was produced,
+is **unobserved until the log is recovered**. Worse, the "same wedge" identification is *doubtful on its
+face*: this arm carries `IDLE_NO_SLEEP=1`, which **skips `platform_cache_idle_enter` entirely**, while
+909's R14 localized the wedge *inside* that enter's cache-off window or its `wfi`. So if this arm wedged
+in the idle path, it wedged in a **different** path than R14 named (the door-1 loop's shared tail), not
+"the same" one — a distinction the exit-2 outcome alone cannot draw and the recovered log can.
+
+**RECOVERY IS THE OWED FIRST STEP, BEFORE THE A/B ARM.** Recovering this log costs a read and no run;
+spending `armed-storage-cb4e17f1` (a new press) before recovering this one would overwrite the DRAM
+console and destroy the only evidence this arm produced. So the order is: (1) operator VolDown+Power →
+fastboot → TWRP → `cat /proc/last_kmsg` for `21086959`; (2) read whether it reached the SMEM probe
+(`xnu_live_smem_*`) and where it stopped; (3) *then* decide whether the no-sleep A/B arm is still the
+right next press.
 
 **WHAT THIS DOES AND DOES NOT SAY.** It **does not confirm** the pre-press hypothesis that
 `entry_usb_stream_poll` was the hang. The USB-off arm does not return *either*, and it reaches further
