@@ -571,3 +571,42 @@ new nm clause reads `N:1:1:1:1:1`; the three globals `g_stage90_smem_ptable_foun
 -DSTAGE90_XNU_MEM_SIZE_MAX=0x5e500000'` exit 0 (`stage90-build-config.txt` byte-identical to 911b's
 `6c2b6038`). `check_set_name_rule` 0; `make check` 0; `verify_press_ready` **5/5** — row 4 names **the
 911c SMEM RAM-BANK-MEASUREMENT arm**. **NO press.**
+
+## 9. THE FIRST PRESS OF THE 911 FAMILY (2026-10-08) — the raised window KILLS the payload's own MMU selftest; the arm never reaches XNU
+
+Arm `armed-storage-1d3ae364` (911c) was **pressed non-persistently** (`fastboot boot`, nothing flashed) on
+2026-10-08 00:13 UTC from a live Android/adbd state. **The device returned** (runner exit 0; adb lists
+`4a2fe00b` as `device`). Capture: `out/stage90/captures/911c-press-20261008-001300-last_kmsg.txt` (211
+lines). **No brick.**
+
+**The run never entered XNU.** It died in the payload's OWN pre-jump MMU selftest:
+
+```
+MI4IOS6_STAGE90_XNU memSize=0x5e500000                                  (the 911 window IS applied)
+MI4IOS6_STAGE90_XNU mmu_alias_base=0xc0000000
+MI4IOS6_STAGE90_XNU mmu_alias_probe_phys=0x006e4648
+MI4IOS6_STAGE90_XNU mmu_alias_read_after_identity_write=0x4d000000
+MI4IOS6_STAGE90_XNU mmu high alias selftest failed: alias read mismatch
+MI4IOS6_STAGE90_XNU kernel_entry bad: MMU high alias selftest
+```
+then the payload's clean reboot (`platform_reboot`: RESTART_REASON + PS_HOLD=0 + hw_watchdog immediate
+bite). **`xnu_entry_status` is absent; no `xnu_live_*` record at all; XNU's `_start` was never reached.**
+
+**THE CAUSE — a VA-window overlap 911's design missed.** The payload maps, in `src/mmu.c`'s
+`build_identity_table()`: a high-alias window `[0xc0000000, +image) -> PA`, and (under
+`STAGE90_XNU_ENTRY`) an entry-window **identity** loop `[0x80000000, +STAGE90_XNU_ENTRY_SIZE)`. When the
+window is raised to `0x5e500000`, the identity loop covers `[0x80000000, 0xde500000)` — which **overlaps
+the alias `[0xc0000000, 0xc4000000)`**. Both target L1 index `0xc06`; the identity loop runs LAST and
+overwrites the alias descriptor, so the selftest's `0xc06e4648` read resolves to the identity PA
+`0xc06e4648` (= DRAM content `0x4d000000`) instead of the expected `0x6e4648`. **The selftest was right;
+the window was wrong.**
+
+**This retires the §8 claim that "the span is clean".** §8 checked the PA *span* (no device / no
+console) but not the **VA windows**: 911a's `0x40000000` (identity to `0xc0000000`, touching the alias)
+and 911c's `0x5e500000` (deep overlap) both clobber it; only 912a's `0x04000000` (identity to
+`0x84000000`) is clear — and 912a was never pressed either. **No 911-family arm was ever observed
+reaching XNU before this press. The whole family is gated behind this fix.**
+
+**The goal is NOT met and nothing in the 911 family should be pressed again until the fix lands.** The
+residence wall (909) is untouched and still gates observability. The 909 event arms (`cabba670` etc.)
+carry `RESIDENT=1` but NO window change, so they are NOT affected by this regression.
