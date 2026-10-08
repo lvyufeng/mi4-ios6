@@ -39,9 +39,17 @@ check_one() {
         note "(a) does not key the pool on the D13 header osfmk/sys/types.h"; return 1
     fi
     # (b) no live object-path literal (the pool refs must go through the derived variable).
-    if grep -qE '\$REPO_ROOT/out/xnu_(kernel|asm|platform)_obj/' <<<"$L"; then
+    # **The pattern must tolerate the `"$REPO_ROOT"/out/…` form.** The 926 substitution re-rooted
+    # `$REPO_ROOT/out/xnu_kernel_obj/…` but not the quoted-before-slash form `"$REPO_ROOT"/out/…`,
+    # and 12 such literals survived — including the `436`/`POOL_OBJS` glob that adds the WHOLE pool to
+    # the link. On D13 that glob would pull 4570's objects (a D13 link that silently links 4570 code).
+    # The failure was the earlier regex requiring `$REPO_ROOT/out` with no quote between; it matched
+    # the substituted form and not the surviving one, so the check passed vacuously — the defect class
+    # "a claim in a comment is not a check", in the check itself.
+    local POOL_RE='\$REPO_ROOT"?/out/xnu_(kernel|asm|platform)_obj'
+    if grep -qE "$POOL_RE" <<<"$L"; then
         note "(b) a live object path is still pinned to a literal pool directory"
-        grep -nE '\$REPO_ROOT/out/xnu_(kernel|asm|platform)_obj/' <<<"$L" | head -3
+        grep -nE "$POOL_RE" <<<"$L" | head -3
         return 1
     fi
     # (c) `XNU` is the selected tree.
@@ -64,6 +72,7 @@ if [[ ${1:-} == --selftest ]]; then
 XNU_TREE=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
 XNU=$REPO_ROOT/external/xnu-4570.1.46
 ARM_INIT_OBJ=${STAGE90_ENTRY_ARM_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_arm_init.o}
+for _o in "$REPO_ROOT"/out/xnu_kernel_obj/*.o; do :; done
 EOF
     if check_one "$tmp" >/dev/null 2>&1; then
         echo "check_entry_tree_pools: SELFTEST FAIL - the pre-926 text was accepted" >&2

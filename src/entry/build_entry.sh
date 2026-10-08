@@ -28259,7 +28259,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     _436_scratch=""
     _436_already=0
     POOL_OBJS=()
-    for _o in "$REPO_ROOT"/out/xnu_kernel_obj/*.o "$REPO_ROOT"/out/xnu_asm_obj/*.o; do
+    for _o in "$XNU_KERNEL_OBJ_OUT"/*.o "$XNU_ASM_OBJ_OUT"/*.o; do
         [[ -e $_o ]] || continue
         _base=${_o##*/}
         if [[ " $_436_refuse " == *" $_base "* ]]; then
@@ -28276,7 +28276,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         # on `_start` being defined twice, with nothing in that message to say which of the two copies
         # was not the build's. The name is now reported and skipped instead of adopted.
         case "$_o" in
-            "$REPO_ROOT"/out/xnu_asm_obj/*)
+            "$XNU_ASM_OBJ_OUT"/*)
                 if [[ ! -f ${_o%.o}.log ]]; then
                     _436_scratch+=" $_base"
                     continue
@@ -28471,7 +28471,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # it overwrites is whatever the linker put next. So: size from the object that defines the
     # symbol, and if that size is not knowable, fail the build and make it a decision.
     arm-none-eabi-nm -A -S -P --defined-only \
-        "$REPO_ROOT"/out/xnu_kernel_obj/*.o "$REPO_ROOT"/out/xnu_asm_obj/*.o 2>/dev/null |
+        "$XNU_KERNEL_OBJ_OUT"/*.o "$XNU_ASM_OBJ_OUT"/*.o 2>/dev/null |
         sed 's/^[^:]*: //' | awk 'NF>=2 {print $1, $2, ($4 == "" ? "-" : $4)}' |
         sort -u > "$OUT/xnu_arm_entry_kernsyms.txt"
 
@@ -29504,7 +29504,7 @@ verify_trace_symbols() {
     # no return address. `bsd_ast` is safe because every reference to it in this tree is a call - one
     # `R_ARM_CALL` relocation in `osfmk_kern_ast.o` and nothing else - and that is a property of the
     # objects, so it is checked here rather than reasoned about in a comment.
-    brefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+    brefs=$(arm-none-eabi-objdump -r "$XNU_KERNEL_OBJ_OUT"/*.o 2>/dev/null |
         awk '/[[:space:]]bsd_ast$/ && $0 !~ /bsd_init_done/ { print $2 }' | sort -u | tr '\n' ' ')
     [[ "$brefs" == "R_ARM_CALL " ]] ||
         layout_fail "the objects in this pool reference bsd_ast with [$brefs] and 511's wrap is only sound while every reference is a call - an R_ARM_ABS32/MOVW/MOVT would be an address taken, and --wrap rewrites those too, so the wrapper's address could end up in a continuation slot that a thread is jumped to and never returns from"
@@ -29550,7 +29550,7 @@ verify_trace_symbols() {
     # stored" is a property of the objects, so it is read out of the relocations rather than reasoned
     # about: an `R_ARM_ABS32`/`MOVW`/`MOVT` there would be an address taken, and `--wrap` rewrites those
     # too, so the wrapper's address could end up somewhere a thread is jumped to.
-    mrefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+    mrefs=$(arm-none-eabi-objdump -r "$XNU_KERNEL_OBJ_OUT"/*.o 2>/dev/null |
         awk '/[[:space:]]machine_idle$/ { print $2 }' | sort -u | tr '\n' ' ')
     [[ "$mrefs" == "R_ARM_CALL " ]] ||
         layout_fail "the objects in this pool reference machine_idle with [$mrefs] and 512's wrap is only sound while every reference is a call - an R_ARM_ABS32/MOVW/MOVT would be an address taken, and the wrapper could then be reached as a function pointer rather than as a call"
@@ -29597,11 +29597,11 @@ verify_trace_symbols() {
     # in `cpu_idle` for the two merged early exits and the second in `cpu_idle_exit`), and `SetIdlePop`
     # by a call - which is why the door record carries a site the kernel set deliberately (the branch
     # plus 8) while the `SetIdlePop` record carries an ordinary return address.
-    idlcrefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+    idlcrefs=$(arm-none-eabi-objdump -r "$XNU_KERNEL_OBJ_OUT"/*.o 2>/dev/null |
         awk '/[[:space:]]Idle_load_context$/ { print $2 }' | sort -u | tr '\n' ' ')
     [[ "$idlcrefs" == "R_ARM_JUMP24 " ]] ||
         layout_fail "the objects in this pool reference Idle_load_context with [$idlcrefs] and 513's wrap is only sound while every reference is a tail branch - an R_ARM_ABS32/MOVW/MOVT would be an address taken, and --wrap rewrites those too, so the wrapper's address could end up somewhere this step's comment does not describe"
-    sipfrefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+    sipfrefs=$(arm-none-eabi-objdump -r "$XNU_KERNEL_OBJ_OUT"/*.o 2>/dev/null |
         awk '/[[:space:]]SetIdlePop$/ { print $2 }' | sort -u | tr '\n' ' ')
     [[ "$sipfrefs" == "R_ARM_CALL " ]] ||
         layout_fail "the objects in this pool reference SetIdlePop with [$sipfrefs] and 513's wrap assumes a call: the record's site is read as a return address (the bl at site - 4), so an address-taken reference would put the wrapper's address where this file says a return address is"
@@ -29726,7 +29726,7 @@ verify_trace_symbols() {
     # object in this link that is not in the kernel pool: a clause that read only the kernel's objects
     # would find the kernel's two tail branches and no call at all, and would then be measuring a
     # different image from the one that runs.
-    sigirefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o "$OUT/xnu_arm_entry_trace.o" 2>/dev/null |
+    sigirefs=$(arm-none-eabi-objdump -r "$XNU_KERNEL_OBJ_OUT"/*.o "$OUT/xnu_arm_entry_trace.o" 2>/dev/null |
         awk '/[[:space:]]cpu_signal_handler_internal$/ { print $2 }' | sort -u | tr '\n' ' ')
     # **594: the expected set is derived from the switch, not pinned.** With the repair in (the default
     # 0 arm) this step adds the only *call*, so the pool shows `R_ARM_CALL` beside the kernel's two tail
@@ -29738,7 +29738,7 @@ verify_trace_symbols() {
     [[ "$IDLE_NO_SLEEP" == 0 ]] && sigirefs_want="R_ARM_CALL R_ARM_JUMP24 "
     [[ "$sigirefs" == "$sigirefs_want" ]] ||
         layout_fail "the objects in this pool (the kernel's and this image's own entry_trace.o) reference cpu_signal_handler_internal with [$sigirefs] and STAGE90_XNU_IDLE_NO_SLEEP=$IDLE_NO_SLEEP says they should be [$sigirefs_want]: with the repair in, this step adds the pool's only *call* beside the kernel's own tail branches; with the repair skipped, no call of this step's exists and the kernel's tail branches are the whole set. An address-taken reference, or the call present while the record says the repair is skipped, is the record and the body disagreeing about which arm this image is"
-    sigicalls=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o "$OUT/xnu_arm_entry_trace.o" 2>/dev/null |
+    sigicalls=$(arm-none-eabi-objdump -r "$XNU_KERNEL_OBJ_OUT"/*.o "$OUT/xnu_arm_entry_trace.o" 2>/dev/null |
         awk '/[[:space:]]cpu_signal_handler_internal$/ && $2 == "R_ARM_CALL" { n++ } END { printf "%d", n + 0 }')
     sigicalls_want=$(( 1 - IDLE_NO_SLEEP ))
     [[ "${sigicalls:-0}" == "$sigicalls_want" ]] ||
@@ -29815,7 +29815,7 @@ verify_trace_symbols() {
     # instruction at that label really is a `wfi`.
     wfiwrap=$(sym_addr __wrap_cpu_idle_wfi) ||
         layout_fail "__wrap_cpu_idle_wfi is not in the linked image - --wrap=cpu_idle_wfi did not link, and the run's 'the CPU slept' line would then be counting nothing"
-    wfirefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+    wfirefs=$(arm-none-eabi-objdump -r "$XNU_KERNEL_OBJ_OUT"/*.o 2>/dev/null |
         awk '/[[:space:]]cpu_idle_wfi$/ { print $2 }' | sort -u | tr '\n' ' ')
     [[ "$wfirefs" == "R_ARM_CALL " ]] ||
         layout_fail "the objects in this pool reference cpu_idle_wfi with [$wfirefs] and 514's wrap assumes a call: an address-taken reference would let --wrap rewrite a value that is later branched to"
@@ -29960,7 +29960,7 @@ verify_trace_symbols() {
     # (4) The two wraps, and the edges into them.
     pcexw=$(sym_addr __wrap_platform_cache_idle_exit) ||
         layout_fail "__wrap_platform_cache_idle_exit is not in the linked image - the window's far end is where the exit count is taken, and without it a completed window and a faulted one would look the same"
-    pcerefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+    pcerefs=$(arm-none-eabi-objdump -r "$XNU_KERNEL_OBJ_OUT"/*.o 2>/dev/null |
         awk '/[[:space:]]platform_cache_idle_(enter|exit)$/ { print $2 }' | sort -u | tr '\n' ' ')
     [[ "$pcerefs" == "R_ARM_CALL " ]] ||
         layout_fail "the kernel's objects reference caches.c's idle-cache pair with [$pcerefs] and 515's wraps assume calls: an address-taken reference would let --wrap rewrite a value that is later branched to, and the census would then be of this file's own call rather than of cpu_idle's"
@@ -30575,7 +30575,7 @@ verify_trace_symbols() {
     # table, say - would keep the original address and the call through it would not be counted, so the
     # census would be of this file's own site rather than of the handler's. Every reference in the
     # linked pool has to be a call for the wrap to be total.
-    tbrefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+    tbrefs=$(arm-none-eabi-objdump -r "$XNU_KERNEL_OBJ_OUT"/*.o 2>/dev/null |
         awk '/[[:space:]]ml_get_timebase$/ { print $2 }' | sort -u | tr '\n' ' ')
     [[ "$tbrefs" == "R_ARM_CALL " || "$tbrefs" == "R_ARM_CALL R_ARM_JUMP24 " ]] ||
         layout_fail "the kernel's objects reference ml_get_timebase with [$tbrefs] and this step's instrument assumes calls: an address-taken reference would let --wrap rewrite a value that is later branched through, and the record would then be missing exactly the calls it exists to make"
