@@ -3136,8 +3136,16 @@ void __wrap_platform_cache_idle_exit(void)
  * is 0x8004f2dc` - `2147807992` = **`0x8004f2f8`**. The move is `+0x20` from 910b's `0x8004f2dc` (the
  * marker is 0x10 of code plus alignment in the pool object, and the seam sits past it in the entry
  * group's layout). The constant below is re-derived from that measurement, and
- * `scripts/run_and_capture.sh`'s literal follows it (both copies, one edit each). */
-#define STAGE90_XNU_SEAM_LR       0x8004f2fcu
+ * `scripts/run_and_capture.sh`'s literal follows it (both copies, one edit each).
+ *
+ * **AND A TWELFTH TIME, IN THE OTHER DIRECTION, ON THE 2026-10-08 RESIDENCE+SMEM ARM.** That arm drops
+ * the whole USB ladder (`USB_PROBE`/`DEV`/`ENUM`/`STREAM` all OFF), so `entry_usb_enum.c`'s ON body -
+ * the `+0x1000` 910b added - leaves the entry group and the exit path moves *back*. The build refused
+ * with `the exit's call to FlushPoU_Dcache is at 2147803896 and returns to 2147803900` = **`0x8004e2fc`**,
+ * which is exactly 910a's `0x8004e2dc` + 911b's `+0x20` marker ([[mi4-911b-ceiling-arm-parked]]): the
+ * USB enum's page is gone, the marker remains. **The first move that is a smaller entry group, not a
+ * larger one** - the value is a function of the entry group's size, full stop, in either direction. */
+#define STAGE90_XNU_SEAM_LR       0x8004e2fcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);

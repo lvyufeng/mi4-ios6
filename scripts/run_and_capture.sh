@@ -397,7 +397,13 @@ unset _self _bad
 # returns to 2147807996`, i.e. the `bl` at `0x8004f2f8` returning to **`0x8004f2fc`**. `entry_trace.c`'s
 # constant was re-derived from that refusal, and this literal follows it. **Both copies are `0x8004f2fc`
 # for the 911b arm.**
-EXIT_POP_LR_LITERAL=0x8004f2fc
+# **THE TWELFTH MOVE - THE FIRST IN THE OTHER DIRECTION (the 2026-10-08 RESIDENCE+SMEM ARM).** Dropping
+# the whole USB ladder (PROBE/DEV/ENUM/STREAM all OFF) removes `entry_usb_enum.c`'s ON body - the
+# `+0x1000` 910b added - so the exit path moves back: the build refused with `the exit's call to
+# FlushPoU_Dcache is at 2147803896 and returns to 2147803900`, i.e. returning to **`0x8004e2fc`**, which
+# is 910a's `0x8004e2dc` plus 911b's `+0x20` marker. `entry_trace.c`'s constant was re-derived from that
+# refusal, and this literal follows it. **Both copies are `0x8004e2fc` for the residence+SMEM arm.**
+EXIT_POP_LR_LITERAL=0x8004e2fc
 exit_pop_lr_addr() {
   local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
   local start size body ret

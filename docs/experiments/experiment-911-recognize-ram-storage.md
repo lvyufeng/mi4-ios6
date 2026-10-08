@@ -657,3 +657,47 @@ XNU to the OS — the `memSize`/window value and the free-region question (912) 
 the next arm isolates the window at a value that both clears the alias and boots. **The 3 GB reading
 (§10) is NOT delivered by this arm** — `entry_smem_probe` publishes no `xnu_live_smem_*` here, which is
 itself the reading that no idle pass ran.
+
+## 12. THE RESIDENCE+SMEM PRESS, USB LADDER OFF (2026-10-08) — the run does NOT return; and the case against "the USB stream was the hang"
+
+**Arm `armed-storage-21086959`** = 9edaa3b3's exact switch set at the 16 MB window, with the whole USB
+ladder OFF (`USB_PROBE=0 USB_DEV=0 USB_DEV_FORCE=0 USB_ENUM=0 USB_STREAM=0`) and `SMEM_PROBE=1
+RESIDENT=1 IDLE_NO_SLEEP=1`. The 911-family fix is in it, so the 16 MB window's identity map
+(`[0x80000000, 0x81000000)`) is provably clear of the alias. **This is the first USB-off press of the
+family, and the first smaller-entry-group build** — dropping the USB ladder removes
+`entry_usb_enum.c`'s ON body (the `+0x1000` 910b added), so the linked exit seam moves **back** from
+`0x8004f2fc` to **`0x8004e2fc`** (the twelfth seam move, and the first in the other direction;
+`STAGE90_XNU_SEAM_LR` and the runner's `EXIT_POP_LR_LITERAL` both re-derived). Entry bin `21086959`,
+payload `e9a24717`, parked 11 members, `verify_press_ready` 5/5, `check_set_name_rule` 0.
+
+**THE OUTCOME — EXIT 2, the device did NOT come back.** Pressed non-persistently (`fastboot boot`, the
+bytes `e9a24717…` sent = the bytes the gate read). The bounded 180 s wait expired with `adb: serial
+4a2fe00b not listed`, `host log 58 -> 58 enumerations`, `port 3-10: 58 -> 58, any id` — **no re-entry in
+any mode**. A further ~4 minutes of polling (adb and fastboot) stayed empty, and `lsusb` shows no
+`cancro` device at all. **No brick** (nothing was flashed), but the device is dark until the operator's
+power press. Because the payload's log lives in the top of DRAM (`ram_console`, base `0xde500000`) and
+`log_init` clears it on every entry, a run that does not return before the operator's power press has
+**lost its log** — so this arm's readings are the *absence of a return*, not a captured log.
+
+**WHAT THIS DOES AND DOES NOT SAY.** It **does not confirm** the pre-press hypothesis that
+`entry_usb_stream_poll` was the 9edaa3b3 hang. The USB-off arm does not return *either* — and it reaches
+further into the wrapper (`__wrap_Idle_load_context` calls `entry_smem_probe` **after**
+`entry_usb_stream_poll`, and `entry_wdt_pet` after that), so a USB stream that had hung would have left
+the SMEM probe and the pet un-run *and the device returning* (the 9edaa3b3 observation); removing it did
+**not** restore a return. That is the opposite of the hypothesis's prediction. **The residence wedge
+(909 R9/R10: the run stops between the 4th `wfi` return and the 5th pass, ~13.4 s in, with no fault, no
+panic, no further publishes) is therefore the live explanation, and it is not caused by the USB ladder.**
+The USB stream may have been a *second* symptom; it was not the cause of the non-return.
+
+**HONEST UNKNOWNS.** (a) Whether the run reached the SMEM probe at all is **unobservable** in an exit-2
+outcome with no log recovery — the 3 GB reading is still not delivered. (b) The wedge is now known to
+reproduce on an arm with the entire USB ladder removed and the identity-map bug fixed, which **narrows
+it to the idle path itself** (the `cpu_idle` re-arm / the pass after the 4th `wfi`), not to any USB code.
+(c) The 909 arms carried `RESIDENT=1` and reached ~13.4 s *and returned*; this arm also carries
+`RESIDENT=1` at the same window and does not — the one structural difference is that 909 ran the USB
+ladder with `IDLE_NO_SLEEP=0` (the deep-idle path), while this arm runs `IDLE_NO_SLEEP=1`. **So the next
+arm should be the 16 MB window with `IDLE_NO_SLEEP=0`** (909's own idle path, which returned), to
+separate "the wedge" from "the no-sleep path".
+
+**OWED:** the operator's power press to restore the device; then the `IDLE_NO_SLEEP=0` arm above; and
+the SMEM 3 GB reading, which needs a run that reaches the first idle pass **and returns**.
