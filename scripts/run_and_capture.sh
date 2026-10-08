@@ -2927,6 +2927,73 @@ summarise_log() {
   say "  ---- and this criterion does not decide whether the machine stayed up. Every reading ----"
   say "  ---- above is a floor that 520 and 533 also meet; the ceiling is the arm's own clause, ----"
   say "  ---- and the run that matters is the one whose log has both. ---------------------------"
+
+  # ---------------------------------------------------------------------------------------------
+  # The NEWEST goal clause: did XNU recognise the Mi 4's own RAM banks?
+  # ---------------------------------------------------------------------------------------------
+  #
+  # **「能够正确识别xiaomi 4的3GB内存」 is a reading this file did not have.** `entry_smem_probe`
+  # (src/entry/entry_smem.c) walks SMEM's RAM-partition table and publishes one cell per bank
+  # (`xnu_live_smem_bankN_start`/`_size`) plus `_banks`/`_total_bytes`/`_part_seen`. Before this block
+  # a grep for `xnu_live_smem_` in this file returned **nothing**, so the probe's whole deliverable -
+  # the bank layout the 3 GB clause is about - would sit unread in the same log the operator was
+  # handed. The probe's own record says where each cell comes from (the `type == SYS_MEMORY (1) &&
+  # size >= 256 MB` rule, entry_smem.c:245); this block only sums what the probe published.
+  #
+  # Like the block above it sits **outside the arm branch**: the probe runs on idle pass 1, before
+  # either arm's death point, so its keys are a reading of the *machine* on both arms - and this is
+  # the reading the owed `armed-storage-*` re-press exists to deliver. It is guarded on the probe's
+  # own verdict key being present, so a log whose image predates the probe (or has SMEM_PROBE off)
+  # takes the else branch and prints one absence line rather than a bank list of zeros.
+  local smem_pf smem_pf_n
+  smem_pf=$(keyval smem_ptable_found)
+  if [[ -n $smem_pf ]]; then
+    smem_pf_n=$(( smem_pf ))
+    say ""
+    say "  the Mi 4's RAM, from SMEM (entry_smem_probe): the newest goal clause's reading"
+    smem_banks=$(keyval smem_banks)
+    smem_total=$(keyval smem_total_bytes)
+    smem_part=$(keyval smem_part_seen)
+    smem_off=$(keyval smem_ptable_off)
+    smem_len=$(keyval smem_ptable_len)
+    if (( smem_pf_n == 0 )); then
+      say "  UNREAD  SMEM was mapped but no RAM-partition table was found (xnu_live_smem_ptable_found=0),"
+      say "        so this log carries no bank layout at all. That is itself a reading - report the"
+      say "        probe's mapping keys (xnu_live_smem_alias_map/_ident_map/_ttbr0/_phys_base) beside it"
+    else
+      # The sum is computed here from the per-bank cells and then compared to the total the probe
+      # *itself* published - so a probe whose cells and total disagree (a defect, not a memory size)
+      # is named rather than averaged away.
+      local smem_sum=0 smem_b smem_sv smem_mb
+      for smem_b in 0 1 2 3; do
+        smem_sv=$(keyval smem_bank${smem_b}_size)
+        [[ -n $smem_sv ]] || continue
+        smem_sum=$(( smem_sum + smem_sv ))
+        printf '    bank%d: start=%-12s size=%s\n' \
+          "$smem_b" "$(keyval smem_bank${smem_b}_start)" "$smem_sv"
+      done
+      smem_mb=$(( smem_sum / 1048576 ))
+      say "  xnu_live_smem_banks=$smem_banks  part_seen=$smem_part  ptable_off=$smem_off  len=$smem_len"
+      say "  the per-bank cells sum to $smem_mb MB; the probe's own total_bytes=$smem_total"
+      if (( smem_sum == 0 )); then
+        say "  UNREAD  no bank cell carries a size: the partition walk found no SYS_MEMORY region of at"
+        say "        least 256 MB (part_seen=$smem_part), which is the reading - check the table, not the RAM"
+      elif (( smem_sum == 0xc0000000 )); then
+        say "  => 3 GB MET: the banks sum to 0xc0000000 (3072 MB), the Mi 4's own RAM."
+      else
+        say "  => 3 GB NOT MET: the banks sum to $smem_mb MB, not 0xc0000000. Name which bank is"
+        say "     missing on this log rather than rounding up - the clause is unmet until they sum."
+      fi
+      if (( smem_sum != ${smem_total:-0} )); then
+        say "  FINDING  the per-bank sum and the probe's own xnu_live_smem_total_bytes disagree - a defect"
+        say "        in the probe or the table, not a memory size. Read them together, never one alone."
+      fi
+    fi
+  else
+    say ""
+    say "  UNREAD  no xnu_live_smem_ptable_found= record: this log's image did not run entry_smem_probe"
+    say "        (SMEM_PROBE off, or a build that predates it), so the 3 GB clause is not read here"
+  fi
 }
 
 # The port the phone is on, resolved once and only when this file is going to touch the device: it

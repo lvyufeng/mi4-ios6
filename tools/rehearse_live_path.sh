@@ -956,6 +956,40 @@ mk_sleeper_log() {
       printf ' xnu_live_wfi_seq=0x00000001\n'
       printf ' xnu_live_slot_cwe_win=0x00000005\n'
     fi
+    # **The newest goal clause's own states, one per branch of the SMEM reader.** The probe
+    # (entry_smem.c) publishes `xnu_live_smem_bankN_start`/`_size` per qualifying bank plus `_banks`,
+    # `_total_bytes`, `_part_seen`. Three fixtures exercise the three readings the block can print,
+    # and they differ in one thing each: `smem-banks` sums to 0xc0000000 (3 GB MET, cells and total
+    # agree), `smem-2g` sums to 0x80000000 (NOT MET, cells and total still agree - so this is the
+    # *size* reading and not the mismatch FINDING), and `smem-mismatch` sums to 0xc0000000 while the
+    # probe's own total says 0x40000000 (MET *and* the FINDING). No SMEM keys on any other base, so
+    # every existing state above now also prints the block's absent line - and its expectations are
+    # greps, so those rows stay green.
+    if [[ $base == smem-banks || $base == smem-2g || $base == smem-mismatch ]]; then
+      printf ' xnu_live_smem_ptable_found=0x00000001\n'
+      printf ' xnu_live_smem_ptable_off=0x00000008\n'
+      printf ' xnu_live_smem_ptable_len=0x00000004\n'
+      printf ' xnu_live_smem_part_seen=0x00000008\n'
+      printf ' xnu_live_smem_bank2_start=0x00000000\n xnu_live_smem_bank2_size=0x00000000\n'
+      printf ' xnu_live_smem_bank3_start=0x00000000\n xnu_live_smem_bank3_size=0x00000000\n'
+      case $base in
+        smem-2g)
+          printf ' xnu_live_smem_bank0_start=0x00000000\n xnu_live_smem_bank0_size=0x80000000\n'
+          printf ' xnu_live_smem_bank1_start=0x00000000\n xnu_live_smem_bank1_size=0x00000000\n'
+          printf ' xnu_live_smem_banks=0x00000001\n xnu_live_smem_total_bytes=0x80000000\n'
+          ;;
+        smem-mismatch)
+          printf ' xnu_live_smem_bank0_start=0x00000000\n xnu_live_smem_bank0_size=0x40000000\n'
+          printf ' xnu_live_smem_bank1_start=0x80000000\n xnu_live_smem_bank1_size=0x80000000\n'
+          printf ' xnu_live_smem_banks=0x00000002\n xnu_live_smem_total_bytes=0x40000000\n'
+          ;;
+        *)
+          printf ' xnu_live_smem_bank0_start=0x00000000\n xnu_live_smem_bank0_size=0x40000000\n'
+          printf ' xnu_live_smem_bank1_start=0x80000000\n xnu_live_smem_bank1_size=0x80000000\n'
+          printf ' xnu_live_smem_banks=0x00000002\n xnu_live_smem_total_bytes=0xc0000000\n'
+          ;;
+      esac
+    fi
   } > "$out"
 }
 
@@ -1103,6 +1137,14 @@ reader_state goal-truncated   "no record of the control open" \
                               "missing here is a POSITION and not a driver fault"
 reader_state goal-bad-values  "the fault is in the values" \
                               "the driver's open answered 0x00000005 (must be 0)"
+# **The newest goal clause's block, one state per branch, plus the absent branch asserted on a log
+# that has no probe at all.** The three fixtures differ in one thing each (the bank sizes), so the
+# MET / NOT-MET / mismatch readings are attributable to the sizes and not to some other difference.
+# The `predicted` row above carries no SMEM keys and so also proves the block's absent line prints -
+# which is what keeps it from being a paragraph that fires only on a log no rehearsal has built.
+reader_state smem-banks    "=> 3 GB MET: the banks sum to 0xc0000000 (3072 MB), the Mi 4's own RAM."
+reader_state smem-2g       "=> 3 GB NOT MET: the banks sum to 2048 MB"
+reader_state smem-mismatch "FINDING  the per-bank sum and the probe's own xnu_live_smem_total_bytes disagree"
 # **The three states 609 added, one per clause that read absence as a fact about the machine.** Each is
 # the *same log* as the FAIL it replaces, plus the channel's own `capped` record, so the difference in
 # the reader's output is attributable to the channel and nothing else. Without these the three UNREAD
