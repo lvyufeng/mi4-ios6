@@ -572,7 +572,7 @@ new nm clause reads `N:1:1:1:1:1`; the three globals `g_stage90_smem_ptable_foun
 `6c2b6038`). `check_set_name_rule` 0; `make check` 0; `verify_press_ready` **5/5** — row 4 names **the
 911c SMEM RAM-BANK-MEASUREMENT arm**. **NO press.**
 
-## 9. THE FIRST PRESS OF THE 911 FAMILY (2026-10-08) — the raised window KILLS the payload's own MMU selftest; the arm never reaches XNU
+## 10a. THE FIRST PRESS OF THE 911 FAMILY (2026-10-08) — the raised window KILLS the payload's own MMU selftest; the arm never reaches XNU
 
 Arm `armed-storage-1d3ae364` (911c) was **pressed non-persistently** (`fastboot boot`, nothing flashed) on
 2026-10-08 00:13 UTC from a live Android/adbd state. **The device returned** (runner exit 0; adb lists
