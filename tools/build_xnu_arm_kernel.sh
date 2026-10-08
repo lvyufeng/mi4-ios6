@@ -173,6 +173,32 @@ if [[ -f $XNU/osfmk/sys/types.h ]]; then
     CXX_STD_FLAGS=(-std=gnu++98)
 fi
 
+# **The board macro and one dialect macro, both the tree's (923).** The fork is an HD2 board port and
+# gates the kernel on its own board target: four C++ translation units (`IOService.cpp`,
+# `IOUserClient.cpp`, `IOStartIOKit.cpp`, `OSKext.cpp`) and `libsa/bootstrap.cpp` `#include` the
+# fork's `nokextd/IOS7NoKextd035.h`, whose line 7 is an `#error` unless a board is named.
+# `IOService.cpp` is a **base class the whole IOKit object graph derives from**, so without a board
+# the link has no `IOService` - the gate is not optional. The board is `BOARD_CONFIG_MSM8974_CANCRO`,
+# a *new* board (the fork's own name was `QSD8250_LEO`): reusing LEO compiles the gate but pulls the
+# fork's HD2 lab instrumentation into core files - `osfmk/arm/trap.c:56`, `osfmk/kern/thread_act.c:82`
+# and the `pexpert/arm/pe_qsd8250_leo.c` board PE all `#include "ios7..."` headers under LEO, and
+# `trap.c` is load-bearing, so the machine would carry the wrong board's tracing. The new name
+# satisfies the nokextd gate (its guard was widened to a board test, a one-line tree edit staged by
+# `tools/stage_d13_board.sh`) and `osfmk/arm/PlatformConfigs.h` maps it to the Qualcomm-Krait class
+# the MSM8960_TOUCHPAD precedent uses. That class is consumed at exactly one site
+# (`osfmk/arm/locore.s:229`, "Enable automatic-clock gating" - a Cortex-A9 CP15 `c15` write, the
+# right path for MSM8974's Krait).
+#
+# `__STDC_LIMIT_MACROS` is the companion: `EXTERNAL_HEADERS/stdint.h:77` gates every `*_MAX`/`*_MIN`
+# on `(! defined(__cplusplus)) || defined(__STDC_LIMIT_MACROS)`, the pre-C++11 rule. `IOMedia.cpp`,
+# `IODeviceTreeSupport.cpp` and `IOS7LeoSDCC2.cpp` use `UINT32_MAX`, which the C path gets for free
+# and the C++ path needs the macro for. Both are gated on the SAME `osfmk/sys/types.h` filesystem test
+# 922 used, so **4570 is untouched** (its stdint idiom is C++11-native and it has no `nokextd` gate).
+if [[ -f $XNU/osfmk/sys/types.h ]]; then
+    COMP_DEFINES_EXTRA=(-DBOARD_CONFIG_MSM8974_CANCRO=1)
+    CXX_STD_FLAGS+=(-D__STDC_LIMIT_MACROS=1)
+fi
+
 # The EABI runtime, which is not in the manifest and is not Apple's. `armv7-unknown-netbsd-eabi`
 # (and `armv7-none-eabi` before it) lowers an aggregate copy to `__aeabi_memcpy4`, where a Darwin
 # target lowers it to `memcpy` - so the ELF path needs four symbols Apple's tree never mentions.
@@ -1317,7 +1343,7 @@ while read -r src; do
     # did, for 45 minutes, because this had no timeout and its output was buffered behind a pipe.
     # A timeout is reported as its own outcome rather than as a compile failure, because "clang
     # hung" and "XNU does not compile" are different findings.
-    if timeout "$PER_FILE_TIMEOUT" "${CXX_EXTRA[@]}" "${FORCE_INCLUDES[@]}" "${CONFIG_COMP_DEFINES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_DEFINES[@]}" "${BSD_FORCE[@]}" "${ROUTE_FORCE[@]}" "${KEXT_FORCE[@]}" "${ONE_FILE[@]}" "${CPP_FORCE[@]}" "${EXTRA_DEFINES[@]}" "${FILE_INCLUDES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CXX_EXTRA[@]}" "${FORCE_INCLUDES[@]}" "${COMP_DEFINES_EXTRA[@]}" "${CONFIG_COMP_DEFINES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_DEFINES[@]}" "${BSD_FORCE[@]}" "${ROUTE_FORCE[@]}" "${KEXT_FORCE[@]}" "${ONE_FILE[@]}" "${CPP_FORCE[@]}" "${EXTRA_DEFINES[@]}" "${FILE_INCLUDES[@]}" \
          -c "$src" -o "$OUT/$key.o" 2>"$OUT/$key.log"; then
         ok=$((ok + 1))
         [[ $is_cpp == 1 ]] && cpp_ok=$((cpp_ok + 1))

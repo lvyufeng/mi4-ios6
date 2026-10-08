@@ -181,6 +181,7 @@ check:
 	@tools/check_response_word_order.py --selftest >/dev/null
 	@tools/check_response_word_order.py
 	@tools/check_hfs_staged.sh
+	@tools/check_d13_board_staged.sh
 # 911b: the physical-memory ceiling port. `check_mem_size_max.py` re-derives the property the arm's
 # whole safety argument rests on - an UNDEFINED STAGE90_XNU_MEM_SIZE_MAX leaves arm_vm_init.o
 # byte-for-byte as Apple shipped it (both marker arms inside the #ifdef; the outer #else a bare
