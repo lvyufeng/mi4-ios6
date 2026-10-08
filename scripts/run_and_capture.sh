@@ -82,6 +82,18 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 SRC_DIR=$REPO_ROOT/src
 OUT=$REPO_ROOT/out/stage90
 IMAGE=$OUT/stage90-qcdt.img
+# **The recovery carrier: the stock Android boot image, NOT TWRP.** The RAM console that holds a
+# non-returning run's log is read by the *stock Android* kernel as `/proc/last_kmsg`; TWRP's own kernel
+# brings no such reader (measured 2026-10-08: TWRP 3.7.0_9-0 exposes no `/proc/last_kmsg`, no pstore,
+# no ramoops, and `/dev/mem` is refused). Worse, `fastboot boot <twrp>` boots a *new* kernel whose own
+# console takes the single previous-boot slot, so booting TWRP FIRST consumes the run's evidence before
+# it can be read — measured: the capture after a TWRP-first recovery returned the TWRP kernel's own log,
+# not the run's. The golden 2026-06-04 image is the verified one the prior 911-era captures used
+# (`.prev.54` is an XNU `MI4IOS6_STAGE90` console read through its `/proc/last_kmsg`). It is booted
+# non-persistently (`fastboot boot`, never flash), so it clears nothing on flash and its own boot is
+# what makes the *previous* run's console readable.
+GOLDEN_DIR=$REPO_ROOT/xiaomi4-cancro-backup-20260604-112053
+RECOVERY_IMAGE=$GOLDEN_DIR/boot.img
 
 # Resolve an input path against the caller's directory. Absolute paths pass through untouched; a
 # relative one is joined to `$INVOKE_PWD`, and the join is recorded so it can be *printed* rather than
@@ -3840,24 +3852,38 @@ if [[ $DRY_RUN -eq 0 && $RETURNED -eq 0 ]]; then
   say "would have preserved the log - so a failure to return means the log is likely"
   say "unrecoverable anyway, but waiting is free and power-cycling is not."
   # **The tripwire: a non-returning run's log is RECOVERABLE, and this used to under-sell that.**
-  # A dark run's console can still be read back: the project's own recovery door is
-  # `VolDown+Power` into fastboot, `fastboot boot <twrp>`, then `cat /proc/last_kmsg`, which reads the
-  # *previous* run's RAM console (`ram_console` at `0xde500000`). The block above says the log is
-  # "likely unrecoverable" on the strength of the watchdog case, and that is only the case where the
-  # payload *has* armed one - a run that stops without a reset (a residence/self-end arm) can often be
-  # read back, and the 911 residence press (`armed-storage-21086959`, 2026-10-08) was written off as
-  # "log lost" one line after this text invited a power-cycling read. The two statements were one file
-  # disagreeing with itself. What actually destroys the log is a **cold** transition (regulators off) or
-  # a **new `fastboot boot`** (the payload clears the buffer on entry); a **warm** reset does not. So the
-  # door below is worth trying first, and this prints it so the operator does not forfeit a run's only
-  # evidence by treating a dark device as an empty one.
+  # A dark run's console can still be read back: the recovery door is `VolDown+Power` into fastboot,
+  # then boot the **stock Android boot image** non-persistently (`fastboot boot`, never flash), then
+  # `cat /proc/last_kmsg` from the Android shell — which reads the *previous* boot's RAM console
+  # (`ram_console` at `0xde500000`, the Qualcomm ramoops region the stock kernel exposes as
+  # `/proc/last_kmsg`). The block above says the log is "likely unrecoverable" on the strength of the
+  # watchdog case, and that is only the case where the payload *has* armed one - a run that stops
+  # without a reset (a residence/self-end arm) can often be read back, and the 911 residence press
+  # (`armed-storage-21086959`, 2026-10-08) was written off as "log lost" one line after this text
+  # invited a power-cycling read. What actually destroys the log is a **cold** transition (regulators
+  # off) or a **new `fastboot boot`** (the payload clears the buffer on entry, and so does ANY later
+  # kernel - see the TWRP caution below); a **warm** reset does not.
+  #
+  # **THE CARRIER WAS WRONG, and this cost the 21086959 recovery (measured 2026-10-08).** An earlier
+  # version of this text named the TWRP door (`fastboot boot <twrp>` -> `cat /proc/last_kmsg`). That
+  # door cannot work on this device, for two independent reasons: (a) TWRP 3.7.0_9-0's kernel has no
+  # `/proc/last_kmsg` (no pstore, no ramoops, `/dev/mem` refused — the reader lives only in the stock
+  # Android kernel), and (b) even if it did, booting TWRP is itself a `fastboot boot` of a *new* kernel
+  # whose console takes the single previous-boot slot — so TWRP-first consumes the evidence before the
+  # read. That is exactly what the attempt did: the capture returned TWRP's own kernel log, not the
+  # run's. The correct carrier is the stock Android image (below), booted **directly** after the run.
   say ""
   say "BUT: a non-returning run's log may still be recoverable. What destroys it is a cold power"
-  say "transition or a NEW \`fastboot boot\` (the payload clears the buffer on entry) - not every"
-  say "reset. Try the TWRP door this file already uses, BEFORE any new press:"
-  say "  VolDown+Power -> fastboot -> \`fastboot boot <twrp>\` -> cat /proc/last_kmsg"
-  say "which returns the *previous* run's RAM console. The watchdog sentence above is the case"
-  say "where this fails (a payload-armed reset), not the general one."
+  say "transition or a NEW \`fastboot boot\` (any later kernel clears the buffer on entry) - not every"
+  say "reset. Boot the STOCK ANDROID image directly (its kernel is what reads the console):"
+  if [[ -r $RECOVERY_IMAGE ]]; then
+    say "  VolDown+Power -> fastboot -> \`fastboot boot $RECOVERY_IMAGE\` -> in the Android shell,"
+  else
+    say "  VolDown+Power -> fastboot -> \`fastboot boot <stock Android boot.img>\` -> in the Android shell,"
+  fi
+  say "  \`cat /proc/last_kmsg\`   # returns the *previous* boot's RAM console"
+  say "Do NOT boot TWRP first: its kernel has no \`/proc/last_kmsg\` AND its boot takes the slot"
+  say "the log is in. The watchdog sentence above is the case where recovery fails outright."
   exit 2
 fi
 

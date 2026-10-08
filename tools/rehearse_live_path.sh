@@ -641,7 +641,14 @@ run_state happy-adb                 0 "reading the log this run captured" adb_up
 #    capture cannot run. This is exit 3 - "a return the host saw and adb missed", not a hang.
 run_state host-log-return-no-adb    3 "REFUSING to call this a hang" capture_fails
 # 3. nothing came back at all: no adb entry and no new enumeration.
-run_state no-return                 2 "The device did not come back" no_enum_after_boot
+#    **The recovery door's carrier is asserted here, not just its existence** (2026-10-08): the exit-2
+#    text used to name the TWRP door, which cannot work on this device (TWRP's kernel has no
+#    `/proc/last_kmsg`, and TWRP-first takes the previous-boot slot) — measured when a TWRP-first
+#    recovery returned TWRP's OWN log. So this cell requires the correct carrier to be printed AND the
+#    dead one to be forbidden, which is the pair that would have caught it before a run was spent.
+run_state no-return                 2 "Boot the STOCK ANDROID image directly" no_enum_after_boot \
+                                      "forbid:\`fastboot boot <twrp>\`" \
+                                      "forbid:Try the TWRP door this file already uses"
 # 4. the host log itself cannot be read: NOT a non-return, and not exit 2.
 run_state host-log-unreadable       1 "the host could not read its own USB log" dmesg_unreadable no_enum_after_boot
 # 5. adb mode, and the phone never shows up in fastboot after the reboot.

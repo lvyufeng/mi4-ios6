@@ -1019,3 +1019,61 @@ read the *arm's* behaviour (door/pce/seam/sleh) in fine detail but not the *goal
 kernel's init exec (§19). Each published its evidence and the reader never read it. All five now read;
 the owed press is read through every one at once, and any of them alone would have been a reading the
 operator had to grep for by hand.
+
+## 20. The recovery door named the wrong carrier, and it cost `21086959`'s log (2026-10-08)
+
+The session opened with the device reachable in fastboot (`4a2fe00b`, `33e80afe` absent) — the owed
+recovery window for `armed-storage-21086959` (§12). The documented door
+(`experiment-910-usb-debug-map.md:51`, the runner's exit-2 text, `scripts/908_watch_and_capture.sh`)
+was `VolDown+Power → fastboot → fastboot boot <twrp> → cat /proc/last_kmsg`. **It does not work, and
+trying it destroyed the evidence it was meant to read.**
+
+**What was measured, in order.**
+
+1. **TWRP-first does not read the console.** `908_watch_and_capture.sh` booted TWRP 3.7.0_9-0
+   (`recovery` on adb), and `grab()` reported `CAPTURED … 61B`. The 61 bytes were
+   `cat: can't open '/proc/last_kmsg': No such file or directory` — a **`cat` error on stdout**, which
+   the `grab()` acceptance test (`[ -s "$out.new" ]`, non-empty only) took as a log. Probing the TWRP
+   kernel directly: **no `/proc/last_kmsg`, no `/sys/fs/pstore`, no `/sys/kernel/ramoops`, no `/proc/kcore`,
+   and `/dev/mem` is refused** (`ENXIO` even after `mknod /dev/mem c 1 1` as root). Its version is
+   `Linux 3.4.113`. The reader that exposes the previous boot's RAM console as `/proc/last_kmsg` lives
+   in the **stock Android kernel** (Qualcomm ramoops, `no-teardown-debugging.md`), and TWRP's kernel was
+   built without it.
+
+2. **Booting anything consumes the single previous-boot slot.** Booting TWRP is itself a
+   `fastboot boot` of a *new* kernel whose own console takes the ramoops region. So even the correct
+   reader, run after TWRP, would read TWRP's console — not the run's.
+
+3. **Android-direct confirms both.** After `adb reboot bootloader` (from TWRP) and a non-persistent
+   `fastboot boot xiaomi4-cancro-backup-20260604-112053/boot.img` (sha256 `b2119252…`, the verified
+   golden image), the Android kernel came up and `/proc/last_kmsg` returned **81,812 bytes of the TWRP
+   kernel's own log** (`Linux 3.4.113`, TWRP markers, ending at `Restarting system with command
+   'bootloader'` — my own reboot). **Not one XNU byte.** The mechanism is nonetheless proven to work:
+   `/tmp/cancro-last_kmsg.txt.prev.54` **is** an XNU console (`MI4IOS6_STAGE90 v1 entered`, 3,930
+   Stage90 lines) read through Android's `/proc/last_kmsg` — the door works **only when the stock
+   Android kernel is booted directly after the run**, never with TWRP in between.
+
+**So `21086959`'s log is unrecoverable.** The TWRP boot displaced it. This is a measured cost, not a
+hypothesis: the §17–19 readers were built precisely to read that log, and the door the project
+documented is the one that erased it. **No brick** (nothing flashed; Android came up; fastboot remained
+reachable throughout) — the cost is the reading, not the device.
+
+**The fix (both files).**
+
+- `scripts/run_and_capture.sh` — the exit-2 recovery text now names the **stock Android** carrier
+  (`fastboot boot <stock Android boot.img> → cat /proc/last_kmsg`) and warns explicitly **not** to boot
+  TWRP first. A new `RECOVERY_IMAGE` constant points at the golden image. The rehearsal cell `no-return`
+  now asserts the corrected line **and forbids the two dead-door phrases**, which is the pair that would
+  have caught the defect before a run was spent.
+- `scripts/908_watch_and_capture.sh` — boots the golden Android image, and `grab()` now requires a real
+  console (≥1 KiB **and** content that is not a shell error line), so "the reader is absent" can no
+  longer masquerade as "the log was empty". The `adb=recovery` branch refuses instead of pretending to
+  read.
+
+**What this changes for the goal.** The §17–19 readers still stand (they are the right readers for a
+recovered log); what is lost is the one log they were aimed at. **The next press must create a fresh
+console to read**: either re-press `cb4e17f1` (the clean one-switch A/B) and recover it **Android-direct,
+never through TWRP**, or — if recovery is the immediate goal — boot a run directly and read it. Two
+facts read from the (finally working) Android shell are recorded beside this: `MemTotal = 2,935,868 kB`
+(~2.9 GB) and the low-bank span `0x80000000–0xde6fffff` (`0x5e700000`, ≈1.512 GB) — the Android OS's
+own view of the same memory the SMEM probe is meant to enumerate.
