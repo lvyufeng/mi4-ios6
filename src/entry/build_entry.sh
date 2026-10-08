@@ -27784,6 +27784,24 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `xnu_entry_905`/`xnu_entry_911d` guard, here across the kernel/payload split (the ceiling is used by
     # BOTH `osfmk_arm_arm_vm_init.o` and the payload's `stage90.h`, so the two could silently disagree).
     _memsize_req=${STAGE90_XNU_MEM_SIZE_MAX:-}
+    # **The ceiling arm is a 4570 shape (934).** `tools/patch_mem_size_max.py` makes `MEM_SIZE_MAX`
+    # a port in `osfmk/arm/arm_vm_init.c`, and that macro exists only on 4570 (Darwin 17). Darwin 13
+    # (iOS 7) has **no `MEM_SIZE_MAX` at all**: `arm_vm_init.c:327` does `max_mem = mem_size =
+    # sane_size = gMemSize;` with no clamp, so `memSize` flows straight to `pmap_bootstrap` and there is
+    # nothing to port. The patch is staged into 4570 alone, so on D13 the marker can never appear and
+    # this check would fail with a message naming a rebuild that cannot help. The switch is therefore
+    # **tree-aware**: on D13 a set `STAGE90_XNU_MEM_SIZE_MAX` is the 4570 switch set carried onto a tree
+    # that has no such port, and the honest answer is to name it, not to attempt it. (A D13 3 GB support
+    # is the region-list port of 915, a different mechanism.)
+    if [[ -f $XNU_TREE/osfmk/sys/types.h ]]; then
+        if [[ -n $_memsize_req && $_memsize_req != 0x40000000 ]]; then
+            say "REFUSING: STAGE90_XNU_MEM_SIZE_MAX=$_memsize_req is a 4570 switch and this is the" >&2
+            say "          Darwin-13 tree, whose arm_vm_init.c has NO MEM_SIZE_MAX to port (there is no" >&2
+            say "          ceiling to raise; memSize reaches pmap_bootstrap unclamped). Drop the switch" >&2
+            say "          for a D13 build - 3 GB on D13 is the region-list port (915), not this arm." >&2
+            exit 2
+        fi
+    fi
     _memsize_arm=unset
     if arm-none-eabi-nm "$ARM_ARM_VM_INIT_OBJ" 2>/dev/null | grep -q 'T entry_xnu_mem_size_max_arm_on'; then
         _memsize_arm=on
