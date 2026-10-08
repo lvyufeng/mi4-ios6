@@ -79,3 +79,35 @@ the modified script (703 objects) → **703/703 byte-identical**. `make check` 0
 *Provenance: `out/{d13_kernel_build.log,4570_base_build.log}`, `out/xnu_kernel_obj_d13/`,
 `out/mach_headers_d13/`. Host-side, reversible, no press. Related: experiment-916,
 [[mi4-913-ios7-rebase-decision]].*
+
+## 6. The next wall, measured and NOT crossed: Darwin-13's per-component doconf
+
+91 of the manifest's 367 sources remain. The largest single cluster is `CONFIG_*` tunables
+(`CONFIG_MAX_CLUSTERS` 50 sites, `CONFIG_VNODE_FREE_MIN`, `CONFIG_NC_HASH`, …). They are declared in
+Darwin-13's `bsd/conf/MASTER`, but `select_master.sh` reads only `osfmk/conf/MASTER` — the modern
+tree (4570) keeps **one** consolidated `config/MASTER`; the 2013 tree keeps a **per-component**
+`<component>/conf/MASTER` (7 of them, 395 `options` lines total). The layout guess reads 41 `-D`
+flags where the modern tree's 108 is the scale.
+
+A union of the seven was implemented and **reverted**, because it does not reproduce Apple's pipeline:
+
+- **Each component's `MASTER.arm` declares its own `RELEASE`** with different size attributes
+  (`osfmk`: `bsmall`; `libkern`: `medium`), so the union selects *both* `CONFIG_MAX_CLUSTERS=4` and
+  `=8` — 20 macros end up with two values. The modern tree's single declaration excludes one.
+- It surfaced a device condition the single-file read never saw: `vol` is a `pseudo-device` in
+  `bsd/conf/MASTER.arm` and an attribute of `osfmk`'s `RELEASE`, but has no `conf/files` need-word, so
+  the device-condition check refuses the build (`NVOL ... no generated header defines it`).
+
+Both are the same question — **how Apple's doconf composes per-component MASTERs into one
+configuration** — and answering it is a sub-project, not a line. Reverting kept the measured landmark
+(325/367) and the 4570 control intact (4570's `make_defines`/`expand`/`select_master` are provably
+byte-identical under the union too, so the work is preserved as a documented direction, not lost).
+
+### Rung 918 (next)
+
+1. Reproduce Apple's per-component doconf: per-component configurations, OR attribute-name scoping so
+   the size attributes cannot cross components.
+2. Decide `vol`: a `conf/files` need-word, or an explicit `NVOL` from the device table.
+3. Remaining after that: `bsdthread_*_args` incomplete (28 sites, a generated sysproto detail), the HD2
+   tree's malformed `# HTC HD2` marker in `version.h.template`/`Makefile.template`, and host-header
+   leakage (`bsd/dev/arm/conf.c` `<pty.h>`).
