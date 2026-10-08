@@ -37343,10 +37343,28 @@ run python3 "$REPO_ROOT/tools/check_undef_handler.py" --split --elf "$OUT/xnu_ar
 # are mutations of the linked image's own disassembly, and a selftest that cannot construct them is
 # reported as a failure rather than skipped - so a run of this line against an image built before 481
 # says so instead of passing quietly.
+# **944: 481's whole subject is 4570's machine — SKIPPED on D13, published.** The check reads five
+# things about the `ml_init_timebase` / `cpu_timebase_init` / `fiq_context_init` registration and the
+# four `cpu_data` offsets it is read back through. **None of those names exists on the Darwin-13 tree**:
+# `grep -rl <name> <D13>` is 0 for `ml_init_timebase`, `cpu_timebase_init`, `fiq_context_init`,
+# `ml_get_decrementer`, `ml_set_decrementer`, `rtclock_timebase_func` and `tbd_ops` alike. D13's timer
+# is the older **`clock_timebase_init()`** (`osfmk/arm/rtclock.c:327`), a different mechanism with a
+# different owner, so there is no table to register and nothing to read back — the clause checks the
+# *body* of a step the tree does not have, not a renamed one (the same shape 937 applied to 513–522,
+# [[mi4-off-option-two-spellings]]). This is a published skip, not silence: the section prints that it
+# was skipped and why, so it cannot read as "checked and passed"
+# ([[mi4-silence-is-a-reading-only-if-success-is-silent]]).
+if [[ -f $XNU_TREE/osfmk/sys/types.h ]]; then
+    say "  xnu_entry_944: SKIPPED on D13 - 481's ml_init_timebase/cpu_timebase_init/fiq_context_init"
+    say "          registration and its four cpu_data offsets are 4570's timer mechanism; Darwin 13 has"
+    say "          none of those names (its timer is clock_timebase_init(), osfmk/arm/rtclock.c:327), so"
+    say "          there is no table to register and no read-back to check. The check is 4570-only."
+else
 run python3 "$REPO_ROOT/tools/check_timebase_registration.py" --image "$OUT/xnu_arm_entry.elf" \
     --verbose || exit 1
 run python3 "$REPO_ROOT/tools/check_timebase_registration.py" --image "$OUT/xnu_arm_entry.elf" \
     --selftest || exit 1
+fi
 
 # **482's six claims, and the four that only the linked image can answer.** The GIC numbers, the two
 # candidate PPIs and the payload's own assertions are read from source; what has to be read out of the
