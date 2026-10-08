@@ -984,6 +984,13 @@ st_media_size(dev_t dev)
  * check that reads this function's body is reading a property of ONE named function, which is
  * layout-independent - and this rung's clause reads exactly the `mi_mdev` store in it.
  */
+/*
+ * **The whole memory-backed answer is mockfs's, and mockfs is a 4570 artefact (921).** Darwin-13 has
+ * no `bsd/miscfs/mockfs`, so nothing reads `DKIOCGETMEMDEVINFO` and the header does not declare it
+ * (`bsd/sys/disk.h`) - the `#ifdef` below is on that declaration, so the body is present exactly when
+ * the tree can ask it. On 4570 the switch is defined and nothing here changes.
+ */
+#ifdef DKIOCGETMEMDEVINFO
 __attribute__((noinline)) static int
 st_media_memdev_info(dev_t dev, dk_memdev_info_t *info)
 {
@@ -1054,6 +1061,7 @@ st_media_memdev_info(dev_t dev, dk_memdev_info_t *info)
     }
     return 0;
 }
+#endif /* DKIOCGETMEMDEVINFO */
 
 static int
 st_media_ioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
@@ -1066,8 +1074,10 @@ st_media_ioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
      * 862: the ioctl mockfs_mountroot reads. Answering it with a page count of the entry image's own
      * RAM disk is what makes this device memory-backed - see st_media_memdev_info.
      */
+#ifdef DKIOCGETMEMDEVINFO
     case DKIOCGETMEMDEVINFO:
         return st_media_memdev_info(dev, (dk_memdev_info_t *)data);
+#endif /* DKIOCGETMEMDEVINFO */
     /* --- the twelve `vfs_init_io_attributes` hard-requires: a non-zero return fails the mount --- */
     case DKIOCGETBLOCKSIZE:
         *(uint32_t *)data = st_media_blocksize[unit];

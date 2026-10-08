@@ -74,6 +74,26 @@
 #include "stage90_aes.h"
 
 /*
+ * **Which generation of corecrypto the selected tree ships (921).** Darwin-13's corecrypto predates
+ * the `ccchacha20poly1305` and `ccrsa` headers entirely - they are in 4570's `EXTERNAL_HEADERS/
+ * corecrypto/` and in no such directory of the 2013 tree - and the same era difference widens every
+ * mode: `struct ccmode_ctr` has no `ecb_block_size`/`setctr` in 4570's generation, `struct ccmode_xts`
+ * no `key_sched`, `struct ccmode_gcm` no `encdec`, and `struct crypto_functions` no `ccrng`, `ccrsa`,
+ * `ccchacha20poly1305`, or `ccpad_cts3` rows. The presence of the RSA header is therefore the token:
+ * it is a fact about the tree rather than a build switch, so this one `#if` selects the shape of the
+ * whole tail below and cannot be left stale by a tree change the way a hand-set define could.
+ */
+#if defined(__has_include)
+#  if __has_include(<corecrypto/ccrsa.h>)
+#    define STAGE90_CRYPTO_TREE_HAS_RSA 1      /* 4570 / Darwin 17: the wide table */
+#  else
+#    define STAGE90_CRYPTO_TREE_HAS_RSA 0      /* Darwin-13 / iOS 7: the narrow table */
+#  endif
+#else
+#  define STAGE90_CRYPTO_TREE_HAS_RSA 1
+#endif
+
+/*
  * Reporting, exactly as the generated stand-ins in `build_entry.sh` do it and exactly as
  * `stage90_pthread_functions.c` does it. Both symbols are defined by this image's own
  * `entry_stubs.c`, so pass 1 of `build_entry.sh` resolves them and no stub is generated for either.
@@ -127,7 +147,20 @@ _Static_assert(sizeof(struct stage90_aes_cbc_ctx) <= sizeof(aes_encrypt_ctx),
  * the same flags, as the code that reports the number - so if a flag changes the branch, the build
  * stops instead of the record quietly moving.
  */
-#if defined(__ARM_NEON__) && !defined(__arm64__)
+#if !STAGE90_CRYPTO_TREE_HAS_RSA
+/*
+ * **Darwin-13's `aes.h` has no bit-sliced term at all (921).** Its `AES_CBC_CTX_MAX_SIZE` is
+ * `ccn_sizeof_size(sizeof(void *)) + ccn_sizeof_size(16) + ccn_sizeof_size(64 * 4)` unconditionally
+ * (`aes.h:45`) - the 2013 corecrypto predates the NEON schedule the 4570 branch adds - so even with
+ * `__ARM_NEON__` defined (it is, on this cortex-a8 build) the tree takes the scalar size. The point
+ * of these two assertions is unchanged: the size is measured against the tree's own macro rather than
+ * predicted, so a tree that moves the macro stops the build instead of moving the record.
+ */
+_Static_assert(AES_CBC_CTX_MAX_SIZE == 276,
+               "Darwin-13's AES_CBC_CTX_MAX_SIZE is not 276, so the derivation above is stale");
+_Static_assert(sizeof(aes_encrypt_ctx) == (AES_CBC_CTX_MAX_SIZE + 15) / 16 * 16,
+               "aes_encrypt_ctx is not the 16-byte-rounded AES_CBC_CTX_MAX_SIZE");
+#elif defined(__ARM_NEON__) && !defined(__arm64__)
 _Static_assert(sizeof(aes_encrypt_ctx) == 1984,
                "AES_CBC_CTX_MAX_SIZE took the bit-sliced branch but does not come to 0x7C0");
 _Static_assert(AES_CBC_CTX_MAX_SIZE == 1972,
@@ -254,11 +287,13 @@ STAGE90_CRYPTO_STUB(cchmac_fn, void,
                      unsigned long data_len, const void *data, unsigned char *mac), (void)0)
 
 /* gcm's two free functions */
+#if STAGE90_CRYPTO_TREE_HAS_RSA
 STAGE90_CRYPTO_STUB(ccgcm_init_with_iv_fn, int,
                     (const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t key_nbytes,
                      const void *key, const void *iv), -1)
 STAGE90_CRYPTO_STUB(ccgcm_inc_iv_fn, int,
                     (const struct ccmode_gcm *mode, ccgcm_ctx *ctx, void *iv), -1)
+#endif
 
 /* the des key helpers */
 STAGE90_CRYPTO_STUB(ccdes_key_is_weak_fn, int, (void *key, unsigned long length), 1)
@@ -271,11 +306,14 @@ STAGE90_CRYPTO_STUB(ccpad_xts_encrypt_fn, void,
 STAGE90_CRYPTO_STUB(ccpad_xts_decrypt_fn, void,
                     (const struct ccmode_xts *xts, ccxts_ctx *ctx, unsigned long nbytes,
                      const void *in, void *out), (void)0)
+#if STAGE90_CRYPTO_TREE_HAS_RSA
 STAGE90_CRYPTO_STUB(ccpad_cts3_crypt_fn, size_t,
                     (const struct ccmode_cbc *cbc, cccbc_ctx *cbc_key, cccbc_iv *iv,
                      size_t nbytes, const void *in, void *out), 0)
+#endif
 
 /* rng and rsa */
+#if STAGE90_CRYPTO_TREE_HAS_RSA
 STAGE90_CRYPTO_STUB(ccrng_fn, struct ccrng_state *, (int *error), NULL)
 STAGE90_CRYPTO_STUB(ccrsa_make_pub_fn, int,
                     (ccrsa_pub_ctx_t pubk, size_t exp_nbytes, const uint8_t *exp,
@@ -283,6 +321,7 @@ STAGE90_CRYPTO_STUB(ccrsa_make_pub_fn, int,
 STAGE90_CRYPTO_STUB(ccrsa_verify_pkcs1v15_fn, int,
                     (ccrsa_pub_ctx_t key, const uint8_t *oid, size_t digest_len,
                      const uint8_t *digest, size_t sig_len, const uint8_t *sig, bool *valid), -1)
+#endif /* STAGE90_CRYPTO_TREE_HAS_RSA */
 
 /* the ecb method, shared by every stand-in descriptor of ecb/ctr/... shape */
 STAGE90_CRYPTO_STUB(mode_ecb_init, int,
@@ -335,6 +374,7 @@ STAGE90_CRYPTO_STUB(mode_digest_compress, void,
 STAGE90_CRYPTO_STUB(mode_digest_final, void,
                     (const struct ccdigest_info *di, ccdigest_ctx_t ctx,
                      unsigned char *digest), (void)0)
+#if STAGE90_CRYPTO_TREE_HAS_RSA
 STAGE90_CRYPTO_STUB(mode_chacha_info, const struct ccchacha20poly1305_info *, (void), NULL)
 STAGE90_CRYPTO_STUB(mode_chacha_init, int,
                     (const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx,
@@ -362,6 +402,7 @@ STAGE90_CRYPTO_STUB(mode_chacha_decrypt, int,
 STAGE90_CRYPTO_STUB(mode_chacha_verify, int,
                     (const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx,
                      const uint8_t *tag), -1)
+#endif /* STAGE90_CRYPTO_TREE_HAS_RSA */
 
 /*
  * The stand-in descriptors. Their scalar fields are the sizes of a context this image does not
@@ -371,6 +412,13 @@ STAGE90_CRYPTO_STUB(mode_chacha_verify, int,
  */
 #define STAGE90_CRYPTO_STANDIN_ECB  { .size = 0, .block_size = 0, \
     .init = stage90_crypto_mode_ecb_init, .ecb = stage90_crypto_mode_ecb_crypt }
+/*
+ * The ctr/xts/gcm descriptors carry the one field each that the 2013 corecrypto lacks: `ecb_block_size`
+ * and `setctr` on ctr, `key_sched` on xts, `encdec` on gcm (all `ccmode_impl.h`). The stub *functions*
+ * are the same in both generations - only the member layout differs - so the macros are the whole of
+ * the tree dependence here.
+ */
+#if STAGE90_CRYPTO_TREE_HAS_RSA
 #define STAGE90_CRYPTO_STANDIN_CTR  { .size = 0, .block_size = 1, .ecb_block_size = 0, \
     .init = stage90_crypto_mode_ctr_init, .setctr = stage90_crypto_mode_ctr_setctr, \
     .ctr = stage90_crypto_mode_ctr_crypt, .custom = NULL }
@@ -383,6 +431,20 @@ STAGE90_CRYPTO_STUB(mode_chacha_verify, int,
     .gmac = stage90_crypto_mode_gcm_gmac, .gcm = stage90_crypto_mode_gcm_gcm, \
     .finalize = stage90_crypto_mode_gcm_finalize, .reset = stage90_crypto_mode_gcm_reset, \
     .custom = NULL }
+#else
+#define STAGE90_CRYPTO_STANDIN_CTR  { .size = 0, .block_size = 1, \
+    .init = stage90_crypto_mode_ctr_init, \
+    .ctr = stage90_crypto_mode_ctr_crypt, .custom = NULL }
+#define STAGE90_CRYPTO_STANDIN_XTS  { .size = 0, .tweak_size = 0, .block_size = 0, \
+    .init = stage90_crypto_mode_xts_init, \
+    .set_tweak = stage90_crypto_mode_xts_set_tweak, .xts = stage90_crypto_mode_xts_crypt, \
+    .custom = NULL, .custom1 = NULL }
+#define STAGE90_CRYPTO_STANDIN_GCM(encdec_)  { .size = 0, .block_size = 0, \
+    .init = stage90_crypto_mode_gcm_init, .set_iv = stage90_crypto_mode_gcm_set_iv, \
+    .gmac = stage90_crypto_mode_gcm_gmac, .gcm = stage90_crypto_mode_gcm_gcm, \
+    .finalize = stage90_crypto_mode_gcm_finalize, .reset = stage90_crypto_mode_gcm_reset, \
+    .custom = NULL }
+#endif /* STAGE90_CRYPTO_TREE_HAS_RSA */
 #define STAGE90_CRYPTO_STANDIN_CBC  { .size = 0, .block_size = 0, \
     .init = stage90_crypto_mode_cbc_init, .cbc = stage90_crypto_mode_cbc_crypt, .custom = NULL }
 #define STAGE90_CRYPTO_STANDIN_RC4  { .size = 0, \
@@ -424,7 +486,9 @@ static const struct ccdigest_info stage90_ccsha1_di = STAGE90_CRYPTO_STANDIN_DIG
 static const struct ccdigest_info stage90_ccsha256_di = STAGE90_CRYPTO_STANDIN_DIGEST(ccsha256_di);
 static const struct ccdigest_info stage90_ccsha384_di = STAGE90_CRYPTO_STANDIN_DIGEST(ccsha384_di);
 static const struct ccdigest_info stage90_ccsha512_di = STAGE90_CRYPTO_STANDIN_DIGEST(ccsha512_di);
+#if STAGE90_CRYPTO_TREE_HAS_RSA
 static const struct ccchacha20poly1305_fns stage90_ccchacha20poly1305_fns = STAGE90_CRYPTO_STANDIN_CHACHA;
+#endif
 
 /* ------------------------------------------------------------------------------------------------
  * The table, and the one check on it that matters.
@@ -452,14 +516,18 @@ static const struct crypto_functions stage90_crypto_functions = {
     .ccaes_ecb_decrypt = &stage90_ccaes_ecb_decrypt,
     .ccaes_cbc_encrypt = &stage90_ccaes_cbc_encrypt,
     .ccaes_cbc_decrypt = &stage90_ccaes_cbc_decrypt,
+#if STAGE90_CRYPTO_TREE_HAS_RSA
     .ccaes_ctr_crypt = &stage90_ccaes_ctr_crypt,
+#endif
     .ccaes_xts_encrypt = &stage90_ccaes_xts_encrypt,
     .ccaes_xts_decrypt = &stage90_ccaes_xts_decrypt,
+#if STAGE90_CRYPTO_TREE_HAS_RSA
     .ccaes_gcm_encrypt = &stage90_ccaes_gcm_encrypt,
     .ccaes_gcm_decrypt = &stage90_ccaes_gcm_decrypt,
     .ccgcm_init_with_iv_fn = stage90_crypto_ccgcm_init_with_iv_fn,
     .ccgcm_inc_iv_fn = stage90_crypto_ccgcm_inc_iv_fn,
     .ccchacha20poly1305_fns = &stage90_ccchacha20poly1305_fns,
+#endif
     /* DES and triple DES */
     .ccdes_ecb_encrypt = &stage90_ccdes_ecb_encrypt,
     .ccdes_ecb_decrypt = &stage90_ccdes_ecb_decrypt,
@@ -481,12 +549,14 @@ static const struct crypto_functions stage90_crypto_functions = {
     /* XTS and CTS3 padding */
     .ccpad_xts_encrypt_fn = stage90_crypto_ccpad_xts_encrypt_fn,
     .ccpad_xts_decrypt_fn = stage90_crypto_ccpad_xts_decrypt_fn,
+#if STAGE90_CRYPTO_TREE_HAS_RSA
     .ccpad_cts3_encrypt_fn = stage90_crypto_ccpad_cts3_crypt_fn,
     .ccpad_cts3_decrypt_fn = stage90_crypto_ccpad_cts3_crypt_fn,
     /* rng and rsa */
     .ccrng_fn = stage90_crypto_ccrng_fn,
     .ccrsa_make_pub_fn = stage90_crypto_ccrsa_make_pub_fn,
     .ccrsa_verify_pkcs1v15_fn = stage90_crypto_ccrsa_verify_pkcs1v15_fn,
+#endif
 };
 
 /*

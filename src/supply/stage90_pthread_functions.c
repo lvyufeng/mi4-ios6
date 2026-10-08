@@ -199,6 +199,22 @@
  * this file is where that turns out to be wrong, and the reason is the one this paragraph is about.
  */
 
+/*
+ * **This whole table is a 4570 artefact (921).** Its reason to exist is `bsd/kern/pthread_shims.c`'s
+ * `pthread_init`, which panics "pthread kernel extension not loaded" when `pthread_functions` is NULL
+ * - and that file, and `<sys/pthread_shims.h>`, are in 4570's tree and not in Darwin-13's, where
+ * `pthread_init` is a plain function with no table to fill. The token is the header the file already
+ * needs, so it is a fact about the tree rather than a switch: present => compile the table (4570),
+ * absent => this translation unit contributes nothing (Darwin-13), and the object is still produced
+ * so the build's object count does not depend on the tree.
+ */
+#if defined(__has_include)
+#  if !__has_include(<sys/pthread_shims.h>)
+#    define STAGE90_PTHREAD_FUNCTIONS_OMITTED 1
+#  endif
+#endif
+
+#ifndef STAGE90_PTHREAD_FUNCTIONS_OMITTED
 #include <sys/eventvar.h>          /* first: see the circular-include note in the header comment */
 #include <sys/pthread_shims.h>     /* Apple's own definition of the table - the layout, not a copy */
 
@@ -773,3 +789,4 @@ static void stage90_pthread_functions_register(void)
 
     pthread_kext_register(&stage90_pthread_functions, &stage90_pthread_callbacks);
 }
+#endif /* !STAGE90_PTHREAD_FUNCTIONS_OMITTED */
