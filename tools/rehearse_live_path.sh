@@ -1019,6 +1019,24 @@ mk_sleeper_log() {
     if [[ $base == wdt-none ]]; then
       printf ' xnu_live_wdt_map=0x00000000\n xnu_live_wdt_via=0x00000000\n'
     fi
+    # **The storage clause's states.** The raw-card unit's capacity is the reading; `card-16g` and
+    # `card-32g` are the two parts the goal names, differing only in the block count / hi:lo bytes (so
+    # the MET band is read off the bytes, not a fixture coincidence), and `card-refused` is the unit
+    # that was not registered (no capacity measured).
+    if [[ $base == card-16g ]]; then
+      printf ' xnu_live_rootmedia_card_raw_registered=0x00000001\n'
+      printf ' xnu_live_rootmedia_card_raw_blocks=0x01d5a000\n'
+      printf ' xnu_live_rootmedia_card_raw_bytes_hi=0x00000003\n xnu_live_rootmedia_card_raw_bytes_lo=0xab400000\n'
+      printf ' xnu_live_rootmedia_card_dev=0x00000402\n xnu_live_rootmedia_card_lba=0x00400000\n'
+    fi
+    if [[ $base == card-32g ]]; then
+      printf ' xnu_live_rootmedia_card_raw_registered=0x00000001\n'
+      printf ' xnu_live_rootmedia_card_raw_blocks=0x03aac000\n'
+      printf ' xnu_live_rootmedia_card_raw_bytes_hi=0x00000007\n xnu_live_rootmedia_card_raw_bytes_lo=0x73594000\n'
+    fi
+    if [[ $base == card-refused ]]; then
+      printf ' xnu_live_rootmedia_card_raw_registered=0x00000000\n xnu_live_rootmedia_card_raw_refused=0x00000001\n'
+    fi
   } > "$out"
 }
 
@@ -1188,6 +1206,14 @@ reader_state wdt-nofeed    "=> RESIDENT, not yet fed" \
                               "so no feed landed"
 reader_state wdt-none      "vouched for NO mapping" \
                               "this log says neither resident nor dead"
+# **The storage clause's reader, one state per branch.** `card-16g`/`card-32g` are the two parts the
+# goal names and differ only in the bytes, so the MET band is a reading of the numbers; `card-refused`
+# is the unit that was not registered. The absent line is proven by `predicted` (no rootmedia keys).
+reader_state card-16g      "=> STORAGE MET: a 16 GB part, as the goal names." \
+                              "and the 903 mount: card_dev=0x00000402"
+reader_state card-32g      "=> STORAGE MET: a 32 GB part, as the goal names."
+reader_state card-refused  "the raw-card unit was NOT registered" \
+                              "the storage clause is not read here"
 # **The three states 609 added, one per clause that read absence as a fact about the machine.** Each is
 # the *same log* as the FAIL it replaces, plus the channel's own `capped` record, so the difference in
 # the reader's output is attributable to the channel and nothing else. Without these the three UNREAD

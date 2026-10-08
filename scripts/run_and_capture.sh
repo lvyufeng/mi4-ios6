@@ -3061,6 +3061,75 @@ summarise_log() {
     say "  ---- no xnu_live_wdt_ map: this image has no resident pet (RESIDENT off, or predates 909), ----"
     say "  ---- so its ending is the seam's, not the watchdog's, and the exit rungs above are the ----"
   fi
+
+  # ---------------------------------------------------------------------------------------------
+  # The storage clause: the CARD's own capacity (the raw whole-card unit), and the 903 mount.
+  # ---------------------------------------------------------------------------------------------
+  #
+  # **「16GB/32GB存储」 is the fourth key family this file did not read.** A grep for
+  # `xnu_live_rootmedia_` in it returned nothing, so the capacity reading the storage half of the
+  # newest clause is about - `xnu_live_rootmedia_card_raw_blocks` and the `_raw_bytes_hi/_lo` pair
+  # (911d registered a 4TH unit = the WHOLE card, not the partition extent) - sat unread beside the
+  # 903 mount's own keys (`_card_lba`/`_card_off`/`_card_last_lba`). The bytes are split hi/lo because
+  # they exceed 32 bits (~15.76 GB = 0x03AB400000, stage90_root_media.c:1436); a reader that took the
+  # low word alone would see a truncated 4 GiB. The raw bytes are decked against the card's RATED size
+  # (decimal GB - how SD parts are sold, not GiB): a ~16 or ~32 GB card is the clause met, and the
+  # block says which. Guarded on `_card_raw_registered`, so every rehearsed log (none carry
+  # `xnu_live_rootmedia_`) takes the else and stays byte-identical.
+  local card_reg
+  card_reg=$(keyval rootmedia_card_raw_registered)
+  if [[ -n $card_reg ]]; then
+    say ""
+    say "  the eMMC card, from the root media (the storage half of the newest clause)"
+    if [[ $card_reg != 0x00000001 ]]; then
+      say "  UNREAD  the raw-card unit was NOT registered (xnu_live_rootmedia_card_raw_registered=$card_reg,"
+      say "        refused=$(keyval rootmedia_card_raw_refused), err=$(keyval rootmedia_card_raw_err)): no"
+      say "        card capacity was measured, so the storage clause is not read here"
+    else
+      local card_sectors card_hi card_lo card_bytes
+      card_sectors=$(keyval rootmedia_card_raw_blocks)
+      card_hi=$(keyval rootmedia_card_raw_bytes_hi)
+      card_lo=$(keyval rootmedia_card_raw_bytes_lo)
+      if [[ -z $card_sectors ]]; then
+        say "  UNREAD  the raw unit registered but published no block count - the capacity is not in this log"
+      else
+        card_bytes=0
+        if [[ $card_hi =~ ^0x[0-9a-f]+$ && $card_lo =~ ^0x[0-9a-f]+$ ]]; then
+          card_bytes=$(( (card_hi << 32) | card_lo ))
+        fi
+        say "  xnu_live_rootmedia_card_raw_blocks=$card_sectors sector(s); bytes (hi:lo)=${card_hi:-?}:${card_lo:-?}"
+        if (( card_bytes == 0 )); then
+          say "  UNREAD  blocks=$card_sectors but the hi/lo bytes are absent or zero, so the byte length is"
+          say "        not read. blocks x 512 = $(( card_sectors * 512 )) would be the fallback - say which"
+        else
+          # decimal GB, as the part is rated; the clause is met by either a 16 or a 32 GB card.
+          local card_gb=$(( card_bytes / 1000000000 ))
+          say "  => the raw card reports $card_bytes bytes = ${card_gb} GB (decimal), i.e. $(keyval rootmedia_card_raw_blocks) x 512 B"
+          if (( card_gb >= 15 && card_gb < 20 )); then
+            say "  => STORAGE MET: a 16 GB part, as the goal names."
+          elif (( card_gb >= 30 && card_gb < 36 )); then
+            say "  => STORAGE MET: a 32 GB part, as the goal names."
+          else
+            say "  => STORAGE NOT MET as named: ${card_gb} GB is neither the 16 GB nor the 32 GB part the"
+            say "     goal names - read the block count against the device, not the clause"
+          fi
+        fi
+      fi
+      # **The 903 mount, beside the capacity.** The raw unit is the MEDIUM; the card unit is the
+      # SELECTION - `_card_lba` is where the mount read (`0x400000+`, the userdata head), `_card_off`
+      # the exec page off the HFS+ volume, and `_card_dev` the unit. It is printed only when present,
+      # because a log that measured the raw card need not have mounted (a later rung).
+      local card_lba
+      card_lba=$(keyval rootmedia_card_lba)
+      if [[ -n $card_lba ]]; then
+        say "  and the 903 mount: card_dev=$(keyval rootmedia_card_dev) card_lba=$card_lba card_off=$(keyval rootmedia_card_off) last_lba=$(keyval rootmedia_card_last_lba)"
+      fi
+    fi
+  else
+    say ""
+    say "  ---- no xnu_live_rootmedia_ keys: this image has no card root media (predates 903/911d), so ----"
+    say "  ---- the storage clause is read from the mount elsewhere, not from a card capacity here ----"
+  fi
 }
 
 # The port the phone is on, resolved once and only when this file is going to touch the device: it
