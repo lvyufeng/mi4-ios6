@@ -52,8 +52,34 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
-# The three fields, in the order `machine_load_context` loads them (`osfmk/arm/cswitch.s`).
-FIELDS = ["TH_CTH_SELF", "TH_CTH_DATA", "TH_KSTACKPTR"]
+# The fields, in the order `machine_load_context` loads them (`osfmk/arm/cswitch.s`).
+#
+# **There are two of these, because there are two context-switch schemes (934).** Darwin 17's
+# `machine_load_context` loads three `struct thread` fields into TPIDRURO/TPIDRURW and the register
+# save area - `TH_CTH_SELF`, `TH_CTH_DATA`, `TH_KSTACKPTR` - and that is the arrangement this check
+# was written for (`cswitch.s`'s own comment calls it "the first instruction sequence a newly
+# scheduled thread runs"). **Darwin 13's `osfmk/arm/cswitch.s:106-127` is a different scheme**: it
+# writes `r0` straight into TPIDRURO (`mcr p15, 0, r0, c13, c0, 4`, no `CTH_SELF` load at all), loads
+# one field `MACHINE_THREAD_CTHREAD_SELF` into `r1` (the `CTHREAD_SELF`, i.e. the `_cthread_self`/
+# `cthread_self` pair), reads TPIDRURW into `r2` (`mrc`), and takes the register save area from
+# `TH_PCB_ISS` (`ldr r3, [r0, TH_PCB_ISS]`) rather than a chain of `kstackptr`/`PCB` fields. The
+# offsets and the count are different, so the single 4570 list cannot describe it.
+#
+# The check's real property is unchanged: **every `ldr rX, [r0, #N]` immediately after the
+# thread-register `mcr` must equal the offset this configuration's `assym.s` gave that field**, so
+# `machine_load_context` reads `struct thread` where the C side laid it out. On the D13 scheme the
+# parked `mcr`/`mrc` pair is also asserted present, because a `machine_load_context` with no thread
+# register write is not the Darwin 13 sequence at all.
+SCHEMES = {
+    # 4570: three loads, `TH_CTH_SELF` first.
+    "4570": {"fields": ["TH_CTH_SELF", "TH_CTH_DATA", "TH_KSTACKPTR"], "require_mcr": False},
+    # D13: the `r0 -> TPIDRURO` write must precede a single `TH_CTHREAD_SELF` load, a TPIDRURW `mrc`,
+    # and the `TH_PCB_ISS` save-area load. The `mcr`/`mrc` are not fields; they are asserted, not
+    # compared.
+    "d13": {"fields": ["MACHINE_THREAD_CTHREAD_SELF", "TH_PCB_ISS"], "require_mcr": True},
+}
+# The default is the 4570 scheme, so a plain run is the check it always was.
+FIELDS = SCHEMES["4570"]["fields"]
 
 OBJDUMP = os.environ.get("ARM_OBJDUMP", "arm-none-eabi-objdump")
 
@@ -73,10 +99,11 @@ def read_assym(path):
     return values
 
 
-def load_offsets(obj):
+def scan(obj):
     """
-    `machine_load_context`'s `ldr rX, [r0, #N]` immediates, in the order they appear in the
-    disassembly.
+    `machine_load_context`'s shape, read from the disassembly: the `ldr rX, [r0, #N]` immediates in
+    the order they appear, and whether the thread-register write (`mcr p15, 0, r0, c13, c0, 4`, the
+    `TPIDRURO` store) is present.
 
     A function's extent is taken to be from its label to the next label at column 0 - the same rule
     the project's other disassembly readers use. The disassembly is `-dr` so that relocation lines
@@ -85,7 +112,8 @@ def load_offsets(obj):
     """
     dis = subprocess.run([OBJDUMP, "-dr", obj], capture_output=True, text=True, check=True).stdout
     inside = False
-    out = []
+    offsets = []
+    mcr = False
     for line in dis.splitlines():
         if re.match(r"^[0-9a-f]{8} <", line):
             inside = line.strip().endswith("<machine_load_context>:")
@@ -94,40 +122,58 @@ def load_offsets(obj):
             continue
         m = re.search(r"\bldr\s+r\d+,\s*\[r0,\s*#(\d+)\]", line)
         if m:
-            out.append(int(m.group(1)))
-    return out
+            offsets.append(int(m.group(1)))
+        # `TPIDRURO <- r0`: `mcr p15, 0, r0, c13, c0, 4` disassembles as `mcr 15, 0, r0, cr13,
+        # cr0, {4}`. A `mov r0, #0` before the `ldm` (present in both schemes) is what makes the
+        # thread register have to be written *before* that point, which is the D13 assertion.
+        if re.search(r"\bmcr\s+15,\s*0,\s*r0,\s*cr13,\s*cr0,\s*\{4\}", line):
+            mcr = True
+    return offsets, mcr
 
 
-def check(assym_path, obj_path):
+def load_offsets(obj):
+    """Back-compat wrapper: the `ldr` immediates only (the 4570 caller uses this)."""
+    return scan(obj)[0]
+
+
+def check(assym_path, obj_path, scheme="4570"):
     """
     Returns `(failures, notes)`. `failures` is empty when every arrangement holds.
     """
     failures = []
     notes = []
+    fields = SCHEMES[scheme]["fields"]
+    require_mcr = SCHEMES[scheme]["require_mcr"]
 
     values = read_assym(assym_path)
-    missing = [f for f in FIELDS if f not in values]
+    missing = [f for f in fields if f not in values]
     if missing:
         return ([f"{assym_path} has no numeric #define for {', '.join(missing)} - the file is not "
                  f"the assym.s gen_assym.sh writes, or the fields moved"], [])
 
-    want = [values[f] for f in FIELDS]
-    got = load_offsets(obj_path)
+    want = [values[f] for f in fields]
+    got, mcr = scan(obj_path)
+
+    if require_mcr and not mcr:
+        return ([f"{obj_path}'s machine_load_context has no `mcr p15, 0, r0, c13, c0, 4` - the "
+                 f"Darwin 13 scheme writes the thread's `struct thread *` into TPIDRURO there, and "
+                 f"without that write this is not the D13 context-switch sequence"], [])
 
     if not got:
         return ([f"no `ldr rX, [r0, #N]` in machine_load_context in {obj_path} - either the object "
                  f"does not define it or the disassembly rule no longer matches it"], [])
 
-    notes.append(f"assym {assym_path}: " + ", ".join(f"{f} {v}" for f, v in zip(FIELDS, want)))
+    notes.append(f"scheme {scheme}; assym {assym_path}: " +
+                 ", ".join(f"{f} {v}" for f, v in zip(fields, want)))
     notes.append(f"object {obj_path}: machine_load_context loads at " +
                  ", ".join(f"#{v}" for v in got))
 
     if len(got) != len(want):
         failures.append(f"machine_load_context has {len(got)} `ldr rX, [r0, #N]` instruction(s) and "
-                        f"this configuration has {len(want)} fields to read ({', '.join(FIELDS)})")
+                        f"this configuration has {len(want)} fields to read ({', '.join(fields)})")
         return (failures, notes)
 
-    for f, w, g in zip(FIELDS, want, got):
+    for f, w, g in zip(fields, want, got):
         if w != g:
             failures.append(f"machine_load_context reads [r0, #{g}] where this configuration's "
                             f"assym.s gives {f} = #{w} - the ARM layer was assembled against a "
@@ -137,11 +183,12 @@ def check(assym_path, obj_path):
     return (failures, notes)
 
 
-def selftest(assym_path, obj_path):
-    """Every one of the three values, one at a time, has to be refused."""
+def selftest(assym_path, obj_path, scheme="4570"):
+    """Every field of the scheme, one at a time, has to be refused."""
+    fields = SCHEMES[scheme]["fields"]
     text = open(assym_path, "r", errors="replace").read()
     refused = 0
-    for f in FIELDS:
+    for f in fields:
         m = re.search(r"^#define\s+%s\s+#(\d+)\s*$" % f, text, re.M)
         if not m:
             print(f"selftest: no numeric #define for {f} to mutate", file=sys.stderr)
@@ -150,16 +197,16 @@ def selftest(assym_path, obj_path):
         tmp = os.path.join("/tmp", f"assym-selftest-{f}.s")
         with open(tmp, "w") as fh:
             fh.write(mutated)
-        failures, _ = check(tmp, obj_path)
+        failures, _ = check(tmp, obj_path, scheme)
         if failures:
             refused += 1
         else:
             print(f"selftest: moving {f} by 16 was NOT refused - the comparison is not reading it",
                   file=sys.stderr)
         os.unlink(tmp)
-    if refused != len(FIELDS):
+    if refused != len(fields):
         return 1
-    print(f"selftest: all {refused} mutations were refused")
+    print(f"selftest[{scheme}]: all {refused} mutations were refused")
     return 0
 
 
@@ -171,8 +218,24 @@ def main():
     args = ap.parse_args()
 
     config = os.environ.get("XNU_KERNEL_CONFIG", "RELEASE")
-    assym = args.assym or os.path.join(REPO_ROOT, "out", "xnu_assym", config, "assym.s")
-    obj = args.object or os.path.join(REPO_ROOT, "out", "xnu_asm_obj", "cswitch.o")
+    # **934: both artifacts are TREE-derived roots.** `tools/xnu_tree_roots.sh` (933) gives every
+    # tree's output root a suffix - `_d13` iff the selected tree ships `osfmk/sys/types.h` - so a run
+    # against Darwin 13 writes `out/xnu_assym_d13/` and `out/xnu_asm_obj_d13/`. This script defaulted
+    # both to the *unsuffixed* 4570 paths, so an entry build on D13 compared the D13 object it had
+    # just assembled against 4570's `assym.s` and failed with three offsets that differed by exactly
+    # the two trees' `struct thread` layout - the check working, but on the wrong pair. The rule is
+    # the one file's; it is read here rather than respelled (asking the sourced shell for the resolved
+    # value keeps this the single definition).
+    suffix = os.environ.get("XNU_OBJ_SUFFIX")
+    tree = os.environ.get("XNU_TREE", os.path.join(REPO_ROOT, "external", "xnu-4570.1.46"))
+    if suffix is None:
+        suffix = "_d13" if os.path.isfile(os.path.join(tree, "osfmk", "sys", "types.h")) else ""
+    # **And the SCHEME follows the same discriminator.** D13 ships `osfmk/sys/types.h` and a
+    # `machine_load_context` that is a different sequence; the tree picks both the roots and the
+    # fields, so one `XNU_TREE` is enough for the whole check.
+    scheme = "d13" if os.path.isfile(os.path.join(tree, "osfmk", "sys", "types.h")) else "4570"
+    assym = args.assym or os.path.join(REPO_ROOT, "out", f"xnu_assym{suffix}", config, "assym.s")
+    obj = args.object or os.path.join(REPO_ROOT, "out", f"xnu_asm_obj{suffix}", "cswitch.o")
 
     for p in (assym, obj):
         if not os.path.exists(p):
@@ -180,9 +243,9 @@ def main():
             return 2
 
     if args.selftest:
-        return selftest(assym, obj)
+        return selftest(assym, obj, scheme)
 
-    failures, notes = check(assym, obj)
+    failures, notes = check(assym, obj, scheme)
     for n in notes:
         print(f"    {n}")
     if failures:
@@ -194,7 +257,8 @@ def main():
         print(f"        XNU_KERNEL_CONFIG={config} ./tools/gen_assym.sh", file=sys.stderr)
         print(f"        XNU_KERNEL_CONFIG={config} ./tools/assemble_arm_layer.sh", file=sys.stderr)
         return 1
-    print(f"ok: machine_load_context reads {', '.join(FIELDS)} at this configuration's offsets")
+    print(f"ok[{scheme}]: machine_load_context reads "
+          f"{', '.join(SCHEMES[scheme]['fields'])} at this configuration's offsets")
     return 0
 
 

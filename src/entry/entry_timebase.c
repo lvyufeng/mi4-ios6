@@ -158,7 +158,13 @@ extern void ml_init_timebase(void *args, const stage90_tbd_ops_t *tbd_funcs,
 /* The two functions this file wraps. `boolean_t` is a 32-bit unsigned word on this target and both
  * wrappers pass it through unchanged, so the parameter is spelled as the word it is. */
 extern void __real_PE_init_platform(uint32_t vm_initialized, void *args);
+/* **4570-only (934).** `fiq_context_init` is defined and called only by Darwin 17's `arm_init.c`/
+ * `machine_routines_asm.s`; Darwin 13 has neither, so on that tree `build_entry.sh` sets no
+ * `--wrap` for it and this whole wrapper - declaration, counters and body - is compiled out, leaving
+ * nothing that would reference an undefined `__real_fiq_context_init`. */
+#if STAGE90_ENTRY_FIQ_CTX
 extern void __real_fiq_context_init(uint32_t enable_fiq);
+#endif
 
 /* How long the first write's countdown sample is given. At the 19.2 MHz the payload measured
  * (`watchdog_hz = 0x7ffd`) one microsecond is ~19 ticks and this loop is a few hundred - i.e. a few
@@ -472,17 +478,30 @@ static const stage90_tbd_ops_t stage90_tbd_ops = {
 /* The registration                                                                               */
 /* --------------------------------------------------------------------------------------------- */
 
+/* **934: this file's one 4570-only reading.** `fiq_context_init` is defined and called by Darwin 17
+ * alone; `build_entry.sh` sets `-DSTAGE90_ENTRY_FIQ_CTX=1` only when the tree's own
+ * `machine_routines_asm.s` names the symbol, and on any tree where it does not, every part of the
+ * wrapper - the declaration below, `g_fiq_ctx_calls`, `g_cpu_*`, the `__wrap_` function and its
+ * report line - is compiled out, so nothing left in the object refers to a name no one defines. */
+#ifndef STAGE90_ENTRY_FIQ_CTX
+#define STAGE90_ENTRY_FIQ_CTX 0
+#endif
+
 static uint32_t g_pe_calls;
 static uint32_t g_registered;
 static uint32_t g_reg_args;
 static uint32_t g_reg_vm_init;
 static uint32_t g_reg_seq;
+#if STAGE90_ENTRY_FIQ_CTX
 static uint32_t g_fiq_ctx_calls;
+#endif
 
+#if STAGE90_ENTRY_FIQ_CTX
 static uint32_t g_cpu_get_dec = 0xFFFFFFFFu;
 static uint32_t g_cpu_set_dec = 0xFFFFFFFFu;
 static uint32_t g_cpu_fiq = 0xFFFFFFFFu;
 static uint32_t g_cpu_dec = 0xFFFFFFFFu;
+#endif
 
 /*
  * **`int_address`/`int_value` are passed as zero, and that is the honest value rather than a
@@ -544,6 +563,7 @@ void __wrap_PE_init_platform(uint32_t vm_initialized, void *args)
  * whether it held. The four words are read *before* the real call, i.e. at the state
  * `cpu_timebase_init` left, which is the state every later `ml_set_decrementer` will branch on.
  */
+#if STAGE90_ENTRY_FIQ_CTX
 void __wrap_fiq_context_init(uint32_t enable_fiq)
 {
     g_fiq_ctx_calls++;
@@ -563,6 +583,7 @@ void __wrap_fiq_context_init(uint32_t enable_fiq)
 
     __real_fiq_context_init(enable_fiq);
 }
+#endif
 
 /* --------------------------------------------------------------------------------------------- */
 /* The kernel's own deadline machinery, which is the thing all of the above exists to serve       */
@@ -831,11 +852,13 @@ __attribute__((noinline)) void entry_timebase_write_kv(void)
     entry_write_kv("xnu_entry_timebase_get_dec", (uint32_t)(uintptr_t)&stage90_tbd_get_decrementer);
     entry_write_kv("xnu_entry_timebase_set_dec", (uint32_t)(uintptr_t)&stage90_tbd_set_decrementer);
     entry_write_kv("xnu_entry_timebase_fiq", (uint32_t)(uintptr_t)&stage90_tbd_fiq_handler);
+#if STAGE90_ENTRY_FIQ_CTX
     entry_write_kv("xnu_entry_timebase_fiq_ctx_calls", g_fiq_ctx_calls);
     entry_write_kv("xnu_entry_timebase_cpu_get_dec", g_cpu_get_dec);
     entry_write_kv("xnu_entry_timebase_cpu_set_dec", g_cpu_set_dec);
     entry_write_kv("xnu_entry_timebase_cpu_fiq", g_cpu_fiq);
     entry_write_kv("xnu_entry_timebase_cpu_dec", g_cpu_dec);
+#endif
     entry_write_kv("xnu_entry_setpop_calls", g_setpop_calls);
     entry_write_kv("xnu_entry_setpop_deadline_lo", g_setpop_first_deadline_lo);
     entry_write_kv("xnu_entry_setpop_deadline_hi", g_setpop_first_deadline_hi);

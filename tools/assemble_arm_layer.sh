@@ -107,6 +107,11 @@ idle_patched=0
 ASSYM=$XNU_ASSYM_OUT/$CONFIG
 OPTION_HEADERS=$XNU_OPTION_HEADERS_OUT/$CONFIG
 DEVICE_HEADERS=$XNU_DEVICE_HEADERS_OUT/$CONFIG
+# 933 left this out: the INCLUDES below still spell `$GENERATED` while the rules file exports
+# `XNU_GENERATED`, so a plain run died on `GENERATED: unbound variable` under `set -u`. The two names
+# are the same root; this is the one-line assignment its two sibling builders (`build_xnu_arm_kernel.sh`
+# `:72`, `build_xnu_arm_layer.sh` `:43`) already had.
+GENERATED=$XNU_GENERATED
 UNDEF=${ASM_UNDEF:-$REPO_ROOT/out/link/$CONFIG-measure-undef.txt}
 
 NM=${NM:-arm-none-eabi-nm}
@@ -186,6 +191,40 @@ INCLUDES=(
 # The translation is its own tool: it is a parser over `.macro` blocks rather than a sed, and it
 # reports how many substitutions it made so a file needing none is used unchanged.
 TRANSLATE=$TOOLS_DIR/translate_arm_asm.py
+
+# **934: an object in the pool that the *selected manifest* does not name is not an object of this
+# layer, and it must be removed rather than left.** The pool directory is per-tree (`_d13`), so a run
+# against a tree does not mix trees - but a *manifest* change does not remove the previous run's
+# products, and the consumer is a glob: `build_entry.sh`'s 436 step adopts every `*.o` in
+# `$XNU_ASM_OBJ_OUT` (930), gated only on a `.log` sitting beside it. So a manifest that was once
+# built against the wrong tree, or an object assembled by hand, survives every later run and is
+# linked. Measured cost on this D13 build: `out/xnu_asm_obj_d13/` held `strncmp.o`/`strnlen.o`/
+# `strlen.o` - the 4570 `osfmk/arm/*.s` files, which D13 does not have (its `subrs.c` and
+# `loose_ends.c` define `strncmp`/`strnlen`/`strlen` in C, so the `.s` copies are duplicate
+# definitions) - left by an earlier run into the same root. The three survived the manifest switch,
+# passed the `.log` gate, and produced pass 1's `multiple definition of 'strncmp'`.
+#
+# Pruning the pool to the manifest's own set is the one rule that makes "the pool" mean "what this
+# manifest builds", independently of what any earlier configuration left behind. `.log` files are
+# removed with the `.o` (the entry build keys on their existence), and the `translated/` mirror is
+# left alone because it is keyed by path and re-materialized as needed.
+pruned=0
+kept=()
+while IFS= read -r src; do
+    case "$src" in *.s|*.S) ;; *) continue ;; esac
+    kept+=("$(basename "$src" .s)")
+done < "$MANIFEST"
+for _o in "$OUT"/*.o; do
+    [[ -e $_o ]] || continue
+    _n=$(basename "$_o" .o)
+    _know=0
+    for _k in "${kept[@]}"; do [[ $_k == "$_n" ]] && { _know=1; break; }; done
+    if [[ $_know -eq 0 ]]; then
+        rm -f "$_o" "${_o%.o}.log"
+        pruned=$((pruned + 1))
+    fi
+done
+[[ $pruned -gt 0 ]] && echo "  pruned $pruned object(s) not named by $(basename "$MANIFEST")"
 
 ok=0; fail=0; renamed=0; translated=0
 while read -r src; do

@@ -105,6 +105,23 @@ ARGS_BYTES=0x00001000          # one page, which is what `boot_args` needs to fi
 REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}
 STUB_DEFINES=()
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES=(-DSTAGE90_ENTRY_REAL_ARM_INIT=1)
+# **934: `fiq_context_init` is a 4570 name.** The trace wraps it to read the FIQ bank's copy of the
+# timebase handler out of `cpu_data`, and on 4570 the symbol exists (`machine_routines_asm.s:916`,
+# called from `arm_init.c:385/467/528`). **Darwin 13 never defines or calls it** - `grep -rln
+# fiq_context_init <D13>/` is empty; D13's `machine_routines_asm.o` has no such global - so the wrap
+# rewrites a reference to a symbol nothing defines, and the `__real_` half of that rewrite leaves
+# `fiq_context_init` undefined in pass 1 (which is a *false* failure: `--wrap` gates on the name the
+# build asked for, and the build asked for a 4570 name). The wrap is therefore built from the tree:
+# present only where the tree has the symbol. `PE_init_platform` is in both trees and stays
+# unconditional. On 4570 this yields the exact three words the line used to spell by hand.
+FIQ_CTX_WRAP=()
+[[ -e $XNU_TREE/osfmk/arm/machine_routines_asm.s ]] &&
+    grep -q 'fiq_context_init' "$XNU_TREE/osfmk/arm/machine_routines_asm.s" &&
+    FIQ_CTX_WRAP=(--wrap=fiq_context_init)
+# The wrapper *function* is guarded by the same question, because without the `--wrap` its
+# `__real_fiq_context_init` call is an ordinary undefined reference the stub generator would size from
+# nothing. Absent the switch, `entry_timebase.c` compiles the wrapper out entirely.
+[[ ${#FIQ_CTX_WRAP[@]} -gt 0 ]] && STUB_DEFINES+=(-DSTAGE90_ENTRY_FIQ_CTX=1)
 # `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s the seventy symbols listed in
 # `TRACE_LDFLAGS` below - `kalloc_canblock`,
 # `lck_grp_alloc_init`, `kernel_memory_allocate`, `vm_page_wait`, `thread_block`, (447)
@@ -180,7 +197,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=ml_get_timebase
                    --wrap=psignal
                    --wrap=setPop
-                   --wrap=PE_init_platform --wrap=fiq_context_init
+                   --wrap=PE_init_platform ${FIQ_CTX_WRAP[@]+"${FIQ_CTX_WRAP[@]}"}
                    --wrap=timer_call_enter
                    --wrap=timer_call_enter_with_leeway
                    --wrap=timer_call_quantum_timer_enter
@@ -27975,8 +27992,90 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # another object).
     ARM_LOCORE_OBJ=${STAGE90_ENTRY_LOCORE_OBJ:-$XNU_ASM_OBJ_OUT/locore.o}
     require "$ARM_LOCORE_OBJ" "run ./tools/assemble_arm_layer.sh first - 466 is also the step that assembles the ARM layer with the configuration's own options, which is what stops locore.o calling two functions the configuration does not compile"
+    # **934: the whole rename map below is 4570's, and Darwin 13's `locore.s` is a different file.**
+    # 4570's `osfmk/arm/locore.s` carries the vectors, the `fleh_*` handlers, `ResetHandlerData` and
+    # the three context-return names; D13 splits all of that away from it. D13's `locore.o` defines
+    # six globals and no more - `debstack`/`debstack_top`, `intstack`/`intstack_top`, `sleep_test` and
+    # `__start` - and **none of the entry image's names are among them** (`__start` is not `_start`),
+    # so there is nothing to rename; and the three context-return names the frontier needs are in D13's
+    # **`cswitch.s`** (`thread_bootstrap_return`/`thread_exception_return`/`thread_syscall_return`),
+    # which the pool glob below already assembles and adds. So on D13 this block is the *check* that
+    # the frontier's three names are the pool's cswitch object's, and the rename machinery - which
+    # would be skipping names this object does not have - is not built at all.
+    D13_LOCORE=0
+    D13_EXTRA_REFUSE=""
+    [[ -f $XNU_TREE/osfmk/sys/types.h ]] && D13_LOCORE=1
     ENTRY_LOCORE_OBJ="$OUT/xnu_arm_entry_locore.o"
+    LOCORE_SELF_OBJ="$ENTRY_LOCORE_OBJ"
+    LOCORE_LINK=("$ENTRY_LOCORE_OBJ")
     LOCORE_KEEP=(thread_bootstrap_return thread_exception_return thread_syscall_return)
+    if [[ $D13_LOCORE -eq 1 ]]; then
+        # The frontier is the *pool's own* object then: `cswitch.o`, assembled with the configuration's
+        # options by `assemble_arm_layer.sh` and named nowhere - the glob takes it whole. What is
+        # checked here is the two halves of what "the object of the step" means (466): the three names
+        # must be **defined by this object** - or the step is about a different symbol than it says -
+        # and, in the block below, **referenced by some other object in this link**.
+        ARM_CSWITCH_OBJ=${STAGE90_ENTRY_CSWITCH_OBJ:-$XNU_ASM_OBJ_OUT/cswitch.o}
+        require "$ARM_CSWITCH_OBJ" "run ./tools/assemble_arm_layer.sh first - D13's context-return names are in cswitch.s, not locore.s"
+        locore_defined=$(arm-none-eabi-nm --defined-only "$ARM_CSWITCH_OBJ" | awk '$2 ~ /^[TDBRW]$/ {print $3}')
+        for k in "${LOCORE_KEEP[@]}"; do
+            if ! grep -qx "$k" <<<"$locore_defined"; then
+                say "FAIL: '$k' is not defined by $ARM_CSWITCH_OBJ, so D13's frontier is not where this" >&2
+                say "      step says it is. The three are the names locore.s defines on 4570 and cswitch.s" >&2
+                say "      on D13; if D13 has moved them again, re-derive the object from the pool." >&2
+                exit 1
+            fi
+        done
+        if arm-none-eabi-nm --defined-only "$ARM_LOCORE_OBJ" | awk '$2 ~ /^[TDBRW]$/ {print $3}' |
+                grep -qxE "$(IFS='|'; echo "${LOCORE_KEEP[*]}")"; then
+            say "FAIL: $ARM_LOCORE_OBJ defines one of ${LOCORE_KEEP[*]} - D13 was expected to keep the" >&2
+            say "      context-return names out of locore.s. Two definers of the same name is a duplicate." >&2
+            exit 1
+        fi
+        # **The other half of 4570's rename: D13's vectors and `fleh_*` handlers live in
+        # `traps_lo.s`, and the entry image defines the same names itself.** On 4570 the pool's
+        # `locore.o` carries Apple's `fleh_*` and the rename makes it the *unreachable* copy under
+        # `locore_*`, which is exactly the name `entry_vectors.s`'s slots delegate to (slots 2/3/4/6
+        # go to Apple's own handlers). D13 splits that object: `traps_lo.o` defines the handlers, and
+        # `exctramps.o`/`memcpy4.o` define the vector base and the EABI fast copy. The pool glob would
+        # pull all three whole, and each collides with something the entry image defines
+        # (`entry_stubs.o`'s `fleh_*`, `entry_vectors.o`'s `ExceptionVectorsBase`, `entry_rtabi.o`'s
+        # `__aeabi_memcpy4`), which is pass 1's `multiple definition`.
+        #
+        # So D13 gets the same shape as 4570 with the object renamed: `traps_lo.o` is refused from the
+        # pool and a renamed copy is linked instead, carrying the six `fleh_*` names the entry image
+        # itself defines under the `locore_` prefix. The names the entry image does NOT define
+        # (`fleh_dataexc`, referenced by `osfmk_arm_cpu.o` and `exctramps.o`) stay unprefixed, so the
+        # copy still satisfies them. The set is the intersection with the entry's own definitions, not
+        # "every name the object defines" - the same rule 4570's seventeen come from.
+        ARM_TRAPS_OBJ=${STAGE90_ENTRY_TRAPS_OBJ:-$XNU_ASM_OBJ_OUT/traps_lo.o}
+        require "$ARM_TRAPS_OBJ" "run ./tools/assemble_arm_layer.sh first - D13's fleh handlers are in traps_lo.s"
+        traps_defined=$(arm-none-eabi-nm --defined-only "$ARM_TRAPS_OBJ" | awk '$2 ~ /^[TDBRW]$/ {print $3}')
+        rename_args=(); renamed=()
+        for sym in $traps_defined; do
+            case "$sym" in
+                fleh_dataabt|fleh_irq|fleh_prefabt|fleh_reset|fleh_swi|fleh_undef)
+                    rename_args+=(--redefine-sym "$sym=locore_$sym"); renamed+=("$sym") ;;
+            esac
+        done
+        LOCORE_RENAME_EXPECTED=(fleh_dataabt fleh_irq fleh_prefabt fleh_reset fleh_swi fleh_undef)
+        if [[ "${renamed[*]}" != "${LOCORE_RENAME_EXPECTED[*]}" ]]; then
+            say "FAIL: the names this step renames out of $(basename "$ARM_TRAPS_OBJ") are not the six the" >&2
+            say "      entry image defines. expected: ${LOCORE_RENAME_EXPECTED[*]}" >&2
+            say "      found:    ${renamed[*]}" >&2
+            exit 1
+        fi
+        cp -f "$ARM_TRAPS_OBJ" "$ENTRY_LOCORE_OBJ"
+        run arm-none-eabi-objcopy "${rename_args[@]}" "$ENTRY_LOCORE_OBJ"
+        LOCORE_SELF_OBJ="$ENTRY_LOCORE_OBJ"
+        LOCORE_LINK=("$ENTRY_LOCORE_OBJ")
+        say "  934: D13's frontier ${LOCORE_KEEP[*]} is defined by $(basename "$ARM_CSWITCH_OBJ") (the pool's own object); $(basename "$ARM_TRAPS_OBJ")'s six colliding fleh names are renamed locore_* in $ENTRY_LOCORE_OBJ"
+        # The other two colliding objects are refused by name, not renamed: `exctramps.o`'s
+        # `ExceptionVectorsBase` is the entry image's own vector page (nothing delegates to Apple's
+        # under a prefix), and `memcpy4.o`'s `__aeabi_memcpy4` is the alias `entry_rtabi.o` already
+        # provides. Both are added to the 436 refusal list below via `D13_EXTRA_REFUSE`.
+        D13_EXTRA_REFUSE="exctramps.o memcpy4.o"
+    else
     LOCORE_RENAME_EXPECTED=(ExceptionLowVectorsBase ExceptionLowVectorsEnd ExceptionVectorPanic \
                             ExceptionVectorsBase ExceptionVectorsEnd ExceptionVectorsTable \
                             fleh_addrexc fleh_dataabt fleh_dec fleh_decirq fleh_fiq_generic fleh_irq \
@@ -28015,11 +28114,12 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     cp -f "$ARM_LOCORE_OBJ" "$ENTRY_LOCORE_OBJ"
     run arm-none-eabi-objcopy "${rename_args[@]}" "$ENTRY_LOCORE_OBJ"
     say "  locore.o: ${#renamed[@]} duplicate name(s) renamed, $(arm-none-eabi-size "$ENTRY_LOCORE_OBJ" | awk 'NR==2 {print $1}') bytes of text"
+    fi  # D13_LOCORE
 
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ENTRY_LOCORE_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ" "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ" "$BSD_KERN_BSD_INIT_OBJ" "$BSD_KERN_KDEBUG_OBJ" "$OSFMK_VM_VM_INIT_OBJ" "$OSFMK_VM_VM_COMPRESSOR_OBJ" "$OSFMK_VM_VM_MAP_OBJ"
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" ${LOCORE_LINK[@]+"${LOCORE_LINK[@]}"} "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ" "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ" "$BSD_KERN_BSD_INIT_OBJ" "$BSD_KERN_KDEBUG_OBJ" "$OSFMK_VM_VM_INIT_OBJ" "$OSFMK_VM_VM_COMPRESSOR_OBJ" "$OSFMK_VM_VM_MAP_OBJ"
     "$LIBKERN_GEN_OSATOMICOPERATIONS_OBJ" "$BSD_KERN_KERN_MEMORYSTATUS_OBJ"
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
@@ -28279,7 +28379,22 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # --------------------------------------------------------------------------------------------
     declare -A _436_have=()
     for _o in "${LINK_OBJS[@]}"; do _436_have["${_o#"$REPO_ROOT"/}"]=1; done
-    _436_refuse="start.o locore.o iokit_KernelConfigTables.o"
+    # **934: the refusal list is a list of the entry image's own names, not of 4570's filenames.**
+    # Each name is refused because the image defines that name itself and the pool's copy would be a
+    # duplicate: `start.o` defines `_start`/`start_cpu`/`resume_idle_cpu`/`arm_init_tramp`, `locore.o`
+    # the vectors and the three context returns, `iokit_KernelConfigTables.o` `gIOKernelConfigTables`.
+    # On D13 the **files** differ: D13's `osfmk/arm/` ships no `start.s` at all, so
+    # `assemble_arm_layer.sh` never builds `start.o`; and `iokit/KernelConfigTables.cpp` is
+    # `optional iokitcpp`, which D13's RELEASE turns off, so that object is never compiled either.
+    # A refusal with nothing to refuse is not a stale list, and this is why the list is built by
+    # asking the pool whether each name exists rather than by naming it unconditionally: the per-name
+    # check below then only asserts about names the pool actually has. On 4570 all three exist, so the
+    # list is the full three, character-for-character what it was.
+    _436_refuse=""
+    for _base in start.o locore.o traps_lo.o iokit_KernelConfigTables.o $D13_EXTRA_REFUSE; do
+        [[ -f $XNU_KERNEL_OBJ_OUT/$_base || -f $XNU_ASM_OBJ_OUT/$_base ]] && _436_refuse+=" $_base"
+    done
+    _436_refuse=${_436_refuse# }
     _436_refused=""
     _436_scratch=""
     _436_already=0
@@ -28371,7 +28486,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # definition. The guard below keeps both halves of that rule honest.
     PASS1_LDFLAGS=()
     if [[ $ENTRY_TRACE -eq 1 ]]; then
-        PASS1_LDFLAGS=(--wrap=PE_init_platform --wrap=fiq_context_init)
+        PASS1_LDFLAGS=(--wrap=PE_init_platform ${FIQ_CTX_WRAP[@]+"${FIQ_CTX_WRAP[@]}"})
     fi
     # The library group is in *this* link as well as the final one, and that is not a detail: pass 1
     # is what produces the undefined set the stubs are generated from, so a symbol libgcc can supply
@@ -28442,21 +28557,21 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # the *success* the sentence above checks, and it cannot also be the evidence for the premise.
     locore_others=()
     for o in "${LINK_OBJS[@]}"; do
-        [[ $o == "$ENTRY_LOCORE_OBJ" ]] && continue
+        [[ $o == "$LOCORE_SELF_OBJ" ]] && continue
         locore_others+=("$o")
     done
     arm-none-eabi-nm -u ${locore_others[@]+"${locore_others[@]}"} 2>/dev/null |
         awk 'NF > 1 {print $NF}' | sort -u > "$OUT/xnu_arm_entry_locore_refs.txt"
     for k in "${LOCORE_KEEP[@]}"; do
         if ! grep -qx "$k" "$OUT/xnu_arm_entry_locore_refs.txt"; then
-            say "FAIL: nothing in this link references '$k', so locore.o defining it retires nothing." >&2
+            say "FAIL: nothing in this link references '$k', so the object defining it retires nothing." >&2
             say "      The three kept names are the frontier this step exists to retire; the objects" >&2
             say "      that reference them are the live paths to it. The other objects' undefined names" >&2
             say "      are in $OUT/xnu_arm_entry_locore_refs.txt." >&2
             exit 1
         fi
     done
-    say "  locore.o's three kept names are each referenced by another object in this link"
+    say "  the frontier object's three kept names are each referenced by another object in this link"
 
     # --------------------------------------------------------------------------------------------
     # 470: and the array the boot walks, checked against the undef set it is built from.

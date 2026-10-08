@@ -156,11 +156,32 @@ def device_table(path):
     return table
 
 
+# The trailing *attributes* of a `*/conf/files` condition, which are not conditions at all.
+# Apple's own reader (`SETUP/config/mkmakefile.c:473-477`) stops the option list at these words and
+# reads the next as a device/profiling marker rather than as a requirement:
+#
+#     if (eq(wd, "device-driver") || eq(wd, "profiling-routine")) {
+#             next_word(fp, wd);
+#             goto save;
+#     }
+#
+# with `ordered`/`sedit` skipped just above. D13's `osfmk/conf/files.arm:12` is
+# `osfmk/console/video_console.c  optional  vc device-driver`; 4570 writes the same row as
+# `optional video_console` (`osfmk/conf/files:301`) with no attribute. Treating `device-driver` as a
+# required condition made `vc device-driver` unmet on D13, so `video_console.o` - the definer of
+# `vcputc` - was dropped from the manifest and its caller `serial_console.o` ended with an undefined
+# `vcputc`. The fix is in the reader, not the manifest.
+_ATTRIBUTES = frozenset(("device-driver", "profiling-routine", "ordered", "sedit"))
+
+
 def condition_met(kind, flags, options_lc, extras=None):
     if kind == "standard":
         return True, ""
+    # Drop the trailing attribute words before deciding anything; a condition that is *only*
+    # attributes (`standard`-like rows) has no requirement left and is met.
+    flags = [f for f in flags if f.lower() not in _ATTRIBUTES]
     if not flags:
-        return False, "no condition given"
+        return True, ""
     extras = extras or {}
     if flags[0] == "not":
         present = [f for f in flags[1:] if f.lower() in options_lc or extras.get(f.lower())]
