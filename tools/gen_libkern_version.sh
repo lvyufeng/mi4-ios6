@@ -50,6 +50,18 @@ mkdir -p "$OUT/libkern"
 # copy first, stamp second, exactly as the rule does.
 install -m 0644 "$TEMPLATE" "$OUT/libkern/version.h"
 
+# **A first-line `#` comment is shell syntax in a C header, and it stops the preprocessor (918).**
+# The HD2 fork prepends its provenance marker to every file it touches, written as `/* ... */` in the
+# 2,249 files that are C or C-like - but `version.h.template` (and ~68 non-C files: man pages, shell,
+# perl) got a **bare `#`**, which is a *shell* comment. Copied verbatim into `version.h`, that line
+# becomes `# HTC HD2 integration/...`, and every file that reaches it (`startup.c`, `task.c`, the kdp
+# and pmc files) dies with `version.h:1:3: error: invalid preprocessing directive`. Normalise the one
+# marker form to the C comment the fork uses everywhere else. Inert on 4570: its template's line 1 is
+# `/*`, so the test never matches and the file is byte-identical.
+if head -1 "$OUT/libkern/version.h" | grep -q '^# HTC HD2 .*\.$'; then
+    sed -i '1s;^# \(HTC HD2 .*\)$;/* \1 */;' "$OUT/libkern/version.h"
+fi
+
 SRCROOT=$XNU OBJROOT=$OUT TARGET=$OUT perl "$NEWVERS" "$OUT/libkern/version.h" || {
     echo "newvers.pl failed" >&2; exit 2; }
 
