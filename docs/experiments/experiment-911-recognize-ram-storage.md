@@ -969,3 +969,14 @@ watchdog fed), and the 911 family's "non-return" is the success it was built to 
 IDLE_NO_SLEEP A/B (`cb4e17f1`) still discriminates: if 21086959 (no-sleep) shows pets and cb4e17f1
 (deep-idle) shows none/short, the wedge is in the deep-idle enter's cache-off window; if both show pets,
 the residence clause is MET and the remaining work is 911e, not the wedge.
+
+**The premises, verified against the artifact (not asserted).** §18's reading rests on four structural
+facts, each checked in the build rather than taken from prose: (1) `STAGE90_HW_WATCHDOG` defaults to
+`STAGE90_HW_WATCHDOG_ARMED` (`stage90.h:4149`) and the live arm's `xnu_arm_entry-config.txt` does **not**
+mention the watchdog, so the default applies — the 25 s/3 s arm at `stage90_main.c:1225` runs; (2) the
+**only** write to `WDT_REG_EN` in the whole tree is `1u` (`hw_watchdog.c:230`); nothing ever writes it
+`0`, and the arm's own read-back `en_after` is published (the fleet carries
+`loader_hw_watchdog_counter_running=0x00000001`, so the counter is seen running); (3) `entry_wdt_pet` is
+a real symbol in `xnu_arm_entry.elf` (`nm` → `t entry_wdt_pet`, with `g_wdt_pets` in `.bss`); (4) the
+payload publishes the `hw_watchdog_*` family the fixture mirrors. So "the watchdog is armed and the pet
+feeds it" is a reading of this image, not a claim about it.
