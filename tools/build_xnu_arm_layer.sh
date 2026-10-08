@@ -146,6 +146,26 @@ DEFINES=(
     -DCONFIG_SCHED_TRADITIONAL=1
 )
 
+# The subset of DEFINES that is genuinely **cross-component** — Apple's `KERNEL`/`__APPLE__`-level
+# build defines, not any one component's private switch. The extras loop (below) uses this plus the
+# target component's own `component_defines.sh` line, because the OSFMK-only switch
+# `MACH_KERNEL_PRIVATE` is INCOMPATIBLE with another component's: it makes
+# `osfmk/kern/misc_protos.h:124` declare `int printf(const char*, ...)` while `pexpert/protos.h:46`
+# declares `void printf(const char*, ...)` — same name, different return type, so a pexpert TU that
+# sees both does not compile. That is exactly the "one global flag set" modelling defect
+# `component_defines.sh` documents. This is inert for the osfmk/arm loop, which still uses DEFINES.
+GLOBAL_DEFINES=(
+    -DARMA7=1
+    -D__APPLE__=1
+    -DKERNEL=1
+    -DKERNEL_PRIVATE=1
+    -DPRIVATE=1
+    -DMACH_BSD=1
+    -D__arm__=1
+    -DCONFIG_EMBEDDED=1
+    -D__ARM_L2CACHE_SIZE_LOG__=21
+)
+
 INCLUDES=(
     -I"$GENERATED" -I"$GENERATED/bsd"
     -I"$MIG_HEADERS"
@@ -212,6 +232,38 @@ if [[ ${#skipped[@]} -gt 0 ]]; then
     printf 'osfmk/arm: skipped %d non-Apple (HD2 lab) TU(s): %s\n' "${#skipped[@]}" "${skipped[*]}"
 fi
 echo "osfmk/arm: $ok of $((ok + fail)) compile to objects"
+
+# Optionally compile one or more ADDITIONAL source directories with the same toolchain, defines and
+# include closure (913). This is how the probe reaches a subsystem whose files live outside
+# `osfmk/arm` — `pexpert` first, since it is the ARM platform layer the entry image feeds. Empty by
+# default, so the 4570 measurement (and the `osfmk/arm` count above) is byte-for-byte what it was.
+#   XNU_ARM_EXTRA_DIRS="pexpert/arm/common:pexpert/gen" ./tools/build_xnu_arm_layer.sh --syntax
+XNU_ARM_EXTRA_DIRS=${XNU_ARM_EXTRA_DIRS:-}
+for extra in ${XNU_ARM_EXTRA_DIRS//:/ }; do
+    [[ -d $XNU/$extra ]] || { printf 'no such extra dir: %s\n' "$XNU/$extra" >&2; continue; }
+    # Per-component defines, exactly as build_xnu_arm_kernel.sh applies them: `PEXPERT_KERNEL_PRIVATE`
+    # is what makes pexpert/pexpert.h:43 include <pexpert/protos.h> (where gPESocDispatch lives), so a
+    # pexpert TU compiled without it fails on an undeclared identifier, not a missing file. The
+    # component is the first path element of the extra dir.
+    EDEF=( $(bash "$TOOLS_DIR/xnu_config/component_defines.sh" "${extra%%/*}") )
+    eok=0; efail=0; eskipped=()
+    for src in "$XNU/$extra"/*.c; do
+        [[ -e $src ]] || continue
+        name=$(basename "$src" .c)
+        if [[ $EXCLUDE_HD2 -eq 1 ]] && grep -qE 'IOS7Leo|ios7leo_|ios7lab_|leo_user_frontier|ios7_compat|leo_qsd8250|leo_scanout' "$src"; then
+            eskipped+=("$name"); continue
+        fi
+        if "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${GLOBAL_DEFINES[@]}" "${EDEF[@]}" "${INCLUDES[@]}" \
+             -c "$src" -o "$OUT/$name.o" 2>"$OUT/$name.log"; then
+            eok=$((eok + 1))
+        else
+            efail=$((efail + 1))
+            printf '  FAIL %s/%s: %s\n' "$extra" "$name" "$(grep -m1 -E 'error:' "$OUT/$name.log" | cut -c1-110)"
+        fi
+    done
+    [[ ${#eskipped[@]} -gt 0 ]] && printf '%s: skipped %d non-Apple TU(s): %s\n' "$extra" "${#eskipped[@]}" "${eskipped[*]}"
+    echo "$extra: $eok of $((eok + efail)) compile to objects"
+done
 
 if [[ $fail -gt 0 ]]; then
     exit 1
