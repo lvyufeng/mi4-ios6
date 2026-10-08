@@ -966,6 +966,7 @@ mk_sleeper_log() {
     # every existing state above now also prints the block's absent line - and its expectations are
     # greps, so those rows stay green.
     if [[ $base == smem-banks || $base == smem-2g || $base == smem-mismatch ]]; then
+      printf ' xnu_live_smem_mapped=0x00000001\n xnu_live_smem_read_base=0xe0000000\n'
       printf ' xnu_live_smem_ptable_found=0x00000001\n'
       printf ' xnu_live_smem_ptable_off=0x00000008\n'
       printf ' xnu_live_smem_ptable_len=0x00000004\n'
@@ -989,6 +990,16 @@ mk_sleeper_log() {
           printf ' xnu_live_smem_banks=0x00000002\n xnu_live_smem_total_bytes=0xc0000000\n'
           ;;
       esac
+    fi
+    # SMEM mapped but no partition table - the block's third state, and the one whose narration
+    # reads the mapping keys (`_mapped`/`_read_base`) rather than a bank list. Without this cell that
+    # branch is a paragraph nothing has run (the debt `goal-truncated`/`baseline-arm` closed for
+    # their own guards).
+    if [[ $base == smem-notable ]]; then
+      printf ' xnu_live_smem_mapped=0x00000001\n xnu_live_smem_read_base=0x0fa00000\n'
+      printf ' xnu_live_smem_ptable_found=0x00000000\n xnu_live_smem_ptable_off=0x00000000\n'
+      printf ' xnu_live_smem_part_seen=0x00000000\n xnu_live_smem_banks=0x00000000\n'
+      printf ' xnu_live_smem_total_bytes=0x00000000\n xnu_live_smem_toc_allocated=0x00000003\n'
     fi
   } > "$out"
 }
@@ -1142,9 +1153,12 @@ reader_state goal-bad-values  "the fault is in the values" \
 # MET / NOT-MET / mismatch readings are attributable to the sizes and not to some other difference.
 # The `predicted` row above carries no SMEM keys and so also proves the block's absent line prints -
 # which is what keeps it from being a paragraph that fires only on a log no rehearsal has built.
-reader_state smem-banks    "=> 3 GB MET: the banks sum to 0xc0000000 (3072 MB), the Mi 4's own RAM."
+reader_state smem-banks    "=> 3 GB MET: the banks sum to 0xc0000000 (3072 MB), the Mi 4's own RAM." \
+                              "xnu_live_smem_mapped=0x00000001 read_base=0xe0000000"
 reader_state smem-2g       "=> 3 GB NOT MET: the banks sum to 2048 MB"
 reader_state smem-mismatch "FINDING  the per-bank sum and the probe's own xnu_live_smem_total_bytes disagree"
+reader_state smem-notable  "SMEM was mapped but no RAM-partition table was found" \
+                              "xnu_live_smem_mapped=0x00000001 read_base=0x0fa00000"
 # **The three states 609 added, one per clause that read absence as a fact about the machine.** Each is
 # the *same log* as the FAIL it replaces, plus the channel's own `capped` record, so the difference in
 # the reader's output is attributable to the channel and nothing else. Without these the three UNREAD

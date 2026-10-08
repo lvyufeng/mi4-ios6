@@ -2951,6 +2951,11 @@ summarise_log() {
     smem_pf_n=$(( smem_pf ))
     say ""
     say "  the Mi 4's RAM, from SMEM (entry_smem_probe): the newest goal clause's reading"
+    # **Reading (1) of the arm's own record: did the probe run and reach SMEM?** `_mapped` says a
+    # section installed and `_read_base` names which VA did (`0xe0000000` if the high alias took,
+    # `0x0fa00000` if only the identity) - so it is printed above the banks, where it answers "did the
+    # probe run at all" before "what did it find". A `_mapped=0` is a reading, not a failed run.
+    say "  xnu_live_smem_mapped=$(keyval smem_mapped) read_base=$(keyval smem_read_base)"
     smem_banks=$(keyval smem_banks)
     smem_total=$(keyval smem_total_bytes)
     smem_part=$(keyval smem_part_seen)
@@ -2958,8 +2963,9 @@ summarise_log() {
     smem_len=$(keyval smem_ptable_len)
     if (( smem_pf_n == 0 )); then
       say "  UNREAD  SMEM was mapped but no RAM-partition table was found (xnu_live_smem_ptable_found=0),"
-      say "        so this log carries no bank layout at all. That is itself a reading - report the"
-      say "        probe's mapping keys (xnu_live_smem_alias_map/_ident_map/_ttbr0/_phys_base) beside it"
+      say "        so this log carries no bank layout at all. That is itself a reading: read the mapping"
+      say "        keys above (_mapped/_read_base - which VA installed) and xnu_live_smem_toc_allocated"
+      say "        (the TOC census) to separate a wrong SMEM base from a device that publishes no table"
     else
       # The sum is computed here from the per-bank cells and then compared to the total the probe
       # *itself* published - so a probe whose cells and total disagree (a defect, not a memory size)
