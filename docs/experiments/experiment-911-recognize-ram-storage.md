@@ -1077,3 +1077,66 @@ never through TWRP**, or — if recovery is the immediate goal — boot a run di
 facts read from the (finally working) Android shell are recorded beside this: `MemTotal = 2,935,868 kB`
 (~2.9 GB) and the low-bank span `0x80000000–0xde6fffff` (`0x5e700000`, ≈1.512 GB) — the Android OS's
 own view of the same memory the SMEM probe is meant to enumerate.
+
+## 21. PRESSED: `armed-storage-cb4e17f1` — the OS idles, the cache window enters AND returns; SMEM maps but no ptable (2026-10-08)
+
+**Authorized by the operator this session, booted host-side** (`adb reboot bootloader` → non-persistent
+`fastboot boot`, bytes `a11e33ac…` unchanged across the send) after the operator explicitly ruled that a
+host-side non-persistent boot counts as the press. Entry bin `cb4e17f1`, 16 MB window, whole USB ladder
+OFF, `SMEM_PROBE=1 RESIDENT=1 IDLE_NO_SLEEP=0`, `POST_END_TICKS=0`. **The device returned** — the runner's
+section 4 saw a new `SerialNumber: 4a2fe00b` enumeration 96 s after the send (exit 3: returned, but the
+adb capture missed because adbd had not come up). The log was recovered **Android-direct, never through
+TWRP** (§20): the device fell to fastboot, the golden Android `boot.img` was booted non-persistently, and
+`cat /proc/last_kmsg` returned **913,107 B, 3,930 `MI4IOS6_STAGE90` lines** (sha256 `f2b5ad2b…`,
+`out/stage90/captures/cb4e17f1-20261008-last_kmsg.txt`). **This is the first recovered XNU console in the
+911 family** — §12's `21086959` was lost to the wrong door; this one was read through the fixed one.
+
+**THE LANDMARK: the OS is up and idling, and the 909 wedge did NOT reproduce.** The console's own OS lines:
+
+- `mini4: the OS's own init load returned, so pid 1 has the init image (caller 0x80051ed8)` — and
+  `xnu_live_exec_done_seq=1`, `_done_who=1`: launchd loaded and `load_init_program` **returned**.
+- `mini4: the OS has nothing to run -- pid 1 parked in poll for 2000 ms ... the kernel's own idle path
+  was entered 74698 time(s)`.
+- `mini4: the idle's cache window -- platform_cache_idle_enter entered 1 time(s) ... and returned 1` —
+  **the cache-off window 909's R14 localized the wedge INSIDE entered and returned here.** The payload's
+  own wrapper confirms it: `xnu_live_idlestack_calls` runs 1..0x2d (45) and `xnu_live_wfi_ticks` advances
+  across 45 `wfi` iterations (0x024b6569 → 0x024c66a8). The console ends `No errors detected` with **no
+  panic, no MACH Reboot** (`xnu_live_seam_end_run=0`, `_post_end_run=0` — the seam's self-end is compiled
+  out, `POST_END_TICKS=0`). So this arm **got past the point 909 arms died at** and ran the OS kernel.
+
+**The two `data abort` lines are the payload's OWN self-test, not a fault.** `dfar=0xdeadc000
+dfsr=0x05` at `stage90_xnu_arm_vm_init_high_va_data_abort_handler` with `_abort_triggered=1` is the
+handler deliberately faulting to prove the high-VA vector works (`_status=0x90000001`,
+`_failure_mask=0`). It is not an unhandled exception.
+
+**THE 3 GB CLAUSE IS STILL NOT MET — and now we know WHY.** The SMEM probe ran and is fully legible:
+
+- `xnu_live_smem_mapped=1`, `_read_base=0xe0000000` (the **high alias** took; `_alias_map=1`,
+  `_ident_map=1`), `_l1_moved=1`, `_part_stride=0x38` (56, correct).
+- **but `xnu_live_smem_ptable_found=0`, `_ptable_off=0`, `_part_seen=0`, `_banks=0`,
+  `_total_bytes=0`.** SMEM was mapped and the heap TOC walked (`_toc_allocated=0x1c`), yet **no magic
+  `0x9DA5E0A8`/`0xAF9EC4E2` table was found anywhere in the mapped window.** So the probe's *assumption*
+  about where the RAM-partition table lives (`SMEM+0xD0` heap_info → `heap_toc` → a table keyed by magic)
+  does not match this device. The 3 GB question is therefore **still unmeasured**, but the failure is now
+  a *located* one: the table is not at the TOC-addressed offset the probe expects. This is the concrete
+  next step for 911c/911e — find where the table actually is (the Qualcomm SMEM RAM-partition table is
+  typically the `SMEM_RAM_PARTITION_TABLE` item, not a heap-TOC entry), or read the device's memory map
+  directly.
+
+**THE STORAGE CLAUSE HOLDS.** `=> STORAGE MET: a 16 GB part` — `xnu_live_rootmedia_card_raw_blocks=
+0x01d5a000` × 512 B = 15,758,000,128 B; the 903 mount unchanged at `LBA 0x400000+` (card unit dev
+`0x04000002`), `BSD root: md0, major 4, minor 2`.
+
+**RESIDENCY: entered but un-petted.** `xnu_live_wdt_map=0`, `_pets=0`, `_countdown` advancing
+(0x172d5→0x174f8) and `_bark=0xc7fb5`. The pet site was not reached, so the runner reads
+**UNREAD** ("the mapping was vouched for but no pet published"). Given the OS ran 74,698 idle iterations
+(the watchdog's 25 s BARK vs the `0xc7fb5` ≈ 819,125-tick countdown), the run's END is most consistent
+with the armed watchdog biting after the OS went idle with nothing feeding it — but the console records
+no reset line, so the *ending* is inferred, not read. What IS read: the run did not panic, did not
+self-end, and did not wedge at 909's point.
+
+**Net for the goal.** 「进入操作系统，把基础驱动跑起来」 is strongly evidenced (pid 1 user-mode at `0x10e0`,
+launchd loaded, the kernel idle loop running). 「保持在xnu里」 is *not yet* watched-the-watchdog-proofed
+(pets=0). 「正确识别 3GB」 is NOT met — the SMEM probe reached SMEM but the partition table was not where
+it looked. 「直接开机就运行xnu」 still needs p19 (currently holds stock Android; 908 proved the write
+works but p19 was restored for safety).
