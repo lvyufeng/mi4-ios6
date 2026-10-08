@@ -980,3 +980,42 @@ mention the watchdog, so the default applies — the 25 s/3 s arm at `stage90_ma
 a real symbol in `xnu_arm_entry.elf` (`nm` → `t entry_wdt_pet`, with `g_wdt_pets` in `.bss`); (4) the
 payload publishes the `hw_watchdog_*` family the fixture mirrors. So "the watchdog is armed and the pet
 feeds it" is a reading of this image, not a claim about it.
+
+## 19. The storage clause was the fourth key family with no reader (2026-10-08)
+
+The sweep for the gap class of §17/§18 found it a third time, and it is the *storage half* of the newest
+clause. `grep xnu_live_rootmedia_ run_and_capture.sh` returned nothing. 911d registered a **4th unit =
+the WHOLE card** (`ST_MEDIA_CARD_RAW`), and its capacity lives in `xnu_live_rootmedia_card_raw_blocks`
+plus the `_raw_bytes_hi`/`_raw_bytes_lo` pair — split hi/lo because the byte length exceeds 32 bits
+(~15.76 GB = `0x03AB400000`, `stage90_root_media.c:1436`), so a reader that took the low word alone
+would see a truncated 4 GiB. The 903 mount's own keys (`_card_lba`/`_card_off`/`_card_last_lba`) sat
+unread beside them.
+
+The new top-level block (guarded on `_card_raw_registered`) reconstructs the byte length from the hi/lo
+pair and decks it against the card's **rated** size in **decimal** GB (how SD parts are sold, not GiB —
+a "16 GB" card is ~15.76 GB): 15–20 GB → **STORAGE MET, a 16 GB part**; 30–36 GB → **a 32 GB part**; else
+NOT MET as named. Three rehearsal fixtures: `card-16g` and `card-32g` differ only in the bytes (so the
+band is a reading of the numbers), and `card-refused` is the unit not registered. Battery green **20/0,
+25/0 (+3 rows), 4/0**. Commit `0ee7adb`.
+
+**The reader-coverage debt.** Three separate goal clauses — the 3 GB SMEM reading (§17), the residency
+pet (§18), and this card capacity — each had their evidence published and unread. The common shape was
+that the runner could read the *arm's* behaviour (door/pce/seam/sleh) in detail but not the *goal's* own
+answers. That gap is now closed for all three families; the owed press is read through all of them at
+once.
+
+**And a fourth — the OS-entry clause, the oldest unread family (`3a4d757`).** `xnu_live_exec_*`
+(`entry_stubs.c:4966`, 509) is the kernel's **own** init load, not the fixture's: `load_init_program`
+returns on every success arm and its only other exit is `panic("Process 1 exec of %s failed")`, so
+**`xnu_live_exec_done_seq` exists iff the OS loaded `/sbin/launchd`** — the reading under the console's
+last line, and the one the goal's 「进入操作系统」 turns on. The runner read none of it. A top-level
+block now prints **OS ENTERED** (done_seq present) or the entered-not-returned branch (a panic, or a
+death before it), with `_who`(1)/`_done_current`(0 = kernproc) naming where the loader ran. Two
+fixtures (`exec-done`/`exec-entered`, one line apart). Battery **20/0, 27/0 (+2 rows), 4/0**.
+
+**Reader-coverage debt, closed (five families).** The same shape recurred five times — the runner could
+read the *arm's* behaviour (door/pce/seam/sleh) in fine detail but not the *goal's* own answers: the
+3 GB SMEM banks (§17), the residency pet (§18), the card capacity and the 903 mount (§19), and the
+kernel's init exec (§19). Each published its evidence and the reader never read it. All five now read;
+the owed press is read through every one at once, and any of them alone would have been a reading the
+operator had to grep for by hand.
