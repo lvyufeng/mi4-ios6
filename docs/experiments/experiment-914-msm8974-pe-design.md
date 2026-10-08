@@ -96,3 +96,38 @@ This is host-side and reversible; no press.
 
 *Provenance: `out/xnu_arm_obj_d13/undefined.txt` (175 symbols, this session), `boot_args` diff read
 from both trees' `pexpert/arm/boot.h`, in-repo constants cited above; device untouched.*
+
+## 7. The board PE, written and compiling green (2026-10-08)
+
+`src/platform/darwin13/pe_msm8974.c` is written — ours, our license, modelled on the *shape* of the
+reusable `pe_socsupport.c`/`pe_bcm2835.c` only. It defines exactly the one symbol the generic PE
+reaches for, `PE_init_SocSupport_stub()`, and fills `gPESocDispatch`. Three findings corrected the
+§1/§2 model:
+
+- **`PE_cpu_machine_init` is NOT a board symbol on ARM.** It is defined generically in
+  `iokit/Kernel/IOCPU.cpp:271` (`void PE_cpu_machine_init(cpu_id_t, boolean_t)`) and declared in
+  `pexpert/pexpert/pexpert.h:285`. `osfmk/arm/cpu.c:1055` calls it; no board file defines it. So the
+  board deliverable is **the dispatch table alone** — smaller than §2's sketch.
+- **`gPESocDispatch` is declared in the reusable file** (`pexpert/arm/common/pe_socsupport.c`, winocm
+  APSL-2.0 — the same license the generic core carries), so the board only *assigns to* it; the
+  object's `U gPESocDispatch` is satisfied by that file. Same for `PE_early_puts`/`PE_early_putc`
+  (`pe_kprintf.c`) — the board PE's only two undefined symbols are both reusable-generic.
+- **`files.arm` lists every board unconditionally**; the `#if defined(BOARD_CONFIG_$(MACHINE_CONFIG))`
+  gate is the whole selection, and `-DBOARD_CONFIG_$(MACHINE_CONFIG)` comes from `MakeInc.def:245`
+  against `SUPPORTED_ARM_MACHINE_CONFIGS` (`:123`). So adding msm8974 is a board-config name, not a
+  new mechanism.
+
+**The probe switches this forced** (`tools/build_xnu_arm_layer.sh`): `XNU_ARM_EXTRA_DIRS` now accepts
+an **absolute path** (our source lives outside the tree — we never write into `external/`);
+`XNU_ARM_EXTRA_DEFINES` carries the board config `-DBOARD_CONFIG_MSM8974=1`; `XNU_ARM_EXTRA_COMPONENT`
+names the component when the path can't (absolute), defaulting to `pexpert`; and the HD2-exclusion
+heuristic is **scoped to tree-relative dirs only**, because our own source legitimately *names* HD2
+symbols in its citations and a comment-scan would skip it for mentioning what it does not use.
+
+**The number:** the board PE compiles **1 of 1** against Darwin-13 with no errors, emitting
+`T PE_init_SocSupport_stub` + `T PE_init_SocSupport_msm8974`, and its only undefineds are the two
+reusable-generic symbols above. The `osfmk/arm` count is unchanged (**15 of 15** with
+`XNU_ARM_EXCLUDE_HD2=1`) and the **4570 control is 32 of 32**, `make check` exit **0**.
+
+*Provenance: `out/xnu_arm_obj_d13/pe_msm8974.o` (`arm-none-eabi-nm`), the compile above; device
+untouched, host-side, reversible, no press.*

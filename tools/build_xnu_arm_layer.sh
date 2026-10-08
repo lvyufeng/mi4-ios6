@@ -238,19 +238,40 @@ echo "osfmk/arm: $ok of $((ok + fail)) compile to objects"
 # `osfmk/arm` — `pexpert` first, since it is the ARM platform layer the entry image feeds. Empty by
 # default, so the 4570 measurement (and the `osfmk/arm` count above) is byte-for-byte what it was.
 #   XNU_ARM_EXTRA_DIRS="pexpert/arm/common:pexpert/gen" ./tools/build_xnu_arm_layer.sh --syntax
+# An entry may also be an ABSOLUTE path, which is how the probe reaches OUR board PE
+# (src/platform/darwin13/pe_msm8974.c) without writing a file into the external tree:
+#   XNU_ARM_EXTRA_DIRS="$REPO_ROOT/src/platform/darwin13" XNU_ARM_EXTRA_DEFINES="-DBOARD_CONFIG_MSM8974=1"
+# XNU_ARM_EXTRA_DEFINES is a whitespace-separated switch set applied to every extra dir (the board
+# config `-DBOARD_CONFIG_x` each board file's own `#if` needs); it defaults empty, so the pexpert
+# measurement is byte-for-byte what it was.
 XNU_ARM_EXTRA_DIRS=${XNU_ARM_EXTRA_DIRS:-}
+XNU_ARM_EXTRA_DEFINES=${XNU_ARM_EXTRA_DEFINES:-}
 for extra in ${XNU_ARM_EXTRA_DIRS//:/ }; do
-    [[ -d $XNU/$extra ]] || { printf 'no such extra dir: %s\n' "$XNU/$extra" >&2; continue; }
+    # Absolute paths (our own sources) are used as-is; relative paths resolve under the tree root.
+    edir=$extra
+    [[ $extra = /* ]] || edir=$XNU/$extra
+    [[ -d $edir ]] || { printf 'no such extra dir: %s\n' "$edir" >&2; continue; }
     # Per-component defines, exactly as build_xnu_arm_kernel.sh applies them: `PEXPERT_KERNEL_PRIVATE`
     # is what makes pexpert/pexpert.h:43 include <pexpert/protos.h> (where gPESocDispatch lives), so a
     # pexpert TU compiled without it fails on an undeclared identifier, not a missing file. The
     # component is the first path element of the extra dir.
-    EDEF=( $(bash "$TOOLS_DIR/xnu_config/component_defines.sh" "${extra%%/*}") )
+    # The component is the first path element for a relative tree dir; for an absolute path (our own
+# sources) it cannot be read off the path, so XNU_ARM_EXTRA_COMPONENT names it and defaults to
+# pexpert. A wrong component is not silent here: the defines it supplies are what make the TU's
+# own `#include <pexpert/protos.h>` resolve, so a mismatch fails to compile, not to a warning.
+    ecomp=${XNU_ARM_EXTRA_COMPONENT:-}
+    [[ -n $ecomp ]] || { [[ $extra = /* ]] && ecomp=pexpert || ecomp=${extra%%/*}; }
+    EDEF=( $(bash "$TOOLS_DIR/xnu_config/component_defines.sh" "$ecomp") )
+    EDEF+=( $XNU_ARM_EXTRA_DEFINES )
     eok=0; efail=0; eskipped=()
-    for src in "$XNU/$extra"/*.c; do
+    for src in "$edir"/*.c; do
         [[ -e $src ]] || continue
         name=$(basename "$src" .c)
-        if [[ $EXCLUDE_HD2 -eq 1 ]] && grep -qE 'IOS7Leo|ios7leo_|ios7lab_|leo_user_frontier|ios7_compat|leo_qsd8250|leo_scanout' "$src"; then
+        # The HD2-exclusion heuristic is for the TREE's own files: an absolute-path extra is our
+        # source, and our source legitimately *names* HD2 symbols in its comments (that is the
+        # citation), so scanning it would skip our board PE for mentioning what it does not use.
+        if [[ $EXCLUDE_HD2 -eq 1 && $extra != /* ]] && \
+           grep -qE 'IOS7Leo|ios7leo_|ios7lab_|leo_user_frontier|ios7_compat|leo_qsd8250|leo_scanout' "$src"; then
             eskipped+=("$name"); continue
         fi
         if "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${GLOBAL_DEFINES[@]}" "${EDEF[@]}" "${INCLUDES[@]}" \
