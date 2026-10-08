@@ -3000,6 +3000,67 @@ summarise_log() {
     say "  UNREAD  no xnu_live_smem_ptable_found= record: this log's image did not run entry_smem_probe"
     say "        (SMEM_PROBE off, or a build that predates it), so the 3 GB clause is not read here"
   fi
+
+  # ---------------------------------------------------------------------------------------------
+  # The residency clause: on a resident arm the host sees DARKNESS, so the watchdog pet is the
+  # only thing in the log that separates "XNU is alive and looping" from "the run died".
+  # ---------------------------------------------------------------------------------------------
+  #
+  # **「保持在xnu里」 is read here and nowhere else.** A resident arm carries `RESIDENT=1` and
+  # `POST_END_TICKS=0` (the seam's ending is compiled out; `entry_wdt_pet`'s block requires it), and
+  # it turns the USB ladder off - so the boot produces NO host enumeration by construction. The payload
+  # armed the SoC watchdog 25 s / 3 s before the jump (`stage90_hw_watchdog_arm`) and feeds it at the
+  # idle wrapper's own site (`entry_wdt_pet`, entry_trace.c:2220 on the no-sleep arm, :2874 on the
+  # deep-idle one). The pet publishes `xnu_live_wdt_pets` on every power-of-two pass, so a log whose
+  # `_pets` count climbed is a boot the watchdog did **not** bite: the distinction darkness cannot make
+  # on its own ([[mi4-907-xnu-in-the-recovery-partition]] — "darkness is not liveness"). The count is
+  # the reading; a `_pets=0` beside a present `_map` is the pet having run on pass 1 and never reached
+  # the half-bark threshold - a short life, read against `_countdown`/`_bark`, not assumed.
+  #
+  # _pet_calls is the PASS number of the last pet (`g_door_exits`), not a second pet count, and the two
+  # bracket the run: `_pets` is how many feeds landed, `_pet_calls` how far the idle loop had run. The
+  # stage-0 read is `_map`: it is written whenever the pet reached its mapping decision, so arriving at
+  # a value at all proves the resident idle path was reached - and on an older, non-resident image the
+  # key is simply absent, which is the else branch. Guarded on `_map`, every rehearsed log (none carry
+  # `xnu_live_wdt_`) stays byte-identical and takes the else.
+  local wdt_map
+  wdt_map=$(keyval wdt_map)
+  if [[ -n $wdt_map ]]; then
+    say ""
+    say "  the watchdog, from the resident idle wrapper (entry_wdt_pet): the residency clause's reading"
+    wdt_via=$(keyval wdt_via)
+    wdt_bark=$(keyval wdt_bark)
+    wdt_pets=$(keyval wdt_pets)
+    wdt_calls=$(keyval wdt_pet_calls)
+    wdt_cd=$(keyval wdt_countdown)
+    say "  xnu_live_wdt_map=$wdt_map slot_before=$(keyval wdt_slot_before) desc=$(keyval wdt_desc)"
+    if [[ $wdt_via == 0x00000000 || -z $wdt_via ]]; then
+      say "  UNREAD  the pet reached the mapper but vouched for NO mapping (via=0, map=0): it read"
+      say "        nothing and fed nothing, so this log says neither resident nor dead. On the Mi 4 the"
+      say "        GIC's own 0xf9000000 block covers the watchdog's 0xf9017000, so the fallback is the"
+      say "        expected path - a map=0 with no GIC descriptor is the case to name"
+    else
+      local wdt_via_name
+      if (( wdt_via == 1 )); then wdt_via_name="its own install"; else wdt_via_name="the GIC's block"; fi
+      say "  the pet read the watchdog through $wdt_via_name; bark=${wdt_bark:-absent} countdown=${wdt_cd:-absent}"
+      if [[ -z $wdt_calls || -z $wdt_pets ]]; then
+        say "  UNREAD  the mapping was vouched for but no pet published: the run died between the"
+        say "        mapping and the first half-bark (the count had not passed ${wdt_bark:+half of }bark)"
+      elif (( wdt_pets == 0 && wdt_calls == 1 )); then
+        say "  => RESIDENT, not yet fed: the idle loop ran (pass 1 reached the site) but died before its"
+        say "     own count passed half-bark, so no feed landed ($wdt_cd < half of $wdt_bark). A SHORT life,"
+        say "     not a wedge - read the door/pce rungs above for where it stopped"
+      else
+        say "  => RESIDENT: xnu_live_wdt_pets=$wdt_pets feed(s) landed by pass $wdt_calls, so the SoC's"
+        say "     25 s/3 s watchdog did NOT bite. The boot was ALIVE in XNU's idle loop past the last"
+        say "     published pass - the reading darkness on the host cannot give"
+      fi
+    fi
+  else
+    say ""
+    say "  ---- no xnu_live_wdt_ map: this image has no resident pet (RESIDENT off, or predates 909), ----"
+    say "  ---- so its ending is the seam's, not the watchdog's, and the exit rungs above are the ----"
+  fi
 }
 
 # The port the phone is on, resolved once and only when this file is going to touch the device: it

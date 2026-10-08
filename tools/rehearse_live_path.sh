@@ -1002,6 +1002,23 @@ mk_sleeper_log() {
       printf ' xnu_live_smem_part_seen=0x00000000\n xnu_live_smem_banks=0x00000000\n'
       printf ' xnu_live_smem_total_bytes=0x00000000\n xnu_live_smem_toc_allocated=0x00000003\n'
     fi
+    # **The residency clause's states, one per branch of its reader.** A resident arm turns the USB
+    # ladder off and compiles `POST_END_TICKS=0` out, so the host sees darkness and the watchdog pet is
+    # the only liveness evidence in the log. `wdt-resident` is a fed boot (pets>0), `wdt-nofeed` the
+    # short life (mapping vouched for, no feed), and `wdt-none` the pet having vouched for nothing.
+    if [[ $base == wdt-resident ]]; then
+      printf ' xnu_live_wdt_map=0x00000000\n xnu_live_wdt_slot_before=0xf900041e\n xnu_live_wdt_desc=0x00000000\n'
+      printf ' xnu_live_wdt_via=0x00000002\n xnu_live_wdt_bark=0x0000ffff\n'
+      printf ' xnu_live_wdt_pets=0x00000008\n xnu_live_wdt_pet_calls=0x00000200\n xnu_live_wdt_countdown=0x00007000\n'
+    fi
+    if [[ $base == wdt-nofeed ]]; then
+      printf ' xnu_live_wdt_map=0x00000000\n xnu_live_wdt_slot_before=0xf900041e\n xnu_live_wdt_desc=0x00000000\n'
+      printf ' xnu_live_wdt_via=0x00000002\n xnu_live_wdt_bark=0x0000ffff\n'
+      printf ' xnu_live_wdt_pets=0x00000000\n xnu_live_wdt_pet_calls=0x00000001\n xnu_live_wdt_countdown=0x00002000\n'
+    fi
+    if [[ $base == wdt-none ]]; then
+      printf ' xnu_live_wdt_map=0x00000000\n xnu_live_wdt_via=0x00000000\n'
+    fi
   } > "$out"
 }
 
@@ -1160,6 +1177,17 @@ reader_state smem-2g       "=> 3 GB NOT MET: the banks sum to 2048 MB"
 reader_state smem-mismatch "FINDING  the per-bank sum and the probe's own xnu_live_smem_total_bytes disagree"
 reader_state smem-notable  "SMEM was mapped but no RAM-partition table was found" \
                               "xnu_live_smem_mapped=0x00000001 read_base=0x0fa00000"
+# **The residency clause's reader, one state per branch.** `predicted` above carries no wdt keys and so
+# also proves the absent line; these three carry the keys and take the three live branches - the
+# positive reading (a fed, live boot, which darkness on the host cannot show), the short life, and the
+# pet that vouched for no mapping. Each names the value its branch turns on, so a branch collapsed into
+# another is a red cell rather than a paragraph.
+reader_state wdt-resident  "=> RESIDENT: xnu_live_wdt_pets=0x00000008" \
+                              "the reading darkness on the host cannot give"
+reader_state wdt-nofeed    "=> RESIDENT, not yet fed" \
+                              "so no feed landed"
+reader_state wdt-none      "vouched for NO mapping" \
+                              "this log says neither resident nor dead"
 # **The three states 609 added, one per clause that read absence as a fact about the machine.** Each is
 # the *same log* as the FAIL it replaces, plus the channel's own `capped` record, so the difference in
 # the reader's output is attributable to the channel and nothing else. Without these the three UNREAD
