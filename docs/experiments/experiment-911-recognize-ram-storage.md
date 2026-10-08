@@ -790,3 +790,6 @@ the §13 exit-2 block at `:3596`, so the §13 edit is not merely unreachable in 
 promised behaviour reproduces with the edit present. The cap is raised to **`timeout 180`** with the
 measurement recorded in place, and the cell now passes. **A `FAIL … exit 124` in this battery is this
 budget until proven otherwise.**
+
+**The full battery is green again**: `20 ok, 0 failed` (live path, was 19/1), `15 ok, 0 failed` (the
+reader), `4 ok, 0 failed` (the path argument), `EXIT=0`. Landed as `112767c`.
