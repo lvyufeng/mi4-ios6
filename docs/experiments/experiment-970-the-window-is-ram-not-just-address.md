@@ -173,6 +173,83 @@ window wider than 16 MiB has never booted on this entry, and the widened arm pro
 Until `press_968.sh` separates the two variables, 969's wall (the window is a prerequisite, met by 915-B)
 stands as the only demonstrated route to running iOS userspace. Nothing was bricked; the device re-enumerated.
 
+## 6c. The control press (2026-10-09) — the window is NOT the cause; entry `7107b998` is broken
+
+`armed-d13-7107b998` (the 968 arm — the **same entry bin `7107b998`**, same medium, but a **16 MiB**
+window) was then pressed. **It failed identically.** The captured log
+(`/tmp/cancro-last_kmsg.txt`, sha256 `56b21710…`) runs the payload clean to the jump and then XNU emits
+**nothing** — zero `xnu_live_*`, no banner — exactly as 970 did. A byte-level diff of the two logs shows
+only `memSize` (`0x01000000` vs `0x1e400000`) plus timing/checksum noise; the post-jump behaviour is the
+same silence.
+
+- **Therefore the window is irrelevant.** Both windows fail on entry `7107b998`; the 484 MiB map's
+  arithmetic (§3, and the console cap) is not the cause — a fact confirmed independently by a read-only
+  analysis that walked `arm_vm_init` end-to-end and found no window-dependent fatality below 1 GiB.
+- **The regression is the entry bin `7107b998` itself**, which is shared by 968 and 970 and was **never
+  pressed before** (both arms are its first press). The last entry known to boot on this device is
+  `cb4e17f1` (2026-10-08, the storage/COW line), a **different bin** (`0x632934` bytes, bss `0x5d350`,
+  `topOfKernelData 0x80800000`, `SEAM_POC=1`, `ISTACK_SEPARATE=0`, no USB ladder, `MEM_SIZE_MAX` set).
+- **What moved between `cb4e17f1` and `7107b998`:** the whole D13 tree-pin + USB-ladder + COW series
+  (935–968) and/or its builder changes — `ISTACK_SEPARATE 0→1`, `SEAM_POC 1→0`, the four `USB_*`
+  switches `0→1`, `TREE_D13` added, `MEM_TOTAL=1`+`MEM_SIZE_MAX` unset, `CARD_COW`/`HFS_ROOT_RW`/
+  `FULL_EXTENT` added. The entry bin grew to `0x609c54` bytes with a **2.4 MB bss** (vs 0.38 MB).
+- **Nothing was bricked; the device re-enumerated.** The bisection is host-side-build + one press per
+  step; **PRESS IS THE OPERATOR'S.** The clean first cut is `cb4e17f1`'s exact switch set rebuilt through
+  the current builder: if it boots, the builder is sound and a 968 switch breaks XNU's early boot; if it
+  fails, the builder regressed.
+
+## 6d. The D13 entry has NEVER booted — and the static cause is D13's `__start` fast path
+
+The control press established the window is not the cause (§6c). Tracing that further, with six
+independent read-only investigations each adversarially verified against the real ELFs, converged on a
+sharper fact and a single structural cause.
+
+**Fact: the whole Darwin-13 entry line has never run.** The two D13 presses (968's `armed-d13-7107b998`,
+970's `armed-window-c74bde1d` — the *same* entry bin) both produced zero XNU output. Every capture in the
+tree with real XNU output (`cb4e17f1-20261008`, `908-*`, `909-*`, all `rung*`) is a **4570-tree** entry
+(no `STAGE90_XNU_TREE_D13`). So this is not a regression of one 968 switch — the D13 *entry→kernel* line
+has never booted on hardware.
+
+**What was ruled out (each verified against the linked image, not a comment):**
+
+| hypothesis | verdict | evidence |
+|---|---|---|
+| boot_args offsets wrong (entry reads garbage) | **REFUTED** | D13 `assym.s`: VERSION=2, VIRTBASE=4, PHYSBASE=8, MEMSIZE=12, TOP_OF_KERNEL=16 — exactly the struct the payload writes |
+| `__start` maps a broken page table | **REFUTED** | the map loop makes every descriptor VA==PA; PC/intstack/vectors all mapped |
+| a branch to an unresolved (0/GOT/stub) address | **REFUTED** | all 22 `bl` targets in `arm_init` and every `__start` literal resolve to real linked code |
+| the 935–937 entry-source tree-pin regressed the entry | **REFUTED** | the entry functions (`entry_write`/`entry_live_init`/…) are byte-identical between the D13 and 4570 ELFs; only the *kernel* region differs |
+| the empty log means XNU is actually running (wrap never hit) | **NOT-ESTABLISHED** | the first console key would come from `processor_init`'s wrapped `timer_call_setup`, on D13's path before `__wrap_PE_init_platform` — but a refused console install is silent too, so the log cannot distinguish the two |
+
+**The one CONFIRMED structural defect — and it is in the D13 tree, not the entry sources.** D13's
+`__start` (`external/xnu-hd2-darwin13/xnu/osfmk/arm/locore.s:52`) opens with an **MMU fast path that the
+4570 `_start` does not have**:
+
+```
+80000008  mrc  p15,0,r4,c1,c0,0     ; read SCTLR
+80000010  cmp  r4,#1
+80000014  beq  80000100 <mmu_initialized>   ; MMU already on → skip the whole setup
+```
+
+The payload jumps with the **MMU on** (`src/mmu.c:5497-5504` enables the identity L1; `xnu_entry_jump.c`
+`bx r1` never turns it off). So D13 takes the branch and **skips everything between `mmu_reinitialize`
+and `mmu_initialized`** — including, at `800000fc`, the **only VBAR write in the whole image**
+(`mcr p15,0,r4,cr12,c0,0`, inside `fix_boot_args_hack_for_bootkit`). The 4570 entry has **zero** `cr12`
+writes and instead *unconditionally* installs its `fleh_*` vectors into a table (observed at
+`_start+0x44`; those are the handlers that would print `exception: data abort`). Because D13 skips its
+vector install, **the first fault after the jump is taken somewhere unmapped with no reporter → silence.**
+
+```
+D13 __start (jumps with MMU on → fast path):   [setup SKIPPED] → mmu_initialized → arm_init
+4570 _start (no fast path):                     setup ALWAYS → installs fleh_* vectors → arm_init
+```
+
+**Consequence for the plan.** This is a **D13-tree `locore.s` defect**, not an entry-source or
+builder regression. The minimal fix is to make D13's vector install (and, if the payload's tables are
+not guaranteed, the table build) happen on **both** paths — move the `VBAR` write and the exception-table
+install **before** the `beq mmu_initialized` branch, so the entry always owns its vectors regardless of
+the MMU state it is entered with. That is a D13 `locore.s`/`machine_routines` edit, host-side and
+buildable; the press to confirm it is the operator's. **The window is a separate, later question.**
+
 ## 7. What it does NOT do
 
 It does **not** make XNU *recognize 3 GB*. `max_mem`/`mem_size`/`sane_size` are all `gMemSize` here, so
