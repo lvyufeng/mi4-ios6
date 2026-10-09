@@ -12626,3 +12626,42 @@ set=armed-d13-89210a26 sha256=9eaf45bbced9fd8b299d33805ca31d3b157ef6fea05153acca
 set=armed-d13-89210a26 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-89210a26 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-every-arm-6c2b6038-because-USB_PROBE-USB_DEV-and-MEM_TOTAL-are-ENTRY-build-parameters
 set=armed-d13-89210a26 sha256=c9596e35215f2f8605963f4883733ce750396f7d15eaac317596cc8a0924e2a5 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+
+# =================================================================================================
+# armed-d13-4894f20a - THE FIRST D13 USB ENUMERATION ARM (2026-10-09)
+#
+# Rung 3 of the goal's clause 3 ladder on D13, after 959 (probe) and 960 (device). It is the 960 arm
+# PLUS ONE KEY: STAGE90_XNU_USB_ENUM=1. 910b (`880a3568`, then `979ded08`) is this rung on 4570, and
+# it was DEFECTIVE twice over: (1) its probes sat in dead code, and (2) `880a3568` built EP1-IN's qh at
+# index 1, but the qh index IS the register bit (`num + dir*ENDPT_MAX/2`) so EP1-IN is **17**, not 1.
+# Defect (2)'s fix is already in the tree (`src/entry/entry_usb_enum.h:78`, STAGE90_USB_ENUM_QH_IN1 17u)
+# and `check_usb_enum.py` RECOMPUTES the index from `num + dir*ENDPT_MAX/2` (ENDPT_MAX=32) rather than
+# trusting the constant, so this D13 build is the first to carry it. Defect (1) cannot recur - the poll
+# fires from `__wrap_machine_idle` (951), the xnu_entry_910 clause reading it write_arm=1, enum=1.
+#
+# WHAT IT WRITES: `entry_usb_enum.c`'s poll drains the latched `USBSTS` and advances the EP0 control
+# state machine, answering the standard requests a host sends during enumeration - the endpoint set,
+# the interrupt mask, `DEVICEADDR`. It **never writes `USBCMD.RST`** (910a2 owns the one link reset; a
+# re-reset here fights the running device - a build refusal, not a comment: `check_usb_enum.py` finds
+# 18 stores, none of them `USBCMD_RST`). It keeps 910a2's MODE GATE (writes nothing unless the core is
+# already a device, `USBMODE[1:0]==2`) with USB_DEV_FORCE still off. EP1-IN is owned by this file (it
+# primes the fixed 4-byte magic); the STREAM arm, off here, would take it over.
+#
+# The payload switch set is UNCHANGED (6c2b6038): USB_PROBE/USB_DEV/USB_ENUM and MEM_TOTAL are ENTRY
+# build parameters. D13 kernel pool = STAGE90_XNU; payload XNU_TREE=.../xnu-hd2-darwin13/xnu +
+# STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'.
+#
+# NOT PRESSED. A press must show `xnu_live_usb_enum_*` readings (the EP0 state machine advanced) on top
+# of the 959 probe keys and the 960 dev keys. PRESS IS THE OPERATOR'S.
+# =================================================================================================
+set=armed-d13-4894f20a sha256=4894f20a743e8d38ae5e12075a258e7f4b155a057e9439f80ffd1ea689cae81d bytes=6323284 file=xnu_arm_entry.bin role=THE-ARM:-the-first-D13-USB-ENUM-entry-image-;-the-suffix-4894f20a-is-THIS-member-s-hash-;-the-960-device-arm-PLUS-STAGE90_XNU_USB_ENUM=1-;-EP1-IN-qh-index-17-carried-from-the-tree-fix
+set=armed-d13-4894f20a sha256=52cd5c4f846834328775c98c3d50aad6c34369cec20000b6d57fb1db158b6230 bytes=7361388 file=xnu_arm_entry.elf role=the-entry-ELF-;-the-linked-D13-entry-image-;-the-xnu_entry_910-clause-reads-it-enum=1
+set=armed-d13-4894f20a sha256=e1ea61b51846a37bfec0a108e4fbdea7f940a5db1abbd4a7fba931de09ccdced bytes=1360 file=xnu_arm_entry-config.txt role=the-entry-record-;-STAGE90_XNU_TREE_D13=1-STAGE90_XNU_MEM_TOTAL=1-STAGE90_XNU_USB_PROBE=1-STAGE90_XNU_USB_DEV=1-STAGE90_XNU_USB_ENUM=1-plus-the-33-arm-keys
+set=armed-d13-4894f20a sha256=3e93301b84ccbaae25f58cf99233da72b568fa550adf97ddbf7f87dee149e15a bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest
+set=armed-d13-4894f20a sha256=25fdf9038903f6a3e9c1b4728ccbc01017a8b03e5e130f609da62322f0229746 bytes=6818684 file=stage90.bin role=the-payload-binary-embedding-the-D13-entry-image
+set=armed-d13-4894f20a sha256=adf6716f996aab5ab2823776aef5420340d1aaf5b6c7c3b51072b78055847916 bytes=6880756 file=stage90.elf role=the-payload-ELF
+set=armed-d13-4894f20a sha256=f3179ba18c02463d0bc5a4134476985561071a34b2ad349c1d6741e7384e8609 bytes=6821888 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-4894f20a sha256=d7f7735bc1a99f3fd7934058337c00eb6141ecf61cafc23655645a8be71f943f bytes=9342976 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT
+set=armed-d13-4894f20a sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-4894f20a sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-every-arm-6c2b6038-because-USB_PROBE-USB_DEV-USB_ENUM-and-MEM_TOTAL-are-ENTRY-build-parameters
+set=armed-d13-4894f20a sha256=8fd07ee636b9da0681fef0dd905529bb33c1aa1f32ccc415ee87d86a08b36453 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
