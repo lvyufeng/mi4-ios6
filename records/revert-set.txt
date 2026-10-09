@@ -12665,3 +12665,43 @@ set=armed-d13-4894f20a sha256=d7f7735bc1a99f3fd7934058337c00eb6141ecf61cafc23655
 set=armed-d13-4894f20a sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-4894f20a sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-every-arm-6c2b6038-because-USB_PROBE-USB_DEV-USB_ENUM-and-MEM_TOTAL-are-ENTRY-build-parameters
 set=armed-d13-4894f20a sha256=8fd07ee636b9da0681fef0dd905529bb33c1aa1f32ccc415ee87d86a08b36453 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+
+# =================================================================================================
+# armed-d13-c54fc40d - THE FIRST D13 USB STREAM ARM (2026-10-09)
+#
+# Rung 4 (the top) of the goal's clause 3 ladder on D13, after 959 (probe), 960 (device) and 961
+# (enum). It is the 961 arm PLUS ONE KEY: STAGE90_XNU_USB_STREAM=1. 910c (`77a51d33`/`6deae815`) is
+# this rung on 4570 and shipped the same `QH_IN1=1` defect as 910b (fixed in tree: entry_usb_enum.h:78
+# = 17u). The xnu_entry_910 clause reads the linked image stream=1; all four rungs now sit in one image.
+#
+# WHAT IT DOES: hands EP1-IN over. The ENUM arm still ENABLES the endpoint on SET_CONFIGURATION, but it
+# stops priming it (entry_usb_enum.c guards both EP1-IN primes on the stream switch - so the two files
+# never both write qh[IN1]); the STREAM arm owns qh[IN1] and its dTD from the first stream prime on, and
+# on each completion sets EP1-IN's payload to a CURSOR over the RAM console ring (via the +0x01000000
+# ALIAS) instead of 910b's fixed 4-byte magic. The count comes from the dTD `token` (with the ACTIVE
+# guard), NOT `qh.curr` - the vendor never reads `qh.curr` for a count (`_hardware_dequeue:2176-2178`).
+#
+# THE POINT: this is the ARM THAT MAKES THE XNU CONSOLE REACHABLE OVER USB - the clause 「可以通过usb
+# 进行调试」 in its operating form. A host that enumerates and opens the bulk IN endpoint reads the
+# console ring; until then there is no USB-debug channel. The stream REQUIRES the enum arm (a build
+# refusal forbids STREAM=1 with ENUM=0), so this arm carries the whole ladder.
+#
+# The payload switch set is UNCHANGED (6c2b6038): the four USB switches and MEM_TOTAL are ENTRY build
+# parameters. D13 kernel pool = STAGE90_XNU; payload XNU_TREE=.../xnu-hd2-darwin13/xnu +
+# STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'.
+#
+# NOT PRESSED. A press must show the console ring's bytes arriving over EP1-IN (the enum arm's
+# `xnu_live_usb_enum_*` keys plus the stream's own prime/completion keys), meaning a host read the RAM
+# console over USB. PRESS IS THE OPERATOR'S.
+# =================================================================================================
+set=armed-d13-c54fc40d sha256=c54fc40d79e7dd6749f38799df7cdde6bec7ec0cff641d51f7c342981302308b bytes=6327380 file=xnu_arm_entry.bin role=THE-ARM:-the-first-D13-USB-STREAM-entry-image-;-the-suffix-c54fc40d-is-THIS-member-s-hash-;-the-961-enum-arm-PLUS-STAGE90_XNU_USB_STREAM=1-;-EP1-IN-becomes-a-cursor-over-the-RAM-console-ring
+set=armed-d13-c54fc40d sha256=7f440af5c7bd599f5e260ad6b66a5a89a0942abea718b358ce33642b37a7c0de bytes=7365840 file=xnu_arm_entry.elf role=the-entry-ELF-;-the-linked-D13-entry-image-;-the-xnu_entry_910-clause-reads-it-stream=1
+set=armed-d13-c54fc40d sha256=1f32c58ed9a675572131c6b1e55526a0d00b4164b38513cee12bcc28c78e4988 bytes=1360 file=xnu_arm_entry-config.txt role=the-entry-record-;-STAGE90_XNU_TREE_D13=1-STAGE90_XNU_MEM_TOTAL=1-and-all-four-USB-switches-PROBE-DEV-ENUM-STREAM=1-plus-the-33-arm-keys
+set=armed-d13-c54fc40d sha256=b47e81afda15b3c7116db14edfa3c50e78000c226034e04147457acbf69c44bf bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest
+set=armed-d13-c54fc40d sha256=787db9e2660bb0f385e176d9594312f22246eb6cc722f3461b72afaceb0b97a2 bytes=6822780 file=stage90.bin role=the-payload-binary-embedding-the-D13-entry-image
+set=armed-d13-c54fc40d sha256=84d7429aaff8dfddc1c164f7515a93940a2c9c27d0755174afbe928348d83430 bytes=6884852 file=stage90.elf role=the-payload-ELF
+set=armed-d13-c54fc40d sha256=2922d52bc86d4a796c9e30d0f530b6f5c4d2b3e88debf5a171782e857e02947e bytes=6825984 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-c54fc40d sha256=6b27854a18928d70ac96d2539877e862a5f8a80f662b41e89263e99325a89785 bytes=9347072 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT
+set=armed-d13-c54fc40d sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-c54fc40d sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-every-arm-6c2b6038-because-the-four-USB-switches-and-MEM_TOTAL-are-ENTRY-build-parameters
+set=armed-d13-c54fc40d sha256=88bd094f486ed89419dfcb61922f343a00d6868da86f498ade77e509ebdba59d bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
