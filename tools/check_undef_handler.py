@@ -236,6 +236,14 @@ def elf_words(path):
         _name, _type, _flags, addr, offset, size = struct.unpack_from("<IIIIII", data, base)
         if addr == 0:
             continue
+        # `SHT_NOBITS` (8, `.bss`) allocates address space but occupies NO file bytes - its
+        # `sh_offset` names where its bytes *would* begin, not bytes that exist. Reading it runs off
+        # the end of the file as soon as `.bss` is the last thing in it, which a large `.bss` (the
+        # 968 COW arena, 2.4 MiB) makes happen: the buffer overran by exactly `.bss`'s size past EOF.
+        # The words this function is for are CODE (the udf vector page), so skipping a section with no
+        # file bytes loses nothing - and it is the honest reading of the header, not a size guard.
+        if _type == 8:
+            continue
         for at in range(0, size - 3, 4):
             words[addr + at] = struct.unpack_from("<I", data, offset + at)[0]
     return words

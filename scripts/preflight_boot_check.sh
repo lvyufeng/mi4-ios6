@@ -678,7 +678,7 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS STAGE90_XNU_STORAGE_PROBE
                 STAGE90_XNU_PWR_WAIT_TICKS STAGE90_XNU_MOUNT STAGE90_XNU_HFS_ROOT_MEDIA
                 STAGE90_XNU_EMMC_STRATEGY STAGE90_XNU_ROOT_FROM_CARD STAGE90_XNU_HDD_WRITE
-                STAGE90_XNU_HFS_ROOT_RW STAGE90_XNU_CARD_TOTAL STAGE90_XNU_FULL_EXTENT STAGE90_XNU_RESIDENT
+                STAGE90_XNU_HFS_ROOT_RW STAGE90_XNU_CARD_TOTAL STAGE90_XNU_FULL_EXTENT STAGE90_XNU_CARD_COW STAGE90_XNU_RESIDENT
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP
                 STAGE90_XNU_USB_PROBE
@@ -782,6 +782,17 @@ if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/
      | grep -q 'entry_root_media_full_extent_arm_on'; then
   _entry_full_extent_arm=on
 fi
+# **968: `STAGE90_XNU_CARD_COW` gets the same ARTIFACT-grounded treatment, and its marker is
+# PRESENCE-ONLY for 965c's reason** (the module defines `entry_root_media_card_cow_arm_on` only under the
+# switch, so a new unconditional `_off` marker would move the parked arms' image hashes with no
+# `--gc-sections` in the link). An entry image that carries the COW marker MUST record the key - a record
+# without it could send a run whose writable-root mechanism nobody named - and one that cannot (every
+# pre-968 park, which served the card read-only) has no value to record: the N/A branch.
+_entry_card_cow_arm=""
+if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/dev/null \
+     | grep -q 'entry_root_media_card_cow_arm_on'; then
+  _entry_card_cow_arm=on
+fi
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
@@ -811,6 +822,10 @@ do
   fi
   if [[ -z $_v && $_k == STAGE90_XNU_FULL_EXTENT && -z $_entry_full_extent_arm ]]; then
     printf '  %s=(absent, and this entry image carries no full-extent arm to name - the key is N/A here)\n' "$_k"
+    continue
+  fi
+  if [[ -z $_v && $_k == STAGE90_XNU_CARD_COW && -z $_entry_card_cow_arm ]]; then
+    printf '  %s=(absent, and this entry image carries no RAM copy-on-write writable-root arm to name - the key is N/A here)\n' "$_k"
     continue
   fi
   # **912's window: absent names the 16 MB arm, because that is the ONLY value any pre-912 record could

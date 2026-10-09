@@ -12749,3 +12749,30 @@ set=armed-d13-e28361f9 sha256=4327ec7443b2e87a3c607403a6911fd30e80d1ff75619f7ef9
 set=armed-d13-e28361f9 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-e28361f9 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set
 set=armed-d13-e28361f9 sha256=ff125ced98b804717b9d124e98f1b9c7eb50e984837b80174e72bc23a1cb7fd1 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img-manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+# =================================================================================================
+# 968: THE COW WRITABLE-ROOT ARM. Same switch set as armed-d13-e28361f9 (the 64-bit bound + HFSX
+# root fixture + full D13 USB ladder + MEM_TOTAL=1), plus TWO switches:
+#   STAGE90_XNU_HFS_ROOT_RW=1 - the D13 tree's hfs_mountroot now carries 905's guarded
+#     vfs_clearflags(mp, MNT_RDONLY) (tools/hfs_patch_root_rw.py applied to the D13 tree; the pool is
+#     built with -DSTAGE90_HFS_ROOT_RW=1), so the root mount is NOT read-only and a write reaches the
+#     card unit's strategy.
+#   STAGE90_XNU_CARD_COW=1 - the card unit (ST_MEDIA_DRIVER) serves B_READ/B_WRITE through a
+#     page-granular RAM copy-on-write shadow (src/platform/stage90_root_media_cow.c, the HD2
+#     leo_cow mechanism): a write first reads the whole original 4096-byte page from the base (through
+#     the ladder's READ door) into a 2 MiB .bss arena, then modifies only the shadow. THE BASE IS NEVER
+#     WRITTEN - the arm is VOLATILE and a power cycle reverts - and the linked image is refused if it
+#     carries entry_storage_driver_write. This is the missing half of the read-only 965c mount: iOS
+#     userspace writes /private/var from its first seconds.
+# NOT PRESSED. PRESS IS THE OPERATOR'S.
+# =================================================================================================
+set=armed-d13-7107b998 sha256=7107b998cc5c5d2f4baa7da37fbfc88652fb8396958074dc52e7629130a4f243 bytes=6331476 file=xnu_arm_entry.bin role=THE-ARM:-the-entry-image-carrying-the-COW-writable-root-(CARD_COW=1)-over-the-real-896-MiB-HFSX-rootfs-with-HFS_ROOT_RW=1-BOOT-a-write-from-the-fixture-creates-a-file-in-the-RAM-shadow-and-the-BASE-MEDIUM-ONLY-READ-does-not-persist-(reversible-;-the-only-write-arm-that-never-touches-the-card)-;-the-suffix-7107b998-is-THIS-member-s-hash
+set=armed-d13-7107b998 sha256=99fd9b121d9edf97f90b0a62c3ce55cffb0fe9b852edfb9cba77074fb26c5f5b bytes=7370384 file=xnu_arm_entry.elf role=the-entry-ELF
+set=armed-d13-7107b998 sha256=2ff6fe26b17f22c89d69b9593150b815adfe8c5a547b788670cf41043d4d1900 bytes=1409 file=xnu_arm_entry-config.txt role=the-entry-record-;-STAGE90_XNU_TREE_D13=1-HFS_ROOT_MEDIA=1-ROOT_FROM_CARD=1-HFS_ROOT_RW=1-CARD_COW=1-CARD_TOTAL=1-FULL_EXTENT=1-and-all-four-USB-switches
+set=armed-d13-7107b998 sha256=f569561a76d32d1f1d7d6efce6f620951dcc400a7bfb0c0aafd02ac83bff7662 bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest
+set=armed-d13-7107b998 sha256=4caa752ad3969652deddf8b09276d4b972bec8aadefcd09e89f7ca730f79e07b bytes=6826876 file=stage90.bin role=the-payload-binary-embedding-the-COW-writable-root-entry-image
+set=armed-d13-7107b998 sha256=cbc77c8fcea2827eff26b3e87d5c01c7d888efe334952d957705041cc9cfeec4 bytes=6888948 file=stage90.elf role=the-payload-ELF
+set=armed-d13-7107b998 sha256=1cf78f46d5a30bd26474d57437c85e37a7d9f566420684bc01cd3ba055501fe3 bytes=6830080 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-7107b998 sha256=52714827bfa6c42dabb9c9a984f5f51c63635d9b04cf4394bda25d016d26c174 bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT
+set=armed-d13-7107b998 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-7107b998 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set
+set=armed-d13-7107b998 sha256=5ad10669052747cdeb40c51a943bca234171c942faa3d47ab710205a003bab32 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img-manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img

@@ -919,6 +919,54 @@ if [[ $FULL_EXTENT -eq 1 && $EMMC_STRATEGY -ne 1 ]]; then
     echo "          switch would widen a length no unit reads. Build both together." >&2
     exit 1
 fi
+# **968: the COW writable-root arm - the HD2 lab's `leo_cow` mechanism for OUR card unit, and the missing
+# half of the read-only 965c mount.** With `STAGE90_XNU_CARD_COW=1` the card MOUNT unit serves reads and
+# writes through a page-granular RAM shadow: a write first copies the whole original 4096-byte page into a
+# RAM arena and then modifies only the shadow, so the BASE IS NEVER WRITTEN and a power cycle reverts every
+# write. iOS userspace writes `/private/var` from its first seconds, so without a writable view the root
+# cannot carry it (see `experiment-966`). It answers `DKIOCISWRITABLE=1` for the card unit like `HDD_WRITE`,
+# but the write it serves is VOLATILE (a RAM shadow), not DURABLE (the medium) - so the two are DIFFERENT
+# ANSWERS TO THE SAME QUESTION and are REFUSED TOGETHER: an image carrying both would put two write
+# branches in one strategy body. It REQUIRES the card strategy (its base read is the ladder's read door),
+# the card-root arm and the rw-mount clear, exactly as HDD_WRITE does, because its whole point is a
+# writable mounted root.
+CARD_COW=${STAGE90_XNU_CARD_COW:-0}
+case "$CARD_COW" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_CARD_COW='$CARD_COW' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $CARD_COW -eq 1 && $EMMC_STRATEGY -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_CARD_COW=1 needs STAGE90_XNU_EMMC_STRATEGY=1." >&2
+    echo "          The RAM shadow's base read IS the card unit's, through the ladder's read door;" >&2
+    echo "          without the card strategy there is no unit to shadow and no base to read. Build both." >&2
+    exit 1
+fi
+if [[ $CARD_COW -eq 1 && $HDD_WRITE -eq 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_CARD_COW=1 with STAGE90_XNU_HDD_WRITE=1." >&2
+    echo "          The two are different answers to the same question - how the card unit serves a" >&2
+    echo "          write - and would put two write branches in one strategy body. CARD_COW is a" >&2
+    echo "          VOLATILE RAM shadow (the base is never written, a power cycle reverts); HDD_WRITE is" >&2
+    echo "          a DURABLE medium write (CMD24, the base changes). Choose one." >&2
+    exit 1
+fi
+if [[ $CARD_COW -eq 1 && $ROOT_FROM_CARD -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_CARD_COW=1 needs STAGE90_XNU_ROOT_FROM_CARD=1." >&2
+    echo "          The COW arm makes the MOUNTED root writable - the HFS root off the card - so it is" >&2
+    echo "          only meaningful when the card IS the root. Without the card-root arm the mounted" >&2
+    echo "          root is the RAM blob and the shadow would be over a device nothing mounts." >&2
+    exit 1
+fi
+if [[ $CARD_COW -eq 1 && $HFS_ROOT_RW -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_CARD_COW=1 needs STAGE90_XNU_HFS_ROOT_RW=1." >&2
+    echo "          The COW arm's whole point is that the HFS root mounts READ-WRITE; the one edit that" >&2
+    echo "          makes it so (905 B2's vfs_clearflags in hfs_mountroot) is compiled into the pool only" >&2
+    echo "          under STAGE90_XNU_HFS_ROOT_RW. Without it the root mounts MNT_RDONLY, the shadow's" >&2
+    echo "          write branch is never reached, and the arm promises a write it cannot make." >&2
+    echo "          Run tools/stage_hfs.sh, rebuild the kernel with STAGE90_XNU_HFS_ROOT_RW=1, then" >&2
+    echo "          rebuild this entry image under the COW arm." >&2
+    exit 1
+fi
 # **910a: the USB2 OTG probe, and the first switch whose arm is a READ of a HIGH-STAKES device.** The
 # Mi 4's micro-B port (`adb`/`fastboot`) is the ChipIdea CI13xxx core at `0xf9a55000`, and the whole
 # point of 910a is that the port may be live with the host, so this arm installs the core's 1 MB
@@ -1294,6 +1342,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_HFS_ROOT_RW
                 STAGE90_XNU_CARD_TOTAL
                 STAGE90_XNU_FULL_EXTENT
+                STAGE90_XNU_CARD_COW
                 STAGE90_XNU_RESIDENT
                 STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_XNU_IDLE_NO_SLEEP
@@ -1409,6 +1458,7 @@ do
         STAGE90_XNU_HFS_ROOT_RW)      _v=$HFS_ROOT_RW ;;
         STAGE90_XNU_CARD_TOTAL)       _v=$CARD_TOTAL ;;
         STAGE90_XNU_FULL_EXTENT)      _v=$FULL_EXTENT ;;
+        STAGE90_XNU_CARD_COW)         _v=$CARD_COW ;;
         STAGE90_XNU_RESIDENT)         _v=$RESIDENT ;;
         STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
@@ -1808,6 +1858,20 @@ say "== AES-128 known-answer tests, on the host, against the same source =="
 run "${HOST_CC:-cc}" -O2 -Wall -Wextra -Werror -std=gnu11 -DSTAGE90_AES_SELFTEST \
     "$REPO_ROOT/src/supply/stage90_aes.c" -o "$OUT/stage90_aes_kat"
 "$OUT/stage90_aes_kat"
+
+# **968: the COW page shadow's known-answer test, the same "run the very same source natively" shape.**
+# The shadow is a VALUE - a page-granular RAM overlay whose ONE safety property is that the base medium is
+# never written - and a wrong page shadow is the failure mode with nothing to report it (HFS+ would read
+# back its own stale bytes and call them clean). So the mechanism is proved on the host, against the same
+# `src/platform/stage90_root_media_cow.c` the platform block `#include`s into `stage90_root_media.c`, by a
+# `STAGE90_COW_SELFTEST` build: the base is a memory array, writes fill the shadow, and the test ASSERTS the
+# base array is byte-identical after a sequence of writes - the property stated as a check, not a comment
+# ([[mi4-a-claim-in-a-comment-is-not-a-check]]). The file is compiled standalone here, so its
+# `-Wno-unused-function` is needed only for this pass (once `#include`d, every function is called).
+say "== COW page-shadow known-answer tests, on the host, against the same source =="
+run "${HOST_CC:-cc}" -O2 -Wall -Wextra -Werror -std=gnu11 -DSTAGE90_COW_SELFTEST \
+    "$REPO_ROOT/src/platform/stage90_root_media_cow.c" -o "$OUT/stage90_cow_kat"
+"$OUT/stage90_cow_kat"
 
 # **The personality table (363).** The stock `iokit_KernelConfigTables.o` defines one symbol,
 # `gIOKernelConfigTables`, and the table it points at has exactly one entry: Apple's `IOPanicPlatform`,
@@ -27888,6 +27952,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     fi
     if [[ $HDD_WRITE -eq 1 ]]; then
         say "  xnu_entry_905: the root-media module and this build agree about the WRITE arm (STAGE90_XNU_HDD_WRITE=$write_arm); the card unit's strategy serves B_WRITE with CMD24 and DKIOCISWRITABLE answers 1 for it, and the linked image is checked for the write door below"
+    elif [[ $CARD_COW -eq 1 ]]; then
+        say "  xnu_entry_905: the root-media module and this build agree about the WRITE arm (STAGE90_XNU_HDD_WRITE=$write_arm); the CARD unit (968) accepts B_WRITE through the RAM shadow, so writes are served, and every OTHER unit still refuses with EROFS"
     else
         say "  xnu_entry_905: the root-media module and this build agree about the WRITE arm (STAGE90_XNU_HDD_WRITE=$write_arm); every unit refuses a write with EROFS, as in 888"
     fi
@@ -27952,6 +28018,33 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         say "  xnu_entry_965c: the root-media module and this build agree about the FULL-EXTENT arm (STAGE90_XNU_FULL_EXTENT=$fext_arm); the card unit's byte length is 64-bit, so the strategy bounds the whole selected partition instead of its low 32 bits"
     else
         say "  xnu_entry_965c: the root-media module and this build agree about the FULL-EXTENT arm (STAGE90_XNU_FULL_EXTENT=off); the card unit's length is 888's 32-bit product, as in the parked 512 KiB arm (the object carries no full-extent marker)"
+    fi
+    # **968: the COW arm, the same one-object-two-scripts defect one switch over, and PRESENCE-ONLY for
+    # 965c's reason.** The module defines `entry_root_media_card_cow_arm_on` ONLY under
+    # `STAGE90_XNU_CARD_COW=1`; there is no `_off`, so the off arm's object (and every parked arm's image)
+    # is byte-untouched. Absence means off; the only refusal is the forward one - a build that RECORDED
+    # CARD_COW=1 while the object compiled it off would promise a writable root over a strategy that still
+    # refuses every write with EROFS.
+    if arm-none-eabi-nm "$STAGE90_ROOT_MEDIA_OBJ" 2>/dev/null | grep -q 'T entry_root_media_card_cow_arm_on'; then
+        cow_arm=1
+    else
+        cow_arm=0
+    fi
+    if [[ $CARD_COW -eq 1 && $cow_arm -ne 1 ]]; then
+        say "REFUSING: STAGE90_XNU_CARD_COW=1 but $STAGE90_ROOT_MEDIA_OBJ carries no" >&2
+        say "          entry_root_media_card_cow_arm_on, so the card unit's strategy serves the base" >&2
+        say "          straight from the ladder (read-only, EROFS on write) while the record says the RAM" >&2
+        say "          COW arm is on. iOS userspace's first write to /private/var would fail. Rebuild the" >&2
+        say "          module with the same value:" >&2
+        say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+        say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_CARD_COW=$CARD_COW' \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    fi
+    if [[ $CARD_COW -eq 1 ]]; then
+        say "  xnu_entry_968: the root-media module and this build agree about the COW arm (STAGE90_XNU_CARD_COW=$cow_arm); the card unit serves B_READ/B_WRITE through the RAM shadow (the base is never written; a power cycle reverts), DKIOCISWRITABLE answers 1 for it, and the linked image is checked for the COW read/write path below"
+    else
+        say "  xnu_entry_968: the root-media module and this build agree about the COW arm (STAGE90_XNU_CARD_COW=off); no shadow is compiled and the card unit is served straight from the ladder (the object carries no COW marker)"
     fi
     # **911b: the PHYSICAL-MEMORY CEILING arm, the same `nm` shape, but against the KERNEL object
     # rather than a platform object.** `tools/patch_mem_size_max.py` makes `arm_vm_init.c`'s `MEM_SIZE_MAX`
@@ -28967,8 +29060,8 @@ if ! hmr_def=$(awk '
     exit 1
 fi
 if [[ $hmr_def == absent ]]; then
-    if [[ $HDD_WRITE -eq 1 || $HFS_ROOT_RW -eq 1 ]]; then
-        say "FAIL: STAGE90_XNU_HFS_ROOT_RW=1 (or HDD_WRITE=1) but \`hfs_mountroot\` is not a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the rw arm makes the MOUNTED root writable, and there is no root-mount body to make writable - the HFS port (STAGE90_HFS_ROOT) is not linked. Nothing is rebuilt by this refusal" >&2
+    if [[ $HDD_WRITE -eq 1 || $HFS_ROOT_RW -eq 1 || $CARD_COW -eq 1 ]]; then
+        say "FAIL: STAGE90_XNU_HFS_ROOT_RW=1 (or HDD_WRITE=1 or CARD_COW=1) but \`hfs_mountroot\` is not a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the rw arm makes the MOUNTED root writable, and there is no root-mount body to make writable - the HFS port (STAGE90_HFS_ROOT) is not linked. Nothing is rebuilt by this refusal" >&2
         exit 1
     fi
     say "  xnu_entry_905: no defined hfs_mountroot in the linked image and both rw switches are OFF - the HFS body check is not applicable to this legacy no-HFS link"
@@ -29158,7 +29251,38 @@ else
         say "FAIL: STAGE90_XNU_HDD_WRITE=0 but \`entry_storage_driver_write\` IS a defined (T) symbol in the linked $OUT/xnu_arm_entry.elf: the read-only ladder must not carry the write door, or an image whose record says read-only is indistinguishable from one that can write the medium. The ladder-side switch did not reach this build. Nothing is rebuilt by this refusal" >&2
         exit 1
     fi
-    say "  xnu_entry_905: STAGE90_XNU_HDD_WRITE=0 - the linked image carries no entry_storage_driver_write, so the ladder is the read-only one and every unit refuses a write with EROFS"
+    if [[ $CARD_COW -eq 1 ]]; then
+        say "  xnu_entry_905: STAGE90_XNU_HDD_WRITE=0 - the linked image carries no entry_storage_driver_write, so the ladder is read-only and the CARD unit's writes are served by the 968 RAM shadow (which reads the base through the READ door); every non-card unit refuses with EROFS"
+    else
+        say "  xnu_entry_905: STAGE90_XNU_HDD_WRITE=0 - the linked image carries no entry_storage_driver_write, so the ladder is the read-only one and every unit refuses a write with EROFS"
+    fi
+fi
+
+# **968: THE COW ARM IN THE LINKED IMAGE, BOTH DIRECTIONS - and its two readings are the two halves of
+# the safety property.** (a) With CARD_COW=1: the linked body must carry the COW write branch, read not by
+# a `bl` to a `static` function (which `-O2` may inline, so the symbol is not a reliable witness -
+# [[mi4-linked-code-order-is-not-source-order]]) but by the LIVE KEY the branch emits, the string literal
+# `xnu_live_rootmedia_cow_refused`, which is in the image's `.rodata` iff the branch was compiled; AND
+# `entry_storage_driver_write` must be ABSENT - the COW arm NEVER writes the medium (it reads the base
+# through the ladder's READ door and writes only the RAM shadow), so a linked image that carried the write
+# door would be one that could modify the base, which is the whole property this arm guarantees. (b) With
+# CARD_COW=0: the key must be ABSENT, so an off arm is distinguishable from an on one.
+if [[ $CARD_COW -eq 1 ]]; then
+    if ! grep -qa 'xnu_live_rootmedia_cow_refused' "$OUT/xnu_arm_entry.elf"; then
+        say "FAIL: STAGE90_XNU_CARD_COW=1 but the linked $OUT/xnu_arm_entry.elf does not carry the COW write branch's live key \`xnu_live_rootmedia_cow_refused\`: the shadow is not in the strategy body, so the root would mount rw over a card unit that still refuses writes. The branch is compiled by STAGE90_XNU_CARD_COW in stage90_root_media.c; build the module with it. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    if arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_storage_driver_write" && $2 == "T" { found = 1 } END { exit(found ? 0 : 1) }'; then
+        say "FAIL: STAGE90_XNU_CARD_COW=1 but the linked $OUT/xnu_arm_entry.elf DEFINES \`entry_storage_driver_write\`: the COW arm must NEVER write the base medium - it writes only the RAM shadow and reads the base through the ladder's READ door - so a linked write door means the image could modify the medium, which is the property this non-destructive arm exists to guarantee. The base must stay byte-exact across the run. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    say "  xnu_entry_968: the COW arm is in the linked image - the strategy carries the shadow's write key (\`xnu_live_rootmedia_cow_refused\`) and the image defines NO entry_storage_driver_write, so the card unit writes only the RAM shadow and the base medium is never written"
+else
+    if grep -qa 'xnu_live_rootmedia_cow_refused' "$OUT/xnu_arm_entry.elf"; then
+        say "FAIL: STAGE90_XNU_CARD_COW=0 (or unset) is RECORDED but the linked $OUT/xnu_arm_entry.elf carries the COW branch's live key \`xnu_live_rootmedia_cow_refused\`: an off arm would be indistinguishable from an on one (mi4-off-option-two-spellings in both directions). Rebuild the module with STAGE90_XNU_CARD_COW=0, or record it ON. Nothing is rebuilt by this refusal" >&2
+        exit 1
+    fi
+    say "  xnu_entry_968: STAGE90_XNU_CARD_COW=0 agrees with the linked image - no RAM shadow is compiled and the card unit is served straight from the ladder"
 fi
 
 run arm-none-eabi-objcopy -O binary "$OUT/xnu_arm_entry.elf" "$OUT/xnu_arm_entry.bin"
@@ -37926,6 +38050,13 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # `$FULL_EXTENT`, not `${STAGE90_XNU_FULL_EXTENT}`, for 882's reason (a defaulted env var is not the
     # value the image was built with).
     echo "STAGE90_XNU_FULL_EXTENT=$FULL_EXTENT"
+    # 968: whether the card MOUNT unit serves reads and writes through the RAM COW shadow (the base never
+    # written, `DKIOCISWRITABLE=1` for the card) rather than straight from the ladder. An arm key for
+    # HDD_WRITE's reason and sharper: the same record names a DIFFERENT write behaviour when this is 1 -
+    # a VOLATILE RAM shadow (a power cycle reverts) vs HDD_WRITE's DURABLE medium write - and a run on
+    # this arm carries `xnu_live_rootmedia_cow_*` keys neither a read-only image nor an HDD_WRITE image
+    # can produce. Written as the RESOLVED `$CARD_COW`, not `${STAGE90_XNU_CARD_COW}`, for 882's reason.
+    echo "STAGE90_XNU_CARD_COW=$CARD_COW"
     # **909's residence arm, as the RESOLVED `$RESIDENT`** - the switch that takes the image's own ending
     # OUT and adds the watchdog pet. It is an arm key for MOUNT's reason and a sharper one: the same
     # record that names the other switches describes a DIFFERENT image when this is 1 (no ending, a pet in

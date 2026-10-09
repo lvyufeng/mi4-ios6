@@ -240,6 +240,15 @@ int entry_root_media_card_total_arm_off(void) { return 0; }
 int entry_root_media_full_extent_arm_on(void) { return 1; }
 #endif
 
+/* **968: the COW arm's marker, emitted only WHEN ON, by 965c's rule above** - the entry link gc's nothing,
+ * so an *unconditional* `..._off` function would add bytes to the parked 512 KiB arm's image and move its
+ * hash. The entry build reads presence as on, absence as off, and refuses only a build that RECORDED
+ * `CARD_COW=1` while this symbol is absent (a record with no artifact). With the switch off the object is
+ * byte-for-byte the full-extent arm's. */
+#if STAGE90_XNU_CARD_COW
+int entry_root_media_card_cow_arm_on(void) { return 1; }
+#endif
+
 #if STAGE90_XNU_HFS_ROOT_MEDIA
 /* Defined by `src/entry/blob/xnu_arm_entry_root_hfs.S` (`.incbin` of the committed HFS+ volume).
  * Only declared here, and only on this arm: with the switch off the section the object carries is
@@ -474,6 +483,33 @@ static uint32_t st_medium_staged;        /* 0 until `entry_root_media_stage` has
 #error "STAGE90_XNU_FULL_EXTENT=1 needs STAGE90_XNU_EMMC_STRATEGY=1: the length it widens is the card unit's, and a unit with no ladder beneath it has no partition to bound."
 #endif
 
+/* **968: THE COW WRITABLE-ROOT ARM.** With `STAGE90_XNU_CARD_COW=1` the card MOUNT unit (ST_MEDIA_DRIVER)
+ * serves its reads and writes through a page-granular RAM shadow (`stage90_root_media_cow.c`, included
+ * below) instead of straight from the ladder: a read returns the shadow if its page is resident and the
+ * base otherwise; a write first reads the whole original 4096-byte page from the base into a RAM arena,
+ * then modifies only the shadow. **The base is NEVER written** - the ladder's read door is the only door
+ * this arm compiles, so a device carried by it cannot be written, and a power cycle reverts every write.
+ * That is the property the HD2 iOS7 lab's `leo_cow` gives it (966) and the missing half of our read-only
+ * 965c mount: iOS userspace writes `/private/var` from its first seconds, so with no writable view it
+ * cannot come up.
+ *
+ * It is a SEPARATE switch from `HDD_WRITE` and the two are MUTUALLY EXCLUSIVE, because they are two
+ * answers to the same question ("how does this unit serve a write?") and an image that carried both would
+ * have two write branches in one body - `HDD_WRITE` writes the MEDIUM through the ladder's write door
+ * (durable, destructive); `CARD_COW` writes a RAM shadow and leaves the medium byte-exact (volatile,
+ * non-destructive). The build refuses both on at once. It requires the card strategy (its base read is the
+ * ladder's door) and, as with `HDD_WRITE`, the card-root and rw-mount arms, because its whole point is a
+ * WRITABLE mounted root. */
+#ifndef STAGE90_XNU_CARD_COW
+#define STAGE90_XNU_CARD_COW 0
+#endif
+#if STAGE90_XNU_CARD_COW && !STAGE90_XNU_EMMC_STRATEGY
+#error "STAGE90_XNU_CARD_COW=1 needs STAGE90_XNU_EMMC_STRATEGY=1: the shadow's base read is the card ladder's door, and a shadow with no base behind it would serve bytes no device holds."
+#endif
+#if STAGE90_XNU_CARD_COW && STAGE90_XNU_HDD_WRITE
+#error "STAGE90_XNU_CARD_COW=1 with STAGE90_XNU_HDD_WRITE=1: the two are different answers to the same question (how the card unit serves a write) and would put two write branches in one body. Choose the volatile RAM shadow (CARD_COW) or the durable medium write (HDD_WRITE), not both."
+#endif
+
 
 #if STAGE90_XNU_EMMC_STRATEGY
 /* The ladder's door and its two addressing accessors - 887's exported half, in the SAME image when
@@ -505,6 +541,15 @@ int entry_root_media_register_card_raw(void);
 #endif
 #endif
 
+#if STAGE90_XNU_CARD_COW
+/* **968: THE SHADOW KERNEL, `#include`d so it is ONE object and ONE definition of the page-shadow rule.**
+ * It is a plain-C, XNU-header-free file (compiled standalone by its own host known-answer test), included
+ * here AFTER the ladder externs above - because its base read (`st_cow_base_read`) calls
+ * `entry_storage_driver_read`, and because the platform block builds this file as a single translation
+ * unit. The `static` functions it defines are file-local to the object either way. */
+#include "stage90_root_media_cow.c"
+#endif
+
 /* The two `.bss` cells the strategy's refusals are counted in, so a served read and a refused one
  * are told apart by a number in the log rather than by the absence of a log line. */
 static uint32_t st_medium_served;
@@ -525,6 +570,83 @@ static uint32_t st_medium_write_served;
 #define ST_LADDER_WRITE_WORDS  128u                      /* 512 / 4 */
 static uint32_t st_write_stage[ST_LADDER_WRITE_WORDS];
 #endif
+
+#if STAGE90_XNU_CARD_COW
+/*
+ * **968: THE COW SHADOW'S ARENA, AND IT IS A NAMED CONSTANT WITH A REASON.** The shadow kernel
+ * (`stage90_root_media_cow.c`, `#include`d below) is the HD2 lab's `leo_cow` mechanism for OUR card unit:
+ * `ST_COW_ARENA_PAGES` distinct 4096-byte pages' worth of RAM. When it is full, the next write to a NEW
+ * page is refused with `ST_COW_NO_SPACE` and the write reaches the filesystem as an error - it does NOT
+ * corrupt the base and does NOT silently drop the write, which is the only acceptable failure for a
+ * non-destructive arm.
+ *
+ * **Why the number is small and not the HD2's `leo_cow_budget_pages`.** The HD2 asks XNU's own free-page
+ * count for its budget (it is a kext, with the page allocator under it): its own boot log reports
+ * `Leo COW budget: ... cap=1405 pages` - a 5.6 MiB budget - and its *observed* usage was tiny
+ * (`Leo COW: cap=1405 pages used=2 dirty=2 writes=2`, the last snapshot in its ring). This arena is a
+ * `.bss` array in the ENTRY image, and `build_entry.sh` derives `topOfKernelData` - the floor of XNU's
+ * early free region, `avail_start = topOfKernelData + 10 pages` (`arm_vm_init.c`) - from the image's
+ * `__bss_end`. So every arena page RAISES `topOfKernelData` and CUTS the RAM XNU boots on by the same
+ * amount: measured, the 2 MiB arena moved `topOfKernelData` from `0x80800000` (965c) to `0x80A00000`,
+ * shrinking XNU's free region under the 16 MB window from ~8 MiB to ~6 MiB. That is the 912 OOM-shaped
+ * confounder, and it is why the HD2's 5.6 MiB budget cannot be copied here - it would leave ~2.5 MiB.
+ * 512 pages (2 MiB) is a floor: 36% of the HD2's budget and ~256x its observed early usage, with the
+ * unused majority available to the real workload. **Its adequacy is MEASURED, not assumed** - a write to
+ * a page the arena cannot hold is refused with `ST_COW_NO_SPACE` (never a silent drop, never a base
+ * write) and counted in `xnu_live_rootmedia_cow_refused`, so a run whose arena is too small says so.
+ * Raising it is a one-line change that re-derives `topOfKernelData`, not a silent allocation.
+ *
+ * The hash table is >= 2x the arena so a full arena cannot fill it (see `st_cow_init`'s refusal); the
+ * pending list is arena-sized. All three are `.bss` (zero-init), so they cost no image bytes.
+ */
+#define ST_COW_ARENA_PAGES  512u                  /* 2 MiB of shadow */
+#define ST_COW_HASH_SLOTS  1024u                  /* power of two, >= 2 * ST_COW_ARENA_PAGES */
+static uint8_t       st_cow_arena[ST_COW_ARENA_PAGES * 4096u];
+static st_cow_entry  st_cow_entries[ST_COW_HASH_SLOTS];
+static uint32_t      st_cow_pending[ST_COW_ARENA_PAGES];
+static st_cow        st_cow_shadow;
+static int           st_cow_bound;                /* 0 until the base's length is known and it is bound */
+/* 968's two counters, in the same spirit as `st_medium_write_refused`/`_served`: `_refused` counts writes
+ * the shadow could not hold (a full arena), so "the arm ran out" is a number in the log rather than a
+ * silent error a mount reads as a corrupt filesystem. */
+static uint32_t      st_cow_write_refused;
+static uint32_t      st_cow_write_served;
+
+/* The shadow's base read: one 512-byte sector from the ladder's read door, addressed by its LBA on the
+ * MEDIUM (`selected_lba() + partition-relative sector`). `cookie` is the `base_lba`, passed as an integer
+ * so the module needs no pointer to this file's state. It is a plain function so the COW source stays
+ * SoC-free and the LBA arithmetic lives here, where `entry_storage_selected_lba` is declared. */
+static int
+st_cow_base_read(void *cookie, uint64_t lba, uint8_t out[512])
+{
+    const uint32_t *w = entry_storage_driver_read((uint32_t)((uint64_t)(uintptr_t)cookie + lba));
+    memcpy(out, (const void *)w, 512u);
+    return 0;
+}
+
+/* Bind the shadow to the card partition once, on the first card-strategy call. The base is
+ * `entry_storage_selected_count()` sectors - the SAME extent `st_medium_card_full_bytes` bounds the unit
+ * with - so the shadow's length and the unit's length are one number ([[mi4-one-value-two-definitions]]).
+ * A failed bind leaves `st_cow_bound` 0 and the caller falls back to the plain ladder read, so a bind that
+ * cannot hold the geometry (a partition too large for the hash key) is a run that reads the base
+ * unwritten, not one that serves a partial shadow. */
+static void
+st_cow_ensure_bound(void)
+{
+    uint64_t sectors;
+    if (st_cow_bound > 0) return;
+    if (st_cow_bound < 0) return;                 /* already refused: do not retry per read */
+    sectors = (uint64_t)entry_storage_selected_count();
+    if (st_cow_init(&st_cow_shadow, sectors, 8u, ST_COW_ARENA_PAGES, ST_COW_HASH_SLOTS,
+                    st_cow_arena, st_cow_entries, st_cow_pending,
+                    (void *)(uintptr_t)entry_storage_selected_lba(),
+                    st_cow_base_read) != ST_COW_OK) {
+        st_cow_bound = -1;
+        return;
+    }
+    st_cow_bound = 1;
+}
+#endif /* STAGE90_XNU_CARD_COW */
 
 static unsigned
 st_media_bytes(void)
@@ -865,7 +987,11 @@ st_media_strategy(struct buf *bp)
      * too), and nothing about the shipped 903/904 arm moves. `st_medium_write_refused` counts the
      * refusals so the log can tell "the arm refused" from "no write was attempted at all". */
     if ((buf_flags(bp) & B_READ) == 0) {
-#if STAGE90_XNU_HDD_WRITE
+#if STAGE90_XNU_HDD_WRITE || STAGE90_XNU_CARD_COW
+        /* 905 widened this guard to the CARD unit; 968 permits the same unit for the OTHER reason (a RAM
+         * shadow rather than a medium write). Both answer "the card unit is this arm's to write"; every
+         * other unit - the RAM blob, the staged sector - still refuses here. The two switches are mutually
+         * exclusive (see the `#error` above), so at most one widening is ever compiled. */
         if (unit != ST_MEDIA_DRIVER) {
 #endif
             st_medium_write_refused++;
@@ -873,7 +999,7 @@ st_media_strategy(struct buf *bp)
             buf_seterror(bp, EROFS);
             buf_biodone(bp);
             return;
-#if STAGE90_XNU_HDD_WRITE
+#if STAGE90_XNU_HDD_WRITE || STAGE90_XNU_CARD_COW
         }
 #endif
     }
@@ -934,6 +1060,60 @@ st_media_strategy(struct buf *bp)
             return;
         }
         nblk = count / ST_MEDIA_BLOCKSIZE;              /* whole blocks in the (already trimmed) count */
+#if STAGE90_XNU_CARD_COW
+        /*
+         * **968: THE COW WRITE BRANCH - the same loop shape as 905's, but the destination is the RAM
+         * shadow, not the medium.** Each 512-byte block the caller wrote is copied into the shadow:
+         * `st_cow_prepare_write` first makes the block's whole original 4096-byte page resident (reading
+         * it from the base through the ladder's READ door - this arm does not compile the write door), then
+         * `st_cow_write_prepared_sector` modifies only the shadow. **The base is never written**: this
+         * branch calls `st_cow_*` (whose only base access is the read callback) and nothing else. The
+         * sector number is the SAME `off / ST_MEDIA_BLOCKSIZE + i` the read path uses, so a shadow write
+         * and a shadow read name one sector - the "one value, two definitions" rule at the unit of the
+         * transfer.
+         *
+         * **A FULL ARENA IS AN ERROR, NOT A SILENT DROP.** `st_cow_prepare_write` refuses a page the arena
+         * cannot hold with `ST_COW_NO_SPACE` before it reads anything, and the branch maps that to `ENOSPC`
+         * and the rest to `EIO`; the filesystem then sees a failed write rather than stale bytes it would
+         * call clean. `st_cow_write_refused` counts those, so "the arm ran out of arena" is a number in
+         * the log. These writes COUNTERS `st_medium_write_served` too - they are writes this device
+         * served, whether they landed in RAM or on a medium.
+         */
+        if (unit == ST_MEDIA_DRIVER && (buf_flags(bp) & B_READ) == 0) {
+            st_cow_ensure_bound();
+            for (i = 0u; st_cow_bound == 1 && i < nblk; i++) {
+                int cr = st_cow_prepare_write(&st_cow_shadow, (off / ST_MEDIA_BLOCKSIZE) + i, 1u);
+                if (cr == ST_COW_OK)
+                    cr = st_cow_write_prepared_sector(&st_cow_shadow, (off / ST_MEDIA_BLOCKSIZE) + i,
+                                                      (const uint8_t *)(vaddr + i * ST_MEDIA_BLOCKSIZE));
+                if (cr != ST_COW_OK) {
+                    st_cow_write_refused++;
+                    entry_live_write("xnu_live_rootmedia_cow_refused", st_cow_write_refused);
+                    buf_unmap(bp);
+                    buf_seterror(bp, (cr == ST_COW_NO_SPACE) ? ENOSPC : EIO);
+                    buf_biodone(bp);
+                    return;
+                }
+            }
+            if (st_cow_bound != 1) {                 /* the bind refused the geometry: no shadow to write */
+                st_cow_write_refused++;
+                entry_live_write("xnu_live_rootmedia_cow_refused", st_cow_write_refused);
+                buf_unmap(bp);
+                buf_seterror(bp, EIO);
+                buf_biodone(bp);
+                return;
+            }
+            buf_unmap(bp);
+            buf_setresid(bp, (uint32_t)buf_count(bp) - count);
+            buf_biodone(bp);
+            entry_live_write("xnu_live_rootmedia_cow_wr_blocks", nblk);
+            entry_live_write("xnu_live_rootmedia_cow_used_pages", st_cow_shadow.used);
+            entry_live_write("xnu_live_rootmedia_cow_dirty_pages", st_cow_shadow.dirty);
+            st_medium_write_served++;
+            entry_live_write("xnu_live_rootmedia_write_served", st_medium_write_served);
+            return;
+        }
+#endif
 #if STAGE90_XNU_HDD_WRITE
         /*
          * **905: THE SAME LOOP, THE OTHER DIRECTION, AND THAT IS THE WHOLE OF THE WRITE BRANCH.**
@@ -980,8 +1160,31 @@ st_media_strategy(struct buf *bp)
         for (i = 0u; i < nblk; i++) {
             uint32_t lba = (uint32_t)((uint64_t)base_lba
                                       + (off / ST_MEDIA_BLOCKSIZE) + i);
-            const uint32_t *w = entry_storage_driver_read(lba);
-            bcopy((const void *)w, (void *)(vaddr + i * ST_MEDIA_BLOCKSIZE), ST_MEDIA_BLOCKSIZE);
+#if STAGE90_XNU_CARD_COW
+            /* **968: a card read goes through the shadow.** The shadow returns the resident page for a
+             * sector that was written (so a mount reads back its own writes) and the base for one that was
+             * not - and the base read is the SAME `entry_storage_driver_read(lba)` the plain path calls, so
+             * an un-modified sector's bytes are byte-identical to the read-only 965c arm's. The shadow is
+             * bound lazily on the first card call; a bind that refused the geometry falls through to the
+             * plain read below, so a medium the shadow cannot hold is still readable. */
+            if (unit == ST_MEDIA_DRIVER) {
+                st_cow_ensure_bound();
+                if (st_cow_bound == 1) {
+                    if (st_cow_read_sector(&st_cow_shadow, (off / ST_MEDIA_BLOCKSIZE) + i,
+                                           (uint8_t *)(vaddr + i * ST_MEDIA_BLOCKSIZE)) != ST_COW_OK) {
+                        buf_unmap(bp);
+                        buf_seterror(bp, EIO);
+                        buf_biodone(bp);
+                        return;
+                    }
+                    continue;
+                }
+            }
+#endif
+            {
+                const uint32_t *w = entry_storage_driver_read(lba);
+                bcopy((const void *)w, (void *)(vaddr + i * ST_MEDIA_BLOCKSIZE), ST_MEDIA_BLOCKSIZE);
+            }
         }
         buf_unmap(bp);
         buf_setresid(bp, (uint32_t)buf_count(bp) - count);
@@ -1238,7 +1441,7 @@ st_media_ioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
          * **THE PAIR IS THE CLAIM, AND IT IS CHECKED BY THE BUILD, NOT BY THIS COMMENT**: `xnu_entry_905`
          * refuses an image in which `st_media_strategy` carries a write branch while this byte still
          * answers 0 for the card, or vice versa - `mi4-a-claim-in-a-comment-is-not-a-check`. */
-#if STAGE90_XNU_HDD_WRITE
+#if STAGE90_XNU_HDD_WRITE || STAGE90_XNU_CARD_COW
         *(uint32_t *)data = (unit == ST_MEDIA_DRIVER) ? 1u : 0u;
 #else
         *(uint32_t *)data = 0u;

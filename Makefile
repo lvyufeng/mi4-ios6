@@ -182,6 +182,12 @@ check:
 	@tools/check_response_word_order.py
 	@tools/check_hfs_staged.sh
 	@tools/check_d13_board_staged.sh
+# 968: the COW writable-root arm needs D13's `hfs_mountroot` to mount the root read-write. `tools/
+# hfs_patch_root_rw.py`'s guarded `vfs_clearflags(mp, MNT_RDONLY)` is the one edit that makes it so, and
+# on D13 it is applied by `tools/stage_d13_root_rw.sh`. `check_d13_root_rw_staged.sh` re-derives the
+# property (present, guarded, adjacent to the ROOT hfs_mountfs call) and refuses drift, so a re-provisioned
+# `external/` cannot leave the arm silently disarmed. Source half, no compiler, no device.
+	@tools/check_d13_root_rw_staged.sh
 # 926: the entry link's object pool must follow the selected tree. `build_entry.sh` read one
 # hard-pinned tree (4570) and one hard-pinned pool, 289 times; the D13 link needs the `_d13` pool.
 # Re-derives the derivation from the tree's own header and refuses a re-pin. Source half, no device.
