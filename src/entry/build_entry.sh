@@ -37561,8 +37561,8 @@ run python3 "$REPO_ROOT/tools/check_driver_catalogue.py" --selftest || exit 1
 # and this image's own - calls either guarded function while both take the telemetry branch the same
 # `#if` selects. It reads the kernel layer's object, which `tools/assemble_arm_layer.sh` writes, so it
 # fails on a build whose step 2 predates the fix rather than quietly linking that object.
-run python3 "$REPO_ROOT/tools/check_asm_config.py" --verbose || exit 1
-run python3 "$REPO_ROOT/tools/check_asm_config.py" --selftest || exit 1
+run python3 "$REPO_ROOT/tools/check_asm_config.py" --tree "$XNU_TREE" --verbose || exit 1
+run python3 "$REPO_ROOT/tools/check_asm_config.py" --tree "$XNU_TREE" --selftest || exit 1
 #
 # **And 489's, which is about a reading rather than a build.** For three steps the console's last line -
 # `load_init_program: attempting to load /sbin/launchd` and then nothing - was read as "`execve` is still

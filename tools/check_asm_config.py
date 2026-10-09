@@ -65,7 +65,22 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-XNU = os.path.join(REPO, "external", "xnu-4570.1.46")
+
+# **The tree (948).** Same shape as 942-947: the check reads the tree the build selected and derives
+# every path and every field name from it, because Darwin 13's ARM layer is a *different scheme* from
+# 4570's, not 4570's minus a set. `is_d13` is the same discriminator the build uses (D13 ships the
+# legacy private header `osfmk/sys/types.h`), and `configure()` sets the module's tree, its per-tree
+# object pool (`out/xnu_kernel_obj_d13`), its `assym.s` root and the two `struct thread` fields the
+# D13 `machine_load_context` addresses (`check_assym_cswitch.py`'s two schemes, one level up).
+DEFAULT_TREE = os.path.join(REPO, "external", "xnu-4570.1.46")
+
+
+def is_d13(tree):
+    return os.path.isfile(os.path.join(tree, "osfmk", "sys", "types.h"))
+
+
+# --- per-tree, set by `configure()` ------------------------------------------------------------------
+XNU = DEFAULT_TREE
 LOCORE = os.path.join(XNU, "osfmk", "arm", "locore.s")
 
 # The option the two functions are guarded by, the functions themselves, and the positive control from
@@ -75,7 +90,7 @@ CALLED_WHEN_UNSET = ("timer_state_event_kernel_to_user", "timer_state_event_user
 CALLED_WHEN_TELEMETRY = ("telemetry_needs_record", "telemetry_mark_curthread")
 
 # The two objects that must agree: the ARM layer the kernel image is linked from, and the entry image's
-# own assembly (a different script, the same `arm_asm_defines.sh`).
+# own assembly (a different script, the same `arm_asm_defines.sh`). Both live under the tree's pool.
 OBJECTS = {
     "kernel_layer": ("out/xnu_asm_obj/locore.o", "tools/assemble_arm_layer.sh"),
     "entry_image": ("out/stage90/xnu_arm_entry_locore.o", "scripts/xnu_arm_assemble.sh"),
@@ -94,7 +109,7 @@ FRAGMENT = "tools/xnu_config/boot/STAGE90_XNU.local"
 #
 # Each site is a *specific function* rather than "the object contains the number": the immediate has to
 # be inside the body the C line is in, or the agreement is a coincidence of two unrelated constants.
-OFFSETS = (
+OFFSETS_4570 = (
     ("TH_KSTACKPTR", (
         ("osfmk_arm_model_dep.o", "DebuggerXCall",
          "model_dep.c:826 reads `current_thread()->machine.kstackptr`"),
@@ -111,9 +126,77 @@ OFFSETS = (
     )),
 )
 
+# **Darwin 13's two fields (948).** D13's `machine_load_context` (`osfmk/arm/cswitch.s:106-127`) is a
+# different sequence: it writes `r0` into TPIDRURO directly, loads `MACHINE_THREAD_CTHREAD_SELF`
+# (`genassym.c:202` `offsetof(thread_t, machine.cthread_self)` = 944 on this tree) into `r1`, reads
+# TPIDRURW, and takes the register save area from `TH_PCB_ISS` (`genassym.c:221`
+# `offsetof(thread_t, machine.iss)` = 576). There is **no `TH_KSTACKPTR` and no `TH_CTH_SELF`** on this
+# tree (genassym.c declares neither), so the 4570 table would compare fields the file does not have.
+#
+# Each site is a function whose compiled C addresses that field. `thread_get_cthread_self` returns it,
+# `thread_set_cthread_self` writes it, and `machine_thread_dup` copies it - the whole chain of the
+# `_cthread_self`/`cthread_self` pair. `TH_PCB_ISS` is written by the three stack functions
+# (`pcb.c:240,243,307`: handoff, handoff's NULL, attach) - the compiled code puts `#576` inside them,
+# read off the object the same way `claim_offsets` reads the others.
+OFFSETS_D13 = (
+    ("MACHINE_THREAD_CTHREAD_SELF", (
+        ("osfmk_arm_pcb.o", "thread_get_cthread_self",
+         "pcb.c:134 returns `curthr->machine.cthread_self`"),
+        ("osfmk_arm_pcb.o", "thread_set_cthread_self",
+         "pcb.c:123 assigns `curthr->machine.cthread_self`"),
+        ("osfmk_arm_pcb.o", "machine_thread_dup",
+         "pcb.c:433 copies `target->machine.cthread_self = self->machine.cthread_self`"),
+    )),
+    ("TH_PCB_ISS", (
+        ("osfmk_arm_pcb.o", "machine_stack_attach",
+         "pcb.c:307 sets `thread->machine.iss`; pcb.c:240/243 in `machine_stack_handoff` set it and "
+         "clear the old thread's - all three are in this file and the immediate is in the one claim 4 "
+         "names, which is enough for a second source"),
+    )),
+)
+
 # The object directory `build_xnu_arm_kernel.sh` writes the C objects into, and the tool the claim reads
-# them with. `arm-none-eabi-objdump` is the same toolchain `arm-none-eabi-nm` above is from.
+# them with. `arm-none-eabi-objdump` is the same toolchain `arm-none-eabi-nm` above is from. The pool
+# carries the tree's suffix (`out/xnu_kernel_obj_d13` on D13), so `configure()` sets it.
 KOBJ = "out/xnu_kernel_obj"
+
+# --- per-tree, continued: the offsets table and the object pool ---
+OFFSETS = OFFSETS_4570
+IS_D13 = False
+
+
+def configure(tree):
+    """Point the check at a tree. Sets the module's `XNU`/`LOCORE` (the files read by claim 3), the
+    `KOBJ` pool suffix (`check_asm_config`'s own `xnu_kernel_obj$suffix`), the per-tree `OFFSETS`
+    table (claim 4's fields), and `assym_for()`'s root. Called once in `main()`."""
+    global XNU, LOCORE, KOBJ, OFFSETS, IS_D13, OBJECTS
+    XNU = tree
+    IS_D13 = is_d13(tree)
+    # **The children must follow the tree too.** `facts_for` runs `make_defines.sh`,
+    # `select_master.sh` and `arm_asm_defines.sh` as subprocesses, and those read `XNU_TREE` from the
+    # *environment*. Setting only the module variable would leave them on 4570, so a D13 selftest would
+    # quietly compare 4570's expansion, declaration and flags and pass for the wrong reason - the exact
+    # silent-wrong-tree defect this pivot is named for, one level down.
+    os.environ["XNU_TREE"] = tree
+    LOCORE = os.path.join(XNU, "osfmk", "arm", "locore.s")
+    suffix = "_d13" if IS_D13 else ""
+    KOBJ = "out/xnu_kernel_obj" + suffix
+    OFFSETS = OFFSETS_D13 if IS_D13 else OFFSETS_4570
+    # The kernel layer's `locore.o` is written into the tree's pool; the entry image's is the entry
+    # build's own root and carries no suffix.
+    OBJECTS = {
+        "kernel_layer": ("out/xnu_asm_obj%s/locore.o" % suffix, "tools/assemble_arm_layer.sh"),
+        "entry_image": ("out/stage90/xnu_arm_entry_locore.o", "scripts/xnu_arm_assemble.sh"),
+    }
+    return IS_D13
+
+
+def assym_for(config):
+    """`out/xnu_assym[<suffix>]/<config>/assym.s`, the per-configuration artifact `gen_assym.sh`
+    writes. On D13 the build writes `out/xnu_assym_d13/...` (the same `$XNU_ASSYM_OUT` the build uses),
+    so a plain run on D13 would otherwise compare against 4570's offsets - which is the defect this
+    whole check exists for, one level down."""
+    return "out/xnu_assym%s/%s/assym.s" % ("_d13" if IS_D13 else "", config)
 
 
 def sh(cmd, env=None):
@@ -188,6 +271,30 @@ def read_assym(path):
     return out
 
 
+def read_fragment(config, tree):
+    """The `.local` fragment `select_master.sh` finds for this configuration and tree, or None.
+
+    The search is the one `select_master.sh` performs (`tools/xnu_config/*/<CONFIG>.local`, first by
+    directory) - **but only when the tree declares `<CONFIG>` without it.** Darwin 13's tree, unlike
+    4570's, ships **no** `mockfs`/`development` configurations, so the 4570-authored
+    `boot/STAGE90_XNU.local` (whose declaration `[ RELEASE mockfs development ]` names them) is *not*
+    this tree's fragment: a D13 `STAGE90_XNU` is the tree's own `RELEASE`, and the fragment is absent.
+    Reading `boot/STAGE90_XNU.local` unconditionally is what makes claim 1 fire on D13 - a failure
+    whose text has been sitting in the D13 build log since build 36 and before.
+
+    Whether the tree declares the bare name is read from the tree's own MASTER files, by the same
+    `select_master.sh` the configuration is expanded with, run with no fragment."""
+    ok, out = sh(["./tools/xnu_config/select_master.sh", config], {"XNU_TREE": tree, "XNU_MASTER_LOCAL": "/dev/null"})
+    if ok and re.search(r"^%s#" % re.escape(config), out, re.M):
+        return None
+    for d in sorted(os.listdir(os.path.join(REPO, "tools", "xnu_config"))):
+        p = os.path.join(REPO, "tools", "xnu_config", d, "%s.local" % config)
+        if os.path.isfile(p):
+            with open(p, encoding="utf-8") as f:
+                return f.read()
+    return None
+
+
 def symbol_immediates(obj, symbol):
     """The immediates inside one function of one object, or None when either is not there.
 
@@ -208,29 +315,42 @@ def symbol_immediates(obj, symbol):
     return [int(n) for n in re.findall(r"#(-?\d+)\b", body)]
 
 
-def facts_for(config):
-    facts = {"config": config, "locore_s": None, "releases": {}, "fragments": {}}
+def facts_for(config, tree=DEFAULT_TREE, suffix=""):
+    facts = {"config": config, "tree": tree, "locore_s": None, "releases": {}, "fragments": {}}
+    # **Every child is told the tree (948).** Each of these scripts reads `XNU_TREE` from its
+    # environment; without it they default to 4570. On an actual D13 build the environment already
+    # carries it, but `--selftest` and a direct invocation must not depend on that - passing it here is
+    # one definition, and it is the same tree `configure()` pinned.
+    env = {"XNU_TREE": tree}
     for name, cfg in (("release", "RELEASE"), (config, config)):
-        ok, out = sh(["./tools/xnu_config/make_defines.sh", cfg])
+        ok, out = sh(["./tools/xnu_config/make_defines.sh", cfg], env)
         facts["releases"][name] = define_lines(out) if ok else None
-    ok, out = sh(["./tools/xnu_config/arm_asm_defines.sh", config])
+    ok, out = sh(["./tools/xnu_config/arm_asm_defines.sh", config], env)
     facts["asm_defines"] = define_lines(out) if ok else None
-    ok, out = sh(["./tools/xnu_config/arm_asm_defines.sh", "--exceptions"])
+    ok, out = sh(["./tools/xnu_config/arm_asm_defines.sh", "--exceptions"], env)
     facts["exceptions"] = sorted(out.split()) if ok else None
     # The configuration names the tree declares, which is what tells a word in a declaration apart from
     # an option: `select_master.sh`'s output carries the declarations themselves as `NAME#<attrs>`.
-    ok, out = sh(["./tools/xnu_config/select_master.sh", config])
+    ok, out = sh(["./tools/xnu_config/select_master.sh", config], env)
     facts["declared_configs"] = (sorted(re.findall(r"^([A-Za-z0-9_]+)#", out, re.M))
                                  if ok else None)
+    # The other tree's declared configurations, for the one case where they matter: a `.local` fragment
+    # written for 4570 that D13's build also finds. `boot/STAGE90_XNU.local` declares
+    # `[ RELEASE mockfs development ]`, and `mockfs`/`development` are 4570-only configurations - real
+    # words of a real tree, not typos. Claim 1's orphan test asks "does this word reach anything", and a
+    # word that is a configuration of the *other* tree reaches something the fragment's author meant;
+    # only a word neither tree declares is the defect. Both are read with no fragment, so the set is
+    # the trees' own declarations.
+    ok_other, out_other = sh(["./tools/xnu_config/select_master.sh", config],
+                             {"XNU_TREE": DEFAULT_TREE, "XNU_MASTER_LOCAL": "/dev/null"})
+    facts["declared_configs_other"] = (sorted(re.findall(r"^([A-Za-z0-9_]+)#", out_other, re.M))
+                                       if ok_other else [])
+    facts["fragment_text"] = read_fragment(config, tree)
     for name, (path, script) in OBJECTS.items():
         facts[name] = {"path": path, "script": script, "undefined": nm_undefined(path)}
-    facts["assym"] = read_assym("out/xnu_assym/%s/assym.s" % config)
+    facts["assym"] = read_assym(assym_for(config))
     facts["offsets"] = {(obj, sym): symbol_immediates(obj, sym)
                         for _name, sites in OFFSETS for obj, sym, _why in sites}
-    path = os.path.join(REPO, FRAGMENT)
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            facts["fragment_text"] = f.read()
     if os.path.exists(LOCORE):
         with open(LOCORE, encoding="utf-8") as f:
             facts["locore_s"] = f.read()
@@ -273,9 +393,20 @@ def claim_declaration(facts, failures, notes):
 
     text = facts.get("fragment_text")
     if text is None:
-        failures.append("no %s, so the declaration `%s = [ ... ]` this configuration is composed "
-                        "from cannot be read and the expansion has nothing to be compared with"
-                        % (FRAGMENT, cfg))
+        # **No fragment is not necessarily a missing fragment (948).** On a tree that declares `<cfg>`
+        # in its own MASTER (D13 declares `STAGE90_XNU`), the tree's own declaration IS the composition
+        # and there is no external fragment to read - the expansion above was compared against it
+        # already. On 4570, where `<cfg>` is declared only by the fragment, an absent fragment is the
+        # defect. `read_fragment` returns None for both, so the two are told apart by asking the tree.
+        ok, decl = sh(["./tools/xnu_config/select_master.sh", cfg],
+                      {"XNU_TREE": facts["tree"], "XNU_MASTER_LOCAL": "/dev/null"})
+        if ok and re.search(r"^%s#" % re.escape(cfg), decl, re.M):
+            notes.append("%s is declared by this tree's own MASTER, so there is no external fragment: "
+                         "the expansion above is the tree's own declaration of it" % cfg)
+        else:
+            failures.append("no %s fragment for %s and this tree does not declare it either, so the "
+                            "declaration `%s = [ ... ]` it is composed from cannot be read and the "
+                            "expansion has nothing to be compared with" % (cfg, cfg, cfg))
     else:
         m = re.search(r"^#\s*%s\s*=\s*\[([^\]]*)\]" % re.escape(cfg), text, re.M)
         if not m:
@@ -288,6 +419,12 @@ def claim_declaration(facts, failures, notes):
             # for exactly that reason. A word that is neither has no reader anywhere - and the failure
             # it would cause is an *added* attribute, not a missing one, so nothing else would notice.
             known = set(facts.get("declared_configs") or ())
+            # The other tree's configurations only widen the set on D13, where the 4570 fragment is
+            # found - so the 4570 run's `known` is byte-for-byte what it was (and its
+            # `a_named_configuration_stops_resolving` mutation, which drops from `declared_configs`,
+            # still fires).
+            if IS_D13:
+                known |= set(facts.get("declared_configs_other") or ())
             if not known:
                 failures.append("`select_master.sh %s` produced no declarations, so which words of "
                                 "`[ %s ]` are configurations cannot be told from options"
@@ -345,6 +482,14 @@ def claim_filter(facts, failures, notes):
 
 def claim_locore(facts, failures, notes):
     """3. The option's two sides agree, read out of Apple's file and out of the objects."""
+    # **948: this claim is 4570's `locore.s`.** D13's `osfmk/arm/locore.s` consults
+    # `CONFIG_SKIP_PRECISE_USER_KERNEL_TIME` **zero** times (`grep -c` = 0) - it has no such guard, no
+    # `timer_state_event_*` and no `telemetry_*` names - so the two branches this claim compares do not
+    # exist on this tree. Skipped, not weakened, and published by `main()`: the value the claim backs
+    # (that the assembly and the C are given the same option) is 4570's arrangement, and 4570's run
+    # still refuses every mutation of it.
+    if IS_D13:
+        return
     text = facts["locore_s"]
     if text is None:
         failures.append("no %s, so the guard this claim is about cannot be read at all" % LOCORE)
@@ -558,6 +703,28 @@ MUTATIONS = (
 )
 
 
+# **The mutations this tree cannot host (948).** Seven are claim 3's - the option's two guarded branches
+# are 4570's `locore.s`, which D13's file does not have - and four are claim 4's, anchored on a field or
+# an object D13 does not use (`TH_CTH_SELF`/`TH_KSTACKPTR`, `osfmk_arm_machdep_call.o`,
+# `osfmk_arm_trap.o`). Mutating any of them edits text D13's run does not compare, so `compare()` returns
+# no failures and the mutation would be *accepted* - a false alarm. Published as skipped, not silenced.
+D13_SKIPPED_MUTATIONS = frozenset((
+    "the_option_is_gone_from_locore", "the_unguarded_call_is_renamed",
+    "the_object_calls_the_guarded_functions", "the_entry_object_calls_the_guarded_functions",
+    "the_object_loses_the_control", "the_object_is_not_there",
+    "the_configuration_stops_setting_the_option",
+    "assym_publishes_a_wrong_offset", "the_kernel_object_reads_a_different_offset",
+    "one_of_the_second_sources_is_gone", "the_offset_is_gone_from_assym",
+    # Drops the word `mockfs` from the tree's declared configurations - a 4570 configuration D13's
+    # MASTER does not carry, so the drop has nothing to remove and the mutation would raise rather than
+    # run.
+    "a_named_configuration_stops_resolving",
+    # D13's `arm_asm_defines.sh --exceptions` is empty (`SLIDABLE` is 4570-only), so setting the list
+    # to `[]` is a no-op and the mutation mutates nothing.
+    "the_exception_is_not_dropped",
+))
+
+
 def selftest(facts):
     failures, _notes = compare(facts)
     if failures:
@@ -566,27 +733,39 @@ def selftest(facts):
             print("  " + f, file=sys.stderr)
         return 1
     accepted = []
+    ran = 0
     for name in MUTATIONS:
+        if IS_D13 and name in D13_SKIPPED_MUTATIONS:
+            continue
+        ran += 1
         failures, _notes = compare(facts, mutate=name)
         if not failures:
             accepted.append(name)
             print("  ACCEPTED: " + name)
     if accepted:
         print("FAIL: %d of %d mutations were not refused: %s"
-              % (len(accepted), len(MUTATIONS), ", ".join(accepted)))
+              % (len(accepted), ran, ", ".join(accepted)))
         return 1
-    print("  --selftest: all %d mutations were refused" % len(MUTATIONS))
+    skipped = len(MUTATIONS) - ran
+    if skipped:
+        print("  --selftest: all %d mutations were refused, %d skipped (4570-only on this tree)"
+              % (ran, skipped))
+    else:
+        print("  --selftest: all %d mutations were refused" % ran)
     return 0
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=os.environ.get("XNU_KERNEL_CONFIG", "STAGE90_XNU"))
+    ap.add_argument("--tree", default=os.environ.get("XNU_TREE", DEFAULT_TREE),
+                    help="the XNU tree the objects were built from (D13 detected by osfmk/sys/types.h)")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
-    facts = facts_for(args.config)
+    configure(args.tree)
+    facts = facts_for(args.config, args.tree, "_d13" if IS_D13 else "")
     if args.selftest:
         return selftest(facts)
 
@@ -600,6 +779,15 @@ def main():
     if args.verbose:
         for n in notes:
             print("    " + n)
+    if IS_D13:
+        print("  xnu_entry_488: the assembly is given the configuration's own options - the expansion "
+              "is the declaration it is composed from and the filter drops only the names it declares - "
+              "and the `struct thread` offsets D13's `machine_load_context` addresses its fields through "
+              "(`MACHINE_THREAD_CTHREAD_SELF` and `TH_PCB_ISS`) are the ones the kernel's own compiled C "
+              "materialises. [the option's two-sides claim is 4570's `locore.s`, which guards "
+              "`CONFIG_SKIP_PRECISE_USER_KERNEL_TIME` at nine sites; D13's `locore.s` consults it zero "
+              "times and is skipped]")
+        return 0
     print("  xnu_entry_488: the assembly is given the configuration's own options - the expansion is "
           "the declaration it is composed from, the filter drops only the names it declares, and "
           "neither assembled `locore.o` calls the two functions `%s=1` keeps out of the kernel, while "
