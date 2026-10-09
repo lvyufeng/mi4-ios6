@@ -125,6 +125,16 @@ served by the shadow, while every *other* unit (RAM blob, staged sector) still r
   greps `xnu_live_rootmedia_cow_refused` from the ELF.
 - `check_undef_handler.py --selftest` + `--split` ok (this run also fixed a latent bug: `elf_words` read the
   `SHT_NOBITS` `.bss` as file bytes and ran 4 bytes past EOF — skipped when `_type == 8`).
+- **The write the arm exercises is in the running blob — MEASURED, because the record does not say so.**
+  `armed-d13-7107b998`'s record calls `stage90_fixture.macho` *"UNCHANGED from 908 through all arms"*, and it
+  is (`52bc9c35…` in every arm) — but that 1744-byte file is a **pretlink stub** (`__PRELINK_*` sections, no
+  `svc`, no `/newfile`). The pid-1 program that writes is `g_stage90_ramdisk` (8192 B, `.data` VMA
+  `0x8056f000`): its bytes at fileoff `0x57f000` carry **15 `svc #0x80`** and the `/newfile` string, i.e.
+  905's `open(O_CREAT|O_WRONLY)` → `write` → `fsync`. On this arm those reach `st_media_strategy`'s COW
+  branch (HDD_WRITE=0), so the press **does** exercise the shadow — but a reader auditing the *record alone*
+  would see only the stub and could wrongly conclude nothing writes. `tools/host_ramdisk_macho_check.py`
+  (run by the build on `entry_ramdisk.o`) is the real guard: it validates the write door word-by-word
+  (`WRITE_PATH_WORD=71`, `WRITE_CALL_WORD`/`WRITE_SVC_WORD=78/79`).
 
 ### 6b. The runner reads the arm — the fifth unread family, closed
 
