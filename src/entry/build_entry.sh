@@ -29399,8 +29399,36 @@ if [[ -f $XNU_TREE/osfmk/sys/types.h ]]; then
         echo "        base (MANAGED_BASE 0xC0000000, arm_vm_init.c:142) cannot hold: the managed L1 is" >&2
         echo "        filled with (gMemSize>>20) entries from byte 0x3000 of a 0x4000 table, so 1 GiB is" >&2
         echo "        the last that fits and its VA reaches 0x100000000. One byte more wraps 32-bit VA and" >&2
-        echo "        writes past the L1 with no fault. Use at most 0x3f000000 for headroom; 4570's" >&2
-        echo "        MEM_SIZE_MAX clamp has no D13 analogue (the window IS memSize)." >&2
+        echo "        writes past the L1 with no fault. 4570's MEM_SIZE_MAX clamp has no D13" >&2
+        echo "        analogue (the window IS memSize)." >&2
+        exit 1; }
+    # **And a SECOND, TIGHTER D13 bound the 1 GiB ceiling does not catch: the window must stay BELOW
+    # the entry's own RAM-console VA, or the whole log is lost.** D13's managed map is FIXED-BASE at
+    # `MANAGED_BASE` (0xC0000000, arm_vm_init.c:142/361) and `gMemSize` LONG (`l2_cache_to_range`,
+    # :379), with NO clamp - 4570 clamps it below the alias base, D13 does not. The entry writes every
+    # record at VA `RAM_CONSOLE_BASE` (0xde500000, entry_stubs.c:74), and that address has NO
+    # translation under XNU's live tables (`entry_stubs.c:696`: "268's exception: data abort,
+    # dfar=0xde500000, pc inside entry_write_kv") - the console works by INSTALLING a section into
+    # XNU's live L1, and `entry_section_install` REFUSES a slot that is already occupied
+    # (entry_stubs.c:2119, "if ((before & LIVE_TTE_TYPE_MASK) != 0u) return 0"). At 16 MiB the map ends
+    # at 0xC1000000, far below the console; a window that reaches 0xde500000 fills that L1 slot with
+    # the map's L2 table, the install is refused, and `entry_write_kv` aborts with a data abort whose
+    # `.bss` refusal only the epilogue would print - i.e. A SILENT BOOT WITH NO LOG. The GIC
+    # (0xf9000000), USB (0xf9a55000), WDT (0xf9017000) and SMCC (0xf9824000) sections above the console
+    # are refused the same way, but they are less fatal: the console is the run's only reading. So on
+    # D13 the window's real ceiling is `RAM_CONSOLE_BASE - MANAGED_BASE` = 0x1e500000 (485 MB), NOT the
+    # 1 GiB L1 bound above - and `SMEM_PROBE=1` (911c) installs an alias at 0xe0000000, ABOVE the
+    # console, so a window reaching that is broken for a second, independent reason.
+    (( ENTRY_WINDOW_REQ < 0x1e500000 )) || {
+        echo "STAGE90_XNU_ENTRY_WINDOW=$ENTRY_WINDOW_REQ reaches the entry's RAM-console VA: D13's" >&2
+        echo "        managed map is fixed-base 0xC0000000 and gMemSize LONG (arm_vm_init.c:361/379," >&2
+        echo "        no clamp on D13), so at this size it occupies the L1 slot the entry installs its" >&2
+        echo "        console section into (VA 0xde500000, entry_stubs.c:74/2119) - the install is" >&2
+        echo "        REFUSED and every log record is dropped with a data abort, a SILENT boot. Also" >&2
+        echo "        the GIC/USB/WDT/SMCC MMIO sections above it are refused the same way, and 911c's" >&2
+        echo "        SMEM alias at 0xe0000000 is swallowed. Use at most 0x1e400000 (one 1 MB section" >&2
+        echo "        below 0xde400000). This is a DIFFERENT bound from the 1 GiB L1-wrap refusal above," >&2
+        echo "        and it is the binding one." >&2
         exit 1; }
 fi
 

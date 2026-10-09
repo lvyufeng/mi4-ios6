@@ -6,22 +6,25 @@
 # only the 16 MiB window - and concluded iOS could not run without the whole-kernel 915-B pmap port.
 # 970 reads `arm_vm_init.c:422 avail_end = gPhysBase + gMemSize`: the window is not just an address, it
 # is the ALLOCATOR's physical-RAM end, anchored at gPhysBase=0x80000000 inside the real high bank
-# [0x80000000, 0xDE500000). So one switch, STAGE90_XNU_ENTRY_WINDOW = 0x3f000000 (1008 MiB), gives XNU
-# ~998 MiB free instead of ~6 MiB - enough for the shared cache - with NO pmap port.
+# [0x80000000, 0xDE500000). So one switch, STAGE90_XNU_ENTRY_WINDOW = 0x1e400000 (484 MiB), gives XNU
+# ~470 MiB free instead of ~6 MiB - enough for the shared cache - with NO pmap port.
 #
 #   - THE MEDIUM IS 968's (965c's real rootfs): `tools/build_root_volumes.sh --real` copies the real iOS
 #     7.1.2 rootfs to `out/stage90/xnu_card_hfs.img`; this script writes THAT to userdata's head
 #     (`seek=0`; the card reads LBA 0x400000 = partition byte 0). It is the COW's base.
 #   - THE ARM is 968's (`armed-d13-7107b998`'s switch set) with ONE key changed:
-#     `STAGE90_XNU_ENTRY_WINDOW 0x01000000 -> 0x3f000000`. The window reaches XNU ONLY through the
+#     `STAGE90_XNU_ENTRY_WINDOW 0x01000000 -> 0x1e400000`. The window reaches XNU ONLY through the
 #     payload's generated header, so the entry bin is byte-identical to 968's and the set name comes
-#     from the qcdt (armed-window-85d8f2a7).
-#   - `0x3f000000` and not `0x40000000`: build_entry.sh refuses a D13 window >= 1 GiB (the fixed
-#     MANAGED_BASE 0xC0000000 L1 fills exactly at 1 GiB and one byte more wraps 32-bit VA with no fault);
-#     the refusal's own advice is "use at most 0x3f000000 for headroom".
+#     from the qcdt (armed-window-c74bde1d).
+#   - `0x1e400000` and not a wider window: D13's managed map is FIXED-BASE with no clamp
+#     (`[0xC0000000, 0xC0000000 + gMemSize)`), so a window that reaches the entry's RAM-CONSOLE VA
+#     0xde500000 occupies the L1 slot `entry_section_install` must install into, and the install is
+#     refused -> silent boot, no log. Above the console the window also swallows the GIC/USB/WDT/SMCC/
+#     GCC/TLMM MMIO and the SMEM alias at 0xe0000000. Real ceiling = 0xde500000 - 0xC0000000 =
+#     0x1e500000; build_entry.sh refuses any window >= that, and 0x1e400000 (484 MiB) is the safe max.
 #
 # WHAT THIS PROVES: if the premise holds, real iOS userspace (launchd, then SpringBoard) can map its
-# shared cache and iOS RUNS - no 915-B port. The runner reports `xnu_entry_args_memSize` (= 0x3f000000),
+# shared cache and iOS RUNS - no 915-B port. The runner reports `xnu_entry_args_memSize` (= 0x1e400000),
 # `BSD root:` naming the card's HFSX volume, and the COW block. FALSIFICATION: XNU panics before idle
 # (the 998 MiB map faults) or launchd still cannot map the cache - then the window's SIZE was not the
 # wall and 915-B is back on the table. Either way this press is the cheap next measurement.
@@ -38,9 +41,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# The 970 arm = 968's switch set with STAGE90_XNU_ENTRY_WINDOW=0x3f000000. Its name is set from the qcdt
+# The 970 arm = 968's switch set with STAGE90_XNU_ENTRY_WINDOW=0x1e400000. Its name is set from the qcdt
 # (the entry bin did not move); confirm with `tools/resolve_arm_set.sh out/stage90` before pressing.
-EXPECT_ARM=armed-window-85d8f2a7
+EXPECT_ARM=armed-window-c74bde1d
 
 echo "== 1. device present? =="
 adb devices | grep -q 4a2fe00b || { echo "NO DEVICE - hold Power ~10-15s to boot it back, then re-run"; exit 1; }

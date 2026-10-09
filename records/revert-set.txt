@@ -12779,41 +12779,38 @@ set=armed-d13-7107b998 sha256=5ad10669052747cdeb40c51a943bca234171c942faa3d47ab7
 
 # =================================================================================================
 # 969/970: THE WIDE-WINDOW ARM. Same switch set as armed-d13-7107b998 (the COW writable root over
-# the real 896 MiB HFSX rootfs, full D13 USB ladder, MEM_TOTAL=1) with ONE switch changed:
+# the real 896 MiB HFSX rootfs), with ONE key raised: STAGE90_XNU_ENTRY_WINDOW.
 #
-#   STAGE90_XNU_ENTRY_WINDOW  0x01000000 (16 MiB)  ->  0x3f000000 (1008 MiB)
-#
-# WHY. 969 measured the wall: the REAL iOS 7.1.2 /sbin/launchd links libSystem/libbsm out of the
-# 301 MiB dyld shared cache, but XNU on every arm so far manages only the 16 MiB entry window, so
-# real launchd cannot exec and SpringBoard is out of reach. It concluded the fix was the whole-kernel
-# 915-B low-bank pmap port. This arm tests the PREMISE of that conclusion, because the window is not
-# just an address: it is PHYSICAL RAM.
-#
-# The mechanism, read from the D13 tree (external/xnu-hd2-darwin13/xnu/osfmk/arm/arm_vm_init.c):
-#   * :333  gMemSize = args->memSize;                     <- the window IS memSize
-#   * :362  managedCachePA = identityCachePA + l2_size(gMemSize);
+# WHAT THE WINDOW IS (970's finding). `arm_vm_init.c` shows the window is not only a VA range but
+# XNU's OWN allocatable physical RAM:
+#   * :316/:333 gMemSize = args->memSize;            <- the window IS memSize
 #   * :379  l2_cache_to_range(managedCachePA, MANAGED_BASE=0xC0000000, ttb, gMemSize, TRUE);
 #   * :422  avail_end = gPhysBase + gMemSize;             <- the ALLOCATOR's end
 #   * :503  pmap_bootstrap(gMemSize, ...);
 # So a larger memSize builds a larger managed map AND moves avail_end up: XNU's OWN allocatable
 # physical RAM grows with the window. On the mi4 the window sits in the REAL high bank
-# [0x80000000, 0xDE500000) (958's RAM_BOOT_BANK_SIZE 0x5e500000 = 1509 MiB), so a 1008 MiB window is
+# [0x80000000, 0xDE500000) (958's RAM_BOOT_BANK_SIZE 0x5e500000 = 1509 MiB), so a wide window is
 # backed by real DRAM. The 16 MiB arm left XNU ~6 MiB free (968's COW arena moved topOfKernelData to
-# 0x80A00000); this arm leaves ~998 MiB (0x80A00000 .. 0xBF000000) - enough for the 301 MiB cache.
+# 0x80A00000); this arm leaves ~470 MiB - enough for iOS's 301 MiB dyld shared cache.
+#
+# WHY 0x1e400000 (484 MiB) AND NOT 0x3f000000 (1008 MiB): D13's managed map is FIXED-BASE with NO
+# clamp - it runs [MANAGED_BASE 0xC0000000, 0xC0000000 + gMemSize) - so a window that reaches the
+# entry's RAM-CONSOLE VA 0xde500000 occupies the very L1 slot `entry_live_map(RAM_CONSOLE_BASE,...)`
+# must install into, and `entry_section_install` (entry_stubs.c:2110) REFUSES an occupied slot. The
+# result is a SILENT boot with NO log (the run's whole record is that console). Above the console the
+# window also swallows the GIC 0xf9000000, USB 0xf9a55000, WDT 0xf9017000, SMCC 0xf9824000, GCC
+# 0xfc400000, TLMM 0xfd500000 and SMEM alias 0xe0000000. So the real ceiling is
+# RAM_CONSOLE_BASE - MANAGED_BASE = 0x1e500000 (485 MiB); the SAFE max is 0x1e400000 (484 MiB).
+# build_entry.sh now REFUSES any >= 0x1e500000 (a session defect: the 0x3f000000 arm was built with
+# no such refusal and would have booted silent).
 #
 # SO THIS IS A PAYLOAD-ONLY ARM: the window reaches XNU through the GENERATED xnu_arm_entry.h
 # STAGE90_XNU_ENTRY_SIZE (xnu_entry_jump.c:150 a->memSize, :164 memSizeActual, :239 the dcache clean),
 # NOT through any entry source - so the entry bin does NOT move (7107b998, byte-identical to 968's)
-# and the SET NAME's suffix comes from stage90-qcdt.img (85d8f2a7), per check_set_name_rule.sh's
-# armed-window-* census row. The entry bin and its ELF/sources are byte-identical to 968's; the
-# config differs in exactly the one window key; the payload differs because it embeds the new
-# immediate (mov r8, #0x3f000000 in xnu_entry_jump.o - read by value from the linked object).
-#
-# WHY 0x3f000000 AND NOT 0x40000000. build_entry.sh REFUSES a D13 window >= 1 GiB: the managed L1 is
-# filled with (gMemSize>>20) entries from byte 0x3000 of a 0x4000 table (L1_SIZE), so 1 GiB is the
-# last that fits and its VA reaches 0x100000000; one byte more wraps 32-bit VA and writes past the L1
-# with no fault. The refusal's own advice is "use at most 0x3f000000 for headroom" - one 16 MB L1
-# step below, and this arm uses it.
+# and the SET NAME's suffix comes from stage90-qcdt.img (c74bde1d), per check_set_name_rule.sh's
+# armed-window-* census row. The entry bin and its ELF are byte-identical to 968's; the config
+# differs in exactly the one window key; the payload differs because it embeds the new immediate
+# (mov r8, #0x1e400000 in xnu_entry_jump.o - read by value from the linked object).
 #
 # WHAT IT IS FOR. If the premise holds, a press of THIS arm lets real iOS userspace (launchd, then
 # SpringBoard) map its shared cache - i.e. iOS RUNS - with NO 915-B port. Falsification: XNU panics
@@ -12824,14 +12821,14 @@ set=armed-d13-7107b998 sha256=5ad10669052747cdeb40c51a943bca234171c942faa3d47ab7
 # NOT PRESSED. PRESS IS THE OPERATOR'S. Reversible: fastboot boot only, never flash; the card's base
 # volume is never written (CARD_COW=1).
 # =================================================================================================
-set=armed-window-85d8f2a7 sha256=7107b998cc5c5d2f4baa7da37fbfc88652fb8396958074dc52e7629130a4f243 bytes=6331476 file=xnu_arm_entry.bin role=THE-ARM:-the-entry-image-carrying-the-COW-writable-root-(CARD_COW=1-over-the-real-896-MiB-HFSX-rootfs-with-HFS_ROOT_RW=1)-AND-the-1008-MiB-window-(STAGE90_XNU_ENTRY_WINDOW-0x3f000000-;the-window-lives-in-the-GENERATED-header-not-in-any-entry-source-so-THIS-member-is-BYTE-IDENTICAL-to-968-s-armed-d13-7107b998-not-set-unique)-;-BOOT-XNU-manages-1008-MiB-of-the-high-bank-and-leaves-~998-MiB-free-so-real-iOS-launchd-can-map-the-301-MiB-shared-cache-;-the-suffix-85d8f2a7-comes-from-stage90-qcdt.img-because-this-member-did-not-move-([[mi4-build-variant-comes-from-an-env-default]])
-set=armed-window-85d8f2a7 sha256=99fd9b121d9edf97f90b0a62c3ce55cffb0fe9b852edfb9cba77074fb26c5f5b bytes=7370384 file=xnu_arm_entry.elf role=the-entry-ELF-;-BYTE-IDENTICAL-to-968-s-because-no-entry-source-moved
-set=armed-window-85d8f2a7 sha256=cde1f47ccd4d004cf2fe491f115ac4500d1ade0c70b9631738a8869f93525c6f bytes=1409 file=xnu_arm_entry-config.txt role=the-entry-record-;-968-s-34-arm-keys-WITH-STAGE90_XNU_ENTRY_WINDOW=0x3f000000-THE-ONLY-KEY-THAT-DIFFERS-from-armed-d13-7107b998-and-the-whole-reason-this-arm-needs-its-own-record-line:-a-window-that-lives-only-in-the-GENERATED-header-is-invisible-in-the-entry-bin-so-without-this-key-a-16-MiB-and-a-1008-MiB-build-would-name-the-same-arm-([[mi4-build-variant-comes-from-an-env-default]])
-set=armed-window-85d8f2a7 sha256=f569561a76d32d1f1d7d6efce6f620951dcc400a7bfb0c0aafd02ac83bff7662 bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest-;-IDENTICAL-to-968-s-(33-files-NOTHING-entry-side-changed)
-set=armed-window-85d8f2a7 sha256=221c614ffaa69d31476b6768f70589681a2dfcd0372bbb37eee04b4eccda0829 bytes=6826876 file=stage90.bin role=the-payload-binary-embedding-the-1008-MiB-entry-image-;-carries-STAGE90_XNU_ENTRY_SIZE-0x3f000000-at-13-little-endian-sites-(the-jump-s-memSize-memSizeActual-dcache-clean-and-asserts)-;-same-size-as-968-s-6826876-because-the-window-changed-no-code-size-only-immediates
-set=armed-window-85d8f2a7 sha256=cbfd3e8c541a25394772766830fa70199a5f561a8ae82465698ffb1f2be26f02 bytes=6888948 file=stage90.elf role=the-payload-ELF
-set=armed-window-85d8f2a7 sha256=676a681ddd9be304a6a0b2582aef58faba22d0f925fb634352ad0ae04266afc4 bytes=6830080 file=stage90.img role=the-fastboot-boot-image
-set=armed-window-85d8f2a7 sha256=85d8f2a7b247b37193d1892fa5d9522282d443abcb3d5d76ddbd613d128f94d1 bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-THIS-is-what-the-press-sends-;-the-set-name-s-suffix-85d8f2a7-is-THIS-member-s-hash-because-the-entry-bin-did-not-move
-set=armed-window-85d8f2a7 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
-set=armed-window-85d8f2a7 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968-s-6c2b6038-because-STAGE90_XNU_ENTRY_WINDOW-is-an-ENTRY-build-parameter-that-reaches-the-payload-through-the-GENERATED-header-not-through-a-payload-switch
-set=armed-window-85d8f2a7 sha256=cdd9bffb1d6a95a22ef2441fcec67bc9de1c0b4ca280d559de643bad6a80c34d bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img-manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-window-c74bde1d sha256=7107b998cc5c5d2f4baa7da37fbfc88652fb8396958074dc52e7629130a4f243 bytes=6331476 file=xnu_arm_entry.bin role=THE-ARM:-the-entry-image-carrying-the-COW-writable-root-(CARD_COW=1-over-the-real-896-MiB-HFSX-rootfs-with-HFS_ROOT_RW=1)-AND-the-484-MiB-window-(STAGE90_XNU_ENTRY_WINDOW-0x1e400000-;the-window-lives-in-the-GENERATED-header-not-in-any-entry-source-so-THIS-member-is-BYTE-IDENTICAL-to-968-s-armed-d13-7107b998-not-set-unique)-;-BOOT-XNU-manages-484-MiB-of-the-high-bank-and-leaves-~470-MiB-free-so-real-iOS-launchd-can-map-the-301-MiB-shared-cache-;-the-suffix-c74bde1d-comes-from-stage90-qcdt.img-because-this-member-did-not-move-([[mi4-build-variant-comes-from-an-env-default]])
+set=armed-window-c74bde1d sha256=99fd9b121d9edf97f90b0a62c3ce55cffb0fe9b852edfb9cba77074fb26c5f5b bytes=7370384 file=xnu_arm_entry.elf role=the-entry-ELF-;-BYTE-IDENTICAL-to-968-s-because-no-entry-source-moved
+set=armed-window-c74bde1d sha256=ae7c937492bfab94e11088e9d05b9ef3afbd61ca0e9fcf0ea47d92b5e34ae3ab bytes=1409 file=xnu_arm_entry-config.txt role=the-entry-record-;-968-s-34-arm-keys-WITH-STAGE90_XNU_ENTRY_WINDOW=0x1e400000-THE-ONLY-KEY-THAT-DIFFERS-from-armed-d13-7107b998-and-the-whole-reason-this-arm-needs-its-own-record-line:-a-window-that-lives-only-in-the-GENERATED-header-is-invisible-in-the-entry-bin-so-without-this-key-a-16-MiB-and-a-484-MiB-build-would-name-the-same-arm-([[mi4-build-variant-comes-from-an-env-default]])
+set=armed-window-c74bde1d sha256=d531d39d1409786baa24d3ac74c5731962041f8c3cb21639d1e62e3786a5c1b3 bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest-;-IDENTICAL-to-968-s-(33-files-NOTHING-entry-side-changed)
+set=armed-window-c74bde1d sha256=fc8929eb584f5828f3e1d37005621906151aab0cd847ec09b3f8cab176362c9a bytes=6826884 file=stage90.bin role=the-payload-binary-embedding-the-484-MiB-entry-image-;-carries-the-STAGE90_XNU_ENTRY_SIZE-0x1e400000-immediate-(mov-r8-MOVW-MOVT-in-xnu_entry_jump.o-read-by-value-from-the-linked-object-NOT-a-raw-byte-count:-ARM-mov-immediates-are-rotated-not-little-endian-literal)-;-the-payload-was-rebuilt-WITH-STAGE90_EXTRA_CFLAGS-DSTAGE90_XNU_ENTRY=1-so-its-own-config-is-968-s-6c2b6038
+set=armed-window-c74bde1d sha256=10c5e9d7872e5b09283bab03ed624e6356c67ab6fd00749aa8d1854ef9fb8b98 bytes=6888956 file=stage90.elf role=the-payload-ELF
+set=armed-window-c74bde1d sha256=55d0d8fbd6222751f64941d94b577be8df723645c34713640ba97ab53e925402 bytes=6830080 file=stage90.img role=the-fastboot-boot-image
+set=armed-window-c74bde1d sha256=c74bde1da470f3a4d9caa7a9c1750c79aa73eb157335ebb72098f68a83af38fb bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-THIS-is-what-the-press-sends-;-the-set-name-s-suffix-c74bde1d-is-THIS-member-s-hash-because-the-entry-bin-did-not-move
+set=armed-window-c74bde1d sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-window-c74bde1d sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968-s-6c2b6038-because-STAGE90_XNU_ENTRY_WINDOW-is-an-ENTRY-build-parameter-that-reaches-the-payload-through-the-GENERATED-header-not-through-a-payload-switch
+set=armed-window-c74bde1d sha256=54435d1ce594910294e0297fd67fdd0f275dd87b853463f462ce73b4030f044f bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img-manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img

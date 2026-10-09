@@ -6,7 +6,7 @@ only the 16 MiB window; 970 read `arm_vm_init.c:422 avail_end = gPhysBase + gMem
 window IS the allocator's physical-RAM end on the real high bank, so the wide-window arms are about a
 NUMBER a reader must SEE.  That number is published as `xnu_entry_args_memSize` (jump.c:172).  Until
 this rung `scripts/run_and_capture.sh` read NO `xnu_entry_args*` key, so a press of a wide-window arm
-(`armed-window-85d8f2a7`) would report nothing about the window itself - the same "unread family" defect
+(`armed-window-c74bde1d`) would report nothing about the window itself - the same "unread family" defect
 the runner has closed for the USB ladder (963) and the COW root (968) ([[mi4-911-runner-now-reads-all-goal-clauses]]).
 This check makes that a build refusal, not a habit.
 
@@ -67,7 +67,7 @@ def check(runner_text):
     block = _block(runner_text)
     if block is None:
         return refuse("scripts/run_and_capture.sh has no window block - the summary reads NONE of the "
-                      "970 entry-window family's keys (the arm `armed-window-85d8f2a7` is unread)")
+                      "970 entry-window family's keys (the arm `armed-window-c74bde1d` is unread)")
 
     read = set(WIN_KEY.findall(block))
     for m in MARKERS:

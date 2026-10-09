@@ -68,11 +68,22 @@ l2_size(0x40000000)`, a 1 MB L2 reservation for a 1 GiB managed region ("Bit gen
 **1 GiB is D13's entry-window ceiling**, and the goal's 3 GB must be met by the *region-list port*
 ([[mi4-915-multibank-region-list-design]]), never by raising the window.
 
+> **970 CORRECTION (2026-10-09): 1 GiB is the TOP ceiling, but NOT the binding one.** This rung bounded
+> the window at 1 GiB — the point the managed L1 *wrap* makes silent corruption. 970 found a **lower**
+> ceiling: D13's managed map is fixed-base and **unclamped**, so a window that reaches the entry's own
+> RAM-console VA `0xde500000` occupies the L1 slot `entry_section_install` must install into; the install
+> is refused and the boot is **silent, with no log** — an arm that cannot even report why it died. The
+> binding ceiling is therefore `RAM_CONSOLE_BASE − MANAGED_BASE = 0x1e500000` (485 MiB), and the table
+> row above calling `0x3f000000` the "headroom max" is **wrong** — that value boots silent.
+> `build_entry.sh` now refuses any window `>= 0x1e500000`. See
+> `docs/experiments/experiment-970-the-window-is-ram-not-just-address.md` §3.
+
 ## The repair
 
 1. **`build_entry.sh`** — a D13-gated refusal (`if [[ -f $XNU_TREE/osfmk/sys/types.h ]]`) of
    `ENTRY_WINDOW_REQ >= 0x40000000`, with the full chain in the comment. The D13 arm's `0x04000000` is
-   unaffected; 4570's path is code-unchanged.
+   unaffected; 4570's path is code-unchanged. **(970 later added a *second* refusal at `>= 0x1e500000`,
+   the RAM-console ceiling — see the correction above.)**
 2. **`tools/check_d13_managed_base.py`** (new) — the refusal *verifies its premise*. It re-derives all
    four facts (MANAGED_BASE's value, the fixed `managedBaseVA = MANAGED_BASE` assignment, `gMemSize` as
    the map length, `L1_SIZE`/`tte_offset`'s masking, and the

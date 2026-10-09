@@ -1,13 +1,18 @@
-# 970 — the window is RAM, not just address: a 1008 MiB window, payload-only (2026-10-09)
+# 970 — the window is RAM, not just address: a 484 MiB window, payload-only (2026-10-09)
 
 969 measured the wall — the real iOS 7.1.2 `/sbin/launchd` links libSystem/libbsm out of the **301 MiB**
 dyld shared cache, but XNU on every arm so far manages only the **16 MiB** entry window — and concluded the
 fix was the whole-kernel **915-B** low-bank pmap port. This rung tests the *premise* of that conclusion,
 because reading the D13 tree shows the window is not only an address: **`avail_end = gPhysBase + gMemSize`
 makes the window the ALLOCATOR's physical-RAM end.** Widening it is payload-only, and on the mi4 it lands
-in the real high bank. Arm: **`armed-window-85d8f2a7`**, `STAGE90_XNU_ENTRY_WINDOW=0x3f000000` (1008 MiB).
+in the real high bank. Arm: **`armed-window-c74bde1d`**, `STAGE90_XNU_ENTRY_WINDOW=0x1e400000` (484 MiB).
 
 It is a **host-side arm, PARKED.** No device was touched. **PRESS IS THE OPERATOR'S** — a park is not a press.
+
+> **Correction, same day.** The arm was first built at `0x3f000000` (1008 MiB, `armed-window-85d8f2a7`). That
+> arm was **defective and unbuildable-safe**: it clobbers the entry's own RAM console (see §3). It has been
+> replaced by `0x1e400000` (484 MiB), a new arm `armed-window-c74bde1d`, and `build_entry.sh` now refuses any
+> window `>= 0x1e500000`. §3 is the finding that forced the correction.
 
 ## 1. What 969 left open, and the one line that reopens it
 
@@ -42,32 +47,56 @@ The window reaches XNU through the **generated header** `out/stage90/xnu_arm_ent
 
 - the **entry bin does not move** — `xnu_arm_entry.bin` on this arm is `7107b998…`, **byte-identical** to
   968's; and the entry ELF/sources are identical too;
-- **the payload moves** — `stage90.bin` embeds the new immediate. Measured by disassembly of the linked
-  object: `xnu_entry_jump.o` carries `mov r8, #0x3f000000` (`e3a0843f`), and `stage90.bin` holds
-  `0x3f000000` at 13 little-endian sites (the `memSize`/`memSizeActual` stores, the dcache clean, the
-  bounds asserts).
+- **the payload moves** — `stage90.bin` embeds the new immediate. Read by value from the linked object
+  (not a raw byte count — an ARM `mov` immediate is *rotated*, `movw`/`movt` are halfwords, so a
+  `bytes.count()` finds nothing): `xnu_entry_jump.o` disassembles to `mov r8, #0x1e400000`
+  (`e3a08579`), and `stage90.elf` carries exactly one `0x1e400000` and zero `0x3f000000`.
 
 So the arm is the **`armed-window-*`** family: the set-name suffix comes from `stage90-qcdt.img`
-(`85d8f2a7`) because the entry bin did not move — exactly the case `check_set_name_rule.sh`'s census row
+(`c74bde1d`) because the entry bin did not move — exactly the case `check_set_name_rule.sh`'s census row
 records (memory: `mi4-build-variant-comes-from-an-env-default`).
 
-## 3. Why `0x3f000000` and not `0x40000000`
+## 3. Why `0x1e400000` and not a wider window — the console is the ceiling
 
-`src/entry/build_entry.sh` refuses a D13 window `>= 0x40000000`, and its refusal is itself the bound:
-D13's managed map is built from the **fixed** VA `MANAGED_BASE = 0xC0000000` (`:142`), and its L1 is filled
-with `(gMemSize>>20)` entries from byte `0x3000` of a `0x4000` table (`L1_SIZE`). At `gMemSize =
-0x40000000` that is **exactly** `[0x3000, 0x4000)` — the whole table — and `MANAGED_BASE + gMemSize`
-reaches `0x100000000`. One byte more wraps 32-bit VA and writes past the L1 **with no fault** (a brick
-with no cause in the log). The refusal's own advice is *"use at most `0x3f000000` for headroom"* — one
-16 MiB L1 step below the wrap, and this arm uses it.
+**This is the finding the session's own defect produced.** D13's managed map is **fixed-base with no
+clamp**: `l2_cache_to_range(managedCachePA, MANAGED_BASE = 0xC0000000, ttb, gMemSize, TRUE)` builds a
+linear map of length `gMemSize` starting at exactly `MANAGED_BASE`, i.e. it spans
+`[0xC0000000, 0xC0000000 + gMemSize)`. (4570 clamps its managed map below the alias base; D13 does not —
+see `check_d13_managed_base.py`, the check that reads the map's own construction.)
 
-| arm | window | XNU free region after `topOfKernelData` (`0x80A00000`, 968's COW arena) |
-|---|---|---|
-| 968 | `0x01000000` (16 MiB) | `0x81000000 - 0x80A00000` = **6 MiB** |
-| 970 | `0x3f000000` (1008 MiB) | `0xBF000000 - 0x80A00000` = **998 MiB** |
+The entry's **RAM console** — the run's only log — lives at VA `0xde500000` (`entry_stubs.c`'s
+`RAM_CONSOLE_BASE`, published as the console alias). It sits *above* `MANAGED_BASE`, and it works only
+because the entry installs a **section descriptor into XNU's live L1** at that slot
+(`entry_live_map(RAM_CONSOLE_BASE, …)`, `entry_stubs.c:2357`). And `entry_section_install`
+(`entry_stubs.c:2110`) **refuses an occupied slot**:
 
-**998 MiB free** is what the 301 MiB shared cache — plus the rest of iOS userspace — needs. That is the
-whole point: the number 969 said required a whole-kernel port is available with one switch.
+```c
+if ((before & LIVE_TTE_TYPE_MASK) != 0u) return 0u;
+```
+
+So a managed map that **reaches** `0xde500000` occupies the very L1 slot the console needs. The install is
+refused, `entry_write_kv` never runs, and the boot is **silent with no log at all** — the whole record of
+the run is that console. A window that reaches the console is therefore not merely wide: it is
+**unobservable**.
+
+The GIC (`0xf9000000`), USB OTG (`0xf9a55000`), WDT (`0xf9017000`), SMCC (`0xf9824000`), GCC
+(`0xfc400000`), TLMM (`0xfd500000`) and 911c's SMEM alias (`0xe0000000`) are all **above** the console and
+are swallowed the same way.
+
+The ceiling is therefore `RAM_CONSOLE_BASE − MANAGED_BASE = 0xde500000 − 0xC0000000 = 0x1e500000`
+(**485 MiB**), and the **safe max is `0x1e400000` (484 MiB)** — one 16 MiB step below, with the console and
+every MMIO window above it left intact. `src/entry/build_entry.sh` now **refuses** any D13 window
+`>= 0x1e500000`, naming all of the above (it used to check only the **top** — the 1 GiB L1 wrap — and
+advised `0x3f000000`, which is exactly the value that produces a silent boot).
+
+| arm | window | free after `topOfKernelData` (`0x80A00000`) | console `0xde500000` |
+|---|---|---|---|
+| 968 | `0x01000000` (16 MiB) | `0x81000000 − 0x80A00000` = **6 MiB** | clear |
+| 970 (defective) | `0x3f000000` (1008 MiB) | ~998 MiB | **clobbered → silent** |
+| 970 | `0x1e400000` (484 MiB) | `0x9E400000 − 0x80A00000` = **~470 MiB** | clear |
+
+**~470 MiB free** is enough for the 301 MiB shared cache plus the rest of iOS userspace — the number 969
+said required a whole-kernel port, available with one switch that does **not** cross the console.
 
 ## 4. The arm
 
@@ -76,36 +105,36 @@ full D13 USB ladder, `MEM_TOTAL=1`, `CARD_COW=1` with `HDD_WRITE=0`) with **one*
 
 | switch | 968 | 970 |
 |---|---|---|
-| `STAGE90_XNU_ENTRY_WINDOW` | `0x01000000` (16 MiB) | **`0x3f000000` (1008 MiB)** |
+| `STAGE90_XNU_ENTRY_WINDOW` | `0x01000000` (16 MiB) | **`0x1e400000` (484 MiB)** |
 
 Everything else is byte-for-byte the 968 arm. `stage90-build-config.txt` is `6c2b6038…`, identical to
 968's — because the window is an **entry** build parameter that reaches the payload through the generated
 header, not through a payload switch, so the payload's own record cannot see it. That is why the *entry*
 record must carry the key (the `533` defect).
 
-**Park:** `out/stage90/frozen/armed-window-85d8f2a7/`, 11 members. Entry bin `7107b998…` (6331476 B,
-unchanged from 968); payload `stage90.bin` `221c614f…` (6826876 B); qcdt `85d8f2a7…` (9351168 B).
-`records/revert-set.txt` carries the block. Nothing in `src/` or `scripts/` was edited to build it — the
-arm is a build *parameter*, not new code.
+**Park:** `out/stage90/frozen/armed-window-c74bde1d/`, 11 members. Entry bin `7107b998…` (6331476 B,
+unchanged from 968); payload `stage90.bin` `fc8929eb…` (6826884 B); qcdt `c74bde1d…` (9351168 B).
+`records/revert-set.txt` carries the block. Nothing in `src/` was edited to build it — the arm is a build
+*parameter*, not new code; the only code change this rung made is `build_entry.sh`'s **refusal** (§3).
 
 ## 5. Host-side verification (all green, no device)
 
-- `resolve_arm_set` resolves `armed-window-85d8f2a7`; `check_set_name_rule` rc=0 (suffix from the qcdt);
-  `verify_revert_set out/stage90/frozen/armed-window-85d8f2a7` — all 11 members `ok`, and the note *"this
-  directory matches armed-window-85d8f2a7 exactly"*.
+- `resolve_arm_set` resolves `armed-window-c74bde1d`; `check_set_name_rule` rc=0 (suffix from the qcdt);
+  `verify_revert_set out/stage90/frozen/armed-window-c74bde1d --set=armed-window-c74bde1d` — all 11
+  members `VERIFIED`.
+- The linked `memSize` is proved by value: `xnu_entry_jump.o` → `mov r8, #0x1e400000`; `stage90.elf`
+  carries one `0x1e400000` and zero `0x3f000000`.
 - `make check` rc=0. `verify_press_ready.sh` **5/5** rc=0, which resolves the live arm to this park and
-  reads the entry record key `STAGE90_XNU_ENTRY_WINDOW=0x3f000000`.
-- The linked `memSize` is proved by value: `xnu_entry_jump.o` `mov r8, #0x3f000000`; `stage90.bin` carries
-  `0x3f000000` at 13 sites.
+  reads the entry record key `STAGE90_XNU_ENTRY_WINDOW=0x1e400000`.
 
 ## 6. What the press decides
 
-**If the premise holds**, a press of `armed-window-85d8f2a7` lets real iOS userspace map its shared cache —
+**If the premise holds**, a press of `armed-window-c74bde1d` lets real iOS userspace map its shared cache —
 launchd, then SpringBoard — with **no 915-B port**. The reading is the runner's own: `BSD root:` names the
-card's HFSX volume (not `md0`), the COW serves the fixture's write, `xnu_entry_args_memSize = 0x3f000000`,
+card's HFSX volume (not `md0`), the COW serves the fixture's write, `xnu_entry_args_memSize = 0x1e400000`,
 and — the new question — a userspace launchd that gets past `dyld`.
 
-**Falsification**: XNU panics before idle (the 998 MiB map faults), or the log shows launchd still cannot
+**Falsification**: XNU panics before idle (the 484 MiB map faults), or the log shows launchd still cannot
 map the cache, in which case the window's *size* was not the wall and 915-B is back on the table. Either
 way this press is the cheap next measurement, and it is reversible — `fastboot boot` only, never flash, and
 `CARD_COW=1` means the base volume is never written.
@@ -116,7 +145,7 @@ medium as 968, the widened window, the `--expect-arm`).
 ## 7. What it does NOT do
 
 It does **not** make XNU *recognize 3 GB*. `max_mem`/`mem_size`/`sane_size` are all `gMemSize` here, so
-XNU still reports the window (1008 MiB), not the device total — that reader half is 958's, and the *3 GB
+XNU still reports the window (484 MiB), not the device total — that reader half is 958's, and the *3 GB
 owned for allocation* clause is still 915-B. This arm is the **"iOS runs"** prerequisite, which 969 showed
 is a different thing from clause 5c. The two can share the alloy only if a later rung unifies them; here
 they are kept separate so each arm answers one question.
@@ -127,8 +156,13 @@ Nothing was pressed: **PRESS IS THE OPERATOR'S.** `33e80afe` must be unplugged; 
 
 - `external/xnu-hd2-darwin13/xnu/osfmk/arm/arm_vm_init.c:333/334/362/379/422/503` (the window is RAM);
   956/969 (`mi4-956-d13-entry-window-ceiling`, `mi4-969-the-16mb-window-is-the-wall`).
+- `src/entry/entry_stubs.c` (`RAM_CONSOLE_BASE 0xde500000u`; `entry_section_install` refusing an occupied
+  slot; the console section installed into XNU's live L1); `tools/check_d13_managed_base.py` (D13's
+  fixed-base, unclamped map).
 - Built by replaying `out/stage90/frozen/armed-d13-7107b998/xnu_arm_entry-config.txt` with
-  `STAGE90_XNU_ENTRY_WINDOW=0x3f000000`; `src/entry/build_entry.sh` (the D13 `>= 1 GiB` refusal, the
-  `0x3f000000` advice); `scripts/build.sh` (the payload reads the regenerated header).
+  `STAGE90_XNU_ENTRY_WINDOW=0x1e400000`; the payload rebuilt with
+  `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'` (a plain `./build.sh` leaves `STAGE90_XNU_ENTRY` **off**
+  by default, so it would neither jump into XNU nor match `6c2b6038`); `src/entry/build_entry.sh` (the new
+  `>= 0x1e500000` console refusal).
 - Follows [[mi4-968-cow-writable-root-arm]] (whose switch set this arm is) and
   [[mi4-969-the-16mb-window-is-the-wall]] (whose premise it tests). Device unmodified.
