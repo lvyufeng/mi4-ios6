@@ -274,6 +274,16 @@ check:
 # measured mutations (the served marker dropped, the refused marker dropped, an invented key, no block).
 	@tools/check_runner_cow_family.py --selftest >/dev/null
 	@tools/check_runner_cow_family.py
+# 970: the RUNNER half of the entry WINDOW. 969 said the wall was the 16 MiB window; 970 found the window
+# IS the allocator's physical-RAM end (`arm_vm_init.c:422 avail_end = gPhysBase + gMemSize`) and widened
+# it payload-only, so what a reader must SEE is `xnu_entry_args_memSize` - the RAM XNU was handed. The
+# runner read NO `xnu_entry_args*` key before this rung (and `keyval` cannot read the family anyway: it
+# prepends `xnu_live_`, while the jump publishes `xnu_entry_*`). `check_runner_window_family.py` runs both
+# directions: the runner's window block must read the memSize key, and every `xnu_entry_args*` key it
+# names must be published by `src/xnu_entry_jump.c`. Source half, no build and no device; its --selftest
+# feeds three measured mutations (the window marker dropped, an invented key, no block).
+	@tools/check_runner_window_family.py --selftest >/dev/null
+	@tools/check_runner_window_family.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not

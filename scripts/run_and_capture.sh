@@ -956,6 +956,17 @@ summarise_log() {
   # that can say "this is UNREAD", not end the summary.
   keyval() { grep -ao "xnu_live_$1=[0-9a-fx]*" "$log" 2>/dev/null | tail -1 | sed 's/^[^=]*=//' || true; }
 
+  # **The `xnu_entry_*` family, which `keyval` cannot read.** Not every key travels in the live
+  # channel: the ENTRY image's own readings (`xnu_entry_args_memSize`, `xnu_entry_status`, …) are
+  # published by `xnu_log_kv32` (src/xnu_log.c) as `MI4IOS6_STAGE90_XNU <key>=0x…` with NO
+  # `xnu_live_` prefix - they are written by the payload before the live channel exists. So the one
+  # reader above cannot see them, and a clause that called `keyval entry_args_memSize` would grep for
+  # `xnu_live_entry_args_memSize`, a string nothing publishes, and silently read an absent key as an
+  # UNREAD arm. That is the one-value-two-definitions class ([[mi4-one-value-two-definitions]]) in a
+  # reader; `970`'s window clause is the first to need this family, so the second reader is defined
+  # here rather than pretending the first covers it. `|| true` is load-bearing for `keyval`'s reason.
+  entryval() { grep -ao "xnu_entry_$1=[0-9a-fx]*" "$log" 2>/dev/null | tail -1 | sed 's/^[^=]*=//' || true; }
+
   # **The largest of a key's occurrences, as a decimal - and why it is not `keyval`.** The keys this
   # is for (`door_seq`, `poll_seq`, `poll_timeout_ms`) are published once per event and *in
   # increasing order*, so the last occurrence and the largest agree - until the events outnumber the
@@ -3227,6 +3238,28 @@ summarise_log() {
     say ""
     say "  ---- no xnu_live_rootmedia_ keys: this image has no card root media (predates 903/911d), so ----"
     say "  ---- the storage clause is read from the mount elsewhere, not from a card capacity here ----"
+  fi
+
+  # **970: the ENTRY WINDOW, read from the log.** The window XNU was HANDED is `args->memSize`, logged
+  # at `xnu_entry_jump.c:172` as `xnu_entry_args_memSize` (published by every arm that goes through
+  # `stage90_xnu_entry_run`/`stage90_xnu_entry_log`), and the whole point of the wide-window arms is a
+  # value a reader must SEE, not assume from the record. `970` read `arm_vm_init.c:422 avail_end =
+  # gPhysBase + gMemSize` and found the window IS the allocator's RAM end on the real high bank
+  # [0x80000000, 0xDE500000): at 16 MiB XNU has ~6 MiB free, at 1008 MiB ~998 MiB - so the reading the
+  # arm is for is `xnu_entry_args_memSize`. Before this clause the runner read NO `xnu_entry_args*`
+  # key, so a press of a wide-window arm reported nothing about the window itself (the "unread family"
+  # class, [[mi4-911-runner-now-reads-all-goal-clauses]]). Absent on arms that never reach the jump
+  # (the card rootmedia block's arms all do), so those logs stay byte-identical.
+  local entry_memsize
+  entry_memsize=$(entryval args_memSize)
+  if [[ -n $entry_memsize ]]; then
+    say ""
+    say "  the entry window (970): the RAM size XNU is HANDED - it is gMemSize, and on D13 avail_end ="
+    say "                      gPhysBase + gMemSize, so this IS the allocator's physical-RAM end"
+    say "  xnu_entry_args_memSize=$entry_memsize"
+    say "  => XNU manages $(( entry_memsize / 1048576 )) MiB of the high bank, VA [0x80000000, 0x$(printf '%08x' $(( 0x80000000 + entry_memsize )))) -"
+    say "     everything XNU's own allocator can reach. The record's STAGE90_XNU_ENTRY_WINDOW is the"
+    say "     arm's DECLARATION; THIS is the log's READING of what XNU actually got - compare them."
   fi
 
   # ---------------------------------------------------------------------------------------------
