@@ -175,7 +175,28 @@ card, and it needs no journal.
 
 Nothing was pressed: **PRESS IS THE OPERATOR'S.** Only `fastboot boot`, never flash; `33e80afe` unplugged.
 
-## 8. Provenance
+## 8. What the press actually mounts — the root really is the CARD's iOS volume
+
+Read from the **linked image**, not the record (a record is not a constraint):
+
+- **`vfstbllist` on this D13 image is `[hfs_vfsops, "hfs", NULL]`** — `hfs` is the *first* (and only) root
+  row, with `hfs_mountroot` at its mount word. On D13 the 874 HFS root row is a **native** row, not the
+  4570 `STAGE90_HFS_ROOT` patch; the 895 clause that reconciles a patched row with mockfs is 4570-only
+  (943), so there is nothing to reconcile. **There is no mockfs and no routefs in this image.**
+- Therefore `vfs_mountroot` reaches `hfs_mountroot` **before** any `rd=md0` mockfs fallback, and the root
+  `/` is the **card's HFSX volume** — the real 896 MiB iOS 7.1.2 rootfs `tools/build_root_volumes.sh --real`
+  writes to userdata's head. 903's `BSD root: md0` was the *baseline* (mockfs linked, mocked); on this arm
+  the name is not the device. So "the OS enters" is literally true here: pid 1 execs `/sbin/launchd` read
+  **from the mounted volume**.
+- **The program that execs is 905's fixture, installed as the real `/sbin/launchd`.** `entry_ramdisk.s`
+  (`g_stage90_ramdisk`, 8192 B) is the one program, and `tools/build_root_volumes.sh` installs it at the
+  card volume's `/sbin/launchd` offset, checking it round-trips by hash. So `/newfile` written by the
+  mount's rw path lands in the **card volume's own `/`** via the COW shadow — the geometry is live iOS.
+- **What it does NOT prove is real SpringBoard**: `-X` format is a *marker* volume (`build_root_volumes.sh`
+  header), not the byte-for-byte decrypted tree, so the 7142-file real userspace chain is not exercised.
+  Reaching that is the rung above this one; the geometry is proven here.
+
+## 9. Provenance
 
 - Mechanism source: `external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/leo_cow.{h,c}`
   (82 lines), `IOS7LeoHFSFile.cpp` (393). Follows [[mi4-966-hd2-writable-root-is-a-cow]].
