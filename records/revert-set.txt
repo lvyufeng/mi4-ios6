@@ -12477,3 +12477,38 @@ set=armed-storage-cb4e17f1 sha256=a11e33ace66dcf9c3dd8807658fcb5f0cd7d8b9de6f6b4
 set=armed-storage-cb4e17f1 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-911c
 set=armed-storage-cb4e17f1 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-908-through-21086959-6c2b6038-because-the-USB-SMEM-and-NO_SLEEP-switches-are-ENTRY-build-parameters-that-reach-the-payload-through-THE-GENERATED-HEADER
 set=armed-storage-cb4e17f1 sha256=297d0759ef1aad2a9c8e9ca3b3c8e170428b67de06c58427a5d006323f4e1adf bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+
+# =================================================================================================
+# armed-d13-3af667a3 - THE FIRST PRESSABLE DARWIN-13 (iOS 7) ARM (2026-10-09)
+#
+# The first arm built against the Darwin-13 (iOS 7) XNU tree rather than 4570, and the first whose
+# `xnu_arm_entry-config.txt` carries `STAGE90_XNU_TREE_D13=1`. Rungs 951-954 made the WHOLE pipeline
+# follow the tree: 951 the USB/SMEM probe site (`__wrap_machine_idle` on D13), 952 the entry symbol
+# (`__start`), 953 the idle-cache boot argument (abolished - `STAGE90_BOOT_IDLE_TOKEN` is "" on D13),
+# 954 the press gate's 549 clause (publishes a D13 skip and refuses a stray `up_style_idle_exit=1`).
+#
+# NOT-a-storage-rung, so the family is `armed-d13-*` and the suffix comes from `xnu_arm_entry.bin`
+# (3af667a3) - the entry image IS the artifact 951/952 moved, so the storage family's rule (name by
+# the entry image) is the right one here too, but the `armed-storage-*` prefix is reserved for the
+# eMMC ladder and a D13 bring-up arm is not one of those steps.
+#
+# The arm is 953's D13 payload rebuilt after 954 (the record writer/loop); the entry image is
+# unchanged from 951 (3af667a3) because 952/953/954 touched no entry SOURCE - they moved the entry
+# SYMBOL lookup, the payload boot arg and the GATE. The payload record
+# (`stage90-build-config.txt`, 6c2b6038) is the constant payload switch set; the D13-ness lives in
+# the ENTRY record's STAGE90_XNU_TREE_D13 key, which is the whole reason 954 added it (the payload
+# record cannot see the tree - [[mi4-build-variant-comes-from-an-env-default]]).
+#
+# NOT PRESSED. This arm is built and parked so a D13 press CAN be recorded before it is sent.
+# =================================================================================================
+set=armed-d13-3af667a3 sha256=3af667a3a30d5f27b897bb9680f5096276d3dafda347925ef8543c465beec2e7 bytes=6315092 file=xnu_arm_entry.bin role=THE-ARM:-the-Darwin-13-entry-image-the-press-sends-;-first-entry-image-built-against-the-iOS-7-tree-;-the-suffix-3af667a3-is-THIS-member-s-hash-;-the-entry-symbol-is-__start-(952)-and-the-USB/SMEM-probes-site-is-__wrap_machine_idle-(951)-;-zero-up_style_idle_exit=1-anywhere-(953-offers-no-such-global)
+set=armed-d13-3af667a3 sha256=cf07104bc1e7a773b489651d65c0fce20bdcb5f16607b3df7bda2f2e1ac4e7e3 bytes=7352184 file=xnu_arm_entry.elf role=the-entry-ELF-;-the-linked-D13-entry-image
+set=armed-d13-3af667a3 sha256=3136eb038f48ed6171dc0cf1a07b679a35bf9d0d3dc15eacd759295b8303f23b bytes=1336 file=xnu_arm_entry-config.txt role=the-entry-record-;-THE-ONLY-PLACE-THE-TREE-IS-NAMED:-STAGE90_XNU_TREE_D13=1-(954)-plus-the-35-arm-keys-the-951-build-wrote-;-D13-THIS-IS-WHAT-MAKES-THE-ARM-A-D13-ARM-a-pre-954-record-without-this-key-reads-as-4570
+set=armed-d13-3af667a3 sha256=3a0d482ee2c151cc8c247e9db5ecb7a35f908cc4256399d6142d48549495a730 bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest
+set=armed-d13-3af667a3 sha256=90a5bccddc338847c81a0897996984aa8e79c1848201a00054cb5c9a5c97ce28 bytes=6810500 file=stage90.bin role=the-payload-binary-embedding-the-D13-entry-image
+set=armed-d13-3af667a3 sha256=e3a1c9043059b123d85e2516382bb9e8e249024384082dd7e3d0f28208c3e2d5 bytes=6872572 file=stage90.elf role=the-payload-ELF
+set=armed-d13-3af667a3 sha256=a1f09661a0ab368a2d908afc1f4a419a1f5b1dca8ae5d4ecd149823a81f69775 bytes=6813696 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-3af667a3 sha256=cee337f3afa9b17f055f1bee32ff63d84f2a19fc4515f199ebc1684deb380ccc bytes=9334784 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-;LARGER-than-the-4570-arms-because-the-D13-payload-embeds-the-D13-device-tree
+set=armed-d13-3af667a3 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-3af667a3 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-every-arm-6c2b6038-because-the-D13-ness-is-an-ENTRY-build-parameter-that-reaches-the-payload-through-THE-GENERATED-HEADER-not-through-a-payload-switch-the-payload-record-CANNOT-see-the-tree
+set=armed-d13-3af667a3 sha256=0bd79d8e5452b820ed4981d664faf65a431c0e2f7bdccacd1abb4de09b02e54f bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img

@@ -64,6 +64,7 @@ EXIT CODES
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -93,6 +94,54 @@ CPU_SIGNAL_OFF = 0x28
 SIGPDISABLED = 0x80000000
 
 INSN = re.compile(r"^\s*([0-9a-f]+):\s+([0-9a-f]{8})\s+(\S+)\s*(.*?)\s*$")
+
+IS_D13 = False
+
+
+def is_d13(tree):
+    """D13 ships the legacy private `osfmk/sys/types.h`; 4570 does not. The same discriminator
+    `build_entry.sh` and `build_xnu_arm_kernel.sh` use - one value, one definition."""
+    return tree is not None and os.path.isfile(os.path.join(tree, "osfmk/sys/types.h"))
+
+
+def configure(tree):
+    """**The whole reading walks a symbol named `cpu_idle`, which is the 4570 tree's idle loop.**
+    Darwin 13 ships none (937 pruned the 513-535 idle block against exactly this file), so on a D13
+    image there is no window for this check to find - and a refusal here would be the tool asserting
+    its own name's subject onto a tree that does not have it. A skip that could not tell 'the tree has
+    no `cpu_idle`' from 'the tool is pointed at the wrong tree' would hide a broken selector, so the
+    skip is published AND its premise is confirmed against the tree the record names (949/950)."""
+    global IS_D13
+    IS_D13 = is_d13(tree)
+    return IS_D13
+
+
+def d13_skip(tree):
+    """Confirm the premise and publish the skip. Returns 0 when the tree really carries no `cpu_idle`,
+    else 1 with the refusal printed - a skip that cannot go red is indistinguishable from one that
+    holds (228's class)."""
+    cpu_c = os.path.join(tree, "osfmk/arm/cpu.c") if tree else None
+    if not cpu_c or not os.path.isfile(cpu_c):
+        print("REFUSING: D13 was selected (%s has osfmk/sys/types.h) but its own osfmk/arm/cpu.c is "
+              "not there, so 'D13 has no cpu_idle' cannot be confirmed against the tree the record "
+              "names - either the tree is not the one the record means or this check's premise has "
+              "changed" % (tree or "<no tree>"), file=sys.stderr)
+        return 1
+    text = open(cpu_c, encoding="utf-8", errors="replace").read()
+    if "cpu_idle" in text:
+        print("REFUSING: D13 was selected but osfmk/arm/cpu.c declares or names `cpu_idle`, so this "
+              "tree DOES have the idle window this check exists for and the skip is wrong - the D13 "
+              "discriminator and this check's premise disagree", file=sys.stderr)
+        return 1
+    print("VERDICT: the idle window is not in this tree (SKIPPED on D13).")
+    print("  D13 ships no `cpu_idle`: 937 pruned the 513-535 idle block against exactly this fact, and "
+          "the three `platform_cache_idle_*` wrappers, `SetIdlePop`, `cpu_idle_exit` and Apple's own "
+          "`cpu_idle` are all absent from the linked image. There is no window and no clearer to "
+          "count, so the reachability question this check exists for has no subject on a D13 arm. "
+          "The premise is confirmed against the tree the entry record names (%s): its "
+          "osfmk/arm/cpu.c carries no `cpu_idle`. What D13's idle IS (do_power_save, pmCPU.c:41) is "
+          "not this check's question." % tree)
+    return 0
 BRANCH_TARGET = re.compile(r"^([0-9a-f]+)\s+<([^>]+)>")
 
 
@@ -181,8 +230,17 @@ def extends_of(syms, name):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("elf", help="the entry image's ELF (out/stage90/xnu_arm_entry.elf)")
+    ap.add_argument("--tree", default=None,
+                    help="the XNU tree the image was built from (D13 detected by osfmk/sys/types.h); "
+                         "defaults to 4570, the tree that has the idle window this check reads")
     args = ap.parse_args()
     elf = args.elf
+    tree = args.tree or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "external/xnu-4570.1.46")
+    configure(tree)
+    if IS_D13:
+        # The window is not in this tree; the whole derivation below walks a symbol D13 does not have.
+        return d13_skip(tree)
 
     syms = symbols(elf)
     for need in (SYM_CPU_IDLE, SYM_CPU_IDLE_EXIT, SYM_DOOR, SYM_SETIDLEPOP,

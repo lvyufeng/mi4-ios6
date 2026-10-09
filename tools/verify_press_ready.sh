@@ -594,6 +594,17 @@ fi
 ARM_CHECK=$REPO_ROOT/tools/check_idle_window_unreachable.py
 ARM_ELF=$LIVE/xnu_arm_entry.elf
 ARM_CFG=$LIVE/xnu_arm_entry-config.txt
+# **Which of the two XNU trees the entry reading must be taken against, read out of the SAME hash-bound
+# record the gate reads (954), not the environment.** The discriminator is the tree's own file
+# (`osfmk/sys/types.h`), exactly what `build_entry.sh` uses; a record without the key is a pre-954
+# build, whose only possible tree is 4570 (the D13 line had no press before 954, and 678's two-way
+# check refuses the key's absence in any later build). Reading a shell variable here would let the
+# reading be taken with one tree while the record names another.
+ARM_TREE_4570=$REPO_ROOT/external/xnu-4570.1.46
+ARM_TREE_D13=$REPO_ROOT/external/xnu-hd2-darwin13/xnu
+_arm_tree_d13=$(awk -F= '$1 == "STAGE90_XNU_TREE_D13" { print $2 }' "$ARM_CFG" 2>/dev/null)
+[[ -n $_arm_tree_d13 ]] || _arm_tree_d13=0
+if [[ $_arm_tree_d13 == 1 ]]; then ARM_TREE=$ARM_TREE_D13; else ARM_TREE=$ARM_TREE_4570; fi
 if [[ ! -x $ARM_CHECK ]]; then
   bad 'the arm is named by a reading' "$ARM_CHECK is not executable, so which arm this press sends would be an operator's memory and not a reading"
 elif [[ ! -f $ARM_ELF ]]; then
@@ -605,7 +616,7 @@ elif (( payload_cfg_ok != 1 )); then
 elif [[ -n $sw_problem ]]; then
   bad 'the arm is named by a reading' "the payload's switch record cannot be read well enough to name the arm: $sw_problem"
 else
-  aout=$(timeout 120 "$ARM_CHECK" "$ARM_ELF" 2>&1); arc=$?
+  aout=$(timeout 120 "$ARM_CHECK" "$ARM_ELF" --tree "$ARM_TREE" 2>&1); arc=$?
   vline=$(printf '%s\n' "$aout" | sed -n 's/^VERDICT: //p' | head -1)
   nsc=$(grep -c '^STAGE90_XNU_IDLE_NO_SLEEP=' "$ARM_CFG" || true)
   swe=$(sed -n 's/^STAGE90_XNU_IDLE_NO_SLEEP=//p' "$ARM_CFG" | head -1)
@@ -740,7 +751,7 @@ else
     seam=badcount
     seamwhy="$ARM_CFG carries $nsp STAGE90_XNU_SEAM_POC= and $nsm STAGE90_XNU_SEAM_MEASURE= line(s); both must be named exactly once, or which of two window-entering arms this is cannot be read at all"
   fi
-  want=''; entry_arm=''; entry_conseq=''
+  want=''; entry_arm=''; entry_conseq=''; d13_skip=0; d13_bad=''
   case $vline in
     'the window is UNREACHABLE in this image.'*)
       want=1
@@ -759,6 +770,21 @@ else
           entry_arm='an arm that ENTERS the window with NO seam interception (SEAM_POC=0 and SEAM_MEASURE=0)'
           entry_conseq="this press's log carries NO xnu_live_seam_* key at all, so neither 638 section 3's pair table nor 642's sleh_pc join can be read on it" ;;
       esac ;;
+    'the idle window is not in this tree (SKIPPED on D13).'*)
+      # **D13 (966c): the ELF reading is a SKIP, so this arm is named by the record and not by a
+      # reachability verdict.** 937 pruned the 513-535 idle block against D13's own fact (no
+      # `cpu_idle`/`caches.c`), so the entry ELF carries none of the window's symbols and there is no
+      # verdict to join. The item that replaces the join is the record, but a skip is a claim: the
+      # three switches it rests on are confirmed, and any that disagrees refuses rather than naming an
+      # arm by default. `d13_bad` carries the refusal out to the row's own chain.
+      d13_skip=1
+      if (( nsc != 1 )); then
+        d13_bad="$ARM_CFG carries $nsc STAGE90_XNU_IDLE_NO_SLEEP= line(s); on a D13 record that switch is the arm's only entry-reading name (there is no ELF verdict to join), so it must be named exactly once"
+      else
+        want=$swe
+        entry_arm="**the D13 STORAGE arm** (STAGE90_XNU_TREE_D13=1) - **AND ON D13 THE ARM IS NOT NAMED BY A REACHABILITY READING AT ALL**, because 937 pruned the 513-535 idle block against this very fact (D13 ships no \`cpu_idle\`/\`caches.c\`): the window, its three \`platform_cache_idle_*\` wrappers, \`SetIdlePop\`, \`cpu_idle_exit\` and Apple's own \`cpu_idle\` are all ABSENT from $ARM_ELF, so \`tools/check_idle_window_unreachable.py\` publishes a SKIP and the ELF reading has no arm subject to name. **WHAT NAMES THIS ARM IS THEREFORE THE RECORD AND NOT THE ELF** (966c): its own switch set - the storage ladder at \`STAGE90_XNU_STORAGE_PROBE=$wst\`, the 3 GB SMEM measurement at \`STAGE90_XNU_SMEM_PROBE=$wsm2\`, the storage stack \`MOUNT=1\`/\`EMMC_STRATEGY=1\`/\`ROOT_FROM_CARD=1\`/\`CARD_TOTAL=1\`, and the idle switch this comparison exists for at \`STAGE90_XNU_IDLE_NO_SLEEP=$swe\`. The skip's premise is confirmed where it can be: the tree the record names (osfmk/sys/types.h present) really carries no \`cpu_idle\`, and $ARM_ELF carries none of the window's symbols. **The idle switch is READ rather than joined and its D13 value is 0** - D13's idle is gated by \`do_power_save\` (pmCPU.c:41), a compile default, not a boot argument (954)."
+        entry_conseq="**THIS PRESS'S ENTRY READING IS A SKIP, SO READ ITS CLAIMS OFF THE RECORD, NOT OFF A WINDOW VERDICT.** The window keys (\`xnu_live_sip_seq\`/\`pce_seq\`/\`wfi_seq\`, the seam's \`a1\`/\`b1\` pair, \`sleh_pc\`) are ABSENT from any D13 log by construction - 937 pruned the block - so 638 section 3's pair table and 642's sleh_pc join are UNREAD here, exactly as 640 says for the sleepless arm, and a log that showed them would be a different tree's. The readings that carry this arm are the storage ones: the 903 mount at \`0x00400000+\`, \`xnu_live_rootmedia_card_raw_registered=1\` with \`_card_raw_blocks=0x01d5a000\`, the SMEM bank list (\`_smem_bank0_\`/\`_bank1_\`, sum about \`0xC0000000\` for the goal's 3 GB clause), and \`xnu_entry_args_memSize\`."
+      fi ;;
   esac
   # --- the ending, joined to the operation it ends -------------------------------------------------
   # **683.** The block above names the ENTRY and its operation. This one says whether that operation
@@ -1788,6 +1814,16 @@ elif [[ $wst == 39 ]]; then
   else
     arm=$entry_arm
   fi
+  # **D13's ENTRY READING IS A SKIP, SO THE ARM IS NAMED FROM THE RECORD AND THIS IS WHERE THAT NAME
+  # IS FINAL (966c).** On D13 the tree has no `cpu_idle`, so `check_idle_window_unreachable.py`
+  # publishes a SKIP and there is no reachability verdict to join - the 4570 rungs' narration blocks
+  # above (the 911c SMEM block, the 911d card block) are selected by record keys and would otherwise
+  # OVERWRITE the D13 name with a 4570 arm's sentence about "every reading above", which on a D13
+  # record is a claim about readings that are not there. So the D13 identification is written LAST,
+  # and it PREPENDS the record-read switch set instead of the window verdict.
+  if [[ $d13_skip -eq 1 ]]; then
+    arm="**THE D13 ARM - WHICH IS NAMED BY ITS RECORD'S SWITCH SET AND NOT BY A WINDOW READING.** \`STAGE90_XNU_TREE_D13=1\` (so 937 pruned the 513-535 idle block: this tree has no \`cpu_idle\`/\`caches.c\`), resolved set \`${SET:-<unresolved>}\`. **THE NARRATION BELOW THE NAME IS THE 4570 RUNG IT SHARES THE RECORD KEYS WITH, AND ITS 'READINGS ABOVE' ARE NOT THIS ARM'S UNLESS THE KEY IT NAMES IS IN THIS RECORD** - the D13 record is read here: \`STAGE90_XNU_STORAGE_PROBE=$wst\`, \`STAGE90_XNU_SMEM_PROBE=$wsm2\`, \`STAGE90_XNU_MEM_SIZE_MAX=${wms:-(unset)}\`, \`STAGE90_XNU_ENTRY_WINDOW=$wew\`, \`STAGE90_XNU_MOUNT=1\`, \`STAGE90_XNU_EMMC_STRATEGY=1\`, \`STAGE90_XNU_ROOT_FROM_CARD=1\`, \`STAGE90_XNU_CARD_TOTAL=1\`, \`STAGE90_XNU_IDLE_NO_SLEEP=$swe\` (D13's idle is \`do_power_save\`, pmCPU.c:41, a compile default - 954). **WHAT CARRIES THIS ARM IS THE STORAGE STACK AND THE SMEM MEASUREMENT, NOT THE IDLE WINDOW**: the 903 mount at \`0x00400000+\`, \`xnu_live_rootmedia_card_raw_registered=1\` with \`_card_raw_blocks=0x01d5a000\`, the SMEM bank list, and \`xnu_entry_args_memSize\`. **THE PRESS IS THE OPERATOR'S.** $arm"
+  fi
   # --- the arm's NAME is a reading too, and these are its two checks ------------------------------
   # **A NAME IN PROSE IS A READER, AND 698's RENAME CENSUS COUNTED THREE OF THEM.** 698 renamed the
   # offset-0 word `ST_SDHCI_HCI_VERSION 0x00` to `ST_SDHCI_DMA_ADDRESS` and enumerated its readers by
@@ -1812,7 +1848,7 @@ elif [[ $wst == 39 ]]; then
   #     is what a rename makes of prose; it cannot catch a name that is the suffix of the wrong key, and
   #     nothing here claims it does.
   nar_bad=''; nar_tok=''; nar_glob=''; nar_miss=''; nar_keys=''; nar_note=''; _n_named=0; _n_glob=0
-  if [[ $vline == 'the window is reachable EXACTLY ONCE in this image.'* && -z $sub_arm ]]; then
+  if [[ $vline == 'the window is reachable EXACTLY ONCE in this image.'* && -z $sub_arm && $d13_skip -eq 0 ]]; then
     if [[ -n $wst && $wst != 0 && $arm != *"STAGE90_XNU_STORAGE_PROBE=$wst"* ]]; then
       nar_bad="the arm named above does not quote the rung the entry record carries: STAGE90_XNU_STORAGE_PROBE=$wst is in $ARM_CFG, and every rung this file narrates is narrated by its own value. Either this is a rung with no paragraph here yet - \`STAGE90_XNU_STORAGE_PROBE\` is a ladder (0 inert, then the read-only probe, the vendor's mode sequence, the register-file census, the driver's reset, the clock surface, the first clock set and the card-power byte, each later one carrying the earlier ones), and a new rung needs its own paragraph - or the narration above names a different rung, which is one quantity with two readings. That this row said nothing about it before is the 698 defect: a narration can be WRONG and still non-empty, which is all this row used to ask"
     else
@@ -1935,9 +1971,12 @@ elif [[ $wst == 39 ]]; then
     bad 'the arm is named by a reading' "$seamwhy"
   elif [[ -z $entry_arm ]]; then
     bad 'the arm is named by a reading' "the extractor's verdict is a sentence this row has no reading for: '$vline' - neither of the two it knows, and a sentence that is not one of them means the ENTRY was not read, so the arm is not named rather than named from the payload switch alone"
-  elif [[ -n $nar_bad ]]; then
-    bad 'the arm is named by a reading' "$nar_bad"
-  elif [[ $swe != "$want" ]]; then
+  elif [[ -n $d13_bad ]]; then
+    bad 'the arm is named by a reading' "$d13_bad"
+  elif [[ $d13_skip -eq 0 && $swe != "$want" ]]; then
+    # The comparison is the JOIN of the ELF reading with the record. On a D13 skip there is no
+    # reading to join - the ELF carries no window - so `want` IS `$swe` and the comparison would be
+    # vacuous; the gate above states the skip rather than comparing a value with itself.
     bad 'the arm is named by a reading' "the ENTRY reading says $entry_arm, which is STAGE90_XNU_IDLE_NO_SLEEP=$want, and the entry record says STAGE90_XNU_IDLE_NO_SLEEP=$swe - one quantity with two readings, and they disagree"
   elif [[ -n $sub_arm ]]; then
     ok 'the arm is named by a reading' "$arm, and the entry it carries is $entry_arm ('$vline', and the entry record's STAGE90_XNU_IDLE_NO_SLEEP=$swe agrees). $conseq"

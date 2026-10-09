@@ -54,6 +54,27 @@ MOVT_LO, MOVT_HI = STORAGE_LO >> 16, STORAGE_HI >> 16   # 0xf980 .. 0xf98f
 
 MOVT_RE = re.compile(r"\bmovt\s+r\d+,\s*#(0x[0-9a-fA-F]+|\d+)\b")
 HEXDUMP_RE = re.compile(r"^\s*[0-9a-f]+\s+((?:[0-9a-f]{2,8}\s+){1,4})")
+# The entry-image blob the payload embeds (`stage90_xnu_entry_blob`, 953's `xnu_arm_entry.bin`).
+# `.text` opens at 0x8000 and the blob sits in the middle of it, so a word at file offset F is at
+# vaddr F + 0x8000 while F is still below the blob's file offset - the two spaces coincide, which
+# is why the exclusion can name the blob by its symbol vaddr directly.
+BLOB_RE = re.compile(r"(?:^|\s)([0-9a-f]{8})\s+([0-9a-f]{8})\s+[A-Za-z]\s+stage90_xnu_entry_blob\s*$")
+
+
+def find_blob(elf, nm):
+    """The [lo, hi) vaddr range of `stage90_xnu_entry_blob`, or None.
+
+    None (no such symbol) means "no exclusion" - a 4570 image, or an image built before the blob
+    existed, has none and scans exactly as it did before this was added. `nm -S` carries the size on
+    the symbol (`00080a44 00605c54 T stage90_xnu_entry_blob`), so the range is address..address+size,
+    which is the entry image the payload embeds. A plain `nm` has no size column; `-S` is required.
+    """
+    for line in run([nm, "-S", elf]).splitlines():
+        m = BLOB_RE.search(line)
+        if m:
+            addr, size = int(m.group(1), 16), int(m.group(2), 16)
+            return (addr, addr + size)
+    return None
 
 
 def run(cmd):
@@ -66,29 +87,43 @@ def run(cmd):
 
 
 def check_movt(disasm):
-    """High halves of addresses, which is how the compiler builds a 32-bit constant."""
+    """High halves of addresses, which is how the compiler builds a 32-bit constant.
+
+    Returns (vaddr, value, line). objdump's disassembly line opens with the vaddr, so a `movt`
+    emitted from inside the embedded blob is identifiable and excludable the same way a word is.
+    """
     hits = []
     for line in disasm.splitlines():
+        a = re.match(r"\s*([0-9a-f]+):", line)
+        addr = int(a.group(1), 16) if a else None
         for m in MOVT_RE.finditer(line):
             val = int(m.group(1), 0)
             if MOVT_LO <= val <= MOVT_HI:
-                hits.append((val << 16, line.strip()))
+                hits.append((addr, val << 16, line.strip()))
     return hits
 
 
 def check_words(hexdump):
-    """Full 32-bit constants in section contents, which literal-pool loads use."""
+    """Full 32-bit constants in section contents, which literal-pool loads use.
+
+    Returns (vaddr, value, line); the hexdump's own address column is the file offset, and in this
+    image the file offset equals the vaddr - `.text`'s LMA 0x8000 equals its file offset 0x8000, so
+    the loader places the byte at offset F at address F. The caller filters by vaddr.
+    """
     hits = []
     for line in hexdump.splitlines():
         m = HEXDUMP_RE.match(line)
         if not m:
             continue
-        for h in m.group(1).split():
-            if len(h) != 8:
-                continue
+        a = re.match(r"\s*([0-9a-f]+)", line)
+        base = int(a.group(1), 16)
+        # `objdump -s` prints 4 bytes per token (2 hex digits) or a full word (8); a token of a
+        # single byte is not the 4-byte word we are looking for, so only 8-hex-digit tokens count.
+        words = [h for h in m.group(1).split() if len(h) == 8]
+        for i, h in enumerate(words):
             val = struct.unpack("<I", bytes.fromhex(h))[0]
             if STORAGE_LO <= val <= STORAGE_HI:
-                hits.append((val, line.strip()))
+                hits.append((base + i * 4, val, line.strip()))
     return hits
 
 
@@ -103,7 +138,7 @@ def selftest():
    a608:  e34f2990   movt  r2, #63888   ; 0xf990 -- one past, must not fire
    a60c:  e34f2c4a   movt  r2, #64586   ; 0xfc4a -- PS_HOLD, must not fire
 """
-    got_movt = sorted(v for v, _l in check_movt(fake_disasm))
+    got_movt = sorted(v for _a, v, _l in check_movt(fake_disasm))
     want_movt = sorted([0xF9820000, 0xF98F0000])
     if got_movt != want_movt:
         print("selftest FAILED (movt): want %s got %s"
@@ -116,15 +151,33 @@ def selftest():
     fake_hex = """
  08000 004082f9 00b04afc 000000f9 000090f9
 """
-    got_words = sorted(v for v, _l in check_words(fake_hex))
+    got_words = sorted(v for _a, v, _l in check_words(fake_hex))
     want_words = [0xF9824000]
     if got_words != want_words:
         print("selftest FAILED (words): want %s got %s"
               % ([hex(v) for v in want_words], [hex(v) for v in got_words]))
         return 1
 
+    # **The blob-exclusion must fire inside and stay quiet outside.** A word whose vaddr is inside
+    # `[blob_lo, blob_hi)` is dropped; one at the boundary or outside is kept. This is the shape the
+    # 954 D13 arm hit - the storage-range constants are inert data in the ENTRY image the payload
+    # embeds, not payload code - so the selftest pins the boundary both ways.
+    blob = (0x1000, 0x2000)
+    fake_hex2 = """
+ 01000 004082f9 00000000 00000000 00000000
+ 02000 004082f9 00000000 00000000 00000000
+"""
+    inside, outside = [], []
+    for a, v, _l in check_words(fake_hex2):
+        (inside if blob[0] <= a < blob[1] else outside).append(a)
+    if inside != [0x1000] or outside != [0x2000]:
+        print("selftest FAILED (blob): inside=%s outside=%s" % ([hex(a) for a in inside],
+                                                                [hex(a) for a in outside]))
+        return 1
+
     print("selftest ok: movt fires on 0xf982/0xf98f and not 0xf990/0xf900/0xfc4a;")
-    print("             literal words fire on a storage constant and not on GIC/PS_HOLD")
+    print("             literal words fire on a storage constant and not on GIC/PS_HOLD;")
+    print("             the blob exclusion keeps 0x2000 (the boundary) and drops 0x1000 (inside)")
     return 0
 
 
@@ -132,6 +185,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("elf", nargs="?")
     ap.add_argument("--objdump", default="arm-none-eabi-objdump")
+    ap.add_argument("--nm", default="arm-none-eabi-nm")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -141,17 +195,30 @@ def main():
         ap.error("need an ELF, or --selftest")
 
     o = args.objdump
-    movt_hits = check_movt(run([o, "-d", args.elf]))
-    word_hits = check_words(run([o, "-s", "-j", ".text", "-j", ".rodata", args.elf]))
+    nm = args.nm
+    blob = find_blob(args.elf, nm)
+    movt_raw = check_movt(run([o, "-d", args.elf]))
+    word_raw = check_words(run([o, "-s", "-j", ".text", "-j", ".rodata", args.elf]))
+    def in_blob(a):
+        return blob is not None and a is not None and blob[0] <= a < blob[1]
+    movt_hits = [h for h in movt_raw if not in_blob(h[0])]
+    word_hits = [h for h in word_raw if not in_blob(h[0])]
+    if blob is not None and len(word_raw) != len(word_hits):
+        excluded = len(word_raw) - len(word_hits)
+    else:
+        excluded = 0
 
     print("storage-controller references in %s" % args.elf)
     print("  movt high halves checked: 0x%04x-0x%04x" % (MOVT_LO, MOVT_HI))
     print("  literal words checked:    0x%08x-0x%08x" % (STORAGE_LO, STORAGE_HI))
+    if blob is not None:
+        print("  embedded entry-image blob: 0x%08x-0x%08x (%d word(s) there not counted)"
+              % (blob[0], blob[1], excluded))
 
-    for val, line in movt_hits:
-        print("  movt  0x%08x  %s" % (val, line))
-    for val, line in word_hits:
-        print("  word  0x%08x  %s" % (val, line))
+    for a, val, line in movt_hits:
+        print("  movt  vaddr %s  0x%08x  %s" % ("0x%08x" % a if a is not None else "?", val, line))
+    for a, val, line in word_hits:
+        print("  word  vaddr 0x%08x  0x%08x  %s" % (a, val, line))
 
     total = len(movt_hits) + len(word_hits)
     if total == 0:

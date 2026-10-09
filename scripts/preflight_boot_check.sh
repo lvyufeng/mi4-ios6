@@ -1600,11 +1600,20 @@ echo "== storage tripwire =="
 # The remaining hole is named rather than papered over: a **camelCase** storage name
 # (`AppleSDXCController_probe`) still matches nothing, because a delimiter rule needs a delimiter.
 # This is a heuristic - which is what `check_storage_refs.py` says of itself too.
+# **954: NOT `nm -a`.** `-a` adds STT_FILE debug symbols - a compilation unit's *file name*, kept
+# even when the linker's dead-code pass has discarded every function in it. On D13 the entry link's
+# whole-kernel pool carries a storage module 4570's does not (`.../AppleARMPlatform/leo_sdcc.o`), and
+# the GC kept only its STT_FILE name: a `leo_sdcc.c` line with value 0 and NO `leo_sd_*` function in
+# the image (measured - `leo_sd_init`/`leo_sd_read_sector`/`leo_sd_write_sector` are all `T` in the .o
+# but absent from the ELF). A name with no code is not a reference, and matching it made the tripwire
+# red on every D13 arm. Plain `nm` lists FUNCTIONAL symbols (`T`/`t`/`D`/… ) and no STT_FILE, which is
+# what this check has always meant. It still catches the shape it is for: a linked storage function
+# (`mmc_*`, `sdhci_*`) is a `T` symbol and still matches.
 STORAGE_SYM_RE='(^|[^A-Za-z0-9])(sdcc|emmc|nand|mmc|ufs|flash|partition)'
 _storage_sym_hit=0
 for _img in "$OUT/stage90.elf" "$OUT/xnu_arm_entry.elf"; do
   [[ -r $_img ]] || fail "no $_img - the symbol half of the storage tripwire now reads two images, and a clean answer from the other one would say nothing about this one"
-  if arm-none-eabi-nm -a "$_img" 2>/dev/null | grep -iE "$STORAGE_SYM_RE"; then
+  if arm-none-eabi-nm "$_img" 2>/dev/null | grep -iE "$STORAGE_SYM_RE"; then
     echo "  ^ in $(basename "$_img")"
     _storage_sym_hit=1
   fi
@@ -3032,7 +3041,21 @@ FLUSH_SITES=$("$_GATE_OD" -d --no-show-raw-insn "$ENTRY_ELF" 2>/dev/null \
 FLUSH_WRAP=$("$_GATE_OD" -d --no-show-raw-insn "$ENTRY_ELF" 2>/dev/null \
           | grep -cE 'bl[[:space:]]+(0x)?[0-9a-f]+ <__wrap_FlushPoU_Dcache>' || true)
 echo "== the address run_and_capture.sh's shape test compares against =="
-if [[ ! -f $ENTRY_ELF ]]; then
+# **954: on D13 the subject does not exist, and the clause PUBLISHES the skip (549's shape, one file
+# over).** D13 ships no `platform_cache_idle_exit` and no `FlushPoU_Dcache` - a `grep` of the tree's
+# `osfmk/arm/` is empty for both - so there is no `bl` return address for the reader's 554 shape test
+# to be anchored to, exactly as there is no `up_style_idle_exit` for 549. The two are the same fact:
+# the idle machinery this whole block narrates is 4570's, and D13's idle is `do_power_save` +
+# `machine_routines_asm.s`. Skipping is a published absence rather than a silent one.
+if [[ $_entry_tree_d13 -eq 1 ]]; then
+  echo "  SKIPPED on D13 - the shape-test anchor does not exist in this tree."
+  echo "  D13 ships no platform_cache_idle_exit and no FlushPoU_Dcache (grep of osfmk/arm is empty for"
+  echo "  both), so there is no bl return address for run_and_capture.sh's 554 shape test to compare"
+  echo "  against. This is 549's clause shape: the subject is 4570's idle machinery. THE READER'S 554"
+  echo "  SHAPE TEST IS OWED A TREE-AWARE CRITERION (its lane), because until then a D13 summarise run"
+  echo "  falls back to EXIT_POP_LR_LITERAL - a 4570 number - which is the one-value-two-definitions"
+  echo "  defect this clause exists to catch from the other side."
+elif [[ ! -f $ENTRY_ELF ]]; then
   echo "UNREAD - no $ENTRY_ELF, so the address the death is attributed by cannot be derived here. The"
   echo "reader will fall back to its literal at run time and label it; read $ENTRY_ELF back (it is a"
   echo "build product, and its bin is embedded in the frozen pair) before trusting that label."
