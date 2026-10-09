@@ -7097,6 +7097,25 @@ static inline uint32_t stage90_xnu_real_dt_checksum(const struct stage90_xnu_rea
 
 #define STAGE90_XNU_ENTRY_VERSION 1u
 
+/* **953: the idle-cache boot argument follows the tree, and it is a TOKEN, not absence.** 4570's
+ * `arm_init` parses `up_style_idle_exit` (`osfmk/arm/arm_init.c:287-289`) to select `caches.c:414`'s
+ * uniprocessor idle-cache branch; the payload's command line carries `up_style_idle_exit=1` for it. D13
+ * has neither the global nor `caches.c` - its idle is gated by `do_power_save`, a compile default
+ * (`osfmk/arm/pmCPU.c:41`, tested by `machine_routines_asm.s:63`) - so the token has no reader on D13
+ * and printing it would be a claim the image does not honour. It is defined here, leading with a space
+ * so it appends to a command line in both cases, and `STAGE90_XNU_TREE_D13` comes from `build.sh` (the
+ * `$XNU_TREE/osfmk/sys/types.h` discriminator). The STRING is written four times by hand
+ * (`boot_args.c` twice, `stage90_main.c` twice); each site names this macro so a hand-edited copy that
+ * drops it is caught by the payload build's 515 clause, which reads the linked objects. */
+#if !defined(STAGE90_XNU_TREE_D13)
+#define STAGE90_XNU_TREE_D13 0
+#endif
+#if STAGE90_XNU_TREE_D13
+#define STAGE90_BOOT_IDLE_TOKEN ""
+#else
+#define STAGE90_BOOT_IDLE_TOKEN " up_style_idle_exit=1"
+#endif
+
 /*
  * Where `_start` builds its own page tables, where the boot_args and the device tree sit, and how
  * big the window is, are all properties of the *linked image* - so they are computed by

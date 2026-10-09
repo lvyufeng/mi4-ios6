@@ -160,6 +160,19 @@ if [[ -n ${STAGE90_EXTRA_CFLAGS:-} ]]; then
   CFLAGS+=($STAGE90_EXTRA_CFLAGS)
 fi
 
+# **953: the payload learns which XNU tree it embeds.** The boot-arg string carries
+# `up_style_idle_exit=1`, which 4570's `arm_init` parses (`osfmk/arm/arm_init.c:287`) to select
+# `caches.c:414`'s idle-cache branch. **D13 has neither** (`arm_init.c` parses only `maxmem`/
+# `-no-cache`/`serial`; there is no `caches.c`), and its idle is gated by `do_power_save`, a compile
+# default - so on D13 the token is a lie printed into the command line. The discriminator is the same
+# one the entry build and `build_xnu_arm_kernel.sh` use: `$XNU_TREE/osfmk/sys/types.h` exists iff D13.
+# A bare `./build.sh` (no `XNU_TREE`) defaults to 4570, so this `-D` is absent and the payload is
+# unchanged; `boot_args.c` and `stage90_main.c` read it to drop the token and print a skip.
+XNU_TREE=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
+STAGE90_XNU_TREE_D13=0
+[[ -f $XNU_TREE/osfmk/sys/types.h ]] && STAGE90_XNU_TREE_D13=1
+CFLAGS+=(-DSTAGE90_XNU_TREE_D13=$STAGE90_XNU_TREE_D13)
+
 LDFLAGS=(
   -nostdlib
   -Wl,-T,linker.ld
@@ -347,6 +360,27 @@ CMDLINE="$CMDLINE_BASE $CACHE_TOKEN no-persist-write no-external-mutation"
 # first version of this check died with status 141 and no message, which is the same silent death
 # the entry build's own clause warns about. A reader that runs to the end of the stream, and a
 # `|| true` for the case where there is no match at all, are both part of the check working.
+# **953: on D13 the token does not exist and the check PUBLISHES the skip rather than reading
+# nothing.** D13 has no `up_style_idle_exit` global and no `caches.c`; its idle is gated by
+# `do_power_save`, a compile default. So there is no token to place, and this clause's whole subject -
+# the command line carries the name `arm_init` parses - has no referent. It refuses in BOTH
+# directions: on D13 it requires the token to be ABSENT from the payload (a token there is output
+# without a reader - [[mi4-off-option-two-spellings]]), and on 4570 it requires it present (below).
+# `STAGE90_XNU_TREE_D13` is the same discriminator the entry build and `build_xnu_arm_kernel.sh` use.
+if [[ ${STAGE90_XNU_TREE_D13:-0} -eq 1 ]]; then
+  _d13_tok=$(arm-none-eabi-strings "$REPO_ROOT/out/stage90/boot_args.o" "$REPO_ROOT/out/stage90/stage90_main.o" 2>/dev/null | grep -c 'up_style_idle_exit=1' || true)
+  if [[ ${_d13_tok:-0} -ne 0 ]]; then
+    echo "FAIL: D13 was selected (XNU_TREE=$XNU_TREE has osfmk/sys/types.h) but the payload still carries"
+    echo "      'up_style_idle_exit=1' $_d13_tok time(s) in its command lines. D13 has no such global and no"
+    echo "      caches.c, so the token has no reader - it is a claim the image does not honour. The token"
+    echo "      is written by STAGE90_BOOT_IDLE_TOKEN (src/stage90.h), which must be empty for D13."
+    exit 1
+  fi
+  echo "xnu_entry_515: SKIPPED on D13 - the idle-cache boot argument does not exist in this tree."
+  echo "  D13's arm_init parses only maxmem/-no-cache/serial (osfmk/arm/arm_init.c:156/190/202) and it"
+  echo "  ships no caches.c; its idle is gated by do_power_save (pmCPU.c:41), a compile default, not a"
+  echo "  boot argument. The payload's command lines are confirmed NOT to carry up_style_idle_exit=1."
+else
 argname=$(arm-none-eabi-strings "$ENTRY_BIN" | awk '$0 == "up_style_idle_exit" { n++; if (n == 1) print }')
 if [[ -z $argname ]]; then
   echo "FAIL: $ENTRY_BIN carries no literal 'up_style_idle_exit'; arm_init's own PE_parse_boot_argn" >&2
@@ -378,6 +412,7 @@ if [[ -z $dtstr ]]; then
 fi
 echo "xnu_entry_515: the payload's command line (${#cmdstr} characters) and the tree's /chosen copy"
 echo "  both carry '$argname=1', the name taken from the entry image's own parse site"
+fi
 
 
 $MKBOOTIMG \

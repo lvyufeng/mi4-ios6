@@ -794,7 +794,7 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
      */
     apple_dt_node_begin(b, 6, 1);
     apple_dt_prop_str(b, "name", "chosen");
-    apple_dt_prop_str(b, "boot-args", "debug=0x144 rd=md0 mi4ios6.stage=83 xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready up_style_idle_exit=1");
+    apple_dt_prop_str(b, "boot-args", "debug=0x144 rd=md0 mi4ios6.stage=83 xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready" STAGE90_BOOT_IDLE_TOKEN);
     apple_dt_prop_str(b, "stdout-path", "ram-console");
     apple_dt_prop_u32_array(b, "ram-console-reg", ram_console_reg, ARRAY_SIZE(ram_console_reg));
     apple_dt_prop(b, "random-seed", chosen_random_seed, sizeof(chosen_random_seed));
@@ -802,7 +802,7 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
 #else
     apple_dt_node_begin(b, 5, 1);
     apple_dt_prop_str(b, "name", "chosen");
-    apple_dt_prop_str(b, "boot-args", "debug=0x144 rd=md0 mi4ios6.stage=83 xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready up_style_idle_exit=1");
+    apple_dt_prop_str(b, "boot-args", "debug=0x144 rd=md0 mi4ios6.stage=83 xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready" STAGE90_BOOT_IDLE_TOKEN);
     apple_dt_prop_str(b, "stdout-path", "ram-console");
     apple_dt_prop_u32_array(b, "ram-console-reg", ram_console_reg, ARRAY_SIZE(ram_console_reg));
     apple_dt_prop(b, "random-seed", chosen_random_seed, sizeof(chosen_random_seed));

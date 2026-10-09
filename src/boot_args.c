@@ -45,10 +45,11 @@ void build_boot_args(struct boot_args *args, void *dt, uint32_t dt_len)
      * error anywhere, and the boot-arg the step depends on is exactly the kind of thing that would
      * have gone missing that way.
      */
-    const char cmd[] = "debug=0x144 rd=md0 mi4ios6.stage=83 xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm prevm-pexpert dtinit-facts peid-machine no-pub-peinit no-pub-dtinit no-pub-peid no-pub-thread no-pub-cpuboot no-pub-rtclock up_style_idle_exit=1";
+    const char cmd[] = "debug=0x144 rd=md0 mi4ios6.stage=83 xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm prevm-pexpert dtinit-facts peid-machine no-pub-peinit no-pub-dtinit no-pub-peid no-pub-thread no-pub-cpuboot no-pub-rtclock" STAGE90_BOOT_IDLE_TOKEN;
     _Static_assert(sizeof(cmd) <= BOOT_LINE_LENGTH,
                    "this string no longer fits the boot_args CommandLine, and the copy below would "
-                   "drop the tail of it silently - the last token is up_style_idle_exit=1, which is "
+                   "drop the tail of it silently - the last token is STAGE90_BOOT_IDLE_TOKEN "
+                   "(up_style_idle_exit=1 on 4570, empty on D13), which is "
                    "the boot argument 515's repair is carried by");
     const uint32_t cmd_len = (sizeof(cmd) < sizeof(args->CommandLine)) ?
         (uint32_t)sizeof(cmd) : (uint32_t)sizeof(args->CommandLine);
