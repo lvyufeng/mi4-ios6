@@ -2110,6 +2110,64 @@ void __wrap_machine_idle(void)
      * `entry_stubs.c` for the arithmetic and for the arm. */
     entry_istack_separate();
 
+#if STAGE90_ENTRY_D13
+    /*
+     * **951: on D13 the four USB probes and the SMEM probe live HERE, at `machine_idle`'s own entry,
+     * because D13 compiles `__wrap_Idle_load_context` (the 4570 site, below) out.** That wrapper is
+     * inside the `#if !STAGE90_ENTRY_D13` gate 937 opened: D13 ships neither `Idle_load_context` nor
+     * `cpu_idle`, so the whole block is 4570-only and the probes there are DEAD CODE on this tree - a
+     * press would log zero `xnu_live_usb_*`/`xnu_live_smem_*` keys and read as "the probe did not run".
+     * It is [[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]] again: a TREE's missing API made a
+     * probe's site unreachable, exactly as a lower ARM's switch (`IDLE_NO_SLEEP`) did in 910a.
+     *
+     * **`__wrap_machine_idle` is the one wrapper every pass reaches on D13 too.** It is the shared entry
+     * of 512/513/518 (D13's own `machine_idle` tests `do_power_save` before it will `wfi`), and it is
+     * entered before `__real_machine_idle` on every pass. The probes are all idempotent - they latch
+     * after their first pass - so the exact pass does not matter; what matters is that the site is
+     * reached. The ordering (USB read, device, enum, stream, SMEM) is the 4570 block's, kept so the two
+     * trees' records read the same way.
+     *
+     * **The build refuses the defect rather than trusting this comment**
+     * ([[mi4-a-claim-in-a-comment-is-not-a-check]]): 910a/910a2's clause in `build_entry.sh` now reads
+     * the linked image and accepts `__wrap_Idle_load_context` on 4570 OR `__wrap_machine_idle` on D13,
+     * refusing any other site - so an edit that leaves a probe at a dead site stops the build.
+     */
+#ifndef STAGE90_XNU_USB_PROBE
+#define STAGE90_XNU_USB_PROBE 0
+#endif
+#if STAGE90_XNU_USB_PROBE
+    entry_usb_probe();
+#endif
+
+#ifndef STAGE90_XNU_USB_DEV
+#define STAGE90_XNU_USB_DEV 0
+#endif
+#if STAGE90_XNU_USB_DEV
+    entry_usb_dev_init();
+#endif
+
+#ifndef STAGE90_XNU_USB_ENUM
+#define STAGE90_XNU_USB_ENUM 0
+#endif
+#if STAGE90_XNU_USB_ENUM
+    entry_usb_enum_poll();
+#endif
+
+#ifndef STAGE90_XNU_USB_STREAM
+#define STAGE90_XNU_USB_STREAM 0
+#endif
+#if STAGE90_XNU_USB_STREAM
+    entry_usb_stream_poll();
+#endif
+
+#ifndef STAGE90_XNU_SMEM_PROBE
+#define STAGE90_XNU_SMEM_PROBE 0
+#endif
+#if STAGE90_XNU_SMEM_PROBE
+    entry_smem_probe();
+#endif
+#endif /* STAGE90_ENTRY_D13 */
+
     __real_machine_idle();
 }
 

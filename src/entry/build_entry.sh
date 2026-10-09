@@ -37910,6 +37910,15 @@ run python3 "$REPO_ROOT/tools/check_usb_stream.py" --selftest || exit 1
 # `__wrap_Idle_load_context`. **A comment saying where the call belongs is not a check**
 # ([[mi4-a-claim-in-a-comment-is-not-a-check]]); this reads the artifact.
 #
+# **951 makes that expected symbol follow the TREE.** On D13 `__wrap_Idle_load_context` does not exist
+# at all - 937's `#if !STAGE90_ENTRY_D13` gated the whole 513-535 idle block out (D13 ships no
+# `cpu_idle`), so the probes there would be dead code for the SAME reason they were dead on the
+# `IDLE_NO_SLEEP` arm in 910a. D13's one wrapper every pass reaches is `__wrap_machine_idle` (the shared
+# 512/513/518 entry, entered before `__real_machine_idle`), so on D13 the clause accepts that name and
+# refuses `__wrap_Idle_load_context` - a probe left at the 4570 site on D13 stops the build rather than
+# reading nothing on a press. The expected name is picked from `$D13_TRACE`, the same tree
+# discriminator this script uses everywhere.
+#
 # It is placed here, after the record writer like the two guards above, because it reads the same two
 # switches out of the record just written - and it refuses in BOTH directions: a switch that is ON whose
 # probe is at the wrong site, and (the same edit's other half) a probe left at a caller that is not a
@@ -37929,13 +37938,20 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     # "no call there", not as "not checked"). The form is matched by FIELD, not by a prefix regex -
     # `$3` is the mnemonic as objdump spaces it, so `bl`, `blx` and `b` all count and the field split
     # cannot be fooled by a symbol name that contains `b`.
-    _cs_out=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" 2>/dev/null | awk '
+    # **951: the site name follows the TREE.** On 4570 the probes live at `__wrap_Idle_load_context`; on
+    # D13 that wrapper is compiled out (937) and the probes live at `__wrap_machine_idle`. The clause must
+    # name the tree's own site - accepting the wrong one would refuse a correct D13 image, and accepting
+    # BOTH would let a probe sit at the dead `Idle_load_context` site on D13 and read as present. Pick the
+    # one expected symbol from `$D13_TRACE` (the tree discriminator the rest of this script uses).
+    _cs_probe_site="__wrap_Idle_load_context"
+    [[ $D13_TRACE -eq 1 ]] && _cs_probe_site="__wrap_machine_idle"
+    _cs_out=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" 2>/dev/null | awk -v oksym="$_cs_probe_site" '
         /^[0-9a-f]+ <[a-zA-Z_][a-zA-Z_0-9]*>:/ { sym=$2; gsub(/[<>:]/,"",sym) }
-        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_probe>"    || $5=="<entry_usb_probe>")    { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_probe:%s\n", sym; nprobe++ }
-        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_dev_init>" || $5=="<entry_usb_dev_init>") { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_dev_init:%s\n", sym; ndev++ }
-        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_enum_poll>" || $5=="<entry_usb_enum_poll>") { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_enum_poll:%s\n", sym; nenum++ }
-        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_stream_poll>" || $5=="<entry_usb_stream_poll>") { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_usb_stream_poll:%s\n", sym; nstream++ }
-        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_smem_probe>"    || $5=="<entry_smem_probe>")    { if (sym != "__wrap_Idle_load_context") printf "BAD:entry_smem_probe:%s\n", sym; nsmem++ }
+        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_probe>"    || $5=="<entry_usb_probe>")    { if (sym != oksym) printf "BAD:entry_usb_probe:%s\n", sym; nprobe++ }
+        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_dev_init>" || $5=="<entry_usb_dev_init>") { if (sym != oksym) printf "BAD:entry_usb_dev_init:%s\n", sym; ndev++ }
+        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_enum_poll>" || $5=="<entry_usb_enum_poll>") { if (sym != oksym) printf "BAD:entry_usb_enum_poll:%s\n", sym; nenum++ }
+        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_usb_stream_poll>" || $5=="<entry_usb_stream_poll>") { if (sym != oksym) printf "BAD:entry_usb_stream_poll:%s\n", sym; nstream++ }
+        ($3=="bl" || $3=="blx" || $3=="b") && ($4=="<entry_smem_probe>"    || $5=="<entry_smem_probe>")    { if (sym != oksym) printf "BAD:entry_smem_probe:%s\n", sym; nsmem++ }
         END { printf "N:%d:%d:%d:%d:%d\n", nprobe+0, ndev+0, nenum+0, nstream+0, nsmem+0 }')
     _cs_bad=$(printf "%s\n" "$_cs_out" | sed -n 's/^BAD:\([a-z_]*\):\(.*\)$/\1 from \2 /p')
     _cs_probe=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:\([0-9]*\):.*/\1/p')
@@ -37944,7 +37960,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     _cs_stream=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:[0-9]*:[0-9]*:[0-9]*:\([0-9]*\):.*/\1/p')
     _cs_smem=$(printf "%s\n" "$_cs_out" | sed -n 's/^N:[0-9]*:[0-9]*:[0-9]*:[0-9]*:\([0-9]*\)/\1/p')
     if [[ -n ${_cs_bad// /} ]]; then
-        layout_fail "the linked image calls a USB probe or the SMEM probe from a site that is not \`__wrap_Idle_load_context\`: [${_cs_bad}]. Both USB arms carry STAGE90_XNU_IDLE_NO_SLEEP=1, on which \`cpu_idle\` leaves by its first door on every pass and \`__wrap_platform_cache_idle_exit\` is NEVER entered - so a probe called from there is dead code and a press logs zero \`xnu_live_usb_*\` keys. The probes belong in \`__wrap_Idle_load_context\`, the one wrapper every pass reaches on every arm (xnu_entry_513 pins it to machine_idle plus cpu_idle's two first-door bodies). This is [[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]]: a lower arm's switch must not make an upper arm's site unreachable"
+        layout_fail "the linked image calls a USB probe or the SMEM probe from a site that is not \`${_cs_probe_site}\`: [${_cs_bad}]. Both USB arms carry STAGE90_XNU_IDLE_NO_SLEEP=1, on which \`cpu_idle\` leaves by its first door on every pass and \`__wrap_platform_cache_idle_exit\` is NEVER entered - so a probe called from there is dead code and a press logs zero \`xnu_live_usb_*\` keys. The probes belong in \`${_cs_probe_site}\`, the one wrapper every pass reaches on this tree (4570: \`__wrap_Idle_load_context\`, pinned by xnu_entry_513 to machine_idle plus cpu_idle's two first-door bodies; D13: \`__wrap_machine_idle\`, 937 compiles the idle-load wrapper out). This is [[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]]: a lower arm's switch - or a tree's missing API - must not make an upper arm's site unreachable"
     fi
     [[ $_want_probe -eq $_cs_probe ]] \
         || layout_fail "STAGE90_XNU_USB_PROBE=$USB_PROBE says the read probe should be called ${_want_probe} time(s) from the idle-load wrapper but the linked image calls it ${_cs_probe} time(s): the switch and the body disagree about whether this arm probes the USB core"
@@ -37982,7 +37998,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     if [[ $_want_enum -eq 1 ]] && grep -qE 'usb_enum_write32\([^)]*USBCMD[^)]*USBCMD_RST' "$BOOT_DIR/entry_usb_enum.c"; then
         layout_fail "entry_usb_enum.c stores \`USBCMD.RST\` - the 910b enumeration arm must NEVER re-run the link reset. 910a2 owns the ONE reset (its \`_dev_rst_count = 1\`); a reset in the once-per-pass poll fights the running device: the host enumerates, then the next pass resets the controller under it. The arm writes the endpoint set, \`USBINTR\`, and \`DEVICEADDR\`, and nothing that resets the link"
     fi
-    say "  xnu_entry_910: the USB probes are called from \`__wrap_Idle_load_context\` and nowhere else (read_probe=${_cs_probe}, write_arm=${_cs_dev}, enum=${_cs_enum}, stream=${_cs_stream}), which is the one idle site every pass reaches on BOTH the SLEEP and the IDLE_NO_SLEEP arms - so a USB key in the log means the probe ran and its absence is not a site this arm never enters"
+    say "  xnu_entry_910: the USB probes are called from \`${_cs_probe_site}\` and nowhere else (read_probe=${_cs_probe}, write_arm=${_cs_dev}, enum=${_cs_enum}, stream=${_cs_stream}), which is the one idle site every pass reaches on this tree - on 4570 \`__wrap_Idle_load_context\` (the site both the SLEEP and the IDLE_NO_SLEEP arms reach), on D13 \`__wrap_machine_idle\` (937 compiles the idle-load wrapper out) - so a USB key in the log means the probe ran and its absence is not a site this arm never enters"
 fi
 
 # ------------------------------------------------- 533: **the sources of this image, by content**
