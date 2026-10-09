@@ -1280,7 +1280,8 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_USB_STREAM
                 STAGE90_XNU_SMEM_PROBE
                 STAGE90_XNU_MEM_SIZE_MAX
-                STAGE90_XNU_ENTRY_WINDOW)
+                STAGE90_XNU_ENTRY_WINDOW
+                STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
 # the case statement below against the script's own environment reads - `grep -o '${STAGE90_[A-Z0-9_]*:-'`
@@ -1404,6 +1405,11 @@ do
         # is read with its own `${...:-0}`. The default is the same literal, so an unset switch and an
         # explicit `0x04000000` are the same arm and two spellings of one value.
         STAGE90_XNU_ENTRY_WINDOW)     _v=${STAGE90_XNU_ENTRY_WINDOW:-0x04000000} ;;
+        # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
+        # synthesized from a different tree links a different image (951's probe site, 952's entry
+        # symbol), so a record that did not carry it would let a build notice nothing when the tree
+        # moved under it. `$D13_TRACE` is resolved at `:136`, far above this loop, so it reads directly.
+        STAGE90_XNU_TREE_D13)         _v=$D13_TRACE ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_SKIP) _v=${STAGE90_ENTRY_CHECKPOINT_SKIP:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_AFTER) _v=${STAGE90_ENTRY_CHECKPOINT_AFTER:-(unset)} ;;
@@ -37700,6 +37706,13 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "# which refuses a record whose hash is not the entry bin it is about."
     echo "STAGE90_XNU_ENTRY_SHA256=$ENTRY_IMAGE_SHA256"
     echo "STAGE90_XNU_ENTRY_BYTES=$ENTRY_IMAGE_BYTES"
+    # **954: which XNU tree this image is.** The gate (`preflight_boot_check.sh`) reads its clauses
+    # about the *tree's* machine - 549's `up_style_idle_exit` (4570-only), 515's token - against this
+    # key so it can publish a D13 skip instead of failing on a token D13 does not have. This is the
+    # same `$D13_TRACE` discriminator the build itself uses ($XNU_TREE/osfmk/sys/types.h exists iff
+    # D13); recording it here binds the tree to the artifact by the hash above, so a gate that reads
+    # `STAGE90_XNU_TREE_D13=0` is talking about *this* image's tree and not the shell's environment.
+    echo "STAGE90_XNU_TREE_D13=$D13_TRACE"
     echo "STAGE90_ENTRY_TRACE=$ENTRY_TRACE"
     echo "STAGE90_ENTRY_REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}"
     echo "STAGE90_XNU_SLOT_NULL=$SLOT_NULL"

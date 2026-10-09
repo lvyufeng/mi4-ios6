@@ -525,6 +525,14 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 [[ "$recorded_sha" == "$actual_sha" ]] \
   || fail "$ENTRY_CFG describes entry image $recorded_sha and $ENTRY_BIN is $actual_sha: the record names a different artifact than the one on disk, so the switches it lists are about some other image. Rebuild the entry image, then ./build.sh"
 #
+# **954: which XNU tree this image is, read from the same record.** The gate's clauses about the
+# *tree's* machine (549's `up_style_idle_exit`, 515's token) must know the tree to publish a D13 skip
+# instead of failing on a token D13 does not have. It is read out of the hash-bound record rather than
+# the environment, so a gate talking about this image's tree cannot be reading a different shell. An
+# older record (before 954) has no line: default 0 = 4570, which is what every recorded arm so far is.
+_entry_tree_d13=$(awk -F= '$1 == "STAGE90_XNU_TREE_D13" { print $2 }' "$ENTRY_CFG")
+[[ -n $_entry_tree_d13 ]] || _entry_tree_d13=0
+#
 # **Every key by name, because the ten that *are* the variant are not named like the artifact.** The
 # four keys that identify the record (SHA256, BYTES, TRACE, REAL_ARM_INIT) all begin `STAGE90_XNU_ENTRY_`
 # or `STAGE90_ENTRY_`, and the ten that say *which arm this is* - SLOT_NULL, EXIT_POC_FLUSH,
@@ -680,7 +688,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_USB_STREAM
                 STAGE90_XNU_SMEM_PROBE
                 STAGE90_XNU_MEM_SIZE_MAX
-                STAGE90_XNU_ENTRY_WINDOW)
+                STAGE90_XNU_ENTRY_WINDOW
+                STAGE90_XNU_TREE_D13)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this
@@ -820,6 +829,17 @@ do
   # build made carries a non-empty value and the branch above does not fire for it.
   if [[ -z $_v && $_k == STAGE90_XNU_SMEM_PROBE ]]; then
     printf '  %s=(absent, and a record that does not name the SMEM probe is one built before entry_smem.c existed - the probe was off, the only value a pre-911c build could have written)\n' "$_k"
+    continue
+  fi
+  # **954's tree key, the same one-way rule as 911b/911c/912, and for the same reason.** 954 is the first
+  # build to write `STAGE90_XNU_TREE_D13`; every arm parked before it was built against 4570 (the D13 line
+  # had no press yet), so its record has no line, and an absent key is not a missing value but the value -
+  # 4570, the only tree any pre-954 build could have selected. Demanding the key would make every existing
+  # park unpressable (882's own defect, eight times repaired now), and those presses are still owed. A
+  # post-954 record can never reach this branch: `build_entry.sh`'s 678 two-way check refuses a record
+  # whose arm-key list omits the key, and the writer emits the line unconditionally (0 or 1).
+  if [[ -z $_v && $_k == STAGE90_XNU_TREE_D13 ]]; then
+    printf '  %s=(absent, and a record that does not name the tree is one built before 954 - the 4570 tree, the only value any pre-954 build could have selected)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \
@@ -2039,6 +2059,23 @@ PY
   # contracts read - and `stage90_main.c`'s comment states the hazard directly: *a token that only one of
   # the two carries is a token whose check and whose effect are about different strings.* So one
   # occurrence is refused as loudly as none.
+  # **954: on D13 this clause's subject does not exist, and it PUBLISHES the skip.** D13 has no
+  # `up_style_idle_exit` global and no `caches.c`; its idle is gated by `do_power_save`, a compile
+  # default (`pmCPU.c:41`), not a boot argument. So there is no idle arm to select and no token for the
+  # entry image's `arm_init` to name. Skipping is not enough on its own: the clause also REFUSES the
+  # token if it is present, because a D13 image that carried one would be claiming an arm it cannot
+  # take ([[mi4-off-option-two-spellings]]). `_entry_tree_d13` is read from the hash-bound record above.
+  if [[ $_entry_tree_d13 -eq 1 ]]; then
+    echo "== the boot argument that selects the idle arm =="
+    _d13_tok=$(grep -ao -- "up_style_idle_exit=1" "$IMAGE" 2>/dev/null | wc -l || true)
+    if [[ ${_d13_tok:-0} -ne 0 ]]; then
+      fail "this is a D13 image (the record says STAGE90_XNU_TREE_D13=1) but the boot image carries 'up_style_idle_exit=1' $_d13_tok time(s). D13 has no such global and no caches.c, so the token has no reader - a claim the image does not honour. Rebuild with the D13 tree selected"
+    fi
+    echo "549: SKIPPED on D13 - the idle-cache boot argument does not exist in this tree."
+    echo "  D13's arm_init parses only maxmem/-no-cache/serial and ships no caches.c; its idle is gated"
+    echo "  by do_power_save (pmCPU.c:41), a compile default, not a boot argument. The boot image is"
+    echo "  confirmed NOT to carry up_style_idle_exit=1, so no idle arm is being claimed."
+  else
   echo "== the boot argument that selects the idle arm =="
   STRINGS=$(command -v strings || command -v arm-none-eabi-strings || true)
   if [[ -z $STRINGS ]]; then
@@ -2066,6 +2103,7 @@ PY
     fail "the boot image carries '$ARGNAME=1' $N_IMG time(s) and the payload $N_PAY, where 515's repair must be in two command lines (XNU's PE_boot_args() reads boot_args.c's CommandLine; the port's contracts read the /chosen boot-args property) - with one copy, the two sides are about different strings, and with none this image is not the arm 549's reading is written for"
   fi
   echo "ok: the arm 549's reading is written for is the arm in the bytes - both copies carry it"
+  fi
 fi
 
 case "$HWSELFTEST" in 1|1u)
