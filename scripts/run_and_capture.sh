@@ -1208,6 +1208,62 @@ summarise_log() {
     say "     reading."
   fi
 
+  # --- clause 3 (USB debug): the four rungs' families, reported the same way and for the same reason ---
+  #
+  # **959-962 built the whole clause-3 ladder (「可以通过usb进行调试」) and until this block the summary
+  # read NONE of its keys.** That is the recorded defect this project keeps closing - five goal
+  # families once reached the runner unread ([[mi4-911-runner-now-reads-all-goal-clauses]]), and the
+  # USB ladder is the one that grew since. A press of any of the four arms would otherwise produce a
+  # log whose USB outcome the operator had to grep out by hand. The block is REPORTED, not scored,
+  # exactly like the seam family above: a log alone cannot say which arm produced it (an image
+  # publishes no build marker - 549), so the arm stays the gate's/record's reading, and what this adds
+  # is that the arm's OWN outcome is in the summary at all.
+  #
+  # The KIND of an absence differs per family and is what the table's third column says: each
+  # family's publisher body sits inside `#if STAGE90_XNU_USB_<ARM>` ([[mi4-off-option-two-spellings]]),
+  # so on an image built without the switch its key is absent **by construction**; on an image that
+  # HAS the switch the key is absent only because the run did not reach it. The probe fires from
+  # `__wrap_machine_idle`, and the build's own `xnu_entry_910` clause pins that site from the linked
+  # ELF ([[mi4-silence-is-a-reading-only-if-success-is-silent]]) - so on a USB arm an all-absent log
+  # means the idle was not entered, which the arm table above already reports.
+  #
+  # Each row's marker is the family's top-of-body key: `_loaded` for the read probe (entry_usb.c:284)
+  # and the device arm (entry_usb_dev.c:437), `_armed`/`_gated` for the enum arm (one or the other is
+  # written depending on the mode gate, entry_usb_enum.c:538/546), `_state` for the stream (written at
+  # the body's end on every pass, entry_usb_stream.c:259).
+  local usb_probe usb_dev usb_enum usb_enum_gated usb_stream
+  usb_probe=$(grep -a -c 'xnu_live_usb_loaded=' "$log" || true)
+  usb_dev=$(grep -a -c 'xnu_live_usb_dev_loaded=' "$log" || true)
+  usb_enum=$(grep -a -c 'xnu_live_usb_enum_armed=' "$log" || true)
+  usb_enum_gated=$(grep -a -c 'xnu_live_usb_enum_gated=' "$log" || true)
+  usb_stream=$(grep -a -c 'xnu_live_usb_stream_state=' "$log" || true)
+  say ""
+  say "  clause 3 (USB debug 通过usb进行调试): the four rungs' own marker keys, reported not scored - a"
+  say "  family's key is absent by CONSTRUCTION on an image that does not build the switch, and absent"
+  say "  only because the run did not reach it on one that does. Which arm this is remains the gate's"
+  say "  and the record's reading; what this adds is that the arm's own outcome is in the summary."
+  printf '    %-26s %-8s %s\n' 'xnu_live_usb_loaded'       "${arm_words[$(( usb_probe > 0 ))]}" 'rung 1: read probe body ran'
+  printf '    %-26s %-8s %s\n' 'xnu_live_usb_dev_loaded'   "${arm_words[$(( usb_dev > 0 ))]}" 'rung 2: device arm body ran'
+  if (( usb_enum > 0 )); then
+    printf '    %-26s %-8s %s\n' 'xnu_live_usb_enum_armed' "${arm_words[1]}" 'rung 3: enum poll armed EP0'
+  elif (( usb_enum_gated > 0 )); then
+    printf '    %-26s %-8s %s\n' 'xnu_live_usb_enum_gated' "${arm_words[1]}" 'rung 3: MODE GATE refused (not a device)'
+  else
+    printf '    %-26s %-8s %s\n' 'xnu_live_usb_enum_*'     "${arm_words[0]}" 'rung 3: enum body not reached'
+  fi
+  printf '    %-26s %-8s %s\n' 'xnu_live_usb_stream_state' "${arm_words[$(( usb_stream > 0 ))]}" 'rung 4: stream poll running'
+  if (( usb_probe == 0 && usb_dev == 0 && usb_enum == 0 && usb_enum_gated == 0 && usb_stream == 0 )); then
+    say "  => NO USB key at all: either this image builds none of the four switches (read the gate's"
+    say "     record for the arm) or the probe site was never reached - the arm table above says which."
+  elif (( usb_dev > 0 )) && (( usb_enum == 0 )) && (( usb_enum_gated > 0 )); then
+    say "  => the device arm wrote and the enum arm's MODE GATE refused: the core was not already a"
+    say "     device (USBMODE[1:0] != 2) and USB_DEV_FORCE was off. A READING, not a failure - the gate"
+    say "     is the bound that keeps USBCMD.RST from fighting a live host (960's rule)."
+  elif (( usb_stream > 0 )) && (( usb_enum > 0 )); then
+    say "  => the TOP of the ladder: the stream poll is running with EP1-IN armed, so the console ring"
+    say "     is being handed to the endpoint. Whether a host READ it is the host's side, not this log's."
+  fi
+
   if (( idle_no_sleep_arm == 1 )); then
     # (6) the arm where the idle never slept - **and this branch is entered from the log's own keys
     # (626's table above), never from the image.** A capture whose image predates the repair lands here

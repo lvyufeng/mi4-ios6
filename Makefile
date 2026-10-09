@@ -250,6 +250,15 @@ check:
 # switch-independent, so it runs here with no build and no device.
 	@tools/check_usb_stream.py --selftest >/dev/null
 	@tools/check_usb_stream.py
+# 959-962: the RUNNER half of the clause-3 ladder. The four USB rungs are checked by the four guards
+# above, but a key the entry image WRITES and the runner never READS makes a press's summary silent
+# about that arm - the recorded "unread family" defect ([[mi4-911-runner-now-reads-all-goal-clauses]]).
+# `check_runner_usb_families.py` runs both directions: the runner's USB block must name a marker key
+# for each of the four families, and every `xnu_live_usb*` key it names must be published by a
+# `src/entry/entry_usb*.c`. Source half, no build and no device; its --selftest feeds three measured
+# mutations (a dropped family, an invented key, no block).
+	@tools/check_runner_usb_families.py --selftest >/dev/null
+	@tools/check_runner_usb_families.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not
