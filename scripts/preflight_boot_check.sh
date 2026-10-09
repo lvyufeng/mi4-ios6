@@ -678,7 +678,7 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS STAGE90_XNU_STORAGE_PROBE
                 STAGE90_XNU_PWR_WAIT_TICKS STAGE90_XNU_MOUNT STAGE90_XNU_HFS_ROOT_MEDIA
                 STAGE90_XNU_EMMC_STRATEGY STAGE90_XNU_ROOT_FROM_CARD STAGE90_XNU_HDD_WRITE
-                STAGE90_XNU_HFS_ROOT_RW STAGE90_XNU_CARD_TOTAL STAGE90_XNU_RESIDENT
+                STAGE90_XNU_HFS_ROOT_RW STAGE90_XNU_CARD_TOTAL STAGE90_XNU_FULL_EXTENT STAGE90_XNU_RESIDENT
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP
                 STAGE90_XNU_USB_PROBE
@@ -769,6 +769,19 @@ if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/
      | grep -q 'entry_root_media_card_total_arm_on'; then
   _entry_card_total_arm=on
 fi
+# **965c: `STAGE90_XNU_FULL_EXTENT` is grounded the same way, and its marker is PRESENCE-ONLY.** The
+# module defines `entry_root_media_full_extent_arm_on` only under the switch (there is no `_off`
+# function, so the parked 512 KiB arm's image keeps its `b9c224c0` hash - a new unconditional marker
+# would move it with no `--gc-sections` in the link). So the ELF carries the symbol iff the image's card
+# unit bounds the whole partition; an image that carries it MUST record the key, and one that cannot
+# (every pre-965c park, which bounded its 512 KiB fixture in 32 bits without harm) has no value to
+# record - the N/A branch. This is the same grounded shape as CARD_TOTAL above, with presence standing
+# in for the `_on`/`_off` pair.
+_entry_full_extent_arm=""
+if [[ -r $OUT/xnu_arm_entry.elf ]] && "$STAGE90_NM" "$OUT/xnu_arm_entry.elf" 2>/dev/null \
+     | grep -q 'entry_root_media_full_extent_arm_on'; then
+  _entry_full_extent_arm=on
+fi
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
@@ -794,6 +807,10 @@ do
   fi
   if [[ -z $_v && $_k == STAGE90_XNU_CARD_TOTAL && -z $_entry_card_total_arm ]]; then
     printf '  %s=(absent, and this entry image carries no raw whole-card unit to name - the key is N/A here)\n' "$_k"
+    continue
+  fi
+  if [[ -z $_v && $_k == STAGE90_XNU_FULL_EXTENT && -z $_entry_full_extent_arm ]]; then
+    printf '  %s=(absent, and this entry image carries no full-extent arm to name - the key is N/A here)\n' "$_k"
     continue
   fi
   # **912's window: absent names the 16 MB arm, because that is the ONLY value any pre-912 record could
@@ -912,6 +929,29 @@ PY
         with tools/build_root_volumes.sh (HFSX), which writes out/xnu_card_hfs.img and touches no tracked file."
   printf '  root medium: the CARD image %s is HFSX 0x4858 v5 (%s bytes) - the family the pressed root uses\n' \
          "$_card_img" "$_cbytes"
+  # **965c: the card image's SIZE against the strategy's BOUND, which is the one thing a 512 KiB fixture
+  # never had to answer.** `STAGE90_XNU_FULL_EXTENT=0` bounds the card unit through 888's 32-bit product
+  # `(unsigned)(selected_count * 512)`; `userdata` is 13,610,499,072 B, so that product is 725,597,184 B
+  # (692 MiB). A card image larger than 692 MiB therefore cannot be served whole without the arm - the
+  # strategy answers `EOF` for its top bytes and the mount reads a truncated medium. This grounds the arm
+  # on the ARTIFACT (the card's own byte count), not the record: a 965c arm with the switch OFF shipping a
+  # 896 MiB card is exactly the silent defect the rung exists to prevent, and it is refused here. The bound
+  # is THIS device's userdata extent mod 2^32 (the same partition the arm selects, `_card_lba=0x400000`).
+  _CARD_32BIT_BOUND=725597184
+  _v_full_extent=$(awk -F= '$1 == "STAGE90_XNU_FULL_EXTENT" { print $2 }' "$ENTRY_CFG")
+  if [[ $_v_full_extent == 1 && $_cbytes -gt $_CARD_32BIT_BOUND ]]; then
+    printf '  root medium: FULL_EXTENT=on - the card unit bounds the WHOLE selected partition (13.6 GiB), so\n'
+    printf '               the %s-byte card image is addressable in full (888\x27s 32-bit bound was 692 MiB)\n' "$_cbytes"
+  elif [[ $_v_full_extent != 1 && $_cbytes -gt $_CARD_32BIT_BOUND ]]; then
+    fail "$ENTRY_CFG names a card-root arm whose FULL_EXTENT is ${_v_full_extent:-<absent>} (not 1), but the
+        card image $OUT/xnu_card_hfs.img is $_cbytes bytes = $((_cbytes / 1048576)) MiB, LARGER than the
+        strategy's 32-bit bound of $_CARD_32BIT_BOUND B (692 MiB) for this device's 13.6 GiB userdata.
+        Without STAGE90_XNU_FULL_EXTENT=1 the card unit's length is 888's (unsigned) product, so the
+        strategy serves EOF for everything above 692 MiB and the mount reads a truncated medium: this is
+        the silent defect 965c exists to prevent (a 512 KiB fixture never saw it).
+        Rebuild the entry image under STAGE90_XNU_FULL_EXTENT=1 (with the platform module built with the
+        same define), or write a card image no larger than 692 MiB."
+  fi
 fi
 #
 # **Which arm those keys add up to, and what it can be read for - because the checklist the XNU-entry arm

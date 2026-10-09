@@ -228,6 +228,18 @@ int entry_root_media_card_total_arm_on(void)  { return 1; }
 int entry_root_media_card_total_arm_off(void) { return 0; }
 #endif
 
+/* **965c: the FULL-EXTENT arm's marker, and unlike the five above it is emitted only WHEN ON.**
+ * The reason is the parked arm's safety rather than a different rule: the entry link gc's nothing
+ * (`build_entry.sh` links with no `--gc-sections`), so a new *unconditional* `..._off` function here
+ * would add ~10 bytes to the image the parked 512 KiB arm sends and move its hash off `b9c224c0`.
+ * 911b's `MEM_SIZE_MAX` marker is the precedent - a marker whose ABSENCE is "off" - and the entry
+ * build reads presence as on, absence as off, refusing only a build that RECORDED the switch on
+ * while this symbol is absent (a record with no artifact). With the switch off, the object and the
+ * image are exactly 888's. */
+#if STAGE90_XNU_FULL_EXTENT
+int entry_root_media_full_extent_arm_on(void) { return 1; }
+#endif
+
 #if STAGE90_XNU_HFS_ROOT_MEDIA
 /* Defined by `src/entry/blob/xnu_arm_entry_root_hfs.S` (`.incbin` of the committed HFS+ volume).
  * Only declared here, and only on this arm: with the switch off the section the object carries is
@@ -445,6 +457,24 @@ static uint32_t st_medium_staged;        /* 0 until `entry_root_media_stage` has
 #error "STAGE90_XNU_CARD_TOTAL=1 needs STAGE90_XNU_EMMC_STRATEGY=1: the raw whole-card unit is served through the card ladder's door, and a capacity with no door beneath it would report a size it cannot address."
 #endif
 
+/* **965c: THE FULL-EXTENT ARM.** With `STAGE90_XNU_FULL_EXTENT=1` the CARD unit's byte length
+ * (`st_medium_disk_bytes(ST_MEDIA_DRIVER)`) is computed in 64 bits, so the strategy bounds the WHOLE
+ * selected partition (`userdata` = 13,610,499,072 B on this device) instead of its low 32 bits (692
+ * MiB). This is the one thing standing between the port and the goal's real rootfs: the decrypted
+ * iOS 7.1.2 volume is 896 MiB (965), and 896 > 692, so without this arm the strategy answers EOF for
+ * the volume's top ~204 MiB and `hfs_mountroot` cannot read its catalog. It is a SEPARATE switch from
+ * `CARD_TOTAL` and not a value on it: `CARD_TOTAL` is about a fourth unit's CAPACITY reading, this is
+ * about the mount unit's ADDRESSABLE LENGTH - one name, one meaning. It requires the card strategy
+ * for the same reason the two above do, and with it OFF the module returns 888's exact `(unsigned)`
+ * value, so the shipped 512 KiB arm's object is byte-for-byte what it was. */
+#ifndef STAGE90_XNU_FULL_EXTENT
+#define STAGE90_XNU_FULL_EXTENT 0
+#endif
+#if STAGE90_XNU_FULL_EXTENT && !STAGE90_XNU_EMMC_STRATEGY
+#error "STAGE90_XNU_FULL_EXTENT=1 needs STAGE90_XNU_EMMC_STRATEGY=1: the length it widens is the card unit's, and a unit with no ladder beneath it has no partition to bound."
+#endif
+
+
 #if STAGE90_XNU_EMMC_STRATEGY
 /* The ladder's door and its two addressing accessors - 887's exported half, in the SAME image when
  * this switch is on (the entry image links `entry_storage.c` and this object together; see
@@ -604,7 +634,15 @@ st_medium_disk_bytes(uint32_t unit)
      * `ST_MEDIA_BLOCKSIZE` bytes each. Deriving it from the ladder's own selection (rather than a
      * second constant) keeps the device's length and the ladder's addressing the same number, which
      * is the "one value, two definitions" rule this file keeps re-learning: a strategy whose length
-     * and whose addressing disagreed would serve a byte range that is not what was selected. */
+     * and whose addressing disagreed would serve a byte range that is not what was selected.
+     *
+     * **965c: THIS `(unsigned)` IS A 32-BIT WALL, AND IT IS LEFT EXACTLY AS 888 WROTE IT.** `userdata`
+     * (`mmcblk0p25`) is 13,610,499,072 B, and `(unsigned)` of that is 725,597,184 B (692 MiB) - a
+     * length below the decrypted iOS 7.1.2 rootfs's 896 MiB, so a strategy bounded here would serve
+     * `EOF` for the volume's top ~204 MiB. Rather than change this function's return TYPE (which would
+     * move the `.o` even for a build that does not use the arm - verified: it did, at byte 1858),
+     * 965c adds `st_medium_card_full_bytes()` BELOW, under `STAGE90_XNU_FULL_EXTENT`, and the strategy
+     * picks it for the card unit on that arm. With the switch off this body is byte-for-byte 888's. */
     if (unit == ST_MEDIA_DRIVER)
         return (unsigned)((uint64_t)entry_storage_selected_count() * ST_MEDIA_BLOCKSIZE);
 #if STAGE90_XNU_CARD_TOTAL
@@ -619,6 +657,27 @@ st_medium_disk_bytes(uint32_t unit)
         return ST_MEDIA_BLOCKSIZE;        /* the ONE sector 864 handed over */
     return st_media_strategy_bytes();     /* 882: the volume on the HFS arm, the Mach-O without it */
 }
+
+#if STAGE90_XNU_FULL_EXTENT
+/*
+ * **965c: the card unit's length in 64 BITS - the one thing between this port and the real iOS rootfs.**
+ * The CARD mount unit (ST_MEDIA_DRIVER) is the selected partition (`userdata`, 13,610,499,072 B on this
+ * device), and `st_medium_disk_bytes()` above returns its 32-bit product = 725,597,184 B (692 MiB). The
+ * decrypted iOS 7.1.2 rootfs (965) is **896 MiB**; 896 > 692, so a strategy bounded at the 32-bit value
+ * serves `EOF` for the volume's top ~204 MiB and `hfs_mountroot` cannot read its catalog. This function
+ * is that bound in 64 bits, `entry_storage_selected_count() * ST_MEDIA_BLOCKSIZE`, the SAME product 888
+ * computes - the width is the only difference, so the length and the ladder's addressing stay one number
+ * ([[mi4-one-value-two-definitions]]). It is a SEPARATE function, not a change to the accessor's return
+ * type, so the arm-OFF object keeps 888's exact bytes; the strategy picks THIS for the card unit under
+ * the switch (see its `len` computation). `CARD_TOTAL` is unrelated: that widens a fourth unit's
+ * CAPACITY reading, this the mount unit's ADDRESSABLE LENGTH - one arm, one switch each.
+ */
+static uint64_t
+st_medium_card_full_bytes(void)
+{
+    return (uint64_t)entry_storage_selected_count() * (uint64_t)ST_MEDIA_BLOCKSIZE;
+}
+#endif
 
 /* ----------------------------------------------------------- the switch bodies (memdev's shape) */
 
@@ -696,8 +755,9 @@ st_media_strategy(struct buf *bp)
     uint32_t unit = (uint32_t)minor(buf_device(bp));
     uint32_t count = (uint32_t)buf_count(bp);
     const uint8_t *base;
-#if STAGE90_XNU_EMMC_STRATEGY && STAGE90_XNU_CARD_TOTAL
-    uint64_t len;                     /* 911d: 64-bit - the raw whole-card unit's length exceeds 4 GiB */
+#if STAGE90_XNU_EMMC_STRATEGY && (STAGE90_XNU_CARD_TOTAL || STAGE90_XNU_FULL_EXTENT)
+    uint64_t len;                     /* 911d: 64-bit - the raw whole-card unit's length exceeds 4 GiB;
+                                       * 965c: and so does the card mount unit's once FULL_EXTENT is on */
 #else
     unsigned len;
 #endif
@@ -730,11 +790,25 @@ st_media_strategy(struct buf *bp)
         buf_biodone(bp);
         return;
     }
-    #if STAGE90_XNU_EMMC_STRATEGY && STAGE90_XNU_CARD_TOTAL
+    #if STAGE90_XNU_EMMC_STRATEGY && (STAGE90_XNU_CARD_TOTAL || STAGE90_XNU_FULL_EXTENT)
     /* 911d: compute this unit's byte length in 64 bits so the raw unit's card total is not truncated,
-     * and keep every other unit's value byte-for-byte what `st_medium_disk_bytes` returns. */
-    len  = ST_MEDIA_RAW_UNIT(unit) ? st_medium_card_bytes()
-                                   : (uint64_t)st_medium_disk_bytes(unit);
+     * and keep every other unit's value byte-for-byte what `st_medium_disk_bytes` returns.
+     * 965c adds the OTHER 64-bit case: on a `FULL_EXTENT` arm the CARD mount unit's own length exceeds
+     * 32 bits (userdata is 12.68 GiB), so it too is computed here rather than through the 32-bit
+     * `st_medium_disk_bytes`. The two switches are independent - one widens unit 3's capacity reading,
+     * the other unit 2's mount length - so each has its OWN 64-bit source and neither implies the
+     * other; the `else` chain falls through to the accessor for units 0/1 unchanged. */
+#if STAGE90_XNU_CARD_TOTAL
+    if (ST_MEDIA_RAW_UNIT(unit))
+        len = st_medium_card_bytes();
+    else
+#endif
+#if STAGE90_XNU_FULL_EXTENT
+    if (unit == ST_MEDIA_DRIVER)
+        len = st_medium_card_full_bytes();
+    else
+#endif
+        len = (uint64_t)st_medium_disk_bytes(unit);
 #else
     len  = st_medium_disk_bytes(unit);
 #endif

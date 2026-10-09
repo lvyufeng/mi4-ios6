@@ -12725,3 +12725,27 @@ set=armed-d13-b9c224c0 sha256=5d0f2e95a56a7a8ce8addf9305a6e97540e90042952aa855e4
 set=armed-d13-b9c224c0 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-b9c224c0 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set
 set=armed-d13-b9c224c0 sha256=9d171c706f6111a546457c959eee54c57cc5aac66f74f6fb3c1c94ebf53bae07 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img-manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+# =================================================================================================
+# 965c: THE 64-BIT STRATEGY BOUND ARM. Same switch set as armed-d13-b9c224c0 (the whole D13 USB
+# ladder + HFS_ROOT_MEDIA=1 + ROOT_FROM_CARD=1 + CARD_TOTAL=1 + MEM_TOTAL=1), plus
+# STAGE90_XNU_FULL_EXTENT=1: the CARD unit's strategy bound becomes the WHOLE selected partition
+# (64-bit) instead of 888's 32-bit product. The 32-bit bound on this device is 725,597,184 B (692
+# MiB) - LESS than the real iOS 7.1.2 rootfs (939,524,096 B, 896 MiB) - so 965b's arm would serve
+# EOF for the volume's top ~204 MiB and could not parse its catalog. This is the arm that serves the
+# REAL root volume: tools/build_root_volumes.sh --real stages /mnt/data/ios7-payload/v2/ios7/rootfs.hfs
+# (HFSX 0x4858 v5, 7142 files) and scripts/press_965c.sh writes it to userdata's head. When pressed,
+# hfs_mountroot parses and mounts the real 896 MiB HFSX volume off the device's own storage. On
+# master that mount is D13's native hfs_mountroot (vfs_conf.c:120), not 4570's mockfs.
+# NOT PRESSED. PRESS IS THE OPERATOR'S.
+# =================================================================================================
+set=armed-d13-e28361f9 sha256=e28361f9c672eb5703960b53b4e5c1f05e880387360358d67f90fbc51c506ff9 bytes=6327380 file=xnu_arm_entry.bin role=THE-ARM:-the-entry-image-carrying-the-64-bit-strategy-bound-(FULL_EXTENT=1)-plus-the-HFSX-root-fixture-and-the-full-D13-USB-ladder-;-the-suffix-e28361f9-is-THIS-member-s-hash
+set=armed-d13-e28361f9 sha256=f47ac5f6d5864f315e3e556bcdd6c694544057483b4080742f433e34214e06f5 bytes=7365892 file=xnu_arm_entry.elf role=the-entry-ELF
+set=armed-d13-e28361f9 sha256=0a67d04d51618b69483aa1bd0b0621211e19374bbe60be79c2c3899f1be21d1a bytes=1386 file=xnu_arm_entry-config.txt role=the-entry-record-;-STAGE90_XNU_TREE_D13=1-STAGE90_XNU_HFS_ROOT_MEDIA=1-STAGE90_XNU_ROOT_FROM_CARD=1-STAGE90_XNU_CARD_TOTAL=1-STAGE90_XNU_FULL_EXTENT=1-and-all-four-USB-switches
+set=armed-d13-e28361f9 sha256=2b3e5c303bcf743e62ab18950b6b19688623a2335765db8ac6d5033cfa1151b6 bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest
+set=armed-d13-e28361f9 sha256=530c3229574f45eb68c71cb04b6521fb664715c2080fe7e12d994b5edfa12d64 bytes=6822780 file=stage90.bin role=the-payload-binary-embedding-the-64-bit-bound-entry-image
+set=armed-d13-e28361f9 sha256=42d40206725b755f17239412093606c8bf83bf77ec3d081efa48672dd7c5e97d bytes=6884852 file=stage90.elf role=the-payload-ELF
+set=armed-d13-e28361f9 sha256=3401939b52520a90cb23b53e4b8100673ec641462094eb821846e9967cd329aa bytes=6825984 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-e28361f9 sha256=4327ec7443b2e87a3c607403a6911fd30e80d1ff75619f7ef9f76b3fed9a123d bytes=9347072 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT
+set=armed-d13-e28361f9 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-e28361f9 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set
+set=armed-d13-e28361f9 sha256=ff125ced98b804717b9d124e98f1b9c7eb50e984837b80174e72bc23a1cb7fd1 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img-manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img

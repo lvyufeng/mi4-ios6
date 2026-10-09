@@ -898,6 +898,27 @@ if [[ $HDD_WRITE -eq 1 && $HFS_ROOT_RW -ne 1 ]]; then
     echo "          then rebuild this entry image under the write arm." >&2
     exit 1
 fi
+# **965c: the FULL-EXTENT arm - the 896 MiB rootfs's own rung.** With `STAGE90_XNU_FULL_EXTENT=1` the
+# CARD unit's byte length (`st_medium_disk_bytes(ST_MEDIA_DRIVER)`, the strategy's bound) is computed in
+# 64 bits, so the strategy bounds the WHOLE selected partition (`userdata` = 13,610,499,072 B) instead
+# of its low 32 bits (692 MiB). The decrypted iOS 7.1.2 rootfs is 896 MiB (965); 896 > 692, so without
+# this arm the strategy answers EOF for the volume's top ~204 MiB and `hfs_mountroot` cannot read its
+# catalog - the mount rung is bounded by 888's `(unsigned)` product, which was correct for the 512 KiB
+# fixture and wrong for the goal. It REQUIRES the card strategy (the length is the card unit's). With it
+# off the module returns 888's exact value and the object is byte-for-byte the parked arm's.
+FULL_EXTENT=${STAGE90_XNU_FULL_EXTENT:-0}
+case "$FULL_EXTENT" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_FULL_EXTENT='$FULL_EXTENT' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $FULL_EXTENT -eq 1 && $EMMC_STRATEGY -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_FULL_EXTENT=1 needs STAGE90_XNU_EMMC_STRATEGY=1." >&2
+    echo "          The length this arm widens is the CARD unit's (the selected partition's extent);" >&2
+    echo "          without the card strategy there is no card unit and no partition to bound, so the" >&2
+    echo "          switch would widen a length no unit reads. Build both together." >&2
+    exit 1
+fi
 # **910a: the USB2 OTG probe, and the first switch whose arm is a READ of a HIGH-STAKES device.** The
 # Mi 4's micro-B port (`adb`/`fastboot`) is the ChipIdea CI13xxx core at `0xf9a55000`, and the whole
 # point of 910a is that the port may be live with the host, so this arm installs the core's 1 MB
@@ -1272,6 +1293,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_HDD_WRITE
                 STAGE90_XNU_HFS_ROOT_RW
                 STAGE90_XNU_CARD_TOTAL
+                STAGE90_XNU_FULL_EXTENT
                 STAGE90_XNU_RESIDENT
                 STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_XNU_IDLE_NO_SLEEP
@@ -1386,6 +1408,7 @@ do
         STAGE90_XNU_HDD_WRITE)        _v=$HDD_WRITE ;;
         STAGE90_XNU_HFS_ROOT_RW)      _v=$HFS_ROOT_RW ;;
         STAGE90_XNU_CARD_TOTAL)       _v=$CARD_TOTAL ;;
+        STAGE90_XNU_FULL_EXTENT)      _v=$FULL_EXTENT ;;
         STAGE90_XNU_RESIDENT)         _v=$RESIDENT ;;
         STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
@@ -1831,6 +1854,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_MOUNT="$MOUNT" \
         -DSTAGE90_XNU_ROOT_FROM_CARD="$ROOT_FROM_CARD" \
         -DSTAGE90_XNU_CARD_TOTAL="$CARD_TOTAL" \
+        -DSTAGE90_XNU_FULL_EXTENT="$FULL_EXTENT" \
         -DSTAGE90_XNU_IDLE_NO_SLEEP="$IDLE_NO_SLEEP" \
         -DSTAGE90_XNU_USB_PROBE="$USB_PROBE" \
         -DSTAGE90_XNU_USB_DEV="$USB_DEV" \
@@ -27901,6 +27925,34 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     else
         say "  xnu_entry_911d: the root-media module and this build agree about the CARD-CAPACITY arm (STAGE90_XNU_CARD_TOTAL=$ctotal_arm); no raw whole-card unit is registered - the card unit (2) is the only card-backed device, as in 903"
     fi
+    # **965c: the FULL-EXTENT arm, the same one-object-two-scripts defect one switch over, and its
+    # marker is PRESENCE-ONLY (911b's shape) so the off arm's object is untouched.** The module defines
+    # `entry_root_media_full_extent_arm_on` ONLY under `STAGE90_XNU_FULL_EXTENT=1`; there is no `_off`
+    # function, because an unconditional one would add ~10 bytes to the entry image the parked 512 KiB
+    # arm sends (no `--gc-sections`) and move its hash off `b9c224c0`. So absence means off, and the
+    # only refusal is the forward one: a build that RECORDED the switch on while the object compiled it
+    # off would carry a length 965c exists to fix, published as if fixed.
+    if arm-none-eabi-nm "$STAGE90_ROOT_MEDIA_OBJ" 2>/dev/null | grep -q 'T entry_root_media_full_extent_arm_on'; then
+        fext_arm=1
+    else
+        fext_arm=0
+    fi
+    if [[ $FULL_EXTENT -eq 1 && $fext_arm -ne 1 ]]; then
+        say "REFUSING: STAGE90_XNU_FULL_EXTENT=1 but $STAGE90_ROOT_MEDIA_OBJ carries no" >&2
+        say "          entry_root_media_full_extent_arm_on, so the card unit's length is still 888's 32-bit" >&2
+        say "          product (692 MiB on this device's 12.68 GiB userdata) while the record says the arm" >&2
+        say "          that widens it to the full partition is on. The strategy would bound the 896 MiB" >&2
+        say "          rootfs at 692 MiB and answer EOF above it. Rebuild the module with the same value:" >&2
+        say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+        say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_FULL_EXTENT=$FULL_EXTENT' \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    fi
+    if [[ $FULL_EXTENT -eq 1 ]]; then
+        say "  xnu_entry_965c: the root-media module and this build agree about the FULL-EXTENT arm (STAGE90_XNU_FULL_EXTENT=$fext_arm); the card unit's byte length is 64-bit, so the strategy bounds the whole selected partition instead of its low 32 bits"
+    else
+        say "  xnu_entry_965c: the root-media module and this build agree about the FULL-EXTENT arm (STAGE90_XNU_FULL_EXTENT=off); the card unit's length is 888's 32-bit product, as in the parked 512 KiB arm (the object carries no full-extent marker)"
+    fi
     # **911b: the PHYSICAL-MEMORY CEILING arm, the same `nm` shape, but against the KERNEL object
     # rather than a platform object.** `tools/patch_mem_size_max.py` makes `arm_vm_init.c`'s `MEM_SIZE_MAX`
     # a guarded port and emits `entry_xnu_mem_size_max_arm_on` ONLY when `STAGE90_XNU_MEM_SIZE_MAX` is
@@ -37866,6 +37918,14 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # 906 arm cannot produce, and a record that omitted it would describe a different device set.
     # Written as the RESOLVED `$CARD_TOTAL`, not `${STAGE90_XNU_CARD_TOTAL}`, for 882's reason.
     echo "STAGE90_XNU_CARD_TOTAL=$CARD_TOTAL"
+    # 965c: whether the CARD unit's strategy bound is the WHOLE selected partition (64-bit) rather than
+    # 888's 32-bit product. An arm key for MOUNT's reason and a sharper one than CARD_TOTAL's: the same
+    # record names a DIFFERENT mountable extent when this is 1 - 692 MiB vs the partition's 12.68 GiB -
+    # and the record is the only thing the gate reads about this image, so a switch that shapes the
+    # mounted medium and reaches no record is a run whose arm nobody read. Written as the RESOLVED
+    # `$FULL_EXTENT`, not `${STAGE90_XNU_FULL_EXTENT}`, for 882's reason (a defaulted env var is not the
+    # value the image was built with).
+    echo "STAGE90_XNU_FULL_EXTENT=$FULL_EXTENT"
     # **909's residence arm, as the RESOLVED `$RESIDENT`** - the switch that takes the image's own ending
     # OUT and adds the watchdog pet. It is an arm key for MOUNT's reason and a sharper one: the same
     # record that names the other switches describes a DIFFERENT image when this is 1 (no ending, a pet in

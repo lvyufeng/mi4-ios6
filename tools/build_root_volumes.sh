@@ -1,7 +1,8 @@
 #!/bin/bash
 # Build the CARD root volume, and verify the COMMITTED blob matches it (experiment 965b).
 #
-#     tools/build_root_volumes.sh [-s CARD_SIZE_BYTES]
+#     tools/build_root_volumes.sh [-s CARD_SIZE_BYTES]   # the 512 KiB HFSX fixture card (default)
+#     tools/build_root_volumes.sh --real                 # the REAL 896 MiB iOS 7.1.2 rootfs (965c)
 #
 # WHY THIS EXISTS. The HFS root is served to XNU by two DIFFERENT media on two different arms, and until
 # 965b only one of them was produced on demand:
@@ -32,15 +33,25 @@
 # hands it to the generator for the card, and reads it back out of the COMMITTED blob to prove the two
 # agree - the lockstep is checked against the artifact, not asserted (`mi4-one-value-two-definitions`).
 #
-# WHAT IT TOUCHES. The card image under out/ (gitignored) and, inside the generator, a loop mount under
-# sudo - the same `losetup`+`mount -t hfsplus` the generator already uses, on the image file alone. No
-# device, no network, and no edit to any tracked file.
+# --real (965c): the goal's real rootfs, not the fixture. The card medium becomes a byte-for-byte copy of
+# the decrypted iOS 7.1.2 volume (`/mnt/data/ios7-payload/v2/ios7/rootfs.hfs`, 896 MiB) instead of the
+# 512 KiB mkfs fixture. Nothing is built - the volume already exists - so this mode only COPIES and
+# VERIFIES (HFSX 0x4858 v5). It is the medium a 965c press serves; the 896 MiB scale is exactly what
+# `STAGE90_XNU_FULL_EXTENT=1` widens the strategy's bound to reach (888's 32-bit product stopped at 692
+# MiB). The blob (disk 0) is NOT checked in this mode: it is inert on a card-root arm, and the real volume
+# cannot be `.incbin`'d into the image, so there is no second medium to keep in lockstep.
+#
+# WHAT IT TOUCHES. The card image under out/ (gitignored) and, in the fixture mode only, a loop mount
+# under sudo - the same `losetup`+`mount -t hfsplus` the generator already uses, on the image file alone.
+# No device, no network, and no edit to any tracked file.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$HERE/.." && pwd)
 
 CARD_SIZE=524288          # the proven size class (882/903); the real 896 MiB rootfs is a later rung
+REAL=0
+REAL_ROOTFS=${STAGE90_REAL_ROOTFS:-/mnt/data/ios7-payload/v2/ios7/rootfs.hfs}
 OUT_BLOB="$REPO_ROOT/src/entry/blob/xnu_arm_entry_root_hfs.img"
 OUT_CARD="$REPO_ROOT/out/stage90/xnu_card_hfs.img"
 RAMDISK_OBJ="$REPO_ROOT/out/stage90/xnu_arm_entry_ramdisk.o"
@@ -48,13 +59,43 @@ RAMDISK_OBJ="$REPO_ROOT/out/stage90/xnu_arm_entry_ramdisk.o"
 while [[ $# -gt 0 ]]; do
     case $1 in
         -s) CARD_SIZE=$2; shift 2 ;;
-        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        --real) REAL=1; shift ;;
+        -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
         -*) echo "build_root_volumes: unknown option $1" >&2; exit 2 ;;
         *)  echo "build_root_volumes: unexpected argument $1" >&2; exit 2 ;;
     esac
 done
 
 say() { printf 'build_root_volumes: %s\n' "$*"; }
+
+# ---------------------------------------------------------------- --real: the 896 MiB iOS 7.1.2 rootfs
+#
+# No generator runs: the volume is the decrypted iOS 7.1.2 rootfs, already built by the world, and this
+# mode's whole job is to put it where the press reads it and prove it is the family the driver branches on.
+# The copy is `cp` and not `dd` so a short read cannot leave a half-volume that still has a valid header.
+if [[ $REAL -eq 1 ]]; then
+    [[ -f $REAL_ROOTFS ]] || {
+        echo "build_root_volumes: --real wants the decrypted rootfs at $REAL_ROOTFS; it is absent." >&2
+        echo "                    Set STAGE90_REAL_ROOTFS to point at it." >&2; exit 2; }
+    mkdir -p "$(dirname "$OUT_CARD")"
+    say "copying the real iOS 7.1.2 rootfs to the card medium: $OUT_CARD"
+    cp -f "$REAL_ROOTFS" "$OUT_CARD"
+    python3 - "$OUT_CARD" <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+sig, ver = struct.unpack(">HH", d[1024:1028])
+bs, tb = struct.unpack(">II", d[1064:1072])
+fam = "HFSX" if sig == 0x4858 else ("HFS+" if sig == 0x482B else "0x%04x" % sig)
+print("build_root_volumes: card = %s 0x%04x v%d, %d bytes (%d blocks x %d) = %.1f MiB"
+      % (fam, sig, ver, len(d), tb, bs, len(d) / 1048576.0))
+if not (sig == 0x4858 and ver == 5):
+    sys.exit("build_root_volumes: the real rootfs at %s is NOT HFSX 0x4858 v5 - refusing to stage a"
+             " medium the driver would not branch into the HFSX path for" % sys.argv[1])
+PY
+    say "  card (write THIS to userdata's head): $(sha256sum "$OUT_CARD" | cut -d' ' -f1)  $OUT_CARD"
+    say "a 965c press writes this to userdata's head; it is $(stat -c %s "$OUT_CARD") bytes and fits userdata's 12.68 GiB head"
+    exit 0
+fi
 
 # The one launchd fixture, extracted once. `objcopy` selection mirrors `scripts/build.sh` (`OBJCOPY=`);
 # `ARM_NONE_EABI_OBJCOPY` is accepted as the same override `build_entry.sh`'s tooling uses.
