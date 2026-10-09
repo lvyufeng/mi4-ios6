@@ -21,11 +21,12 @@ separate kernel partition.
 
 Verified file facts:
 
-- `rootfs.hfs` is a **real HFS+ volume**. Its volume header at offset `0x400`
-  begins `HX 0005` (HFS+ signature `'H+'` + version 5) with `attributes`
-  `0x00000100` — `kHFSVolumeUnmountedBit` set, **journaled bit clear**. Same
-  shape as the 903 volume: an unmounted, unjournaled HFS+ root, so XNU can mount
-  it read-write with no journal replay. 939,524,096 B.
+- `rootfs.hfs` is a **real HFSX volume** (HFS+, case-sensitive variant). Its volume header at offset
+  `0x400` begins `HX 0005` = **`kHFSXSigWord` (0x4858) + `kHFSXVersion` (5)** — *not* `'H+'`
+  (`kHFSPlusSigWord` 0x482B), which the first draft of this note folded together (see 965). Attributes
+  `0x80000100`: `kHFSVolumeUnmountedBit` set, **journaled bit clear**, `lastMountedVersion` `'fsck'`.
+  An unmounted, unjournaled root, so XNU can mount it read-write with no journal replay — but the
+  **HFSX** branch (`hfs_vfsutils.c:339-345`), which no mi4 arm has ever exercised. 939,524,096 B.
 - `initrd.gz` is **not gzip**. It is the **XNU `UNXF`/`PRELINK` container** —
   magic `UNXF` at offset 4 (`0x554E5846`), preceded by an ARM branch
   (`0c 00 00 ea` = `b` over the header), then a size/offset table
