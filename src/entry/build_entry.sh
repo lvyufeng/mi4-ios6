@@ -212,6 +212,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=setPop
                    --wrap=PE_init_platform ${FIQ_CTX_WRAP[@]+"${FIQ_CTX_WRAP[@]}"}
                    --wrap=timer_call_enter
+                   --wrap=timer_call_enter1
                    --wrap=timer_call_enter_with_leeway
                    --wrap=timer_call_quantum_timer_enter
                    --wrap=timer_call_setup --wrap=thread_quantum_expire
@@ -274,6 +275,16 @@ fi
 # where the matching wrapper bodies, their helper blocks and their report lines are compiled out under
 # the one switch `STAGE90_ENTRY_D13`; the file's own `#ifndef` makes the switch well-defined when the
 # build does not set it. On 4570 `D13_TRACE` is 0, nothing is dropped, and the switch is never defined.
+#
+# **946: and the tree's list is not 4570's minus a set - one timer entry point swaps.** `timer_call_enter1`
+# is *live on D13 and dead on 4570*, the mirror of the two allocator names above: D13's scheduler arms
+# `processor->quantum_timer` through `enter1` (`priority.c:189`, `sched_prim.c:1966/2523`) and its
+# `wait_queue.c` arms both `thread->wait_timer` and the etimer queue through `timer_call_enter`, while
+# 4570 cites `enter1` only in `sfi.c` and `dtrace_glue.c`, neither of which is compiled here. So a
+# `--wrap` on it is refused on 4570 (no reference to rewrite) and required on D13 (the metronome's only
+# entry point). It stays in the literal below - so `tools/check_timer_sources.py` reads the tree's wrap
+# set out of the source - and each tree removes the name it does not have: D13 via `D13_ONLY_WRAPS` for
+# the leeway/quantum pair, 4570 via the `else` below for `enter1`.
 STUB_DEFINES_TRACE=()
 if [[ $D13_TRACE -eq 1 ]]; then
     D13_ONLY_WRAPS=(--wrap=Idle_load_context --wrap=SetIdlePop --wrap=cpu_idle_wfi
@@ -291,6 +302,17 @@ if [[ $D13_TRACE -eq 1 ]]; then
     TRACE_LDFLAGS=("${_937_kept[@]}")
     unset -v _937_kept _w _d _drop
     STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1)
+else
+    # **946: 4570's list drops the one name D13's keeps.** `timer_call_enter1` is in the literal above so
+    # `tools/check_timer_sources.py` can read the tree's wrap set out of the source; here the *other* tree
+    # removes it, because 4570 has no reference to it to rewrite and the reachability check would refuse
+    # the image. This is the exact mirror of `D13_ONLY_WRAPS` above, one tree over.
+    _946_kept=()
+    for _w in ${TRACE_LDFLAGS[@]+"${TRACE_LDFLAGS[@]}"}; do
+        [[ $_w == "--wrap=timer_call_enter1" ]] || _946_kept+=("$_w")
+    done
+    TRACE_LDFLAGS=("${_946_kept[@]}")
+    unset -v _946_kept _w
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
@@ -37429,9 +37451,9 @@ run python3 "$REPO_ROOT/tools/check_timer_line.py" --image "$OUT/xnu_arm_entry.e
 # failing baseline: 483's own selftest accepted four mutations before its first good build, because each
 # of those was refused for a reason that was already there. The baseline is checked first here for that
 # reason, and the failure it prints says so.
-run python3 "$REPO_ROOT/tools/check_timer_sources.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
+run python3 "$REPO_ROOT/tools/check_timer_sources.py" --image "$OUT/xnu_arm_entry.elf" --tree "$XNU_TREE" --verbose \
     || exit 1
-run python3 "$REPO_ROOT/tools/check_timer_sources.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
+run python3 "$REPO_ROOT/tools/check_timer_sources.py" --image "$OUT/xnu_arm_entry.elf" --tree "$XNU_TREE" --selftest \
     || exit 1
 
 # **485's six claims, about the instrument the boot's completion is read with.** This step adds no

@@ -4050,16 +4050,28 @@ int __wrap_timer_call_enter(void *call, uint64_t deadline, uint32_t flags)
     return r;
 }
 
-/* **There is no `__wrap_timer_call_enter1` here, and its absence is the first build's finding.**
- * `timer_call_enter1` is the family's second member and its callers in this tree are `sfi.c`'s seven
- * and `dtrace_glue.c`'s three - Selective Forced Idle, which is not compiled for ARM, and dtrace,
- * which is not in this configuration. So the wrap was written, the build refused it, and rightly:
+/* **The wrapped names are the tree's, and the family is not the same shape in both.**
+ *
+ * On 4570 there is no `__wrap_timer_call_enter1`, and its absence is the first build's finding.
+ * `timer_call_enter1` is the family's second member and its callers there are `sfi.c`'s seven and
+ * `dtrace_glue.c`'s three - Selective Forced Idle, which is not compiled for ARM, and dtrace, which is
+ * not in this configuration. So the wrap was written, the build refused it, and rightly:
  * `build_entry.sh`'s reachability check found no branch to the wrapper anywhere in the linked image,
- * because a `--wrap` on a name nothing references produces a wrapper nothing can call. Adding it to
- * that check's `never-called` list would have made the refusal quiet for every later step, so the
- * wrapper is gone and what replaced it is a claim in `tools/check_timer_sources.py`: it reads this
- * tree's callers of `timer_call_enter1` and refuses the build if the family ever gains one here, which
- * is the event that would make this omission wrong. */
+ * because a `--wrap` on a name nothing references produces a wrapper nothing can call.
+ *
+ * **On Darwin 13 that finding is inverted: `timer_call_enter1` is the quantum metronome and the two
+ * 4570 names are the ones that do not exist.** D13's `wait_queue.c` arms `thread->wait_timer` through
+ * `timer_call_enter` (there is no `waitq_assert_wait64_leeway`), the etimer queue is armed through the
+ * same `timer_call_enter`, and the scheduler arms `processor->quantum_timer` through
+ * **`timer_call_enter1`** (`priority.c:189`, `sched_prim.c:1966/2523`) rather than through
+ * `timer_call_quantum_timer_enter`, which D13 does not declare. So on D13 source 3 is `enter1` and
+ * source 2 (the deadline family) is never emitted - the same entry point serves both the etimer queue
+ * and the wait timer, so the source number cannot separate them here. `tools/check_timer_sources.py`
+ * carries the per-tree source and wrap tables; the numbers stay 1 and 3 so that a reader comparing
+ * this step's comment with its records does not have to know which tree produced them.
+ *
+ * `thread_quantum_expire`, `timer_call_setup` and `timer_call_enter` are the same three names in both
+ * trees and are wrapped in both. */
 #if !STAGE90_ENTRY_D13
 int __real_timer_call_enter_with_leeway(void *call, void *param1, uint64_t deadline,
                                         uint64_t leeway, uint32_t flags, uint32_t ratelimited);
@@ -4088,7 +4100,20 @@ int __wrap_timer_call_quantum_timer_enter(void *call, void *param1, uint64_t dea
     entry_timebase_note_timer_enter(3u, (uint32_t)(uintptr_t)call, deadline, 0u);
     return r;
 }
-#endif /* !STAGE90_ENTRY_D13 - the two leeway/quantum timer entries are 4570-only */
+#else /* STAGE90_ENTRY_D13 - the quantum metronome's own entry point */
+int __real_timer_call_enter1(void *call, void *param1, uint64_t deadline, uint32_t flags);
+
+int __wrap_timer_call_enter1(void *call, void *param1, uint64_t deadline, uint32_t flags)
+{
+    int r = __real_timer_call_enter1(call, param1, deadline, flags);
+
+    /* Source 3: on this tree `enter1` *is* the quantum arming, so it takes the metronome's number. The
+     * `flags` word is read here, unlike 4570's quantum wrapper - D13's `enter1` does take one, and
+     * `TIMER_CALL_CRITICAL` is what both of its scheduler callers pass. */
+    entry_timebase_note_timer_enter(3u, (uint32_t)(uintptr_t)call, deadline, flags);
+    return r;
+}
+#endif /* !STAGE90_ENTRY_D13 - the leeway/quantum entries are 4570's, `enter1` is D13's */
 
 void __real_timer_call_setup(void *call, void *func, void *param0);
 

@@ -97,39 +97,118 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
+# **The tree, and it is a parameter rather than a constant (946).** 945's shape: the check detects the
+# tree the way the build does, and everything tree-specific below is derived from it. The two trees do
+# not have the same timer entry points - D13 has no `timer_call_enter_with_leeway` /
+# `timer_call_quantum_timer_enter` at all, and its quantum metronome is armed through
+# `timer_call_enter1`, a name 4570 declares but never calls - so the wrap set and the source numbers are
+# per-tree rather than one table with an exception.
+DEFAULT_TREE = os.path.join(REPO_ROOT, "external/xnu-4570.1.46")
+
 BOOT_DIR = os.path.join(REPO_ROOT, "src/entry")
 ENTRY_TRACE_C = os.path.join(BOOT_DIR, "entry_trace.c")
 ENTRY_TIMEBASE_C = os.path.join(BOOT_DIR, "entry_timebase.c")
 BUILD_ENTRY_SH = os.path.join(BOOT_DIR, "build_entry.sh")
-TIMER_CALL_H = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/osfmk/kern/timer_call.h")
-SCHED_H = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/osfmk/kern/sched.h")
-# The pool the entry image links from, which is why claim 7 can read "what this build compiles" rather
-# than "what this tree contains": the two answers differ, and the picture a log takes is of the former.
-OBJECT_POOL = os.path.join(REPO_ROOT, "out/xnu_kernel_obj")
 
 NM = "arm-none-eabi-nm"
 OBJDUMP = "arm-none-eabi-objdump"
 
-# The arming entry points this step wraps and the source number each one must pass, in the order
-# `entry_timebase.c` documents them. The numbers are part of the claim and not a convenience: they are
-# what the log's `xnu_live_tmr_enter_src` is compared against by a reader, and a wrapper that passed the
-# wrong one would attribute a millisecond to the wrong timer.
-SOURCES = {
-    "__wrap_timer_call_enter": 1,
-    "__wrap_timer_call_enter_with_leeway": 2,
-    "__wrap_timer_call_quantum_timer_enter": 3,
+
+def is_d13(tree):
+    """The same discriminator the build uses (`D13_TRACE`): D13's legacy private `osfmk/sys/types.h`."""
+    return os.path.isfile(os.path.join(tree, "osfmk/sys/types.h"))
+
+
+def timer_call_h(tree):
+    return os.path.join(tree, "osfmk/kern/timer_call.h")
+
+
+def sched_h(tree):
+    return os.path.join(tree, "osfmk/kern/sched.h")
+
+
+def object_pool(tree):
+    """The pool the entry image links from, which is why claim 7 can read "what this build compiles"
+    rather than "what this tree contains": the two answers differ, and the picture a log takes is of
+    the former. D13's pool has its own suffix (`XNU_OBJ_SUFFIX=_d13`)."""
+    return os.path.join(REPO_ROOT, "out/xnu_kernel_obj" + ("_d13" if is_d13(tree) else ""))
+
+
+# **The tables are per-tree, and 946 is the finding that made them so.** 4570's family is the four
+# entry points `timer_call.h` declares there: `timer_call_enter` (source 1), `timer_call_enter_with_leeway`
+# (source 2, the deadline a parked thread is woken by) and `timer_call_quantum_timer_enter` (source 3,
+# the metronome). D13 declares only `timer_call_enter` and `timer_call_enter1`; its `wait_queue.c` arms
+# both the wait timer and the etimer queue through `timer_call_enter` (there is no
+# `waitq_assert_wait64_leeway`), and the scheduler arms the quantum through **`timer_call_enter1`**
+# (`priority.c:189`, `sched_prim.c:1966/2523`). So on D13 source 3 is `enter1` and source 2 is never
+# emitted - one entry point serves both the etimer queue and the wait timer, so the *number* cannot
+# separate them there. The numbers are kept aligned to the mechanism ("1 = etimer/enter, 3 = metronome")
+# rather than renumbered, so a reader joining the log against `entry_timebase.c` need not know the tree.
+#
+# `SOURCES` maps wrapper -> the literal source number its body must pass; `WRAPPED` maps wrapped name ->
+# the *basename* of the header the wrapper transcribes; `UNWRAPPED` is the member this step deliberately
+# does not wrap, with (in the 4570 case) the one object that may reference it.
+_PER_TREE = {
+    False: {  # 4570
+        "sources": {
+            "__wrap_timer_call_enter": 1,
+            "__wrap_timer_call_enter_with_leeway": 2,
+            "__wrap_timer_call_quantum_timer_enter": 3,
+        },
+        "wrapped": {
+            "timer_call_enter": "timer_call.h",
+            "timer_call_enter_with_leeway": "timer_call.h",
+            "timer_call_quantum_timer_enter": "timer_call.h",
+            "timer_call_setup": "timer_call.h",
+            "thread_quantum_expire": "sched.h",
+        },
+        # 4570's omission: `enter1` is declared beside the other three and nothing here calls it, so its
+        # wrapper was written, the build refused it, and what replaced it is this claim.
+        "unwrapped": {"timer_call_enter1": "osfmk_kern_timer_call.o"},
+    },
+    True: {  # Darwin 13
+        "sources": {
+            "__wrap_timer_call_enter": 1,
+            "__wrap_timer_call_enter1": 3,
+        },
+        "wrapped": {
+            "timer_call_enter": "timer_call.h",
+            "timer_call_enter1": "timer_call.h",
+            "timer_call_setup": "timer_call.h",
+            "thread_quantum_expire": "sched.h",
+        },
+        # D13's omission is inverted: the member this step does not wrap is the leeway form, which D13
+        # does not declare at all, so there is no object to name. `enter1` is *wrapped* on D13, and its
+        # presence (and each caller) is asserted by claim 3 and claim 6 instead.
+        "unwrapped": {},
+    },
 }
-# Every wrapped name this step adds, wrapper -> the header that declares it.
-WRAPPED = {
-    "timer_call_enter": TIMER_CALL_H,
-    "timer_call_enter_with_leeway": TIMER_CALL_H,
-    "timer_call_quantum_timer_enter": TIMER_CALL_H,
-    "timer_call_setup": TIMER_CALL_H,
-    "thread_quantum_expire": SCHED_H,
-}
-# The family member this step deliberately does not wrap, and the one object in a pool of hundreds that
-# may reference it - itself, since `osfmk/kern/timer_call.c` is where it is defined.
-UNWRAPPED = {"timer_call_enter1": "osfmk_kern_timer_call.o"}
+
+# The active (flat) tables, set by `configure()` from the tree - so the claims below read one shape and
+# the selftest mutates one shape regardless of which tree is under test.
+SOURCES = _PER_TREE[False]["sources"]
+WRAPPED = _PER_TREE[False]["wrapped"]
+UNWRAPPED = _PER_TREE[False]["unwrapped"]
+TIMER_CALL_H = os.path.join(DEFAULT_TREE, "osfmk/kern/timer_call.h")
+SCHED_H = os.path.join(DEFAULT_TREE, "osfmk/kern/sched.h")
+OBJECT_POOL = os.path.join(REPO_ROOT, "out/xnu_kernel_obj")
+IS_D13 = False
+
+
+def configure(tree):
+    """Point the check at a tree: the headers it transcribes, the pool it links from, and the two
+    tables whose rows differ. Called once in `main()` before anything reads them, so the module-level
+    names the claims use are the tree's."""
+    global SOURCES, WRAPPED, UNWRAPPED, TIMER_CALL_H, SCHED_H, OBJECT_POOL, IS_D13
+    d13 = is_d13(tree)
+    IS_D13 = d13
+    SOURCES = _PER_TREE[d13]["sources"]
+    WRAPPED = _PER_TREE[d13]["wrapped"]
+    UNWRAPPED = _PER_TREE[d13]["unwrapped"]
+    TIMER_CALL_H = timer_call_h(tree)
+    SCHED_H = sched_h(tree)
+    OBJECT_POOL = object_pool(tree)
+    return d13
 
 
 def say(message):
@@ -483,11 +562,11 @@ def claim_prototypes(facts, failures, notes):
         notes.append("timer_call_param_t is %s" % " ".join(param_typedef.group(0).split()))
 
     for name, header in sorted(WRAPPED.items()):
-        text = facts["timer_call_h"] if header == TIMER_CALL_H else facts["sched_h"]
+        text = facts["timer_call_h"] if header == "timer_call.h" else facts["sched_h"]
         ret, args = header_declaration(text, name)
         if args is None:
             failures.append("%s no longer declares %s, so this check cannot say whether the wrapper "
-                            "beside it matches" % (os.path.basename(header), name))
+                            "beside it matches" % (header, name))
             continue
         # **Both spellings are claims about Apple's header, and the compiler only enforces one of
         # them.** The `__real_` declaration and the `__wrap_` definition are two unrelated names as far
@@ -506,7 +585,7 @@ def claim_prototypes(facts, failures, notes):
                 failures.append("%s%s takes %d argument(s) and %s declares %d: on AAPCS the extra or "
                                 "missing one is a register pair, so every argument after it is read "
                                 "from the wrong place"
-                                % (prefix, name, len(our_args), os.path.basename(header), len(args)))
+                                % (prefix, name, len(our_args), header, len(args)))
                 continue
 
             for index, (mine, theirs) in enumerate(zip(our_args, args)):
@@ -517,15 +596,15 @@ def claim_prototypes(facts, failures, notes):
                                     "argument occupies an even-numbered register pair on AAPCS, so a "
                                     "one-word transcription shifts every argument after it"
                                     % (prefix, name, index + 1, " ".join(_types(theirs)) or theirs,
-                                       os.path.basename(header), " ".join(_types(mine)) or mine))
+                                       header, " ".join(_types(mine)) or mine))
                 if ours_is_64 and not header_is_64:
                     failures.append("%s%s argument %d is one word in %s and 64-bit in the wrapper, which "
                                     "consumes two registers for one argument"
-                                    % (prefix, name, index + 1, os.path.basename(header)))
+                                    % (prefix, name, index + 1, header))
                 if "timer_call_param_t" in theirs and "*" not in mine:
                     failures.append("%s%s argument %d is a `timer_call_param_t` - a pointer - in %s and "
                                     "`%s` in the wrapper"
-                                    % (prefix, name, index + 1, os.path.basename(header), mine))
+                                    % (prefix, name, index + 1, header, mine))
 
             # The return type, and it is a claim about *bits* rather than about spelling: `boolean_t` is
             # `unsigned int` here, so `int`, `uint32_t` and `boolean_t` are the same one register, while
@@ -533,7 +612,7 @@ def claim_prototypes(facts, failures, notes):
             if "boolean_t" in ret and "64" in our_ret:
                 failures.append("%s%s returns `%s` in %s and a 64-bit type in the wrapper, so the value "
                                 "the real function computed is read as two words"
-                                % (prefix, name, ret, os.path.basename(header)))
+                                % (prefix, name, ret, header))
     if not failures:
         notes.append("all %d wrapped declarations agree with the kernel headers on argument count and on "
                      "which arguments are 64-bit, in both the `__real_` declaration and the `__wrap_` "
@@ -591,7 +670,31 @@ def claim_quantum_expire_is_reachable(facts, failures, notes):
 
 
 def claim_unwrapped_member(facts, failures, notes):
-    """7. `timer_call_enter1` is not wrapped because nothing here calls it, read out of the pool."""
+    """7. `timer_call_enter1` is not wrapped because nothing here calls it, read out of the pool.
+
+    **On D13 the claim inverts (946).** The family this step wraps is D13's, in which `enter1` *is* the
+    quantum metronome and is wrapped, and the member that is omitted is the leeway form - which D13 does
+    not declare at all. So the omission is structural rather than a measured "no caller here", and the
+    claim is that the two 4570 entries are still absent from D13's header (the day one appears, the
+    wrappers for it are the thing to add) while `enter1` is still declared (the day it moves, the
+    metronome's record is the thing that breaks)."""
+    if IS_D13:
+        for name in ("timer_call_enter_with_leeway", "timer_call_quantum_timer_enter"):
+            if re.search(r"\b%s\s*\(" % name, facts["timer_call_h"]):
+                failures.append("Darwin 13's timer_call.h now declares %s, which this step does not wrap: "
+                                "on 4570 that is an arming path with its own source number, so its "
+                                "appearance here is the event that makes the D13 omission wrong - add its "
+                                "wrapper to entry_trace.c, its name to build_entry.sh's D13 arm and to "
+                                "this check's D13 tables" % name)
+        if not re.search(r"\btimer_call_enter1\s*\(", facts["timer_call_h"]):
+            failures.append("Darwin 13's timer_call.h no longer declares timer_call_enter1, whose wrapper "
+                            "is the only record of this tree's quantum metronome: if it were renamed or "
+                            "removed the census would silently stop naming source 3")
+        if not failures:
+            notes.append("Darwin 13 declares only timer_call_enter and timer_call_enter1 (no leeway or "
+                         "quantum_timer_enter), so `enter1` is the metronome this step wraps and the "
+                         "omitted member has no arming path to be omitted from")
+        return
     pool = facts["pool"]
     if pool is None:
         failures.append("the object pool %s is not there or holds no objects, so this claim - that the "
@@ -989,9 +1092,16 @@ def mutate(facts, name):
         rederive_build(_bump(build, "--wrap=timer_call_setup --wrap=thread_quantum_expire",
                              "--wrap=thread_quantum_expire"))
     elif name == "wrap_moved_to_pass_one":
-        rederive_build(_bump(build, "        PASS1_LDFLAGS=(--wrap=PE_init_platform --wrap=fiq_context_init)",
-                             "        PASS1_LDFLAGS=(--wrap=PE_init_platform --wrap=fiq_context_init"
-                             " --wrap=timer_call_setup)"))
+        # **The anchor carries the FIQ expansion, and that is 934/935's correction to this step (946).**
+        # `PASS1_LDFLAGS` was written `--wrap=PE_init_platform --wrap=fiq_context_init` until 934 made
+        # the second name tree-gated through `${FIQ_CTX_WRAP[@]}`, and 935 threaded it - both edits left
+        # this mutation's anchor stale, which no run noticed because the D13 build never reached 484 and
+        # the 4570 selftest was not rerun. It surfaced the first time 484 ran on D13. The literal is now
+        # the same in both trees (only the expansion differs), so the mutation runs on both.
+        rederive_build(_bump(build,
+                             '        PASS1_LDFLAGS=(--wrap=PE_init_platform ${FIQ_CTX_WRAP[@]+"${FIQ_CTX_WRAP[@]}"})',
+                             '        PASS1_LDFLAGS=(--wrap=PE_init_platform ${FIQ_CTX_WRAP[@]+"${FIQ_CTX_WRAP[@]}"}'
+                             ' --wrap=timer_call_setup)'))
     elif name == "wrapper_without_a_real":
         rederive_trace(_bump(trace, "void __real_timer_call_setup(void *call, void *func, void *param0);\n\n", ""))
     elif name == "wrapper_removed_from_the_source":
@@ -1026,6 +1136,39 @@ MUTATIONS = (
     "wrap_moved_to_pass_one", "wrapper_without_a_real", "wrapper_removed_from_the_source",
 )
 
+# **946: the mutations whose anchor is a 4570-only name.** `hopeless_on_d13` are the two that name the
+# leeway form directly (`deadline_spelled_as_one_word` rewrites the 6-argument prototype,
+# `leeway_spelled_as_one_word` rewrites its `leeway` word) - on D13 that wrapper does not exist, so
+# there is nothing for them to break and `mutate()`'s `_bump` would raise. `D13_SKIPPED` is the rest that
+# the D13 flip makes inapplicable: source 2's deadline-family rule is never emitted (nothing on D13 arms
+# through a leeway entry), the omission's own argument is about `enter1`, and the pool claims are 4570's.
+# They are *published* as skipped, not silently dropped ([[mi4-silence-is-a-reading-only-if-success-is-silent]]).
+D13_SKIPPED_MUTATIONS = frozenset((
+    # Anchored on a name D13's header does not declare, so `_bump` cannot find it or the wrapper it
+    # edits is compiled out (it lives in the `#if !STAGE90_ENTRY_D13` block).
+    "deadline_spelled_as_one_word", "leeway_spelled_as_one_word",
+    "param_becomes_an_integer", "a_header_declaration_removed", "param_typedef_stops_being_a_pointer",
+    "a_wrapped_name_absent", "wrapper_without_a_real",
+    # **The three source-number mutations anchor on the first `(3u,` / `(2u,` in the file, and on D13 the
+    # first such literal is inside the 4570-only block that D13 compiles out** - so they edit dead text
+    # and claim 1 has nothing to refuse. Claim 1 *is* exercised on D13 by the `--verbose` path (it reads
+    # the two live wrappers' bodies and compares them against this tree's `SOURCES`), so what is lost here
+    # is only the proof that the check would catch a swap; that proof is the 4570 run's, unchanged.
+    "source_number_swapped", "source_number_is_a_constant", "source_number_two_wrappers_agree",
+    # The omission's own argument and the object-pool claims are 4570's: D13 wraps `enter1`, and its
+    # omitted member (the leeway form) has no pool row to read.
+    "the_wrapped_member_gains_a_caller", "the_object_pool_is_missing",
+    "the_definer_does_not_define_it", "the_omission_loses_its_argument",
+))
+
+
+def _skip_mutation(name, facts):
+    """True when this mutation cannot run on the tree this selftest is on: its anchor (or its whole
+    subject) is one the other tree supplies. Defined titles are still refused where they apply."""
+    if not IS_D13:
+        return False
+    return name in D13_SKIPPED_MUTATIONS
+
 
 def selftest(facts):
     # **The baseline first, and it is not a formality.** Every mutation below is "the check must still
@@ -1042,22 +1185,31 @@ def selftest(facts):
             print("      " + failure, file=sys.stderr)
         return 1
     accepted = []
+    ran = 0
+    skipped = []
     for name in MUTATIONS:
+        if _skip_mutation(name, facts):
+            skipped.append(name)
+            continue
+        ran += 1
         failures, _notes = compare(mutate(facts, name))
         if not failures:
             accepted.append(name)
             print("      ACCEPTED: %s" % name, file=sys.stderr)
     if accepted:
         print("FAIL: %d of %d mutations were not refused: %s"
-              % (len(accepted), len(MUTATIONS), ", ".join(accepted)), file=sys.stderr)
+              % (len(accepted), ran, ", ".join(accepted)), file=sys.stderr)
         return 1
-    say("  --selftest: all %d mutations were refused" % len(MUTATIONS))
+    say("  --selftest: all %d mutations were refused" % ran
+        + (", %d skipped (4570-only on this tree)" % len(skipped) if skipped else ""))
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     parser.add_argument("--image", default=None, help="the linked entry image")
+    parser.add_argument("--tree", default=DEFAULT_TREE,
+                        help="the XNU tree this image was built from (default: 4570)")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -1068,7 +1220,14 @@ def main():
               "that is a function pointer - and there is no default that can stand in for it",
               file=sys.stderr)
         return 1
+    d13 = configure(args.tree)
     facts = gather(args.image)
+    if d13:
+        say("  xnu_entry_946: this image is Darwin 13's, so the wrapped family is D13's - "
+            "`timer_call_enter` (source 1) and `timer_call_enter1` (source 3, the quantum metronome). "
+            "4570's `timer_call_enter_with_leeway` / `timer_call_quantum_timer_enter` do not exist "
+            "here, and source 2 (the leeway deadline family) is not emitted: D13 arms the wait timer "
+            "through the same `timer_call_enter`")
     if args.selftest:
         return selftest(facts)
 
