@@ -28814,7 +28814,19 @@ run arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" --defsym=ENTRY_BASE=$ENTRY_BASE \
     "${LINK_OBJS[@]}" \
     --start-group "$LIBGCC" --end-group
 
-entry=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="_start"{print "0x"$1}')
+# **952: the entry symbol's NAME follows the tree.** 4570's `start.s` declares `_start`; D13 ships no
+# `start.s` - its entry is `osfmk/arm/locore.s:52`'s `EnterARM(_start)`, and that macro (`masked_globals_asm.h`)
+# writes the symbol with a leading underscore (`__start`), the same Apple-underscore convention 936
+# handles for `xnu_arm_assemble.sh`. Both are the image's FIRST instruction (`mmu_reinitialize`, at
+# `ENTRY_BASE`); only the name differs. Reading `_start` alone on D13 returns NOTHING, and nothing
+# substitutes into the generated header as an EMPTY value - which 459's own placeholder check cannot
+# see, because an empty value deletes `@ENTRY@` exactly as a real one does. So the lookup picks the
+# tree's name, and the substitution below refuses an empty value outright.
+_entry_sym="_start"
+[[ $D13_TRACE -eq 1 ]] && _entry_sym="__start"
+entry=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk -v s="$_entry_sym" '$3==s{print "0x"$1}')
+[[ -n $entry ]] \
+    || layout_fail "the linked image has no \`${_entry_sym}\` symbol, so the generated header's STAGE90_XNU_ENTRY_ENTRY would be EMPTY and the payload would compile \`r->entry_va = ;\`. The entry symbol is the tree's: 4570 writes \`_start\` (start.s), D13 writes \`__start\` (locore.s's EnterARM(_start), Apple's underscore convention - 936). An empty value is what 459's placeholder check CANNOT catch, because it removes @ENTRY@ exactly as a valid value does ([[mi4-silence-is-a-reading-only-if-success-is-silent]])"
 bss_start=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="__bss_start"{print "0x"$1}')
 bss_end=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="__bss_end"{print "0x"$1}')
 # `.text`'s own size, from the linker's symbol rather than from `size`'s "text" column - because
@@ -37315,6 +37327,15 @@ for pair in \
     ARGS_OFFSET=$ENTRY_ARGS_OFFSET DATA_LIMIT=$ENTRY_DATA_LIMIT DT_OFFSET=$ENTRY_DT_OFFSET \
     TABLE_BYTES=$ENTRY_TABLE_BYTES DT_MAX=$ENTRY_DT_MAX ARGS_BYTES=$ARGS_BYTES \
     RAMDISK_VA=$ramdisk_va RAMDISK_SIZE=$ramdisk_size; do
+    # **952: an EMPTY value is refused here, because it is the one substitution the placeholder check
+    # below cannot see.** `sed s/@NAME@//` deletes the placeholder exactly as a real value does, so
+    # `left` comes out empty and 459's check passes while the header holds `#define … ` with nothing
+    # after it - and the payload then compiles `r->entry_va = ;` (measured: that is what a D13 payload
+    # build printed, five `error: expected expression` lines in `xnu_entry_jump.c`). A value that is
+    # empty is a symbol the link did not find (952: `_start` vs `__start`), not a valid number this
+    # generator should write ([[mi4-silence-is-a-reading-only-if-success-is-silent]]).
+    [[ -n ${pair#*=} ]] \
+        || layout_fail "the generated header's @${pair%%=*}@ has no value: \`${pair%%=*}\` is empty in this link, so the payload's own header would define it as nothing and \`xnu_entry_jump.c\` would not compile. A missing symbol here (952) reads as a harmless empty string to 459's placeholder check, which cannot tell an empty substitution from a real one - so the refusal lives at the substitution"
     sed -i "s/@${pair%%=*}@/${pair#*=}/g" "$OUT/xnu_arm_entry.h"
 done
 
