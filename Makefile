@@ -195,6 +195,16 @@ check:
 # MEASURED defect (a marker outside the #ifdef) and asserts it is refused.
 	@tools/check_mem_size_max.py --selftest >/dev/null
 	@tools/check_mem_size_max.py
+# 956 (fifteenth tree-pin rung's cousin): `build_entry.sh` refuses `ENTRY_WINDOW >= 1 GiB` on D13,
+# because D13's managed map is `gMemSize` long from the FIXED `MANAGED_BASE` 0xC0000000 - so the
+# window IS memSize and 1 GiB fills its 16 KB L1 exactly (byte 0x3000..0x4000), with a 32-bit VA
+# wrap one byte past. The refusal rests on four source facts; `check_d13_managed_base.py` re-derives
+# each (MANAGED_BASE's value, the fixed assignment, `gMemSize` as the map length, L1_SIZE/tte_offset,
+# and the `xnu_entry_jump.c` -> `args->memSize` -> `gMemSize` chain) and refuses if one moves, with
+# the 4570 tree as the control. Its `--selftest` feeds nine measured mutations. No tree named: checks
+# BOTH repo trees. Source half, no compiler, no device.
+	@tools/check_d13_managed_base.py --selftest >/dev/null
+	@tools/check_d13_managed_base.py
 # 882: the HFS+ root volume and the arm that mounts it. Three claims, each one a committed artifact
 # or a copied claim rather than a preference:
 #   check_hfs_root_blob.py     reads the volume header out of the COMMITTED blob and refuses the fields

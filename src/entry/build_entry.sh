@@ -29189,6 +29189,35 @@ while (( ENTRY_SIZE < ENTRY_DT_OFFSET + ENTRY_DT_MAX )); do ENTRY_SIZE=$((ENTRY_
     echo "        a window the payload does not have (912)." >&2
     exit 1; }
 
+# **Darwin 13 has an upper bound at 1 GiB that 4570 does not, and on D13 the window IS `gMemSize`.** The
+# comment below says the window XNU is TOLD can be as large as the goal wants because the payload's map
+# is clamped below the alias base. That decoupling is a **4570** property: there `memSize` is clamped
+# against `xmaxmem` and the kernel pmap's span is derived as `(gVirtBase+MEM_SIZE_MAX+0x3FFFFF)&
+# 0xFFC00000`, so `MEM_SIZE_MAX` moves the base. D13 clamps nothing - `osfmk/arm/arm_vm_init.c` sets
+# `gMemSize = args->memSize; max_mem = mem_size = sane_size = gMemSize;` (325-327) and calls
+# `pmap_bootstrap(gMemSize, ...)` (483) - and `xnu_entry_jump.c:150` hands XNU this exact value
+# (`a->memSize = STAGE90_XNU_ENTRY_SIZE`, and `memSizeActual` with it). D13's managed map is built from
+# a FIXED VA: `managedBaseVA = MANAGED_BASE` = `0xC0000000` (142/341), then
+# `l2_cache_to_range(managedCachePA, managedBaseVA, ttb, gMemSize, TRUE)` (359). That map fills
+# `tte_psize = (gMemSize>>20)<<2` bytes from `tte_pbase = addr_to_tte(ttb, 0xC0000000)` = byte
+# [0x3000 .. 0x4000) of the 16 KB L1 (`L1_SIZE 0x4000`, pmap.h:195; `tte_offset` masks the index to
+# 12 bits). At `gMemSize = 0x40000000` that is EXACTLY `[0x3000, 0x4000)` - the whole table - and
+# `managedBaseVA + gMemSize` reaches `0x100000000`, the top of the 32-bit space. One byte more and the
+# loop writes PAST the L1 (`0x4000 + ...`, the `first_avail`/vectp region, arm_vm_init.c:350/381) while
+# the masked index wraps, silently corrupting the boot tables. Line 350's `l2_size(0x40000000)` (a
+# 1 MB "bit generous" L2 reservation) is the same ceiling written down. So a D13 window >= 1 GiB is a
+# brick with no cause in the log, and it is refused here rather than pressed.
+if [[ -f $XNU_TREE/osfmk/sys/types.h ]]; then
+    (( ENTRY_WINDOW_REQ < 0x40000000 )) || {
+        echo "STAGE90_XNU_ENTRY_WINDOW=$ENTRY_WINDOW_REQ reaches 1 GiB, which Darwin 13's fixed managed" >&2
+        echo "        base (MANAGED_BASE 0xC0000000, arm_vm_init.c:142) cannot hold: the managed L1 is" >&2
+        echo "        filled with (gMemSize>>20) entries from byte 0x3000 of a 0x4000 table, so 1 GiB is" >&2
+        echo "        the last that fits and its VA reaches 0x100000000. One byte more wraps 32-bit VA and" >&2
+        echo "        writes past the L1 with no fault. Use at most 0x3f000000 for headroom; 4570's" >&2
+        echo "        MEM_SIZE_MAX clamp has no D13 analogue (the window IS memSize)." >&2
+        exit 1; }
+fi
+
 # The bound of the payload's OWN entry-window identity map (`mmu.c`'s `build_identity_table`), a
 # DIFFERENT thing from the window `memSize` XNU is handed. **It must cover the WHOLE window** - every
 # byte the payload or `_start` can touch under the payload's page tables before XNU installs its own:
@@ -37590,6 +37619,15 @@ run python3 "$REPO_ROOT/tools/check_driver_catalogue.py" --selftest || exit 1
 # fails on a build whose step 2 predates the fix rather than quietly linking that object.
 run python3 "$REPO_ROOT/tools/check_asm_config.py" --tree "$XNU_TREE" --verbose || exit 1
 run python3 "$REPO_ROOT/tools/check_asm_config.py" --tree "$XNU_TREE" --selftest || exit 1
+
+# **The window ceiling's premise, for the refusal made above.** D13's entry window is refused at
+# 1 GiB because its managed map is built from the FIXED `MANAGED_BASE` 0xC0000000 and is `gMemSize`
+# long. That argument is a claim about THIS tree's `arm_vm_init.c`/`pmap.h` and about
+# `xnu_entry_jump.c`'s `memSize` chain; a tree that drifts would make the refusal wrong (a derived
+# base makes 1 GiB safe; a non-masking `tte_offset` makes an overflow a fault, not corruption). This
+# re-derives all four facts and refuses if one moves, so the ceiling is checked, not asserted.
+run python3 "$REPO_ROOT/tools/check_d13_managed_base.py" --tree "$XNU_TREE" --selftest || exit 1
+run python3 "$REPO_ROOT/tools/check_d13_managed_base.py" --tree "$XNU_TREE" --verbose || exit 1
 #
 # **And 489's, which is about a reading rather than a build.** For three steps the console's last line -
 # `load_init_program: attempting to load /sbin/launchd` and then nothing - was read as "`execve` is still
