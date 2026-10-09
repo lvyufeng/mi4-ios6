@@ -126,6 +126,35 @@ served by the shadow, while every *other* unit (RAM blob, staged sector) still r
 - `check_undef_handler.py --selftest` + `--split` ok (this run also fixed a latent bug: `elf_words` read the
   `SHT_NOBITS` `.bss` as file bytes and ran 4 bytes past EOF — skipped when `_type == 8`).
 
+### 6b. The runner reads the arm — the fifth unread family, closed
+
+The arm's **entire adequacy claim** is three published keys in `st_media_strategy`:
+`xnu_live_rootmedia_cow_wr_blocks` (served, on every write), `_cow_used_pages`/`_cow_dirty_pages` (the live
+footprint), and `_cow_refused` (**only** on a write the arena could not hold). Until this rung
+`scripts/run_and_capture.sh` read **none** of them — the `[[mi4-911-runner-now-reads-all-goal-clauses]]`
+class, one rung after the USB ladder (963). A press of `armed-d13-7107b998` would have been silent about
+whether a single write was served.
+
+- The runner gains a COW block inside the root-media block, guarded on `_cow_wr_blocks` (absent on every
+  non-968 arm, so those logs stay byte-identical — verified against the pre-edit runner's output on a real
+  capture: `152cf1b4…` both sides). It prints `WRITABLE ROOT MET` when writes were served and no refusal,
+  and `COW WRITE REFUSED` (naming the 2 MiB arena and that no write in the log proves a writable mount)
+  when `_cow_refused` is present.
+- `tools/check_runner_cow_family.py` (NEW, in `make check`) makes it a refusal, both directions: the block
+  must read **both** markers (a presence-only check misses the failure branch), and every
+  `xnu_live_rootmedia_cow*` key it names must be published by `stage90_root_media.c`. Four selftest
+  mutations (served marker dropped, refused marker dropped, invented key, no block) are all refused.
+- `scripts/press_968.sh` (NEW) is the recipe: 965c's real-rootfs medium (the COW's base **is** that image),
+  the 968 arm hash, and the `--expect-arm` — steps 2/3 through the project's own gate + runner, never a raw
+  fastboot, never a flash.
+
+**The lane caveat.** `run_and_capture.sh` has been "another session's lane" before; the durable rule
+(`[[mi4-file-lanes]]`) is to resolve with `ListAgents` first and, if the other party is not running, to
+edit rather than invoke a lane rule that enforces nothing. Measured: this session is
+`emmc-mount-write-verify`, and neither `mi4-ios6-1a` nor `run-experiment-526` is running — so the edit is
+made here, and its cost is nil (the runner is not a build input of the parked image, unlike
+`build_entry.sh`).
+
 ## 7. What it does NOT do
 
 It does **not** make iOS boot. It removes the read-only wall that would stop userspace the moment it writes

@@ -265,6 +265,15 @@ check:
 # mutations (a dropped family, an invented key, no block).
 	@tools/check_runner_usb_families.py --selftest >/dev/null
 	@tools/check_runner_usb_families.py
+# 968: the RUNNER half of the COW writable root. The arm's ENTIRE adequacy claim is the shadow's three
+# keys, and before this rung the runner read none of them - the same "unread family" defect, one rung
+# after the USB ladder. `check_runner_cow_family.py` runs both directions: the runner's COW block must
+# read BOTH the served key (`_cow_wr_blocks`) and the refused key (`_cow_refused` - a presence-only
+# check would miss the failure), and every `xnu_live_rootmedia_cow*` key it names must be published by
+# `src/platform/stage90_root_media.c`. Source half, no build and no device; its --selftest feeds four
+# measured mutations (the served marker dropped, the refused marker dropped, an invented key, no block).
+	@tools/check_runner_cow_family.py --selftest >/dev/null
+	@tools/check_runner_cow_family.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not

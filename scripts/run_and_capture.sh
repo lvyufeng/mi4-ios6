@@ -3192,6 +3192,36 @@ summarise_log() {
       if [[ -n $card_lba ]]; then
         say "  and the 903 mount: card_dev=$(keyval rootmedia_card_dev) card_lba=$card_lba card_off=$(keyval rootmedia_card_off) last_lba=$(keyval rootmedia_card_last_lba)"
       fi
+      # **968: the COW WRITABLE ROOT, the clause the storage half was still missing.** The 968 arm mounts
+      # the real rootfs READ-WRITE over a RAM shadow (`STAGE90_XNU_CARD_COW=1`), so iOS userspace's writes to
+      # `/private/var` are served without touching the base medium. Its ENTIRE adequacy claim is in three
+      # keys, and before this block the runner read NONE of them (the "unread family" class,
+      # [[mi4-911-runner-now-reads-all-goal-clauses]]): `_cow_wr_blocks` (published on every served write,
+      # stage90_root_media.c:1109), `_cow_used_pages`/`_cow_dirty_pages` (the shadow's live footprint), and
+      # `_cow_refused` (published ONLY on a write the arena could not hold - stage90_root_media.c:1091/1100
+      # - so its ABSENCE is the success reading and its PRESENCE is a failed write, never a silent drop).
+      # `_cow_wr_blocks` is the guard: absent on every non-968 arm, so those logs take the else and stay
+      # byte-identical.
+      local cow_wr
+      cow_wr=$(keyval rootmedia_cow_wr_blocks)
+      if [[ -n $cow_wr ]]; then
+        say ""
+        say "  the COW writable root (968): the card unit's writes served from RAM, not the medium"
+        local cow_ref cow_used cow_dirty
+        cow_ref=$(keyval rootmedia_cow_refused)
+        cow_used=$(keyval rootmedia_cow_used_pages)
+        cow_dirty=$(keyval rootmedia_cow_dirty_pages)
+        say "  xnu_live_rootmedia_cow_wr_blocks=$cow_wr block(s) served; used_pages=${cow_used:-?} dirty_pages=${cow_dirty:-?}"
+        if [[ -n $cow_ref ]]; then
+          say "  => COW WRITE REFUSED: xnu_live_rootmedia_cow_refused=$cow_ref write(s) hit a page the 2 MiB"
+          say "     arena ($(( 512 * 4096 / 1024 )) KiB) could not hold - the filesystem saw ENOSPC/EIO, not a"
+          say "     silent drop and never a base write. This arm's arena is TOO SMALL for the run: no write in"
+          say "     this log can be read as proof the mount is writable end to end."
+        else
+          say "  => WRITABLE ROOT MET: every $cow_wr write(s) landed in the RAM shadow, none refused; the base"
+          say "     medium was never written (a power cycle reverts, and the card head stays byte-exact)."
+        fi
+      fi
     fi
   else
     say ""
