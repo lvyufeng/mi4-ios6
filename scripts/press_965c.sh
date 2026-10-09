@@ -12,17 +12,19 @@
 #
 #   (b) THE STRATEGY'S BOUND WAS 32-BIT. `st_medium_disk_bytes(ST_MEDIA_DRIVER)` returns
 #       `(unsigned)(selected_count * 512)`; userdata is 13,610,499,072 B, so the bound was 725,597,184 B
-#       (692 MiB) - LESS than the 896 MiB rootfs. A mount over that bound reads EOF for the volume's top
-#       ~204 MiB and cannot parse its catalog. `STAGE90_XNU_FULL_EXTENT=1` computes the bound in 64 bits
-#       (`st_medium_card_full_bytes()`), so the strategy addresses the whole partition. This is the entry
-#       arm the press boots (its hash is the one `--expect-arm` names below) - NOT the 965b arm, whose
-#       32-bit bound would silently truncate the real volume.
+#       (692 MiB) - a real disagreement with `DKIOCGETBLOCKCOUNT` (26,582,225 sectors = 13.6 GB).
+#       `STAGE90_XNU_FULL_EXTENT=1` computes the bound in 64 bits (`st_medium_card_full_bytes()`), so the
+#       strategy addresses the whole partition. ⚠️ 965d: this is a CORRECTNESS fix, not a blocker - the
+#       real 896 MiB volume's data all lives below 530 MiB (max file-data end block 135750), so the mount
+#       would succeed under the 32-bit bound too; a successful press does NOT prove the switch took.
+#       See docs/experiments/experiment-965d-the-32-bit-bound-does-not-block-the-mount.md.
 #
 # WHAT THIS PROVES: on a card-root arm, `hfs_mountroot` parses and mounts the REAL 896 MiB iOS 7.1.2 HFSX
 # rootfs - the goal's own root volume, off the device's own storage, through XNU's own HFS driver and the
-# ladder's read path. If it mounts, the HFSX branch (`hfs_vfsutils.c:339-345`), the multi-extent catalog
-# (first extent block 9220), and the 64-bit bound are all exercised. If it fails ABOVE 692 MiB, the
-# FULL_EXTENT arm did not take - the falsifier the preflight's size clause also guards.
+# ladder's read path. If it mounts, the HFSX branch (`hfs_vfsutils.c:339-345`) and the multi-extent catalog
+# (extents at blocks 9220 and 124571) are exercised for the first time. What the mount is bounded by is the
+# LADDER's read path, not the strategy's 32-bit length (965d) - if it stops after the volume header, the
+# card serving failed, not the bound.
 #
 # THE ARM IS A NON-RETURNING (RESIDENT) RUNG: it carries `POST_END_TICKS=0`, so budget for a black screen +
 # a power-cycle capture, not a clean return (`mi4-xnu-reboot-path-cannot-reset`).
