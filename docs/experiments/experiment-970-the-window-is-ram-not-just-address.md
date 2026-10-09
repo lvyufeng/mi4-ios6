@@ -142,6 +142,37 @@ way this press is the cheap next measurement, and it is reversible — `fastboot
 **This is what the operator's press is for.** `scripts/press_970.sh` is the recipe (the same real-rootfs
 medium as 968, the widened window, the `--expect-arm`).
 
+## 6b. The press result (2026-10-09, operator-authorized) — FALSIFIED
+
+`armed-window-c74bde1d` was pressed. **The premise did not hold: the 484 MiB window does not boot.**
+
+- The payload runs clean to the jump — `xnu_entry_status=0x90000001`, `xnu_entry_failures=0x00000000`,
+  `xnu_entry_args_memSize=0x1e400000` — and then **XNU emits nothing at all**. Not one `xnu_live_*` probe
+  key, no `Darwin Kernel Version` banner. Log: `out/stage90/captures/970-484mib-window-20261009-last_kmsg.txt`
+  (3932 lines, `out/` is gitignored so it is not in the tree; sha256 `fe538f69…`).
+- **Where XNU dies.** The `xnu_live_*` keys are written by `--wrap`ped **very early** XNU symbols
+  (`kalloc_canblock`, `thread_block`, `ml_get_max_cpus`, …), so their first appearance sits inside
+  `arm_init` **before `arm_vm_init`**; the working log's `xnu_live_ttbr0=0x80800000` shows the payload's own
+  TTB is still active when the probe fires (`cpu_ttb = topOfKernel + L1_SIZE = 0x80800000 + 0x4000 =
+  0x80804000`). **970 emits zero probe lines**, so XNU dies in the `_start` → `arm_init` prologue, before
+  the first `--wrap` target — i.e. in `_start`'s section-map loop (`osfmk/arm/locore.s:189-197`, which maps
+  `memSize` = 484 sectors and is the code the window alone changes) or the `start_trampoline` MMU switch
+  immediately after it.
+- **Contrast.** `out/stage90/captures/cb4e17f1-20261008-last_kmsg.txt` — the same tree, the card HFSX root
+  mounted, `MEM_TOTAL=1`, but window **16 MiB** — emits 12971 `xnu_live_` keys and a full boot to kalloc.
+  The console cap of §3 was **not** the cause: 484 MiB kept `0xde500000` clear and the payload completed.
+- **Two variables moved at once — the window is *suggested*, not *isolated*.** The entry bin `7107b998` is
+  shared by 968 and 970, and **neither was ever pressed at 16 MiB** (`xnu_entry_args_pa=0x80861000` appears
+  in exactly one capture: this one). So this press is simultaneously (a) the first press of the 968 entry
+  *and* (b) the first window wider than 16 MiB — 911a raised the window but was never pressed. The clean
+  isolation is `scripts/press_968.sh` (`armed-d13-7107b998`, same entry, same medium, 16 MiB window); it
+  has **not** been run. **PRESS IS THE OPERATOR'S.**
+
+**Conclusion.** The window-size route is **not** closed as a *cause*, but it is closed as a *cheap fix*: a
+window wider than 16 MiB has never booted on this entry, and the widened arm produced no measurement at all.
+Until `press_968.sh` separates the two variables, 969's wall (the window is a prerequisite, met by 915-B)
+stands as the only demonstrated route to running iOS userspace. Nothing was bricked; the device re-enumerated.
+
 ## 7. What it does NOT do
 
 It does **not** make XNU *recognize 3 GB*. `max_mem`/`mem_size`/`sane_size` are all `gMemSize` here, so
