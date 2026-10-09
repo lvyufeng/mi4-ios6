@@ -86,6 +86,39 @@ took, because the mount would succeed under the 32-bit bound too.
   trace), not by the bound. Whether it can then *exec* `/sbin/launchd` (located by the catalog walker
   above; all its blocks ≤ 530 MiB) is likewise a ladder/driver question, not a `FULL_EXTENT` one.
 
+## 4b. The mount path's structural gates — all satisfied by the real volume
+
+The bound was one candidate wall; to be sure **no other host-side gate** stands between the real volume and
+a mount, `hfs_mountfs` / `hfs_MountHFSPlusVolume` (D13) were read end to end and each refusal tested against
+the volume's measured header (`blockSize` 4096, `totalBlocks` 229376, HFSX 0x4858 v5, attributes
+0x80000100):
+
+| gate | site | real volume | verdict |
+|---|---|---|---|
+| mountfs ioctl preamble: `DKIOCGETBLOCKSIZE`, `DKIOCGETPHYSICALBLOCKSIZE`, `DKIOCSETBLOCKSIZE`, `DKIOCGETBLOCKCOUNT` | `hfs_vfsops.c:1327-1382` | `st_media_ioctl` answers all four (physical blk falls to `default: ENOTTY`, which mountfs accepts at `:1343`) | ✓ |
+| HFSX signature/version | `hfs_vfsutils.c:334-346` | `0x4858`/5 → `hfsmp->hfs_flags |= HFS_X` | ✓ |
+| blockSize ≥ 512 and a power of 2 | `:358-364` | 4096 | ✓ |
+| dirty non-journaled volume must not mount RW | `:367-373` | attributes `0x80000100` — `kHFSVolumeUnmountedBit` set, journaled bit clear, and the root is RO | ✓ |
+| `disksize`/`embeddedOffset` aligned to logical block, and `blockSize >= hfs_logical_block_size` | `:376-384` | disksize = 26,582,225×512 (aligned), `embeddedOffset` = 0, 4096 > 512 | ✓ |
+| alternate-VH location | `:448-456` | `spare_sectors` = `hfs_logical_block_count - totalBlocks*blockSize/512` = 24,721,873 > 8 → **`hfs_alt_id_sector = 0`** | ✓ (confirms §2) |
+
+Two consequences worth stating plainly:
+
+- **The device's logical block size stays 512, and that is correct.** `hfs_mountfs` switches the device to
+  4096 only when `log_blkcnt > 0x7fffffff` (`:1397`, an Apple pre-Tiger compatibility hack); `userdata`'s
+  26,582,225 sectors are far below it. This is **not** a wall in either direction: the volume's `blockSize`
+  4096 ≥ the device's 512, and the extent arithmetic is header-relative, so the volume is served as one
+  8-sector block per 4096-byte read. `DKIOCSETBLOCKSIZE` is a no-op (`st_media_ioctl:1217`) and does not
+  move the block count — which is exactly what this volume needs (a switch *to* 4096 would have driven
+  `log_blkcnt > 0x7fffffff` and made the alt-VH unreachable — §2).
+- **The `hfs_alt_id_sector = 0` line is the same code 965d §2 named**, read here at its source: the real
+  volume's partition (13.6 GiB) is far larger than the volume (896 MiB), so `spare_sectors` is huge and the
+  alternate header is disarmed — independent of the primary's health.
+
+So the real 896 MiB HFSX volume is refused by **no** structural gate in the D13 mount path. The only thing
+left between it and a mount is the **ladder's per-LBA read on hardware** (965b's card serving), which is
+press-only and cannot be settled host-side.
+
 ## 5. What would falsify this
 
 - A block in `[177050, 229376)` **other than 229375** set in the allocation bitmap → real data in the
