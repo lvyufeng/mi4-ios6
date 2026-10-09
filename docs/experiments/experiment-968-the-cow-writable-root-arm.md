@@ -188,13 +188,17 @@ Read from the **linked image**, not the record (a record is not a constraint):
   writes to userdata's head. 903's `BSD root: md0` was the *baseline* (mockfs linked, mocked); on this arm
   the name is not the device. So "the OS enters" is literally true here: pid 1 execs `/sbin/launchd` read
   **from the mounted volume**.
-- **The program that execs is 905's fixture, installed as the real `/sbin/launchd`.** `entry_ramdisk.s`
-  (`g_stage90_ramdisk`, 8192 B) is the one program, and `tools/build_root_volumes.sh` installs it at the
-  card volume's `/sbin/launchd` offset, checking it round-trips by hash. So `/newfile` written by the
-  mount's rw path lands in the **card volume's own `/`** via the COW shadow — the geometry is live iOS.
-- **What it does NOT prove is real SpringBoard**: `-X` format is a *marker* volume (`build_root_volumes.sh`
-  header), not the byte-for-byte decrypted tree, so the 7142-file real userspace chain is not exercised.
-  Reaching that is the rung above this one; the geometry is proven here.
+- **What execs is the REAL iOS `/sbin/launchd` — corrected.** `build_root_volumes.sh --real` does
+  `cp -f "$REAL_ROOTFS" "$OUT_CARD"`, a **byte-for-byte copy of the decrypted iOS 7.1.2 rootfs** (verified:
+  HFSX `0x4858` v5, 939,524,096 B). What `-X` / the *fixture* mode builds is the 512 KiB **marker** card —
+  a different rung, and the header wording "the `-X` format is a marker volume" is about *that* mode, **not**
+  `--real`. So on the 968 arm the root `/` **is** the real tree, and `/sbin/launchd` is the **real iOS
+  launchd** (not 905's fixture). Measured: the fixture blob `g_stage90_ramdisk` (8192 B, sha256 `521edbdc…`)
+  is **not in the real rootfs** — its `/newfile` string and a 48-byte code probe both return −1. The fixture
+  is hardcoded into the image; the real volume carries the real launchd.
+- **What remains unmeasured is whether the real launchd RUNS** — it needs its `dyld`/dylibs and `/private/var`
+  under the **16 MiB window** (the 968 arena leaves XNU ≈6 MiB free, §3). That, not "build the real tree", is
+  the rung above: the geometry (real volume as `/`, writable via the COW) is what this arm proves.
 
 ## 9. Provenance
 
