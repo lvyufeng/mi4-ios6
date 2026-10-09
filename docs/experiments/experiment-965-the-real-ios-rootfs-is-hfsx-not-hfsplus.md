@@ -63,6 +63,12 @@ paths for the first time, without needing (b) solved and without a press. This i
 the current arms lack: every "the mount works" result so far is on a filesystem family the target does
 not use.
 
+**Verified through the whole loop, this session:** `mkfs.hfsplus -s -v ios7probe /tmp/hfsx_fx.img`
+(512 KiB) → header `4858 0005` → `tools/check_hfs_root_blob.py /tmp/hfsx_fx.img` **rc=0** ("HFS+ 0x4858
+v5, 128 blocks"). So 965a has **no unknowns**: an HFSX volume at the proven size passes the project's
+own mount gate. (The builder still needs `sudo` for the `losetup`+populate step — already how
+`build_hfs_root_image.sh` works.)
+
 **(b) The serving mechanism — the real size wall.** The proven root-volume serving is a **linked
 array**: `src/entry/blob/xnu_arm_entry_root_hfs.S` does `.incbin` of the 524288-byte image, and
 `st_medium_disk_size(0)`/`st_medium_disk_base(0)` return the array's length and base
