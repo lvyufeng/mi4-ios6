@@ -33,21 +33,39 @@ A second identity corroborates the goal's own memory note: `/proc/device-tree/me
 the 911c SMEM bank sum. Two independent channels, one number (`mi4-one-value-two-definitions` = *don't
 let them drift*).
 
-## 2. The channel: aboot injects the reg, so it is already in XNU's DT
+## 2. The channel — CORRECTED: the tree is OURS, and it carries ONE bank
 
-915 §5 proposed injecting `/memory/reg` ourselves. **Unnecessary — the channel already exists.** The
-flashed `dt.img` (QCDT, 2.4 MB, 25 DTBs) has **no `/memory` node at all** — its 42 `memory` strings are
-`qcom,memory-size`/`qcom,mem*` substrings, and its only `0x00000000,0x60000000` quad is a
-`qup_phys_addr` property (a collision, verified by dumping the surrounding struct). The running device
-nonetheless shows **both** banks in `/proc/device-tree/memory/reg`. Therefore **aboot patches
-`/memory/reg` into the live DT at boot** from the RAM it detected.
+**First draft of this section was wrong; this is the correction, kept visible.** The first reading took
+the running device's `/proc/device-tree/memory/reg` (two banks) as "the tree XNU gets". It is not:
+that is **Android's** tree, written by aboot for Android's kernel. XNU does not get it.
 
-And the entry image hands XNU that same live DT: `xnu_entry_copy_device_tree` copies
-`boot_args->deviceTreeP` (`xnu_entry_jump.c:105-120`), `a->deviceTreeP = ENTRY_DT_PA` (`:161`). So on a
-D13 press **XNU already receives a DT whose `/memory/reg` has both banks** — the kernel's DT walk
-(`DTLookupEntry(NULL, "/memory", &e)` → `DTGetProperty(e, "reg", &p, &n)`, the API D13 ships) has
-everything it needs. **The port is a READER, not a feeder.** That removes ~half of 915's file table
-(the entry-image / pexpert injection row).
+XNU gets a **synthetic tree the payload builds itself**: `build_stage90_apple_dt`
+(`src/stage90_main.c:47-138`) emits `g_apple_dt` in Apple's `DeviceTreeNode` format, `build_boot_args`
+(`src/boot_args.c:5`) puts it in `boot_args->deviceTreeP`, and `xnu_entry_copy_device_tree`
+(`xnu_entry_jump.c:105-120`) copies exactly that (`args->deviceTreeP = ENTRY_DT_PA`, `:161`). Its
+`/memory` node's `reg` is a **one-bank** constant:
+
+```c
+static const uint32_t memory_reg[] = { RAM_PHYS_BASE, RAM_CONSOLE_BASE - RAM_PHYS_BASE };
+/* = { 0x80000000, 0x5e500000 } - the high bank only, up to the ram_console */
+```
+
+So the channel the port was going to add **is the payload's own builder**, and it must be made to emit
+both banks. The DT *format* is settled by the payload's own reader: `DTGetProperty` returns bytes with
+**no swap** (`device_tree.c:410-425`), and `apple_dt_prop_u32_array` writes **host (LE) order** — so a
+reg the payload writes is read back by D13's `DTGetProperty` verbatim, no endianness work.
+
+Two definitions of the same quantity now exist and must not drift (the class this project keeps hitting,
+`mi4-one-value-two-definitions`): the payload's **`PE_state_stage90.memorySize`** — parsed back from this
+very reg by `src/pe_state.c:32-39` (`apple_dt_find_child(dt,…,"memory")` → `apple_dt_get_prop(…,"reg")`,
+word 1) and asserted against `RAM_CONSOLE_BASE - RAM_PHYS_BASE` in five places (`mmu.c:2335`,
+`xnu_early_pmap_platform_init.c:287-288`, `xnu_pe_init_platform_false.c:351-352`, …) — and the D13
+kernel's `max_mem`. A two-bank reg changes the payload's word-1 reading and breaks every one of those
+asserts, so the port updates the payload's own checks in lockstep.
+
+**The flashed `dt.img` is irrelevant to this path** (it is QCDT for Android's boot; the payload's
+`stage90-qcdt.img` merely carries it for `fastboot boot` framing). Its having no `/memory` node and the
+running device's having two are both about Android, not XNU.
 
 ## 3. What D13's pmap can accept, and the split the port must make
 
