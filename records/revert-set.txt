@@ -12717,7 +12717,7 @@ set=armed-d13-c54fc40d sha256=88bd094f486ed89419dfcb61922f343a00d6868da86f498ade
 set=armed-d13-b9c224c0 sha256=b9c224c074abda583e3fca9de127c19258056a12e88950c9fb97bcb0edee13ce bytes=6327380 file=xnu_arm_entry.bin role=THE-ARM:-the-entry-image-carrying-the-HFSX-root-fixture-(HFS_ROOT_MEDIA=1)-plus-the-full-D13-USB-ladder-;-the-suffix-b9c224c0-is-THIS-member-s-hash
 set=armed-d13-b9c224c0 sha256=c46c299a74764f4e8d85e1dea41d84759e253e00447ff7189c21728283154922 bytes=7365840 file=xnu_arm_entry.elf role=the-entry-ELF
 set=armed-d13-b9c224c0 sha256=dbf1a0b6726d44db979229a6877ab88389565ce835e923a62a1ad8f68034d72b bytes=1360 file=xnu_arm_entry-config.txt role=the-entry-record-;-STAGE90_XNU_TREE_D13=1-STAGE90_XNU_HFS_ROOT_MEDIA=1-STAGE90_XNU_MEM_TOTAL=1-and-all-four-USB-switches
-set=armed-d13-b9c224c0 sha256=016dbd4241869cac0ddf45bee4e53f17af23701ebfb6da95056add5757695235 bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest
+set=armed-d13-b9c224c0 sha256=f302318b78114768985d2109e8dc1a0ed007bbfeb43e6b0c2c690779dfd05f5d bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest
 set=armed-d13-b9c224c0 sha256=08fdeed03ebe1d8e465f95c53c563bb22940117390b828a78b2b500e66af9ccd bytes=6822780 file=stage90.bin role=the-payload-binary-embedding-the-HFSX-entry-image
 set=armed-d13-b9c224c0 sha256=349286aca822a225426e273d78234536ed14e62e3e6f3efe901578b42fabf4e6 bytes=6884852 file=stage90.elf role=the-payload-ELF
 set=armed-d13-b9c224c0 sha256=a4e93e085a179962f8fe1b580dcd09fb39360154fb3e2c3b9b92cb382c1de63a bytes=6825984 file=stage90.img role=the-fastboot-boot-image

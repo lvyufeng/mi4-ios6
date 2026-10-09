@@ -767,8 +767,10 @@ STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
 # mounts it - 530 section 9's route. Default 0: the wrapper is the pass-through it has been since 457,
 # so the shipped image is unchanged (this is an arms dimension, not a behaviour that ships by default).
 MOUNT=${STAGE90_XNU_MOUNT:-0}
-# **882: the HFS+ root arm.** With `STAGE90_XNU_HFS_ROOT_MEDIA=1`, disk 0's *strategy* serves the
-# committed HFS+ volume (`src/entry/blob/xnu_arm_entry_root_hfs.img`) while `DKIOCGETMEMDEVINFO` and
+# **882: the HFS root arm.** With `STAGE90_XNU_HFS_ROOT_MEDIA=1`, disk 0's *strategy* serves the
+# committed volume (`src/entry/blob/xnu_arm_entry_root_hfs.img`; HFSX 0x4858 v5 since 965a - the family
+# the real iOS 7.1.2 rootfs uses, though on a card-root arm this blob is inert and the CARD image is the
+# medium - 965b) while `DKIOCGETMEMDEVINFO` and
 # `spec_open` still see the RAM disk - so a FAILED `hfs_mountroot` falls through to a mockfs whose
 # file node is still the Mach-O. The two readers must disagree; see
 # `tools/check_hfs_root_arm_split.py` and experiment 881 section 3.
@@ -1731,8 +1733,8 @@ if [[ $HFS_ROOT_MEDIA -eq 1 ]]; then
         say "STAGE90_XNU_HFS_ROOT_MEDIA=1 and $ROOT_HFS_SRC is missing: the arm's medium has no wrapper,"
         say "so the strategy would serve whatever the linker left at g_stage90_root_hfs"; exit 2; }
     [[ -f "$ROOT_HFS_IMG" ]] || {
-        say "STAGE90_XNU_HFS_ROOT_MEDIA=1 and $ROOT_HFS_IMG is missing: the committed 524288-byte HFS+"
-        say "volume is the arm's medium. Regenerate it with tools/build_hfs_root_image.sh (its output"
+        say "STAGE90_XNU_HFS_ROOT_MEDIA=1 and $ROOT_HFS_IMG is missing: the committed 524288-byte HFSX"
+        say "volume is the arm's medium. Regenerate it with tools/build_hfs_root_image.sh -X (its output"
         say "is NOT byte-reproducible - mkfs.hfsplus stamps the volume - so a regenerated file replaces"
         say "the committed one rather than being compared against it)."; exit 2; }
     # `-I` is what resolves the `.incbin` operand; without it the assembler searches its own cwd, which

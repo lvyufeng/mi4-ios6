@@ -1,9 +1,14 @@
 /*
- * The HFS+ root volume, as bytes in the entry image (experiment 882).
+ * The HFS root volume, as bytes in the entry image (experiment 882; HFSX since 965a, the family the
+ * real iOS 7.1.2 rootfs uses).
  *
  * This file is `.incbin` and nothing else, and that is the whole design: the image it includes is the
  * output of `tools/build_hfs_root_image.sh`, which is the ONE definition of what XNU's root volume is
- * (`src/entry/blob/xnu_arm_entry_root_hfs.img`, sha256 3fb9273c...). A hand-written array here would
+ * (`src/entry/blob/xnu_arm_entry_root_hfs.img`, HFSX 0x4858 v5, sha256 c154fc61... as of 965a). The sha
+ * is a pointer for a reader, NOT a check: `mkfs.hfsplus` is not byte-reproducible, so the committed file
+ * is not regenerated on every build and this number can drift from it - the fields the kernel actually
+ * reads are re-derived from the committed file by `tools/check_hfs_root_blob.py` in `make check`, which
+ * is why a stale sha here is a stale comment rather than a defect. A hand-written array here would
  * be a second definition of those 524288 bytes, and the bytes are not a layout a human can check
  * (`mi4-one-value-two-definitions`). `.incbin` is how `entry_ramdisk.s`'s precedent is kept without
  * restating a byte: that file assembles its Mach-O because its layout IS the interface (two fields are

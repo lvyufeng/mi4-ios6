@@ -136,6 +136,20 @@ variable — not tangled with 965b's medium change.
 
 **PRESS IS THE OPERATOR'S** — 965a is built and host-verified, not pressed. Both rungs write no device.
 
+## 5a. 965a's premise was wrong on the arm it parked — see 965b
+
+The fixture flip above changed the **committed blob** `src/entry/blob/xnu_arm_entry_root_hfs.img`. But
+the arm 965a parked, `armed-d13-b9c224c0`, carries `STAGE90_XNU_ROOT_FROM_CARD=1`: on that arm the root
+is the **CARD unit** (`__wrap_mdevlookup` answers `entry_root_media_register_card()`,
+`entry_trace.c:5131`) and disk 0 — the blob — is never registered (a build clause even forbids it,
+`build_entry.sh:29016-29020`). The filesystem the press would mount is a **separate** image,
+`out/stage90/xnu_card_hfs.img`, written to `userdata`'s head by `scripts/press_965b.sh`, which 965a left
+**HFS+ v4**. So 965a changed an inert byte array on this arm. **965b** is the correcting rung: it builds
+the card medium as HFSX and adds a preflight refusal so a stale HFS+ card cannot ship silently. See
+`docs/experiments/experiment-965b-the-pressed-root-medium-is-the-card-not-the-blob.md`. This also
+resolves §4's "next rungs": **965b is not a move from array to card (the card is already the pressed
+root) — it is making the card the right family.**
+
 *Provenance: real volume headers read host-side from `/mnt/data/ios7-payload/v{1,2}/ios7/rootfs.hfs`
 (device-free); `tools/check_hfs_root_blob.py` run on both the real rootfs and the fixture;
 `mkfs.hfsplus -s` HFSX probe in `/tmp`; `bsd/hfs/hfs_format.h:53-58`, `hfs_vfsutils.c:333-352`,
