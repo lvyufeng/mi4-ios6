@@ -205,6 +205,15 @@ check:
 # BOTH repo trees. Source half, no compiler, no device.
 	@tools/check_d13_managed_base.py --selftest >/dev/null
 	@tools/check_d13_managed_base.py
+# 958: recognising the device's 3 GB. `check_d13_memory_total.py` re-derives the port: `max_mem` is
+# what `hw.memsize` reads (kern_mib.c), the D13 edit is byte-neutral off (Apple's line as the `#else`
+# arm, the include inside the guard), the managed map still maps `gMemSize` from the fixed
+# MANAGED_BASE (so the 3 GB rides the report, not the map — 956), and the payload publishes the two
+# DIFFERENT quantities: /memory/reg the boot bank 0x5e500000, /defaults hw.memsize the total
+# 0xC0000000. `--selftest` feeds measured mutations; no `--tree` checks both repo trees (4570 is the
+# control). Source half, no compiler, no device.
+	@tools/check_d13_memory_total.py --selftest >/dev/null
+	@tools/check_d13_memory_total.py
 # 882: the HFS+ root volume and the arm that mounts it. Three claims, each one a committed artifact
 # or a copied claim rather than a preference:
 #   check_hfs_root_blob.py     reads the volume header out of the COMMITTED blob and refuses the fields

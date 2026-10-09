@@ -12512,3 +12512,39 @@ set=armed-d13-3af667a3 sha256=cee337f3afa9b17f055f1bee32ff63d84f2a19fc4515f199eb
 set=armed-d13-3af667a3 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-3af667a3 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-every-arm-6c2b6038-because-the-D13-ness-is-an-ENTRY-build-parameter-that-reaches-the-payload-through-THE-GENERATED-HEADER-not-through-a-payload-switch-the-payload-record-CANNOT-see-the-tree
 set=armed-d13-3af667a3 sha256=0bd79d8e5452b820ed4981d664faf65a431c0e2f7bdccacd1abb4de09b02e54f bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+
+# =================================================================================================
+# armed-d13-ad6b4a68 - THE 3 GB MEMORY-TOTAL ARM (2026-10-09)
+#
+# The goal's clause 「安装好的xnu，能够正确识别xiaomi 4的3GB内存」. 957 measured the device's own
+# `/memory/reg` at 0xC0000000 = 3.000 GiB; 956 proved the total cannot ride the linear map (D13's
+# managed map is gMemSize long from the fixed MANAGED_BASE, 1 GiB fills its 16 KB L1 exactly). So the
+# total rides the REPORT: `tools/patch_d13_memory_total.py` guards a read of `/defaults hw.memsize`
+# into `max_mem` ALONE in `osfmk/arm/arm_vm_init.c` (the one global `bsd/kern/kern_mib.c` serves
+# `hw.memsize` from), on the switch `STAGE90_XNU_MEM_TOTAL`. `gMemSize`/`mem_size`/`sane_size` stay
+# the boot bank, so the pmap, kalloc and the zones do not move.
+#
+# THE ARM IS THE ENTRY IMAGE (ad6b4a68) - the switch shapes the linked D13 kernel pool object
+# `osfmk_arm_arm_vm_init.o` (marker `entry_xnu_mem_total_arm_on`), which is IN the entry link, so the
+# entry bin's bytes move. The D13 discriminator (STAGE90_XNU_TREE_D13=1) and the arm key
+# STAGE90_XNU_MEM_TOTAL=1 are both in the record. The payload switch set is UNCHANGED (6c2b6038):
+# the total is an ENTRY build parameter, and the payload reaches it through the generated header.
+#
+# The kernel pool is the D13 STAGE90_XNU kernel (705 objects); the payload was built with
+# XNU_TREE=.../xnu-hd2-darwin13/xnu and STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'.
+#
+# NOT PRESSED. Built and parked so a D13 press can be recorded before it is sent. A press must show
+# `hw.memsize` = 0xC0000000 with `xnu_entry_args_memSize` still the boot bank 0x5e500000 and the pmap
+# vstart unchanged. PRESS IS THE OPERATOR'S.
+# =================================================================================================
+set=armed-d13-ad6b4a68 sha256=ad6b4a682bc7f9aae4dd70e99470401fb2ba0e78c4a77308bb0daba63642b0bd bytes=6315092 file=xnu_arm_entry.bin role=THE-ARM:-the-D13-entry-image-the-press-sends-;-first-entry-image-built-with-STAGE90_XNU_MEM_TOTAL=1-;-the-suffix-ad6b4a68-is-THIS-member-s-hash-;-links-the-D13-kernel-object-that-reads-/defaults-hw.memsize-into-max_mem-(marker-entry_xnu_mem_total_arm_on)
+set=armed-d13-ad6b4a68 sha256=4a385e6bc94e3d89d1f5a1c985b56e7c55be58ae2dc8c4901d0ce1205162af90 bytes=7352228 file=xnu_arm_entry.elf role=the-entry-ELF-;-the-linked-D13-entry-image-;-carries-entry_xnu_mem_total_arm_on-at-0x8001d0a8
+set=armed-d13-ad6b4a68 sha256=cb8ab575ba4dce66a935a4e1eb1003085bef9e20faa5d5b188eae1f929be9fe9 bytes=1360 file=xnu_arm_entry-config.txt role=the-entry-record-;-STAGE90_XNU_TREE_D13=1-plus-STAGE90_XNU_MEM_TOTAL=1-(the-new-key)-plus-the-35-arm-keys-the-previous-D13-build-wrote
+set=armed-d13-ad6b4a68 sha256=3f77c4b5ee75fd4ca2ced8934157733ad5d75760634f4434c80451231c51d0b9 bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest
+set=armed-d13-ad6b4a68 sha256=28ea94238632d3d27aeb99aebddd4da8b6e8677bd6b228933e72a7bd351ecab6 bytes=6810492 file=stage90.bin role=the-payload-binary-embedding-the-D13-entry-image
+set=armed-d13-ad6b4a68 sha256=7954167045abd6ce8bd2ec5a64f536c59c9550fe61030643d69a87a6be58fdfd bytes=6872564 file=stage90.elf role=the-payload-ELF
+set=armed-d13-ad6b4a68 sha256=d7c8ff06b0b306d7418956ef933a5e4dd7411322d3606003a278e8d6d2bdc5c1 bytes=6813696 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-ad6b4a68 sha256=422368bcba3ce38a1e878e46f77431e561af76b6e3624321f16a7b6a36d104c4 bytes=9334784 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-;LARGER-than-the-4570-arms-because-the-D13-payload-embeds-the-D13-device-tree
+set=armed-d13-ad6b4a68 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-ad6b4a68 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-every-arm-6c2b6038-because-the-memory-total-is-an-ENTRY-build-parameter-that-reaches-the-payload-through-the-generated-header
+set=armed-d13-ad6b4a68 sha256=814e6ae64d73d838c09510eb6693c5c392f2818c9bf84612498c0edc5df4542f bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img

@@ -688,6 +688,7 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_USB_STREAM
                 STAGE90_XNU_SMEM_PROBE
                 STAGE90_XNU_MEM_SIZE_MAX
+                STAGE90_XNU_MEM_TOTAL
                 STAGE90_XNU_ENTRY_WINDOW
                 STAGE90_XNU_TREE_D13)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
@@ -840,6 +841,17 @@ do
   # whose arm-key list omits the key, and the writer emits the line unconditionally (0 or 1).
   if [[ -z $_v && $_k == STAGE90_XNU_TREE_D13 ]]; then
     printf '  %s=(absent, and a record that does not name the tree is one built before 954 - the 4570 tree, the only value any pre-954 build could have selected)\n' "$_k"
+    continue
+  fi
+  # **958's total, the same one-way rule as 911b/911c/912/954, and for the same reason.** Every arm
+  # parked before 958 was built with `tools/patch_d13_memory_total.py`'s guard undefined, so its record
+  # has no `STAGE90_XNU_MEM_TOTAL` line; an absent key is not a missing value but the value - the switch
+  # was off, because it did not exist. Demanding the key would make every existing park unpressable
+  # (882's own defect, nine times repaired now), and the ladder still owes those presses. A post-958
+  # record can never reach this branch: the writer emits the line unconditionally (0 or 1), so a record
+  # this build made carries a non-empty value and the branch above does not fire for it.
+  if [[ -z $_v && $_k == STAGE90_XNU_MEM_TOTAL ]]; then
+    printf '  %s=(absent, and a record that does not name the memory total is one built before 958 - the switch was off, the only value a pre-958 build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \

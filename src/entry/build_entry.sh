@@ -1280,6 +1280,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_USB_STREAM
                 STAGE90_XNU_SMEM_PROBE
                 STAGE90_XNU_MEM_SIZE_MAX
+                STAGE90_XNU_MEM_TOTAL
                 STAGE90_XNU_ENTRY_WINDOW
                 STAGE90_XNU_TREE_D13)
 #
@@ -1400,6 +1401,13 @@ do
         # switch is Apple's 1 GiB clamp (`MEM_SIZE_MAX` undefined here), which is a different image from
         # one built with the default spelled out, and the record must say which one it is.
         STAGE90_XNU_MEM_SIZE_MAX)     _v=${STAGE90_XNU_MEM_SIZE_MAX:-(unset)} ;;
+        # 958: recognise the device's full RAM. `tools/patch_d13_memory_total.py` makes D13's
+        # `arm_vm_init.c` read `/defaults hw.memsize` into `max_mem` (`hw.memsize`), guarded by
+        # STAGE90_XNU_MEM_TOTAL and compiled into `osfmk_arm_arm_vm_init.o`, which is IN the link.
+        # Read from the ENVIRONMENT with a default, like its MEM_SIZE_MAX sibling above and for the
+        # same reason (this loop runs ~27000 lines above the assignment site). D13-only: the kernel
+        # object is refused the switch on 4570 by `build_xnu_arm_kernel.sh`.
+        STAGE90_XNU_MEM_TOTAL)        _v=${STAGE90_XNU_MEM_TOTAL:-0} ;;
         # 912: read from the ENVIRONMENT directly and not from `$ENTRY_SIZE`, because this loop runs
         # ~27000 lines ABOVE the assignment (`:28651`) - the same reason `STAGE90_ENTRY_REAL_ARM_INIT`
         # is read with its own `${...:-0}`. The default is the same literal, so an unset switch and an
@@ -37629,6 +37637,14 @@ run python3 "$REPO_ROOT/tools/check_asm_config.py" --tree "$XNU_TREE" --selftest
 run python3 "$REPO_ROOT/tools/check_d13_managed_base.py" --tree "$XNU_TREE" --selftest || exit 1
 run python3 "$REPO_ROOT/tools/check_d13_managed_base.py" --tree "$XNU_TREE" --verbose || exit 1
 #
+# **958's memory total.** `arm_vm_init.c` reads `/defaults hw.memsize` into `max_mem` (guarded by
+# STAGE90_XNU_MEM_TOTAL) so `hw.memsize` reports the device's 3 GiB while the linear map stays the
+# boot bank. The port is correct only if `max_mem` IS what `hw.memsize` reads, the payload publishes
+# the total and the boot bank as the two DIFFERENT numbers, and the map still maps `gMemSize`. This
+# re-derives every one (with 4570 as the control) and refuses if one moves.
+run python3 "$REPO_ROOT/tools/check_d13_memory_total.py" --tree "$XNU_TREE" --selftest || exit 1
+run python3 "$REPO_ROOT/tools/check_d13_memory_total.py" --tree "$XNU_TREE" --verbose || exit 1
+#
 # **And 489's, which is about a reading rather than a build.** For three steps the console's last line -
 # `load_init_program: attempting to load /sbin/launchd` and then nothing - was read as "`execve` is still
 # running, process 1 never started", and 487's next step was aimed at the exec. It is the opposite:
@@ -37882,6 +37898,13 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # the switch is not set, so a record that predates a raised ceiling and one built with Apple's clamp
     # are distinguishable (`X=` is not `X=(unset)` for the same reason `#define X 0` is not off).
     echo "STAGE90_XNU_MEM_SIZE_MAX=${STAGE90_XNU_MEM_SIZE_MAX:-(unset)}"
+    # **958's total, written here for the same reason as 678/911b**: this writer is the one site the
+    # gate ever reads and a name-keyed diff never visits, so a switch that reached the compiler and the
+    # arm-key list but not this line would be a run whose arm nobody read. `0` and `1` are the two
+    # values (`(unset)` never appears: the resolver above defaults it to `0`), and the value is the
+    # switch the D13 kernel pool's `osfmk_arm_arm_vm_init.o` was built with - the marker
+    # `entry_xnu_mem_total_arm_on` is the object's own statement of it.
+    echo "STAGE90_XNU_MEM_TOTAL=${STAGE90_XNU_MEM_TOTAL:-0}"
     # **912's window, written here for a reason the other keys do not have.** Every switch above shapes
     # the ENTRY image's own linked bytes, so the record the gate reads (bound to the entry bin's hash)
     # already differs whenever they differ. `STAGE90_XNU_ENTRY_WINDOW` does NOT: it reaches only the

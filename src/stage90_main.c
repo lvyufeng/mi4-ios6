@@ -47,7 +47,7 @@ static void build_chosen_random_seed(uint8_t *out, uint32_t len)
 static void build_stage90_apple_dt(struct apple_dt_builder *b)
 {
     static const uint32_t memory_reg[] = {
-        RAM_PHYS_BASE, RAM_CONSOLE_BASE - RAM_PHYS_BASE,
+        RAM_PHYS_BASE, RAM_BOOT_BANK_SIZE,
     };
     static const uint32_t gic_reg[] = {
         0xf9000000u, 0x00001000u,
@@ -852,20 +852,29 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
      * is defined in `iokit/Kernel/IODeviceTreeSupport.cpp`, 11303 bytes with 57 mostly-C++
      * references. Both paths want the same node; this is the node.
      *
-     * The value is the same expression `boot_args.c:11` and the /memory node's `reg` already
-     * use, so it introduces no new number. It is a 4-byte machine-order word because
-     * `DTGetProperty` does not swap and `PE_get_default` `memcpy`s into a `uint32_t` - the
-     * way every numeric property in this tree is already written and read
-     * (`pe_serial.c:744` reads `reg` as a native word; `ml_parse_cpu_topology` reads ours).
+     * **958: this is the DEVICE's total RAM, not the payload's boot bank.** The two were the same
+     * expression until now; they are different quantities (`stage90.h:RAM_BOOT_BANK_SIZE` vs
+     * `RAM_DEVICE_TOTAL`). `hw.memsize` means "physical ram size" and answers *this device has 3 GB*,
+     * so it carries `RAM_DEVICE_TOTAL` (`0xC0000000` = 3.000 GiB, the DT-declared bank sum 957
+     * measured). The /memory node's `reg` stays the *boot bank* — the high bank up to the console,
+     * `0x5e500000` — because that is what the payload's own asserts (`mmu.c:2335`, `pexpert.c:68`,
+     * `pe_state_validate`) and D13's linear map (`arm_vm_init.c:327`) are bound to. A value larger
+     * than the boot bank here is safe by the same clamp the paragraph below names.
      *
-     * `arm_vm_init`'s first statement clamps the kernel's own `mem_size` down to this value
-     * only if this value is *smaller*, and it is larger than the 8 MB window this image maps,
-     * so the number cannot change the memory map - which is what makes it safe to add before
-     * the run that measures what XNU actually received.
+     * It is a 4-byte machine-order word because `DTGetProperty` does not swap and `PE_get_default`
+     * `memcpy`s into a `uint32_t` - the way every numeric property in this tree is already written
+     * and read (`pe_serial.c:744` reads `reg` as a native word; `ml_parse_cpu_topology` reads ours).
+     *
+     * `arm_vm_init`'s first statement clamps the kernel's own `mem_size` down to this value only
+     * if this value is *smaller*; here it is LARGER than the window, so 4570's clamp never fires.
+     * **D13's `arm_vm_init` reads it into `max_mem` alone** (958, `arm_vm_init.c`), which is the
+     * reported total (`hw.memsize`, `kern_mib.c:365`) and NOT the map — `gMemSize`/`mem_size`/
+     * `sane_size` stay the boot bank, so the number cannot move the memory map. That is exactly what
+     * 956 requires: recognising the 3 GB must not ride the linear map (which is capped at 1 GiB).
      */
     apple_dt_node_begin(b, 2, 0);
     apple_dt_prop_str(b, "name", "defaults");
-    apple_dt_prop_u32(b, "hw.memsize", RAM_CONSOLE_BASE - RAM_PHYS_BASE);
+    apple_dt_prop_u32(b, "hw.memsize", RAM_DEVICE_TOTAL);
 
     /* /memory */
     apple_dt_node_begin(b, 4, 0);

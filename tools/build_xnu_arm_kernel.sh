@@ -203,6 +203,25 @@ if [[ -f $XNU/osfmk/sys/types.h ]]; then
     CXX_STD_FLAGS+=(-D__STDC_LIMIT_MACROS=1)
 fi
 
+# **958: recognise the device's full RAM.** `tools/patch_d13_memory_total.py` guards a read of
+# `/defaults hw.memsize` in `arm_vm_init.c` on `STAGE90_XNU_MEM_TOTAL`, and this switch defines it for
+# every D13 compilation. It is a SWITCH, not always-on: with it off the guard's `#else` arm is Apple's
+# line exactly, so a D13 object built without the switch is byte-for-byte the tree's - the arms the
+# ladder has already run do not move. It is D13-only: 4570 has no `MANAGED_BASE` (956), so it would
+# recognise a total its linear map cannot bound - and 4570 does not need it (its `arm_init` already
+# reads `hw.memsize` into `xmaxmem`). The refusal below is the 4570 half of build_entry.sh's D13-only
+# arm gate, so a 4570 build cannot silently carry a D13 switch.
+if [[ ${STAGE90_XNU_MEM_TOTAL:-0} -eq 1 ]]; then
+    if [[ -f $XNU/osfmk/sys/types.h ]]; then
+        COMP_DEFINES_EXTRA+=(-DSTAGE90_XNU_MEM_TOTAL=1)
+    else
+        echo "REFUSING: STAGE90_XNU_MEM_TOTAL=1 is a Darwin-13 switch; this tree is 4570 (no" >&2
+        echo "          osfmk/sys/types.h). 4570 reads hw.memsize in arm_init already, and its linear" >&2
+        echo "          map is bounded by MEM_SIZE_MAX, not the D13 fixed MANAGED_BASE (956)." >&2
+        exit 2
+    fi
+fi
+
 # The EABI runtime, which is not in the manifest and is not Apple's. `armv7-unknown-netbsd-eabi`
 # (and `armv7-none-eabi` before it) lowers an aggregate copy to `__aeabi_memcpy4`, where a Darwin
 # target lowers it to `memcpy` - so the ELF path needs four symbols Apple's tree never mentions.

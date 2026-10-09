@@ -31,6 +31,33 @@
 #define RAM_CONSOLE_RESERVED 0x00200000u
 
 /*
+ * 958 — the DEVICE's total RAM, which is a different number from the RAM the payload makes usable.
+ *
+ * 957 measured the device's own `/memory/reg` (read-only adb, Android 10): two banks
+ * `(0x00000000,0x60000000)` + `(0x80000000,0x60000000)` = `0xC0000000` = **3.000 GiB**, corroborated
+ * by the 911c SMEM sum. That total is what the goal's clause 「能够正确识别xiaomi 4的3GB内存」 is about: the
+ * kernel must RECOGNIZE 3 GB.
+ *
+ * It is NOT the RAM the payload can make usable. The high bank is `[0x80000000,0xE0000000)`, but the
+ * payload's own RAM console sits at `0xde500000` (`RAM_CONSOLE_BASE`) and D13's linear map cannot
+ * exceed 1 GiB anyway (956). So the payload's *boot bank* — `args->memSize`, the `/memory/reg` word,
+ * and every assert bound to it — is the high bank up to the console, `0x5e500000`, and it stays that.
+ * The two are genuinely different quantities (one value, two definitions):
+ *
+ *   RAM_BOOT_BANK_SIZE  ->  args->memSize, /memory/reg[1]  - the linear bank the pmap maps
+ *   RAM_DEVICE_TOTAL    ->  /defaults hw.memsize           - what the device physically has
+ *
+ * The total is published as `/defaults hw.memsize`, the property XNU ALREADY reads for exactly
+ * "physical ram size": 4570's `arm_init` reads it into `xmaxmem` (`arm_init.c:282`), and D13's
+ * `arm_vm_init` reads it into `max_mem` (`kern_mib.c:365` serves `hw.memsize` from `&max_mem`). It is
+ * 3 GiB — above the 1 GiB a single-span linear map can hold — but it feeds ONLY the reported total,
+ * never the map (`gMemSize`/`mem_size`/`sane_size` stay the boot bank), which is what 956 requires.
+ * `tools/check_ram_device_total.py` binds this constant to the DT-declared total.
+ */
+#define RAM_BOOT_BANK_SIZE   (RAM_CONSOLE_BASE - RAM_PHYS_BASE)  /* 0x5e500000 - the linear bank */
+#define RAM_DEVICE_TOTAL     0xC0000000u                         /* 3.000 GiB - the device's RAM */
+
+/*
  * The high-VA alias of the payload's own image: `STAGE90_HIGH_ALIAS_BASE + off` maps to PA `off`,
  * for the whole image. Two tables build it - `mmu.c`'s `build_identity_table()` (the one the payload
  * runs under) and `xnu_arm_vm_init_full_pmap.c`'s Phase 5 (the one a handed-off kernel would run
