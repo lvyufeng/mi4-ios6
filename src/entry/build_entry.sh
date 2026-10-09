@@ -37632,8 +37632,8 @@ run python3 "$REPO_ROOT/tools/check_fault_recovery.py" --image "$OUT/xnu_arm_ent
 # the image, so an image whose record says it is not the residence arm cannot carry the pet - the
 # negative direction [[mi4-a-lower-rungs-side-effect-poisoned-the-rung-above]] names.
 if [[ $RESIDENT -eq 1 ]]; then
-    run python3 "$REPO_ROOT/tools/test_resident_guard.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
-    run python3 "$REPO_ROOT/tools/test_resident_guard.py" --image "$OUT/xnu_arm_entry.elf" --selftest || exit 1
+    run python3 "$REPO_ROOT/tools/test_resident_guard.py" --image "$OUT/xnu_arm_entry.elf" --tree "$XNU_TREE" --verbose || exit 1
+    run python3 "$REPO_ROOT/tools/test_resident_guard.py" --image "$OUT/xnu_arm_entry.elf" --tree "$XNU_TREE" --selftest || exit 1
 else
     if arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "entry_wdt_pet" { found = 1 } END { exit(found ? 0 : 1) }'; then
         say "FAIL: STAGE90_XNU_RESIDENT=0 but \`entry_wdt_pet\` IS in the linked $OUT/xnu_arm_entry.elf: the non-resident image must not carry the pet, or an image whose record says it is not the residence arm is indistinguishable from one that keeps itself alive. The trace-side switch did not reach this build. Nothing is rebuilt by this refusal" >&2

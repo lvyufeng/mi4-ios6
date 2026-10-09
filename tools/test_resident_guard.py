@@ -51,6 +51,25 @@ BUILD_ENTRY = os.path.join(REPO_ROOT, "src/entry/build_entry.sh")
 NM = "arm-none-eabi-nm"
 OBJDUMP = "arm-none-eabi-objdump"
 
+IS_D13 = False
+
+
+def is_d13(tree):
+    """D13 ships the legacy private `osfmk/sys/types.h`; 4570 does not."""
+    return os.path.isfile(os.path.join(tree, "osfmk/sys/types.h"))
+
+
+def configure(tree):
+    """**949/950: on D13 the resident pet is compiled out, and this check says so rather than reading
+    an image that has no pet.** 937 pruned the 513-535 idle block (D13 ships no `cpu_idle`), and the
+    pet's declaration and every call site are behind `#if STAGE90_XNU_RESIDENT && !STAGE90_ENTRY_D13`
+    in `entry_trace.c`. So on D13 there is no `entry_wdt_pet` to check: this publishes a skip, after
+    confirming the gate that compiles it out is really there (a skip that could not tell "pruned" from
+    "deleted" would hide a broken pet)."""
+    global IS_D13
+    IS_D13 = is_d13(tree)
+    return IS_D13
+
 
 def say(message):
     print(message)
@@ -808,12 +827,69 @@ def selftest(facts):
     return 0
 
 
+D13_GATE = "#if STAGE90_XNU_RESIDENT && !STAGE90_ENTRY_D13"
+
+
+def d13_pet_is_pruned(facts, trace_text=None, symbols=None):
+    """1 if D13's resident pet is compiled out as this check expects, else 0 with the reason printed."""
+    trace_text = facts["trace_text"] if trace_text is None else trace_text
+    symbols = facts["symbols"] if symbols is None else symbols
+    if D13_GATE not in trace_text:
+        print("FAIL: D13 was selected and this check expects the resident pet to be compiled out, but "
+              "`%s` is not in entry_trace.c: either the gate was removed (a D13 image with no pet that "
+              "nothing refuses) or this check's premise has changed" % D13_GATE, file=sys.stderr)
+        return 1
+    if "entry_wdt_pet" in symbols:
+        print("FAIL: D13 was selected but the linked image has an `entry_wdt_pet`: the gate is present "
+              "in the source and the symbol is in the image, so the image is not the one this check's "
+              "gate names", file=sys.stderr)
+        return 1
+    say("  xnu_entry_909: SKIPPED on D13 - the resident watchdog pet is compiled out. 937 pruned the "
+        "513-535 idle block (D13 ships no `cpu_idle`/`caches.c`), and the pet's declaration and every "
+        "call site are behind `#if STAGE90_XNU_RESIDENT && !STAGE90_ENTRY_D13` in entry_trace.c, so "
+        "`entry_wdt_pet` is not in the linked image and there is no pet for this check's claims to "
+        "read. The gate itself is confirmed present (a skip that could not tell 'pruned' from "
+        "'deleted' would hide a broken pet).")
+    return 0
+
+
+def d13_selftest(facts):
+    """A skip is a claim too, so it gets the same treatment: mutate the two things it rests on and
+    require a refusal. A skip that cannot go red is 228's class - a claim that mutates nothing is
+    indistinguishable from one that holds."""
+    baseline = d13_pet_is_pruned(facts)
+    if baseline:
+        print("FAIL: the D13 skip does not hold for the image it was written against:", file=sys.stderr)
+        return baseline
+    accepted = []
+    # (a) the gate removed from the source: the skip must refuse rather than pass silently.
+    if d13_pet_is_pruned(facts, trace_text=facts["trace_text"].replace(D13_GATE, "#if 0")) == 0:
+        accepted.append("the_gate_that_prunes_the_pet_is_removed")
+    # (b) the symbol present in the image: the skip must refuse.
+    symbols = dict(facts["symbols"])
+    symbols["entry_wdt_pet"] = (0, "t")
+    if d13_pet_is_pruned(facts, symbols=symbols) == 0:
+        accepted.append("the_linked_image_has_a_pet")
+    if accepted:
+        print("FAIL: %d D13 mutations were not refused: %s"
+              % (len(accepted), ", ".join(accepted)), file=sys.stderr)
+        return 1
+    say("  --selftest: both D13 mutations were refused (the gate removed, the symbol present)")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     parser.add_argument("--image", default=None, help="the linked entry image")
+    parser.add_argument("--tree", default=None,
+                        help="the XNU tree the image was built from (D13 detected by osfmk/sys/types.h)")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+
+    tree = args.tree or os.environ.get("XNU_TREE") or os.path.join(
+        REPO_ROOT, "external/xnu-4570.1.46")
+    configure(tree)
 
     if not args.image:
         print("FAIL: --image is required: the pet's base, its store and the wrapper's frame are claims "
@@ -821,6 +897,11 @@ def main():
               file=sys.stderr)
         return 1
     facts = gather(args.image)
+    if IS_D13:
+        # The pet is compiled out on D13; all eight claims are about a pet the image does not have.
+        if args.selftest:
+            return d13_selftest(facts)
+        return d13_pet_is_pruned(facts)
     if args.selftest:
         return selftest(facts)
 
