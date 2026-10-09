@@ -35,12 +35,27 @@ GPT-selected partition is `userdata` (`mmcblk0p25`, `_card_lba = 0x400000` = LBA
 | **`(unsigned)` of it** | **725,597,184 B = 692.0 MiB** |
 | the real iOS 7.1.2 rootfs | **939,524,096 B = 896.0 MiB** |
 
-The strategy's bound is therefore **692 MiB, below the 896 MiB volume**. A mount over it serves `EOF` for
-the volume's top ~204 MiB — and the HFS catalog's file extent at block 9220 and the volume's allocation
-bitmap in the upper region are exactly there, so `hfs_mountroot` cannot finish. **This is `one value, two
+The strategy's bound is therefore **692 MiB, below the 896 MiB volume**. **This is `one value, two
 definitions`**: the SAME unit reports `DKIOCGETBLOCKCOUNT` = `st_media_blockcount[2]` = 26,582,225 sectors
-(fitted the 32-bit cell) = 13.6 GB, and a strategy `len` of 692 MiB. The two numbers disagree by a factor
-of ~19, and a filesystem that trusted the block count would address blocks the strategy refuses.
+= 13.6 GB (64-bit, untruncated), and a strategy `len` of 692 MiB. The two numbers disagree by a factor of
+~19, and a filesystem that trusted the block count would address blocks the strategy refuses.
+
+> **⚠️ 965d CORRECTION (2026-10-09): THIS SECTION'S CAUSAL CLAIM IS RETRACTED.** The original text read
+> "…A mount over it serves `EOF` for the volume's top ~204 MiB — and the HFS catalog's file extent at
+> block **9220** and the volume's allocation bitmap in the upper region are exactly there, so
+> `hfs_mountroot` cannot finish." **Block 9220 is 36 MiB, not above 692 MiB**, and a byte-level parse of
+> the real volume (a catalog walker whose file count matches `fileCount = 7142` exactly, plus the
+> allocation bitmap) shows **every block the real rootfs's mount and exec read is ≤ 530 MiB** — max file
+> data end block **135750** (530.3 MiB across all 7142 files), max catalog/metadata end block **125339**
+> (490 MiB). The bitmap sets only **one** block in `[177050, 229376)` — the tail reserve 229375. The only
+> ≥ 691.6 MiB read a mount *could* make is the **alternate volume header** at block `totalBlocks-2`
+> (896 MiB), and `hfs_mountfs` reads it **only if the primary is corrupt** (`hfs_vfsops.c:3706`) — the
+> primary here is intact, and `hfs_vfsutils.c:452` additionally zeroes `hfs_alt_id_sector` whenever the
+> partition outgrows the volume (`userdata` 13.6 GiB ≫ 896 MiB does). So the 32-bit bound is a **real
+> correctness bug** (a read above 691.6 MiB is refused `EINVAL`) but it is **not what blocks the 896 MiB
+> rootfs from mounting** — that mount fits entirely under the bound. The claim was
+> `[[mi4-a-claim-in-a-comment-is-not-a-check]]`; the falsification is in
+> `experiment-965d-the-32-bit-bound-does-not-block-the-mount.md`.
 
 **The parked 512 KiB arm (`b9c224c0`) never saw it.** 512 KiB does not overflow a 32-bit product, so the
 truncation is invisible until the medium exceeds 4 GiB — which is exactly the point: the port's whole
@@ -67,8 +82,11 @@ blocks; second extent block 124571) is well within the D13 HFS driver's widths �
 - The only `u_int16_t` extent casts (`hfs_catalog.c:1601-1614`) are HFS-**Standard** writeback, not reached
   by HFSX.
 
-So the single wall for the real rootfs is the platform medium's 32-bit length — this rung — and nothing in
-the driver.
+So the driver imposes no wall for the real rootfs. **965d correction:** the platform medium's 32-bit
+length is a *real disagreement with the block count* (below), but it is **not** a wall the real rootfs's
+mount hits — the mount reads at most block 135750 = 530 MiB. The 32-bit bound would only bite a read above
+691.6 MiB (an alternate header on a corrupt volume, or a medium with data up there); the real 896 MiB
+volume has none such.
 
 ## 3. The fix
 
@@ -132,12 +150,16 @@ most often. They are independent: neither implies the other, and each has its ow
 
 - **Proves (on press):** with `FULL_EXTENT=1` and the 896 MiB real rootfs on `userdata`'s head, XNU's
   `hfs_mountroot` parses and mounts the **real iOS 7.1.2 root volume** off the device's own storage — the
-  HFSX branch, the multi-extent catalog at block 9220, and the 64-bit bound all exercised for the first
-  time. The strategy serves blocks up to 896 MiB (above 692 MiB), so a mount that reaches the volume's
-  upper region is proof the bound widened.
-- **Falsifier:** a mount that reads the volume header (block 2) and the catalog's first extent (block 9220)
-  but then stops — or the preflight's `_card_last_lba` reading stuck below 692 MiB — means the
-  `FULL_EXTENT` arm did not take, and the 32-bit bound truncated the medium.
+  HFSX branch and the multi-extent catalog (blocks 9220 / 124571) exercised for the first time. The
+  strategy serves blocks up to the whole selected partition, so the mount is not bounded by the old
+  692 MiB.
+- **⚠️ 965d correction — the press does NOT prove the bound widened, because the mount would succeed under
+  the 32-bit bound too.** Every block the real mount reads is ≤ 530 MiB, inside 691.6 MiB, so a successful
+  mount is *not* evidence that `FULL_EXTENT` took. `FULL_EXTENT` is a correctness fix whose effect is
+  invisible to this volume's mount; §7 records that.
+- **Falsifier:** a mount that reads the volume header (block 2) but then stops, or the preflight's
+  `_card_last_lba` reading never advancing — means the *card serving* itself failed (a 965b-class problem),
+  not the bound.
 - **Does not prove:** the goal's larger clauses. A real mount is a prerequisite for a real *userspace*
   (`launchd` from the real volume, not the 8192-byte fixture) and for long-running residency; both are
   later rungs. The 3 GB low-bank pmap port (915-B) is a separate, whole-kernel arm.
@@ -148,8 +170,40 @@ most often. They are independent: neither implies the other, and each has its ow
   is not confined to the new arm (it is, §4).
 - The **preflight passes a card > 692 MiB with `FULL_EXTENT` off** → the size clause is not
   artifact-grounded (it refuses).
-- The press's `_card_last_lba` never exceeds ~692 MiB on a successful mount → the 64-bit bound is not what
-  widened the medium; the mount succeeded for another reason.
+- ⚠️ The claim this step rested on — that the real rootfs's mount is blocked by the 32-bit bound — is
+  **itself falsified**: see §7 and `experiment-965d-the-32-bit-bound-does-not-block-the-mount.md`.
+
+## 7. 965d — the 32-bit bound does not block the 896 MiB mount (and the retraction)
+
+A byte-level read of the real volume (`/mnt/data/ios7-payload/v2/ios7/rootfs.hfs`) was taken host-side to
+decide what the bound actually protects. The catalog walker's file count matched the volume header's
+`fileCount = 7142` **exactly**, which is the parser's own validation:
+
+| quantity (in 4096-byte allocation blocks) | value | in MiB |
+|---|---|---|
+| highest FILE DATA end block (max over all 7142 data forks) | 135750 | 530.3 |
+| highest catalog/metadata end block (catalog 2nd extent end) | 125339 | 490.0 |
+| 32-bit strategy bound `725197312 / 4096` | 177050 | 691.6 |
+| bits set in the allocation bitmap in `[177050, 229376)` | 1 (block 229375, the tail reserve) | — |
+| alternate volume header (`totalBlocks-2`) | 229374 | 896.0 |
+
+**Every block a real mount reads is ≤ 530 MiB.** The single ≥ 691.6 MiB read a mount *could* make is the
+alternate header, read **only when the primary is corrupt** (`hfs_vfsops.c:3706`); the primary is intact,
+and `hfs_vfsutils.c:452` zeroes `hfs_alt_id_sector` whenever the partition is larger than the volume
+(`userdata` 13.6 GiB ≫ 896 MiB), so on this arm it is never read at all.
+
+**Consequence for the arm.** `STAGE90_XNU_FULL_EXTENT=1` is a **correctness fix**, not a blocker removal: it
+makes the strategy's `len` agree with `DKIOCGETBLOCKCOUNT` (one value, one definition), and it matters for
+any medium that ever has data above 691.6 MiB. It is **not** needed for the real rootfs to mount. The arm
+stays parked and named `armed-d13-e28361f9` (the comment-level correction moved the platform object's
+*source* but not its `.o` — `sha256` `2a987c5c…` unchanged — so the entry image is still `e28361f9`); this
+step changes only comments and records, adds no new arm, and presses nothing.
+
+**What is honestly left for the userspace clause.** Whether XNU mounts this volume is decided by the
+*ladder's read path* (965b's card serving), which is what the press tests — not by the bound. What a
+mounted real volume then needs to *exec* `/sbin/launchd` (which the parse above locates in the catalog, and
+whose blocks are all ≤ 530 MiB) is the next question, and it is a **ladder/driver** question, not a
+`FULL_EXTENT` one.
 
 *Provenance: `src/platform/stage90_root_media.c` (`st_medium_disk_bytes`, `st_media_strategy`'s card
 branch, `st_medium_card_full_bytes`), `src/entry/build_entry.sh` (`ENTRY_ARM_KEYS`, the record writer, the

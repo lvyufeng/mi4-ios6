@@ -637,12 +637,14 @@ st_medium_disk_bytes(uint32_t unit)
      * and whose addressing disagreed would serve a byte range that is not what was selected.
      *
      * **965c: THIS `(unsigned)` IS A 32-BIT WALL, AND IT IS LEFT EXACTLY AS 888 WROTE IT.** `userdata`
-     * (`mmcblk0p25`) is 13,610,499,072 B, and `(unsigned)` of that is 725,597,184 B (692 MiB) - a
-     * length below the decrypted iOS 7.1.2 rootfs's 896 MiB, so a strategy bounded here would serve
-     * `EOF` for the volume's top ~204 MiB. Rather than change this function's return TYPE (which would
-     * move the `.o` even for a build that does not use the arm - verified: it did, at byte 1858),
-     * 965c adds `st_medium_card_full_bytes()` BELOW, under `STAGE90_XNU_FULL_EXTENT`, and the strategy
-     * picks it for the card unit on that arm. With the switch off this body is byte-for-byte 888's. */
+     * (`mmcblk0p25`) is 13,610,499,072 B, and `(unsigned)` of that is 725,197,312 B (691.6 MiB) - a
+     * length far below the partition's own 13.6 GiB, so a strategy bounded here refuses (EINVAL) any
+     * read at or above 691.6 MiB. Rather than change this function's return TYPE (which would move the
+     * `.o` even for a build that does not use the arm - verified: it did, at byte 1858), 965c adds
+     * `st_medium_card_full_bytes()` BELOW, under `STAGE90_XNU_FULL_EXTENT`, and the strategy picks it
+     * for the card unit on that arm. With the switch off this body is byte-for-byte 888's.
+     * ⚠️ 965d: the real 896 MiB rootfs mounts *inside* this bound (its highest read is 530 MiB, see the
+     * note on `st_medium_card_full_bytes` below), so this is a correctness fix, not the mount's blocker. */
     if (unit == ST_MEDIA_DRIVER)
         return (unsigned)((uint64_t)entry_storage_selected_count() * ST_MEDIA_BLOCKSIZE);
 #if STAGE90_XNU_CARD_TOTAL
@@ -660,18 +662,40 @@ st_medium_disk_bytes(uint32_t unit)
 
 #if STAGE90_XNU_FULL_EXTENT
 /*
- * **965c: the card unit's length in 64 BITS - the one thing between this port and the real iOS rootfs.**
+ * **965c: the card unit's length in 64 BITS.**
  * The CARD mount unit (ST_MEDIA_DRIVER) is the selected partition (`userdata`, 13,610,499,072 B on this
- * device), and `st_medium_disk_bytes()` above returns its 32-bit product = 725,597,184 B (692 MiB). The
- * decrypted iOS 7.1.2 rootfs (965) is **896 MiB**; 896 > 692, so a strategy bounded at the 32-bit value
- * serves `EOF` for the volume's top ~204 MiB and `hfs_mountroot` cannot read its catalog. This function
- * is that bound in 64 bits, `entry_storage_selected_count() * ST_MEDIA_BLOCKSIZE`, the SAME product 888
- * computes - the width is the only difference, so the length and the ladder's addressing stay one number
+ * device = 13.6 GiB), and `st_medium_disk_bytes()` above returns its 32-bit product = 725,197,312 B
+ * (691.6 MiB). The decrypted iOS 7.1.2 rootfs is 896 MiB, so ANY read at or above 691.6 MiB of the
+ * medium would be refused by that bound. This function is that length in 64 bits,
+ * `entry_storage_selected_count() * ST_MEDIA_BLOCKSIZE`, the SAME product 888 computes - the width is
+ * the only difference, so the length and the ladder's addressing stay one number
  * ([[mi4-one-value-two-definitions]]). It is a SEPARATE function, not a change to the accessor's return
  * type, so the arm-OFF object keeps 888's exact bytes; the strategy picks THIS for the card unit under
  * the switch (see its `len` computation). `CARD_TOTAL` is unrelated: that widens a fourth unit's
  * CAPACITY reading, this the mount unit's ADDRESSABLE LENGTH - one arm, one switch each.
- */
+ *
+ * **⚠️ 965d CORRECTION - WHAT THIS ARM ACTUALLY BOUNDS (measured, not assumed).** A byte-level parse of
+ * the real rootfs (a catalog walker whose file count matches the volume header's `fileCount = 7142`
+ * exactly, plus the allocation bitmap) gives the volume's own high-water marks:
+ *
+ *   * highest FILE DATA block = **135750** (530.3 MiB) - the maximum over all 7142 files' data forks;
+ *   * highest B-tree / metadata block = **125339** (490 MiB, the catalog's second extent);
+ *   * the allocation bitmap sets only ONE block in `[177050, 229376)` (691.6-896 MiB): the last
+ *     allocation block 229375, i.e. the tail reserve - **no file data and no file metadata live above
+ *     691.6 MiB**;
+ *   * the alternate volume header sits at block `totalBlocks-2 = 229374` (896 MiB), and `hfs_mountfs`
+ *     reads it **only if the primary is corrupt** (`hfs_vfsops.c:3706`); on this volume the primary is
+ *     intact (`sig 0x4858 v5`) so that read never happens. `hfs_vfsutils.c:452` sets `hfs_alt_id_sector=0`
+ *     whenever `spare_sectors > blockSize/logical_block_size` - i.e. whenever the partition is larger
+ *     than the volume, which `userdata` (13.6 GiB) is - and then the alternate is never read at all.
+ *
+ * So the 32-bit bound is a REAL disagreement with `DKIOCGETBLOCKCOUNT` and is worth fixing for
+ * correctness (a mount reading above 691.6 MiB - an alternate header on a corrupt volume, a future
+ * larger payload - would be refused), **but it is NOT what blocks the 896 MiB real rootfs from
+ * mounting**: every block such a mount reads is ≤ 530 MiB, well inside the 32-bit bound. The earlier
+ * "the catalog's first extent at block 9220 is above 692 MiB" was arithmetically false (block 9220 is
+ * 36 MiB) and is retracted; the real, measured consequence is documented in
+ * `docs/experiments/experiment-965d-...` and `experiment-965c-...` §7. */
 static uint64_t
 st_medium_card_full_bytes(void)
 {
