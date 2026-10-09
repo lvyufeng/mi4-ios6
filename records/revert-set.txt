@@ -12548,3 +12548,38 @@ set=armed-d13-ad6b4a68 sha256=422368bcba3ce38a1e878e46f77431e561af76b6e3624321f1
 set=armed-d13-ad6b4a68 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-ad6b4a68 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-every-arm-6c2b6038-because-the-memory-total-is-an-ENTRY-build-parameter-that-reaches-the-payload-through-the-generated-header
 set=armed-d13-ad6b4a68 sha256=814e6ae64d73d838c09510eb6693c5c392f2818c9bf84612498c0edc5df4542f bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+
+# =================================================================================================
+# armed-d13-96f53c02 - THE FIRST D13 USB PROBE ARM (2026-10-09)
+#
+# The goal's clause 3 「可以通过usb进行调试」 advanced onto the Darwin-13 line. All prior USB arms
+# (cabba670/377fb57a/b3fbcd31/880a3568/979ded08/77a51d33/6deae815) are 4570-tree; this is the first
+# built against D13. It is the 958 arm (3 GB memory total) PLUS ONE KEY: STAGE90_XNU_USB_PROBE=1.
+#
+# 951 wired the USB/SMEM probes' call site to follow the tree - on 4570 `__wrap_Idle_load_context`, on
+# D13 `__wrap_machine_idle` (937 compiles the idle-load wrapper out, D13 ships no cpu_idle). The
+# xnu_entry_910 clause confirms the linked image calls `entry_usb_probe` from `__wrap_machine_idle`
+# (read_probe=1, write_arm=0, enum=0, stream=0). `entry_usb.c`'s probe READS the USB2 OTG register
+# block only - **it writes NOTHING** (the file's own contract).
+#
+# The D13 kernel pool is the STAGE90_XNU kernel (705 objects, marker entry_xnu_mem_total_arm_on for
+# STAGE90_XNU_MEM_TOTAL=1); the payload was built with XNU_TREE=.../xnu-hd2-darwin13/xnu and
+# STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'. The payload switch set is UNCHANGED (6c2b6038):
+# USB_PROBE and MEM_TOTAL are ENTRY build parameters.
+#
+# NOT PRESSED. Built and parked so a D13 USB press can be recorded before it is sent. A press must
+# show the `xnu_live_usb_*` readings (id/hwgeneral/hwdevice/hwtxbuf/hwrxbuf/caplength/hccparams/
+# dciversion/usbmode/usbcmd/usbsts/...) meaning the probe ran at the D13 idle site. PRESS IS THE
+# OPERATOR'S.
+# =================================================================================================
+set=armed-d13-96f53c02 sha256=96f53c02a603a292994d64c5cadd793cdbdacea90ddafe97ee9a3f360c8213c3 bytes=6315092 file=xnu_arm_entry.bin role=THE-ARM:-the-first-D13-USB-probe-entry-image-;-the-suffix-96f53c02-is-THIS-member-s-hash-;-the-958-3GB-arm-PLUS-STAGE90_XNU_USB_PROBE=1-;-entry_usb_probe-is-read-only
+set=armed-d13-96f53c02 sha256=2726f3c0fa6c4eee7997354923b6ea44f1ac34903e14cdc96807843b04e96e54 bytes=7352288 file=xnu_arm_entry.elf role=the-entry-ELF-;-the-linked-D13-entry-image-;-carries-entry_usb_probe-at-0x80013d1c-and-entry_xnu_mem_total_arm_on-at-0x8001d5d8
+set=armed-d13-96f53c02 sha256=24aa29cad41abd2e970ab0020fee5c1453bee96f8f9ea9c068e405567fd8ce02 bytes=1360 file=xnu_arm_entry-config.txt role=the-entry-record-;-STAGE90_XNU_TREE_D13=1-STAGE90_XNU_MEM_TOTAL=1-STAGE90_XNU_USB_PROBE=1-plus-the-33-arm-keys-the-958-build-wrote
+set=armed-d13-96f53c02 sha256=778579002b79713b4b710919b900f2b8f0afa65f82385697f04d9eafabb2497d bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest
+set=armed-d13-96f53c02 sha256=5c2b90c46df0eff5d79fc590707d715ab2b52e0259dbae54ba2b191cb19c257b bytes=6810492 file=stage90.bin role=the-payload-binary-embedding-the-D13-entry-image
+set=armed-d13-96f53c02 sha256=8d7486a650cea2ab0ae0bb0eb727234e14c793a283802afb7b9390c7380f1a16 bytes=6872564 file=stage90.elf role=the-payload-ELF
+set=armed-d13-96f53c02 sha256=90791695ab700f26c280cf7eaba7a680a8ee0c2fac3be5f34afd897631e055b7 bytes=6813696 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-96f53c02 sha256=5bd897d20e71655bb0355d7ff9447ee21fbd690fdd834f5e8c26b452b3c53514 bytes=9334784 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT
+set=armed-d13-96f53c02 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-96f53c02 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-every-arm-6c2b6038-because-USB_PROBE-and-MEM_TOTAL-are-ENTRY-build-parameters
+set=armed-d13-96f53c02 sha256=18844a7bcf09f349ed234c1358f0cbddb9eb69672b1f1cae50b3da672e23e622 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
