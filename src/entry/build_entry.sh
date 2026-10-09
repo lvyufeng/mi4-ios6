@@ -37477,10 +37477,10 @@ run python3 "$REPO_ROOT/tools/check_timer_sources.py" --image "$OUT/xnu_arm_entr
 # `noreturn`, so `-O2` emits `b __wrap_vm_pageout` and not `bl`), the image claim counts both: a check
 # that looked only for `bl` would report that the fifth wrapper is never reached, which is the one
 # reading the step exists to take.
-run python3 "$REPO_ROOT/tools/check_boot_completion.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
-    || exit 1
-run python3 "$REPO_ROOT/tools/check_boot_completion.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
-    || exit 1
+run python3 "$REPO_ROOT/tools/check_boot_completion.py" --image "$OUT/xnu_arm_entry.elf" \
+    --tree "$XNU_TREE" --verbose || exit 1
+run python3 "$REPO_ROOT/tools/check_boot_completion.py" --image "$OUT/xnu_arm_entry.elf" \
+    --tree "$XNU_TREE" --selftest || exit 1
 
 # **486's claims, about who owns the device tree and about how the instrument says so.** 485 left one
 # question open - the registry slot holds one entry inside the `IODeviceTreeAlloc` wrapper and a

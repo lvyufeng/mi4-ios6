@@ -91,32 +91,75 @@ BOOT_DIR = os.path.join(REPO_ROOT, "src/entry")
 ENTRY_TRACE_C = os.path.join(BOOT_DIR, "entry_trace.c")
 ENTRY_STUBS_C = os.path.join(BOOT_DIR, "entry_stubs.c")
 BUILD_ENTRY_SH = os.path.join(BOOT_DIR, "build_entry.sh")
-STARTUP_C = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/osfmk/kern/startup.c")
-IOSERVICE_H = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/iokit/IOKit/IOService.h")
-IOSERVICE_CPP = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/iokit/Kernel/IOService.cpp")
-OBJECT_POOL = os.path.join(REPO_ROOT, "out/xnu_kernel_obj")
+
+# **The tree (947).** Same shape as 942/943/945/946: the check detects the tree the way the build does
+# (`D13_TRACE`'s `osfmk/sys/types.h`), and the paths, the pool and the one row of the tail that differs
+# are derived from it. Darwin 13's `kernel_bootstrap_thread` has **no `kdebug_free_early_buf`** (the
+# name is absent from the D13 tree, `grep -rl`=0) - so its tail is four calls, but the census's counter
+# array stays five slots *with index 1 a gap*, because the index is the position in 4570's five and a
+# renumbering would relabel every record in the log.
+DEFAULT_TREE = os.path.join(REPO_ROOT, "external/xnu-4570.1.46")
 
 NM = "arm-none-eabi-nm"
 OBJDUMP = "arm-none-eabi-objdump"
 
 KERNEL_THREAD = "kernel_bootstrap_thread"
 
+# The kdebug name, which is **4570-only**: on D13 the entry is present as a *position* but is never
+# called, so it is excluded from the order claim and its wrapper is compiled out (`#if !STAGE90_ENTRY_D13`
+# in entry_trace.c; its `--wrap` is dropped by build_entry.sh's `D13_ONLY_WRAPS`).
+KDEBUG = "kdebug_free_early_buf"
+
 # The five, **in the order Apple's `kernel_bootstrap_thread` calls them**. The order is a transcription
 # of `startup.c` and claim 1 compares it against `startup.c` itself: the tuple is what this check
 # believes, the source is what it measures, and a step that reordered Apple's tail fails here rather
-# than re-transcribing the numbers into the wrappers.
-WRAPPED = (
+# than re-transcribing the numbers into the wrappers. **`WRAPPED` and `EXCLUDED` are set per tree by
+# `configure()`** from the literals below; on D13 `WRAPPED` is the four callable members of the five and
+# the gap at index 1 (kdebug) is what keeps the counter array five long.
+WRAPPED_4570 = (
     "OSKextRemoveKextBootstrap",
-    "kdebug_free_early_buf",
+    KDEBUG,
     "serial_keyboard_init",
     "vm_page_init_local_q",
     "vm_pageout",
 )
+# The five *positions*, present in the counter array whether or not the name is callable: this is the
+# fixed list `ENTRY_TAIL_CALLS` and `tail_seen0..4` index. It is tree-invariant, so D13's index 1 (the
+# kdebug position) is simply never written and the array stays five long on both trees.
+TAIL_FIVE = WRAPPED_4570
 # The two in the same tail that are deliberately *not* wrapped, each for a reason claim 1 and claim 2
 # check rather than restate.
 EXCLUDED = ("bsd_init", "thread_bind")
 
 DEFINING = "TtDdBbRrSsGgVv"
+
+# --- per-tree, set by `configure()` ------------------------------------------------------------------
+# 4570: five callable tail calls. D13: four (no kdebug), with index 1 the gap.
+WRAPPED = WRAPPED_4570
+STARTUP_C = os.path.join(DEFAULT_TREE, "osfmk/kern/startup.c")
+IOSERVICE_H = os.path.join(DEFAULT_TREE, "iokit/IOKit/IOService.h")
+IOSERVICE_CPP = os.path.join(DEFAULT_TREE, "iokit/Kernel/IOService.cpp")
+OBJECT_POOL = os.path.join(REPO_ROOT, "out/xnu_kernel_obj")
+IS_D13 = False
+
+
+def is_d13(tree):
+    """The same discriminator the build uses (`D13_TRACE`): D13's legacy private `osfmk/sys/types.h`."""
+    return os.path.isfile(os.path.join(tree, "osfmk/sys/types.h"))
+
+
+def configure(tree):
+    """Point the check at a tree: the three source files it reads, the pool it links from, and the one
+    tail row that differs (`kdebug_free_early_buf`, absent on D13). Called once in `main()`."""
+    global WRAPPED, STARTUP_C, IOSERVICE_H, IOSERVICE_CPP, OBJECT_POOL, IS_D13
+    d13 = is_d13(tree)
+    IS_D13 = d13
+    WRAPPED = tuple(n for n in WRAPPED_4570 if not (d13 and n == KDEBUG))
+    STARTUP_C = os.path.join(tree, "osfmk/kern/startup.c")
+    IOSERVICE_H = os.path.join(tree, "iokit/IOKit/IOService.h")
+    IOSERVICE_CPP = os.path.join(tree, "iokit/Kernel/IOService.cpp")
+    OBJECT_POOL = os.path.join(REPO_ROOT, "out/xnu_kernel_obj" + ("_d13" if d13 else ""))
+    return d13
 
 # Every count this step takes, and the key it is published under. The list is here rather than read out
 # of the writer because it is the *claim* - `calls` against the five `seen` counters says which of
@@ -270,7 +313,7 @@ def apple_tail(startup):
     if body is None:
         return None
     hits = {}
-    for name in WRAPPED + EXCLUDED:
+    for name in TAIL_FIVE + EXCLUDED:
         hits[name] = [m.start() for m in re.finditer(r"(?<![\w])%s\s*\(" % re.escape(name), body)]
     return {"body": body, "hits": hits}
 
@@ -425,7 +468,14 @@ def claim_apple_order(facts, failures, notes):
                         "publishes is a numbering of nothing")
         return
 
-    wrong = sorted(n for n in WRAPPED + ("bsd_init",) if len(apple["hits"][n]) != 1)
+    # **The order is Apple's five, and it is checked against `TAIL_FIVE` on both trees (947).** On D13
+    # the kdebug position is present in the array but has no call site at all (the name is 4570-only), so
+    # it is excluded here by *count*, not by name: the three names present must be called exactly once,
+    # and the two that are not callable here (nothing on D13) must have zero hits. The measured order is
+    # then compared against the sub-order of `TAIL_FIVE` that has hits - which is Apple's order with the
+    # D13 gap removed.
+    present = tuple(n for n in TAIL_FIVE if apple["hits"][n])
+    wrong = sorted(n for n in present + ("bsd_init",) if len(apple["hits"][n]) != 1)
     for name in wrong:
         failures.append("Apple's kernel_bootstrap_thread calls %s %d time(s), not once: a wrapper's "
                         "record is a *position* in this tail - `tail_seen[i]` says which of Apple's "
@@ -434,17 +484,25 @@ def claim_apple_order(facts, failures, notes):
     if wrong:
         return
 
-    measured = tuple(sorted(WRAPPED, key=lambda n: apple["hits"][n][0]))
-    if measured != WRAPPED:
+    # `present` is already in `TAIL_FIVE` order, so comparing the position-sorted hits against it is
+    # exactly the order claim: a reordering in Apple's source would make the two disagree.
+    measured = tuple(sorted(present, key=lambda n: apple["hits"][n][0]))
+    if measured != present:
         failures.append("Apple's tail calls %s, and this check's table says %s: the indices the wrappers "
                         "publish are a transcription of that order, so a reordered tail would relabel "
                         "every record in the log while every file still compiled"
-                        % (" then ".join(measured), " then ".join(WRAPPED)))
+                        % (" then ".join(measured), " then ".join(present)))
+        return
+    if present != WRAPPED:
+        failures.append("this tree's tail calls %s, but the wrappers this check expects are %s: the "
+                        "counter array's gap must sit at the position of the one name this tree does not "
+                        "call, and a different set would make it the wrong index"
+                        % (", ".join(present), ", ".join(WRAPPED)))
         return
 
-    first = apple["hits"][WRAPPED[0]][0]
-    penultimate = apple["hits"][WRAPPED[-2]][0]
-    last = apple["hits"][WRAPPED[-1]][0]
+    first = apple["hits"][present[0]][0]
+    penultimate = apple["hits"][present[-2]][0]
+    last = apple["hits"][present[-1]][0]
     if apple["hits"]["bsd_init"][0] > first:
         failures.append("Apple's tail no longer calls `bsd_init` before the first of the five, which is "
                         "the reason this step does not wrap it: the boot's own console text is what "
@@ -550,20 +608,22 @@ def claim_exclusive(facts, failures, notes):
 
     if len(singles) == len(WRAPPED):
         if len(set(singles)) != 1:
-            failures.append("the five are referenced by %d different objects (%s): they would not be "
-                            "five calls in one thread's tail, and the index each wrapper publishes would "
-                            "not order anything" % (len(set(singles)), ", ".join(sorted(set(singles)))))
+            failures.append("the tail's %d callable wrappers are referenced by %d different objects (%s): "
+                            "they would not be calls in one thread's tail, and the index each wrapper "
+                            "publishes would not order anything"
+                            % (len(WRAPPED), len(set(singles)), ", ".join(sorted(set(singles)))))
         else:
             startup_object = singles[0]
             defines_thread = pool.get(KERNEL_THREAD, {}).get(startup_object, [])
             if not any(k in DEFINING for k in defines_thread):
-                failures.append("the five are all referenced by %s, which does not define %s: the "
-                                "wrappers' positions are positions in *that* thread's tail, and the "
-                                "object that makes all five calls is what says so"
+                failures.append("the tail's wrappers are all referenced by %s, which does not define %s: "
+                                "the wrappers' positions are positions in *that* thread's tail, and the "
+                                "object that makes all the tail's calls is what says so"
                                 % (startup_object, KERNEL_THREAD))
             else:
-                notes.append("all five are referenced by one object (%s), and it is the object that "
-                             "defines %s" % (startup_object, KERNEL_THREAD))
+                notes.append("all %d of the tail's callable wrappers are referenced by one object (%s), "
+                             "and it is the object that defines %s"
+                             % (len(WRAPPED), startup_object, KERNEL_THREAD))
 
     bind = referrers.get("thread_bind")
     if bind is not None and len(bind) < 2:
@@ -584,11 +644,14 @@ def claim_wrappers(facts, failures, notes):
     expected = {}
     apple = facts["apple"]
     # `thread_bind` is called twice in Apple's body and is not one of the five, so the guard is over
-    # WRAPPED and not over every name the tail census found: testing all of `hits` made `expected` empty
-    # in every run, and an empty expectation is a claim about indices that never runs at all.
-    if apple is not None and all(len(apple["hits"][name]) == 1 for name in WRAPPED):
-        order = sorted(WRAPPED, key=lambda n: apple["hits"][n][0])
-        expected = {name: order.index(name) for name in WRAPPED}
+    # the callable tail names and not over every name the tail census found: testing all of `hits` made
+    # `expected` empty in every run, and an empty expectation is a claim about indices that never runs.
+    # **The index is the position in `TAIL_FIVE`, not in `WRAPPED` (947)**: D13 calls four of the five,
+    # so its wrapper indices are 0,2,3,4 with index 1 the gap - the position 4570's `tail_seen[1]` holds.
+    if apple is not None:
+        present = tuple(n for n in TAIL_FIVE if apple["hits"][n])
+        if all(len(apple["hits"][name]) == 1 for name in present):
+            expected = {name: TAIL_FIVE.index(name) for name in WRAPPED}
 
     for name in WRAPPED:
         body = bodies.get(name)
@@ -625,7 +688,7 @@ def claim_wrappers(facts, failures, notes):
                             % (name, records[name], expected[name]))
 
     if records and len(set(records.values())) != len(records):
-        failures.append("two of the wrappers publish the same index (%s), so the five counters in "
+        failures.append("two of the wrappers publish the same index (%s), so the counters in "
                         "tail_seen[] cannot separate them" % sorted(records.values()))
 
     last = WRAPPED[-1]
@@ -652,8 +715,9 @@ def claim_wrappers(facts, failures, notes):
                                 "boot: a record placed there is either dead code or - worse - the reason "
                                 "the run would keep going" % (last, last))
     if not failures:
-        notes.append("each of the five records its position before performing the call, the indices are "
-                     "Apple's order, and the census runs inside the fifth between them")
+        notes.append("each of the tail's callable wrappers records its position before performing the "
+                     "call, the indices are the positions in Apple's order, and the census runs inside "
+                     "the last between them")
 
 
 def claim_bounds(facts, failures, notes):
@@ -668,10 +732,12 @@ def claim_bounds(facts, failures, notes):
                         "five calls and the guard that keeps a ninth index out of it are two literals "
                         "again - this project's oldest defect class, and here its failure would be a "
                         "store past the end of a `.bss` array in the kernel's own boot thread")
-    elif count != len(WRAPPED):
-        failures.append("ENTRY_TAIL_CALLS is %d and entry_trace.c defines %d wrappers: the counter array "
-                        "and the wrappers disagree about how many positions Apple's tail has"
-                        % (count, len(WRAPPED)))
+    elif count != len(TAIL_FIVE):
+        failures.append("ENTRY_TAIL_CALLS is %d and Apple's tail has %d positions: the counter array and "
+                        "the tail disagree about how many positions Apple's tail has - on this tree %d of "
+                        "those positions are callable (the rest are a name the tree does not call, kept as "
+                        "a gap so the indices match 4570's log)"
+                        % (count, len(TAIL_FIVE), len(WRAPPED)))
     declaration = re.search(r"uint32_t\s+g_boot_tail_seen\s*\[\s*([^\]]+?)\s*\]", facts["stubs"])
     if declaration is None:
         failures.append("entry_stubs.c no longer declares g_boot_tail_seen[] as a `uint32_t` array, so "
@@ -943,6 +1009,16 @@ def claim_the_bit_registration_sets(facts, failures, notes):
     cpp = facts["ioservice_cpp"]
     stubs = facts["stubs"]
 
+    # **947: this claim is 4570's `IOService.cpp`, and D13's file has diverged.** D13 has no
+    # `copyNotifiers` function at all (`grep`=0 in the D13 tree) - its registration path delivers
+    # `gIOMatchedNotification` from inside `doServiceMatch` - so four of the links this claim reads are
+    # links in a file the tree does not have. The claim is **skipped, not weakened**: the reading it
+    # backs (that the census's `Matched` tally says nothing about a driver) has no 4570-shaped source in
+    # this tree, which is a separate concern from the boot tail this rung is about. Published by
+    # `main()` as `xnu_entry_485: ... skipped`, so a skip is a reading and not a silence.
+    if IS_D13:
+        return
+
     setter = function_body(cpp, "copyNotifiers")
     if setter is None:
         failures.append("IOService.cpp no longer defines copyNotifiers, so the statement that writes the "
@@ -1096,7 +1172,7 @@ def claim_image(facts, failures, notes):
     lines = functions.get(KERNEL_THREAD)
     if lines is None:
         failures.append("the image has no kernel_bootstrap_thread, so the tail this step wraps is not "
-                        "in it and the four `bl`s the run would take do not exist")
+                        "in it and the `bl`s the run would take do not exist")
     else:
         wrapped_targets = [t for _kind, t in transfers(lines) if t.startswith("__wrap_")]
         measured = tuple(sorted((t[len("__wrap_"):] for t in wrapped_targets),
@@ -1122,8 +1198,8 @@ def claim_image(facts, failures, notes):
                             "order the calls actually run in would disagree with the number beside it in "
                             "the log" % (", ".join(measured), ", ".join(WRAPPED)))
         if measured == WRAPPED:
-            notes.append("kernel_bootstrap_thread transfers to the five wrappers in Apple's order, the "
-                         "last of them as a tail branch because vm_pageout is `noreturn`")
+            notes.append("kernel_bootstrap_thread transfers to the wrappers of Apple's tail in Apple's "
+                         "order, the last of them as a tail branch because vm_pageout is `noreturn`")
 
     for name in WRAPPED:
         wrapper_lines = functions.get("__wrap_" + name)
@@ -1135,8 +1211,8 @@ def claim_image(facts, failures, notes):
                             "a constant: the site it publishes in the log is then not the function it "
                             "calls" % (name, name, plain))
     if not failures:
-        notes.append("all five wrappers are linked at addresses of their own and each publishes its real "
-                     "function's address")
+        notes.append("all %d wrappers are linked at addresses of their own and each publishes its real "
+                     "function's address" % len(WRAPPED))
 
 
 CLAIMS = (claim_apple_order, claim_exclusive, claim_wrappers, claim_bounds, claim_census,
@@ -1278,8 +1354,15 @@ def mutate_facts(facts, mutate):
         rederive_build(_bump(facts["build_text"], " --wrap=vm_pageout)",
                              " --wrap=vm_pageout --wrap=thread_bind)"))
     elif mutate == "a_wrap_moves_to_pass_one":
+        # The anchor is the *live* line, not the pre-934 spelling. 934/935 made the second pass-1 wrap
+        # tree-gated (`${FIQ_CTX_WRAP[@]}`) and neither updated this anchor, so from 935 until 947 the
+        # `_bump` assertion killed the whole selftest with a `SystemExit` - which reads as "the check
+        # cannot find what it mutates", not as a mutation result, and the 4570 `--selftest` printed no
+        # verdict at all. The same break 946 found in `check_timer_sources.py`. Now it is a real mutation
+        # on both trees: `PASS1_LDFLAGS` still reads as a single-element array, but its one wrap is one of
+        # the five, which claim 1 refuses.
         rederive_build(_bump(facts["build_text"],
-                             "PASS1_LDFLAGS=(--wrap=PE_init_platform --wrap=fiq_context_init)",
+                             'PASS1_LDFLAGS=(--wrap=PE_init_platform ${FIQ_CTX_WRAP[@]+"${FIQ_CTX_WRAP[@]}"})',
                              "PASS1_LDFLAGS=(--wrap=vm_pageout)"))
     elif mutate == "wrapper_index_swapped":
         # Replaced with the call each one wraps in the pattern, because a bare `entry_note_boot_tail(0u,`
@@ -1359,8 +1442,15 @@ def mutate_facts(facts, mutate):
         rederive_trace(facts["trace_text"].replace("STAGE90_DTK_STATE0_OFF + 4u",
                                                    "STAGE90_DTK_STATE0_OFF"))
     elif mutate == "the_mangled_accessor_is_dropped":
-        rederive_trace(_bump(facts["trace_text"],
-                             '__asm__("_ZNK7OSArray8getCountEv")', '__asm__("_ZNK7OSArray8getCountE")'))
+        # Every spelling, not the first. The claim is an existence test over the whole file, and this
+        # accessor is named in *two* places (`entry_probe_dt_children`'s census and the service-plane
+        # census 487 added), so a `_bump` that edits one leaves the other standing and the claim still
+        # passes - a mutation that mutates nothing. This is the same fix
+        # `the_second_state_word_moves_a_word_back` carries, and 947's revival of this selftest (the
+        # 934/935 anchor break had silenced it) is what surfaced it.
+        assert facts["trace_text"].count('__asm__("_ZNK7OSArray8getCountEv")') >= 1
+        rederive_trace(facts["trace_text"].replace('__asm__("_ZNK7OSArray8getCountEv")',
+                                                   '__asm__("_ZNK7OSArray8getCountE")'))
     elif mutate == "the_tail_count_is_spelled_again":
         rederive_stubs(_bump(facts["stubs_text"], "g_boot_tail_seen[ENTRY_TAIL_CALLS]",
                              "g_boot_tail_seen[5]"))
@@ -1481,6 +1571,38 @@ MUTATIONS = (
 )
 
 
+# **The mutations this tree cannot host (947).** Every one of these is anchored on a *4570* fact - a
+# name D13's `startup.c` does not call, or a value this tree's `build_entry.sh` does not carry - so
+# mutating it would edit text that is not there and the `_bump` assertion would kill the whole selftest
+# silently (`SystemExit`, which reads as "the check cannot find what it mutates", not as a result). They
+# are published by `selftest()` as *skipped on this tree*, the same shape 483 and 484/486 chose. The
+# claim they back is not weakened: the ordinary claims still run, and what they exercise (`kdebug`,
+# the wrapped name set, the index arithmetic) is the part of the tail D13 does not have.
+D13_SKIPPED_MUTATIONS = frozenset((
+    "a_wrap_is_dropped_from_the_build",          # TRACE_LDFLAGS names all three trees' wraps; D13's set differs
+    "the_excluded_one_is_wrapped",
+    "a_wrap_moves_to_pass_one",
+    "wrapper_index_swapped",                      # the 0u/1u pair is 4570's kdebug position
+    "wrapper_index_is_a_name",
+    "the_site_is_the_wrapper",
+    "a_wrapper_loses_its_record",
+    "the_tail_count_is_spelled_again",
+    "the_guard_uses_a_literal",
+    "the_tail_count_shrinks",
+    "a_wrapper_is_absent_from_the_image",
+    "a_wrapper_is_the_function",                  # drops __wrap_kdebug_free_early_buf - absent on D13
+    "the_tail_calls_are_out_of_order",            # swaps the kdebug transfer - absent on D13
+    "apple_drops_a_tail_call",                    # edits `kdebug_free_early_buf();` - absent from D13's startup.c
+    # These mutate claim 6, which is 4570's `IOService.cpp` and is skipped on D13 (no `copyNotifiers`):
+    # "the check must still refuse this" has no subject where the claim does not run.
+    "the_matched_bit_is_a_match_again", "the_inactive_tally_is_dropped",
+    "the_setter_stops_writing_the_bit", "the_matched_write_moves_inside_the_match_gate",
+    "the_guard_gains_a_match_test", "startMatching_stops_calling_doServiceMatch",
+    "registerService_leaves_the_chain", "the_config_thread_loses_the_match",
+    "a_third_route_to_the_write", "the_service_tree_tallies_leave_the_live_channel",
+))
+
+
 def selftest(facts):
     # **The baseline first, and it is not a formality.** Every mutation below is "the check must still
     # report a failure after this edit", so on a baseline that already fails - an image built before this
@@ -1494,25 +1616,38 @@ def selftest(facts):
             print("      " + failure, file=sys.stderr)
         return 1
     accepted = []
+    ran = 0
     for name in MUTATIONS:
+        if IS_D13 and name in D13_SKIPPED_MUTATIONS:
+            continue
+        ran += 1
         failures, _notes = compare(facts, mutate=name)
         if not failures:
             accepted.append(name)
             print("      ACCEPTED: %s" % name, file=sys.stderr)
     if accepted:
         print("FAIL: %d of %d mutations were not refused: %s"
-              % (len(accepted), len(MUTATIONS), ", ".join(accepted)), file=sys.stderr)
+              % (len(accepted), ran, ", ".join(accepted)), file=sys.stderr)
         return 1
-    say("  --selftest: all %d mutations were refused" % len(MUTATIONS))
+    skipped = len(MUTATIONS) - ran
+    if skipped:
+        say("  --selftest: all %d mutations were refused, %d skipped (4570-only on this tree)"
+            % (ran, skipped))
+    else:
+        say("  --selftest: all %d mutations were refused" % ran)
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     parser.add_argument("--image", default=None, help="the linked entry image")
+    parser.add_argument("--tree", default=DEFAULT_TREE,
+                        help="the XNU tree the image was built from (D13 detected by osfmk/sys/types.h)")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+
+    configure(args.tree)
 
     if not args.image:
         print("FAIL: --image is required: three of the seven claims are about the linked image - the "
@@ -1532,6 +1667,17 @@ def main():
         for failure in failures:
             print("      " + failure, file=sys.stderr)
         return 1
+    if IS_D13:
+        say("  xnu_entry_485: Apple's own tail is wrapped in Apple's order (this tree calls %d of the "
+            "tail's %d positions - `kdebug_free_early_buf` is 4570-only and its position is kept as the "
+            "gap index 1), each callable wrapper is called from one place in this kernel - the boot "
+            "thread's object - the last records its position before a call that never returns, and the "
+            "device tree census walks from the root the OS's own walk uses, publishing both candidate "
+            "roots and both child counts, with every record in the live channel as well as the report. "
+            "[claim 6, the `Matched`-bit source read, is 4570's `IOService.cpp` and is skipped on this "
+            "tree: D13 has no `copyNotifiers`]"
+            % (len(WRAPPED), len(TAIL_FIVE)))
+        return 0
     say("  xnu_entry_485: Apple's own tail is wrapped in Apple's order, each of the five is called from "
         "one place in this kernel - the boot thread's object - the fifth records its position before a "
         "call that never returns, and the device tree census walks from the root the OS's own walk uses, "
