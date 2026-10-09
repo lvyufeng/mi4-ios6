@@ -15,7 +15,13 @@ facts hold together, and any one can silently drift:
      ride it);
   4. the payload publishes the two DIFFERENT quantities correctly - `/memory/reg` the boot bank
      (`RAM_BOOT_BANK_SIZE` = 0x5e500000) and `/defaults hw.memsize` the device total
-     (`RAM_DEVICE_TOTAL` = 0xC0000000 = 3 GiB, above the boot bank - the whole distinction).
+     (`RAM_DEVICE_TOTAL` = 0xC0000000 = 3 GiB, above the boot bank - the whole distinction);
+  5. `mem_size` and `sane_size` are NEVER raised off the boot bank (964, refining 915 §5).  They are a
+     DIFFERENT quantity from `max_mem`: `mem_size` sizes the pmap's page tables and `sane_size` sizes
+     kalloc/zones, so setting them to the region SUM while the allocator owns one bank OVER-PROMISES
+     (and a multi-region pmap sizes its tables from the FIRST region - 917).  The stale 915 §5 row
+     said "set max_mem/mem_size/sane_size = the sum"; this fact refuses a port that follows it.  Both
+     are only ever assigned `gMemSize`.
 
 The 4570 tree is the CONTROL: it ships no D13 marker (so the discriminator reads the right tree) and
 its `arm_vm_init` still clamps `mem_size` DOWN to `memory_size`, which is what makes the raised total
@@ -143,6 +149,22 @@ def _facts_d13(avm_text, mib_text):
     if not re.search(r"#define\s+MANAGED_BASE\s+0xC0000000", avm_text):
         return ("D13's MANAGED_BASE is no longer the fixed 0xC0000000 - 956's 1 GiB ceiling (and the "
                 "reason the total must NOT ride the map) has moved")
+    # fact 5 (964): mem_size and sane_size must NOT be raised off the boot bank.  The stale 915 §5 row
+    # would set max_mem/mem_size/sane_size = the region sum; setting the last two there over-promises the
+    # allocator (they size the pmap page tables and kalloc/zones - 958 §3).  Both are only ever assigned
+    # gMemSize, possibly through a chain (`max_mem = mem_size = sane_size = gMemSize;`) - so the check
+    # reads each assignment STATEMENT, takes the terminal RHS after the last `=`, and requires it to be
+    # exactly `gMemSize`.  A port that gives either a second writer (a region sum, RAM_DEVICE_TOTAL, an
+    # arithmetic expression) is refused here, structurally, before it can ship.
+    for match in re.finditer(r"(?:^|[;{=])\s*(mem_size|sane_size)\s*=\s*([^;]*);", avm_text, re.M):
+        var, rhs = match.group(1), match.group(2)
+        terminal = rhs.rsplit("=", 1)[-1].strip()
+        if terminal != "gMemSize":
+            return ("D13's arm_vm_init.c assigns `%s` off the boot bank (`%s = %s`) - 964: %s sizes the "
+                    "%s, and raising it to the region sum while the allocator owns one bank over-promises "
+                    "(the stale 915 §5 row).  It must only ever be `gMemSize`."
+                    % (var, var, terminal, var,
+                       "pmap page tables" if var == "mem_size" else "kalloc and the zones"))
     # fact 1: max_mem is the reported total
     if not re.search(r"SYSCTL_QUAD\s*\(\s*_hw\s*,\s*HW_MEMSIZE\s*,[^;]*?&max_mem\s*,", mib_text, re.S):
         return ("bsd/kern/kern_mib.c no longer serves `hw.memsize` from `&max_mem` - `max_mem` is not "
@@ -195,6 +217,12 @@ def selftest():
         ("MANAGED_BASE becomes derived", base_avm.replace("#define MANAGED_BASE    0xC0000000", "#define MANAGED_BASE    gVirtBase"), mib, hdr, mn, False),
         ("the device total moved", base_avm, mib, hdr.replace("0xC0000000u", "0x40000000u"), mn, False),
         ("the total is not above the bank", base_avm, mib, hdr.replace("0xC0000000u", "0x5e500000u"), mn, False),
+        ("mem_size raised to the region sum (915 §5)",
+         base_avm.replace("max_mem = mem_size = sane_size = gMemSize;\n    {",
+                          "max_mem = gMemSize;\n    mem_size = sane_size = RAM_DEVICE_TOTAL;\n    {"), mib, hdr, mn, False),
+        ("sane_size alone raised off the bank",
+         base_avm.replace("max_mem = mem_size = sane_size = gMemSize;\n    {",
+                          "max_mem = mem_size = gMemSize;\n    sane_size = mem_size + gMemSize;\n    {"), mib, hdr, mn, False),
         ("reg stops being the boot bank", base_avm, mib, hdr, mn.replace("RAM_BOOT_BANK_SIZE, }", "RAM_DEVICE_TOTAL, }"), False),
         ("hw.memsize stops being the total", base_avm, mib, hdr, mn.replace("RAM_DEVICE_TOTAL", "RAM_BOOT_BANK_SIZE"), False),
     ]

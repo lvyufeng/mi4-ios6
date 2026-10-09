@@ -44,9 +44,16 @@ So the goal's clause 「能够正确识别 3 GB」 is already **met** (958 repor
 next word the goal does not strictly use but the *port* implies: **the low bank's pages become
 allocatable**. That is a distinct, harder claim, and it must not re-open the total.
 
-**A build refusal binds it:** with the region list present, `max_mem` has exactly ONE writer (the DT
-property, 958), and `mem_size`/`sane_size` are set from the selected region alone. A region port that
-writes `max_mem` is a refusal, not a preference ([[mi4-a-claim-in-a-comment-is-not-a-check]]).
+**A build refusal binds it (and it now EXISTS).** With the region list present, `max_mem` has exactly
+ONE writer (the DT property, 958), and `mem_size`/`sane_size` are set from the selected region alone.
+`tools/check_d13_memory_total.py` (958's guard, already in `make check`) gained **fact 5**: it reads
+every assignment *statement* to `mem_size`/`sane_size` in D13's `arm_vm_init.c`, takes the terminal RHS
+after the last `=` (so the chain `max_mem = mem_size = sane_size = gMemSize;` reads as `gMemSize`), and
+requires it to be exactly `gMemSize`. A port that follows the stale 915 §5 row — `mem_size = sane_size
+= <sum>` — is **refused at `make check`**, with the reason naming the doomed stale row. Two selftest
+mutations (`mem_size = sane_size = RAM_DEVICE_TOTAL`, `sane_size = mem_size + gMemSize`) prove the fact
+bites the right way. This is the difference between a rule in prose and a rule in the build: a note in
+this doc would have been [[mi4-a-claim-in-a-comment-is-not-a-check]] again.
 
 ## 3. Why there is no smaller safe slice than "the whole region port"
 
