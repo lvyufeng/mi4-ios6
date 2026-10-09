@@ -76,9 +76,18 @@ array**: `src/entry/blob/xnu_arm_entry_root_hfs.S` does `.incbin` of the 524288-
 the 896 MiB iOS rootfs, disk 0 must be a real block device (the eMMC card strategy, `ST_MEDIA_DRIVER`),
 not an embedded array. The array cannot be 896 MiB: the payload region holds the entry image, and
 `build_hfs_root_image.sh` chose 512 KiB precisely *"small enough to sit in the payload's own region."*
-This is why 903's note said the mounted volume was a RAM blob (`md0`) — the read path is real, the
-medium is not the device's storage. **Serving a real iOS-sized rootfs requires the root volume to live
-on the card, served through the 903 card read path** — a distinct, larger port than the signature fix.
+**Serving a real iOS-sized rootfs requires the root volume to live on the card** — a distinct, larger
+port than the signature fix.
+
+**Correction (965a, verified): on master the mount is the tree's own `hfs_mountroot`, not 4570's
+mockfs.** The first draft of this section repeated 903's "the volume was a RAM blob (`md0`)" note. That
+is a **4570 inheritance**: 4570's root provider is `mockfs` (which memory-backs a blob as `md0`), but
+**D13 ships no mockfs** — its `bsd/vfs/vfs_conf.c:120` carries the native row
+`{ &hfs_vfsops, "hfs", 17, …, hfs_mountroot, … }`, and `build_entry.sh`'s D13 branch *requires*
+`bsd_hfs_hfs_vfsops.o` in the pool for exactly this reason (`36998-37003`). So on master, with
+`STAGE90_XNU_HFS_ROOT_MEDIA=1`, `vfs_mountroot` genuinely calls `hfs_mountroot`, which reaches the
+strategy-served volume. The medium (array vs card) is still the wall in §3b, but it is a **size**
+wall, not a "the mount never happens" wall.
 
 ## 4. Why this is the honest next frontier
 
@@ -93,13 +102,39 @@ the entry build), and both belong on the road to "no byte so far has been Apple'
 that is must land on a mount path that has never seen the target's filesystem family."
 
 **Next rungs (both host-side, both parkable):**
-- **965a:** a small HFSX fixture (`mkfs.hfsplus -s`, 512 KiB, same `launchd` blob) as a selectable root
-  arm — first execution of the HFSX branch at the proven size. Refused-or-parked, no device write.
+- **965a (DONE, this rung):** the committed fixture is now **HFSX** — see §5.
 - **965b:** move disk 0 to the **card** for the root volume (the 896 MiB path), so the root medium is
   the device's own storage. This is the larger port and needs the 903 card read path as its base.
 
-**PRESS IS THE OPERATOR'S** — neither rung above presses. Both are host-side/reversible and write no
-device.
+## 5. 965a — the fixture is HFSX (built and verified host-side)
+
+Per the user's directive 「跑iOS7需要什么格式就用什么格式」, the format is whatever iOS 7 uses, so the
+fixture was flipped to HFSX. It is a **one-file generator change + one regenerated blob** — nothing else,
+because the strategy serves raw bytes (no format assumption anywhere in the port; the arm split, the
+size constant `524288`, and every switch are unchanged):
+
+- **`tools/build_hfs_root_image.sh`** gained `-X|--hfsx` (mkfs's `-s` case-sensitive flag; `-s` was
+  already SIZE). The post-format header readback now accepts **either** family and checks signature and
+  version **as a pair** (`0x482B`+4 or `0x4858`+5), the way the kernel does (`hfs_vfsutils.c:340`).
+- **`src/entry/blob/xnu_arm_entry_root_hfs.img`** regenerated as a 512 KiB HFSX volume (`mkfs.hfsplus -s`),
+  `/sbin/launchd` = the same 8192-byte Mach-O blob (round-trip verified).
+- **`tools/check_hfs_root_blob.py`** already accepted HFSX; its pass line now prints the family.
+
+**Verified, host-side, no press:**
+- generator → `HFSX 0x4858 v5, blockSize 4096, totalBlocks 128 (524288 B)`; header `4858 0005`.
+- `check_hfs_root_blob.py` rc=0 on the fixture (`HFSX 0x4858 v5`).
+- the **full entry build** on the recorded switch set (the c54fc40d arm, `HFS_ROOT_MEDIA=1`) → rc=0, and
+  the built `out/stage90/xnu_arm_entry.bin` **embeds the HFSX volume** (header `0x4858 v5` at image
+  offset `0x570400`; **zero** HFS+ v4 occurrences left). The new record sha256 is
+  `b9c224c0…`/6327380 B.
+- `make check` rc=0.
+
+So on master, when this arm is pressed, `hfs_mountroot` will parse an **HFSX** volume for the first time
+— the driver branch `hfs_vfsutils.c:339-345` that no prior arm ever reached. That is the de-risking
+965a buys: if the HFSX parse path is broken, it fails here, at the proven 512 KiB size, with one changed
+variable — not tangled with 965b's medium change.
+
+**PRESS IS THE OPERATOR'S** — 965a is built and host-verified, not pressed. Both rungs write no device.
 
 *Provenance: real volume headers read host-side from `/mnt/data/ios7-payload/v{1,2}/ios7/rootfs.hfs`
 (device-free); `tools/check_hfs_root_blob.py` run on both the real rootfs and the fixture;

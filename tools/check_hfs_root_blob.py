@@ -156,7 +156,8 @@ def check(path):
                 f"4096 and anything that says 512 here is not a volume this port can mount")
     if node_size == 0 or node_size & (node_size - 1):
         return f"{path}: catalog nodeSize {node_size} is not a power of two"
-    print(f"check_hfs_root_blob: {kind} {path}: HFS+ 0x{sig:04x} v{ver}, blockSize {block_size}, "
+    family = {HFS_PLUS_SIG: "HFS+", HFSX_SIG: "HFSX"}.get(sig, "HFS?")
+    print(f"check_hfs_root_blob: {kind} {path}: {family} 0x{sig:04x} v{ver}, blockSize {block_size}, "
           f"{total_blocks} blocks ({total_blocks * block_size} B), attrs 0x{attr:08x}, "
           f"catalogFile blk {cat_start} +{cat_blocks} (nodeSize {node_size})")
     return None
