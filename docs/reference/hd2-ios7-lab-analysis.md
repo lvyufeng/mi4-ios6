@@ -1,5 +1,15 @@
 # The HD2 iOS7 lab package: what is usable for the mi4 port (2026-10-08)
 
+> **⚠️ 2026-10-09 correction — read `experiment-966` alongside this note.** 913 pivoted the mi4 target
+> from XNU-2050 (iOS 6) to **Darwin-13 / iOS 7**, and `external/xnu-hd2-darwin13/xnu` **is the HD2 lab's
+> own tree**. So the HD2 is no longer "a different and later XNU than the mi4 target" (this note's opening
+> framing) — it is **the same XNU tree, booted on a different SoC**. Two items this note omitted are in 966:
+> (1) the HD2 booted *our* `rootfs.hfs` (`HFS=4858 v5 bytes=939524096`, sha `c9b9080d…`) into **iOS
+> userspace** — `launchd[1] has started up`, `backboardd pid=11`, `SpringBoard pid=12` (`BOOTLOG.BIN`); and
+> (2) its **writable root is a block-layer RAM COW** (`leo_cow.c`, already in our tree) over a read-only
+> base — the missing half of our read-only 965c mount. See
+> `docs/experiments/experiment-966-the-hd2-writable-root-is-a-cow-over-our-own-tree.md`.
+
 Read `/mnt/data/ios7-payload/README-FOR-MI4.md`, the v2 package
 (`/mnt/data/ios7-payload/v2/ios7/`), and the HD2 kernel source
 (`github.com/Garysss123/xnu-hd2`, branch `codex/hd2-source`, = the v2
