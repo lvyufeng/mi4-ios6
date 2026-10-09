@@ -59,6 +59,43 @@
 #ifndef STAGE90_ENTRY_SAVED_STATE_H
 #define STAGE90_ENTRY_SAVED_STATE_H
 
+/*
+ * **949: these are the tree's numbers, and D13's are not 4570's.** Every value below is a field of
+ * D13's `struct thread`, whose layout the Darwin-13 pivot (913) moved. The tree is the one the build
+ * already knows - `STAGE90_ENTRY_D13`, the discriminator `entry_trace.c` uses (`osfmk/sys/types.h`,
+ * set from the tree by `build_entry.sh`) - so the header selects its table the same way. A file that
+ * carried only 4570's numbers would make a D13 image read the *wrong member* of every thread, which
+ * is invisible to a run (a plausible number is a plausible number) and is exactly the defect class
+ * this project keeps paying for. The values are checked against the selected tree's generated
+ * `assym.s` by `tools/check_saved_state_offsets.py --tree`, which is the gate that would have caught
+ * this before 949 had it not silently read 4570's `assym.s` (it hard-coded `out/xnu_assym/…`).
+ */
+#if defined(STAGE90_ENTRY_D13) && STAGE90_ENTRY_D13
+
+/* D13's fault frame is `abort_information_context_t` (`osfmk/arm/misc_protos.h`): `r[13]`, `sp`,
+ * `lr`, `pc`, `cpsr`, `fsr`, `far` - the same member order and so the same six offsets as 4570's
+ * `arm_saved_state`, and the same six numbers the abort record has always read. What differs is the
+ * frame's **size**: D13 has no `exception` word, so it is 76 bytes and not 80, and `SS_SIZE` is the
+ * word count the frame is indexed in (`entry_stubs.c`'s window check). */
+#define STAGE90_SS_SP      52
+#define STAGE90_SS_LR      56
+#define STAGE90_SS_PC      60
+#define STAGE90_SS_CPSR    64
+#define STAGE90_SS_STATUS  68
+#define STAGE90_SS_VADDR   72
+
+#define STAGE90_SS_SIZE    76
+
+/* D13: `offsetof(thread_t, map)`, `offsetof(vm_map_t, pmap)`, `offsetof(thread_t, recover)`,
+ * `offsetof(thread_t, machine.uss)` (the machine block is first in D13's `struct thread`, so
+ * `machine.uss` is the 12-member `arm_saved_state_t`'s pointer, not `PcbData`). */
+#define STAGE90_ACT_MAP        956
+#define STAGE90_MAP_PMAP       44
+#define STAGE90_TH_RECOVER     552
+#define STAGE90_ACT_PCBDATA    580
+
+#else   /* 4570 (Darwin 17) - the frozen backup's layout, unchanged since 474. */
+
 /* `struct arm_saved_state`, `osfmk/mach/arm/thread_status.h` - via genassym's `SS_*` (see above). */
 #define STAGE90_SS_SP      52
 #define STAGE90_SS_LR      56
@@ -69,6 +106,13 @@
 
 /* `sizeof(struct arm_saved_state)` (`SS_SIZE`), for the word count the frame is indexed in. */
 #define STAGE90_SS_SIZE    80
+
+#define STAGE90_ACT_MAP        692
+#define STAGE90_MAP_PMAP       40
+#define STAGE90_TH_RECOVER     664
+#define STAGE90_ACT_PCBDATA    848
+
+#endif
 
 /* `osfmk/arm/proc_reg.h`: `cpsr & PSR_MODE_MASK == PSR_USER_MODE` is Apple's own test, in
  * `sleh_abort` (`osfmk/arm/trap.c`: `if ((spsr & PSR_MODE_MASK) != PSR_USER_MODE)`), and the frame's
@@ -96,9 +140,10 @@
  * own, so the same two words are on the path, and this image now measures `thread->map` and
  * `map->pmap` immediately before the fixture's first access. A zero is then a reading in the log
  * instead of a silent recursion - and `entry_stubs.c` says what the run does with it.
+ * **949: the value is in the per-tree table at the top** (`STAGE90_ACT_MAP`/`STAGE90_MAP_PMAP`),
+ * because D13's `struct thread` puts these fields elsewhere; the comment is kept here and the
+ * definition is not, so there is one definition and one place to read it.
  */
-#define STAGE90_ACT_MAP        692
-#define STAGE90_MAP_PMAP       40
 
 /*
  * **490 adds the word that says whether a fault was a copy's designed fault or a fault the kernel
@@ -120,9 +165,8 @@
  * return EFAULT. Publishing this word turns that from an inference about the source into a number
  * the run prints, and it is read in the wrapper *before* `__real_sleh_abort` because the handler
  * consumes it - a read after the call would report 0 for every entry, which is a value a reader
- * would believe.
+ * would believe. **949: value in the per-tree table at the top** (D13's `recover` is at 552).
  */
-#define STAGE90_TH_RECOVER     664
 
 /*
  * **510 adds the third `offsetof(struct thread, ...)`, and it is the one that reaches the saved state
@@ -148,8 +192,8 @@
  * The alternative would be to publish only the argument, and the defect that would hide is the one
  * this project keeps paying for: a function that returns without doing anything looks exactly like a
  * correct call from the argument's side. The read-back is what says the store happened.
+ * **949: value in the per-tree table at the top** (D13's `machine.uss` is at 580).
  */
-#define STAGE90_ACT_PCBDATA    848
 
 /* `osfmk/arm/trap.h:69-74`, the two abort classes this image can see once 467 and 476 have given
  * slots 4 and 3 to Apple's own first-level handlers. **The class is what says which coprocessor pair

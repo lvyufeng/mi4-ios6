@@ -1526,7 +1526,7 @@ run python3 "$REPO_ROOT/tools/check_assym_cswitch.py" || exit 1
 # plausible `pc` that is some other word of the frame - which is why it is a build failure and not a
 # comment. The same six numbers are checked a third time on the device, by the record itself: see
 # `entry_stubs.c`'s `xnu_live_sleh_frame_ok`.
-run python3 "$REPO_ROOT/tools/check_saved_state_offsets.py" --verbose || exit 1
+run python3 "$REPO_ROOT/tools/check_saved_state_offsets.py" --tree "$XNU_TREE" --verbose || exit 1
 
 # **And the two promises the `udf` handler makes (475, 477), both of them things a run turned from
 # prose into failures.** The panic-argument guard's answer for `args = 0` was the read of address 0
@@ -37602,8 +37602,8 @@ run python3 "$REPO_ROOT/tools/check_os_entry.py" --image "$OUT/xnu_arm_entry.elf
 # gated and ordered as above, the offset is materialised by `osfmk_arm_trap.o`'s own compiled
 # `sleh_abort`, the instrument reads it before the call that spends it, and the instrument reads the
 # frame after that call and publishes what it found under its own name.
-run python3 "$REPO_ROOT/tools/check_fault_recovery.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
-run python3 "$REPO_ROOT/tools/check_fault_recovery.py" --image "$OUT/xnu_arm_entry.elf" --selftest || exit 1
+run python3 "$REPO_ROOT/tools/check_fault_recovery.py" --image "$OUT/xnu_arm_entry.elf" --tree "$XNU_TREE" --verbose || exit 1
+run python3 "$REPO_ROOT/tools/check_fault_recovery.py" --image "$OUT/xnu_arm_entry.elf" --tree "$XNU_TREE" --selftest || exit 1
 
 # **910a: the USB2 OTG probe, guarded three ways.** `tools/check_usb_probe.py` compares every one of
 # `entry_usb.h`'s transcribed register offsets against the Android header that OWNS it - both

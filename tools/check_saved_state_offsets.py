@@ -100,6 +100,79 @@ DEFINES = os.path.join(REPO_ROOT, "src/entry/entry_saved_state.h")
 # The hand-written stand-in the entry image's own `start.s` is assembled against (see above).
 BOOT_ASSYM = os.path.join(REPO_ROOT, "src/entry/assym.s")
 START_S = os.path.join(XNU, "osfmk/arm/start.s")
+
+# The assym root the tool reads. **949: this used to be a literal `out/xnu_assym`**, so a D13 build
+# compared `entry_saved_state.h`'s 4570 values against 4570's `assym.s` and passed - a check that
+# silently validated the wrong tree (the `one value, two definitions` class, one level down: the
+# *measurement* was the thing that was wrong). It is now derived from the selected tree the same way
+# every other tool derives it (`tools/xnu_tree_roots.sh`'s `_d13` suffix).
+DEFAULT_TREE = os.path.join(REPO_ROOT, "external/xnu-4570.1.46")
+D13_OFFSET_KEYS = ("STAGE90_ACT_MAP", "STAGE90_MAP_PMAP", "STAGE90_TH_RECOVER",
+                   "STAGE90_ACT_PCBDATA")
+D13_STRUCT_ENUM = ("STAGE90_SS_SP", "STAGE90_SS_LR", "STAGE90_SS_PC", "STAGE90_SS_CPSR",
+                   "STAGE90_SS_STATUS", "STAGE90_SS_VADDR", "STAGE90_SS_SIZE")
+
+# Set by `configure()`. The header is the *same file* in both trees and selects its table by the
+# `#if defined(STAGE90_ENTRY_D13) && STAGE90_ENTRY_D13` preprocessor branch, so a textual reader must
+# select the same branch - `read_defines_for_branch()` below does, by cutting the file at the two
+# markers the header itself uses. Without this the reader would take the *last* `#define` of each name
+# (the 4570 arm) on both trees, which is the very confusion 949 exists to remove.
+D13 = False
+_D13_BRANCH_START = "#if defined(STAGE90_ENTRY_D13) && STAGE90_ENTRY_D13"
+_BRANCH_ELSE = "#else"
+
+
+def read_defines_for_branch(defines_text, d13):
+    """`entry_saved_state.h`'s defines as the *compiler* would see them for the selected tree.
+
+    The header's top selection is a plain `#if defined(...)/#else/#endif`; everything below it (the
+    frame's offsets, the two mode constants) is shared. So the answer is the selected arm's body
+    concatenated with the common head (before the `#if`) and tail (after the `#endif`) - and the
+    **other** arm must be dropped, or the last `#define` of each name wins and a D13 read takes
+    4570's number (the silent-wrong-tree defect this function exists to prevent).
+    """
+    start = defines_text.find(_D13_BRANCH_START)
+    if start < 0:
+        return defines_text                      # no selection yet: the whole file is one table
+    after = defines_text.find("\n", start) + 1
+    els = defines_text.find(_BRANCH_ELSE, after)
+    if els < 0:
+        return defines_text
+    end = defines_text.find("\n", els) + 1
+    endif_at = defines_text.find("#endif", end)
+    tail_start = defines_text.find("\n", endif_at) + 1 if endif_at >= 0 else len(defines_text)
+    head = defines_text[:start]
+    tail = defines_text[tail_start:]
+    body = defines_text[after:els] if d13 else defines_text[end:endif_at if endif_at >= 0 else len(defines_text)]
+    return head + body + tail
+
+
+def is_d13(tree):
+    """D13 is the tree whose `osfmk/sys/types.h` exists - the pivot's discriminator, `build_entry.sh`'s."""
+    return os.path.isfile(os.path.join(tree, "osfmk/sys/types.h"))
+
+
+def configure(tree):
+    """Point the module's paths at the selected tree and return whether it is D13.
+
+    **The frame is a different type in the two trees.** 4570's `sleh_abort` receives
+    `struct arm_saved_state` (`osfmk/mach/arm/thread_status.h`, 80 bytes, `r[13] sp lr pc cpsr fsr
+    far exception`); D13's receives `abort_information_context_t` (`osfmk/arm/misc_protos.h`, 76
+    bytes, the same order without `exception`). The six offsets the record reads are the same in
+    both - which is *why* the 474 record could be read as if it were portable - but the size differs,
+    and on D13 the `SS_*` numbers come from the crafted `abort037` set - that is, from `SS_*` - not
+    from the struct body. Both are parsed here so the record's offsets are a reading either way.
+    """
+    global XNU, HEADER, PROC_REG, START_S, STRUCT_NAME, D13
+    d13 = is_d13(tree)
+    D13 = d13
+    XNU = tree
+    HEADER = os.path.join(XNU, "osfmk/arm/misc_protos.h" if d13
+                          else "osfmk/mach/arm/thread_status.h")
+    PROC_REG = os.path.join(XNU, "osfmk/arm/proc_reg.h")
+    START_S = os.path.join(XNU, "osfmk/arm/start.s")
+    STRUCT_NAME = "_abort_information_context" if d13 else "arm_saved_state"
+    return d13
 # 481's four `cpu_data` offsets. A separate file from `DEFINES` because it is a separate decision -
 # the timer, not the saved-state frame - and compared the same way, against the same generated assym.s.
 TIMEBASE = os.path.join(REPO_ROOT, "src/entry/entry_timebase.h")
@@ -108,6 +181,8 @@ TIMEBASE = os.path.join(REPO_ROOT, "src/entry/entry_timebase.h")
 # whose width is one word; a name with a `[N]` is N words. Both are Apple's `uint32_t`s, so the
 # offsets are the accumulated word counts and there is no padding to allow for - which is a property
 # of the declaration (every member is `uint32_t`), not an assumption: the parse reads the types.
+# **949: this is a per-tree name and `configure()` selects it** - 4570's `arm_saved_state` versus
+# D13's `_abort_information_context` (the tag `typedef`s typedef name is `abort_information_context_t`).
 STRUCT_NAME = "arm_saved_state"
 
 # `#define SS_PC #60` - `gen_assym.sh` writes the `#` because Apple's `genassym.s` is fed to `sed` and
@@ -227,7 +302,8 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
         ", ".join("%s %d" % (m, o) for m, o, _w in members) + ", size %d" % size))
 
     # --- 1 vs 3: what this image reads, against Apple's declaration ---------------------------
-    local = read_local_defines(defines_text)
+    # The header's per-tree table is selected by the same preprocessor branch the compiler uses.
+    local = read_local_defines(read_defines_for_branch(defines_text, D13))
     wanted = {"SP": "sp", "LR": "lr", "PC": "pc", "CPSR": "cpsr", "STATUS": "fsr", "VADDR": "far"}
     for suffix, member in sorted(wanted.items()):
         key = "STAGE90_SS_" + suffix
@@ -246,10 +322,17 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
         failures.append("STAGE90_SS_SIZE is %d and sizeof(struct %s) is %d"
                         % (local["STAGE90_SS_SIZE"], STRUCT_NAME, size))
 
-    # The mode test the frame's cpsr is read with.
+    # The mode test the frame's cpsr is read with. **949: D13's `proc_reg.h` has no `PSR_MODE_MASK`/
+    # `PSR_USER_MODE` names** - its `sleh_abort` tests the mode with the literal `0x13` and the header
+    # keeps 0x1F/0x10 for the record - so there is nothing in this tree to compare the two against.
     proc_reg = read_proc_reg(proc_reg_text)
-    for key, name in (("STAGE90_PSR_MODE_MASK", "PSR_MODE_MASK"),
-                      ("STAGE90_PSR_USER_MODE", "PSR_USER_MODE")):
+    if D13 and not proc_reg:
+        notes.append("D13: proc_reg.h declares no PSR_MODE_MASK/PSR_USER_MODE (D13 names modes "
+                     "PSR_SVC32_MODE etc.), so the two mode constants the record is read with are "
+                     "checked against the tree only by their value in entry_saved_state.h")
+    for key, name in (() if (D13 and not proc_reg) else
+                      (("STAGE90_PSR_MODE_MASK", "PSR_MODE_MASK"),
+                       ("STAGE90_PSR_USER_MODE", "PSR_USER_MODE"))):
         if key not in local or name not in proc_reg:
             failures.append("cannot compare %s with %s - one of them was not parsed" % (key, name))
             continue
@@ -296,12 +379,19 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
     # offset that is off by one word turns a data pointer into a call target and the boot jumps into
     # whatever `cpu_data` holds there. The comparison is the only thing that can refuse that at build
     # time, because on the device a wrong pointer and a working one both leave a plausible number.
+    # **949: D13's `genassym.c` emits no `CPU_DECREMENTER`/`CPU_GET_*` family** (D13's timer is
+    # `clock_timebase_init`, per the 944 rung - it has none of `ml_init_timebase`/`cpu_timebase_init`/
+    # `fiq_context_init`), so this claim is skipped there rather than failing on an absent name.
     timebase = read_local_defines(timebase_text or "")
     timebase_names = (("STAGE90_CPU_DECREMENTER", "CPU_DECREMENTER"),
                       ("STAGE90_CPU_GET_DECREMENTER_FUNC", "CPU_GET_DECREMENTER_FUNC"),
                       ("STAGE90_CPU_SET_DECREMENTER_FUNC", "CPU_SET_DECREMENTER_FUNC"),
                       ("STAGE90_CPU_GET_FIQ_HANDLER", "CPU_GET_FIQ_HANDLER"))
-    for key, name in timebase_names:
+    if D13:
+        notes.append("D13: `struct cpu_data`'s four timebase words are 4570's timer registration "
+                     "(944); D13's genassym.c emits none of CPU_DECREMENTER/CPU_GET_*/CPU_SET_*/"
+                     "CPU_GET_FIQ_HANDLER, so 481's claim is skipped")
+    for key, name in (() if D13 else timebase_names):
         if key not in timebase:
             failures.append("entry_timebase.h defines no %s, so one of the four `cpu_data` words the "
                             "timebase registration is read back through is missing from the image" % key)
@@ -332,73 +422,89 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
     assym_names = {"SP": "SS_SP", "LR": "SS_LR", "PC": "SS_PC", "CPSR": "SS_CPSR",
                    "STATUS": "SS_STATUS", "VADDR": "SS_VADDR", "EXC": "SS_EXC", "SIZE": "SS_SIZE",
                    "R0": "SS_R0"}
-    missing = [n for n in assym_names.values() if n not in assym]
-    if missing:
-        failures.append("%s has no numeric #define for %s - it is not the assym.s gen_assym.sh "
-                        "writes, or those fields moved" % (assym_text, ", ".join(sorted(missing))))
+    # **949: on D13 the `SS_*` names are not in the generated `assym.s` at all.** D13's `genassym.c`
+    # does not `DECLARE` them; the record's six frame offsets come from the *crafted* `ABORT037`
+    # frame (`ios7leo_data_abort037.h` asserts the frame is 76 bytes with `fsr` at 68 and `far` at
+    # 72), so the claim that holds on 4570 - "Apple's declaration, this configuration's assym.s and
+    # the header are one number" - has two of its three legs missing here and is *skipped*, not
+    # weakened: the header's D13 arm is still compared against the parsed
+    # `abort_information_context_t` above, which is the tree's own declaration.
+    if D13:
+        notes.append("D13: the SS_* frame offsets are compared against the parsed "
+                     "`abort_information_context_t` (above); D13's genassym.c emits no SS_* and has "
+                     "no ACT_PCBDATA_PC/ACT_PCBDATA_R0, so 4570's Apple/assym/PCB claims are skipped")
     else:
-        small = {suffix: assym[name] for suffix, name in assym_names.items()}
-        for suffix, member in wanted.items():
-            if by_name.get(member) != small[suffix]:
-                failures.append("assym.s gives SS_%s %d and %s declares %s at %d - the assembled "
-                                "kernel and Apple's header disagree, so re-run gen_assym.sh and "
-                                "assemble_arm_layer.sh before linking anything"
-                                % (suffix, small[suffix], HEADER, member, by_name[member]))
-        if small["R0"] != by_name.get("r", 0):
-            failures.append("assym.s gives SS_R0 %d and struct %s's first member is at %d"
-                            % (small["R0"], STRUCT_NAME, by_name.get("r", 0)))
-        if small["EXC"] != by_name.get("exception", -1):
-            failures.append("assym.s gives SS_EXC %d and struct %s declares `exception` at %d - a "
-                            "member was added to or removed from the struct"
-                            % (small["EXC"], STRUCT_NAME, by_name.get("exception", -1)))
-        if small["SIZE"] != size:
-            failures.append("assym.s gives SS_SIZE %d and struct %s is %d bytes"
-                            % (small["SIZE"], STRUCT_NAME, size))
-
-        # --- the same numbers from the PCB side -------------------------------------------------
-        if "ACT_PCBDATA" in assym and "ACT_PCBDATA_PC" in assym and "ACT_PCBDATA_R0" in assym:
-            base = assym["ACT_PCBDATA"]
-            for key, delta, suffix in (("ACT_PCBDATA_PC", assym["ACT_PCBDATA_PC"] - base, "PC"),
-                                       ("ACT_PCBDATA_R0", assym["ACT_PCBDATA_R0"] - base, "R0")):
-                if delta != small[suffix]:
-                    failures.append("%s - ACT_PCBDATA is %d and SS_%s is %d, so the PCB and the "
-                                    "stack frame do not agree on where that member is - "
-                                    "dataabt_from_user passes the PCB as `regs`"
-                                    % (key, delta, suffix, small[suffix]))
-            notes.append("assym.s: ACT_PCBDATA %d, +PC %d, +R0 %d" % (
-                base, assym["ACT_PCBDATA_PC"] - base, assym["ACT_PCBDATA_R0"] - base))
+        missing = [n for n in assym_names.values() if n not in assym]
+        if missing:
+            failures.append("%s has no numeric #define for %s - it is not the assym.s gen_assym.sh "
+                            "writes, or those fields moved" % (assym_text, ", ".join(sorted(missing))))
         else:
-            failures.append("assym.s has no ACT_PCBDATA/ACT_PCBDATA_PC/ACT_PCBDATA_R0, so the "
-                            "PC-side cross-check of the same offsets did not run")
+            small = {suffix: assym[name] for suffix, name in assym_names.items()}
+            for suffix, member in wanted.items():
+                if by_name.get(member) != small[suffix]:
+                    failures.append("assym.s gives SS_%s %d and %s declares %s at %d - the assembled "
+                                    "kernel and Apple's header disagree, so re-run gen_assym.sh and "
+                                    "assemble_arm_layer.sh before linking anything"
+                                    % (suffix, small[suffix], HEADER, member, by_name[member]))
+            if small["R0"] != by_name.get("r", 0):
+                failures.append("assym.s gives SS_R0 %d and struct %s's first member is at %d"
+                                % (small["R0"], STRUCT_NAME, by_name.get("r", 0)))
+            if small["EXC"] != by_name.get("exception", -1):
+                failures.append("assym.s gives SS_EXC %d and struct %s declares `exception` at %d - a "
+                                "member was added to or removed from the struct"
+                                % (small["EXC"], STRUCT_NAME, by_name.get("exception", -1)))
+            if small["SIZE"] != size:
+                failures.append("assym.s gives SS_SIZE %d and struct %s is %d bytes"
+                                % (small["SIZE"], STRUCT_NAME, size))
 
-        notes.append("assym.s: " + ", ".join("%s %d" % (n, assym[n]) for n in sorted(assym_names.values())))
+            # --- the same numbers from the PCB side ---------------------------------------------
+            if "ACT_PCBDATA" in assym and "ACT_PCBDATA_PC" in assym and "ACT_PCBDATA_R0" in assym:
+                base = assym["ACT_PCBDATA"]
+                for key, delta, suffix in (("ACT_PCBDATA_PC", assym["ACT_PCBDATA_PC"] - base, "PC"),
+                                           ("ACT_PCBDATA_R0", assym["ACT_PCBDATA_R0"] - base, "R0")):
+                    if delta != small[suffix]:
+                        failures.append("%s - ACT_PCBDATA is %d and SS_%s is %d, so the PCB and the "
+                                        "stack frame do not agree on where that member is - "
+                                        "dataabt_from_user passes the PCB as `regs`"
+                                        % (key, delta, suffix, small[suffix]))
+                notes.append("assym.s: ACT_PCBDATA %d, +PC %d, +R0 %d" % (
+                    base, assym["ACT_PCBDATA_PC"] - base, assym["ACT_PCBDATA_R0"] - base))
+            else:
+                failures.append("assym.s has no ACT_PCBDATA/ACT_PCBDATA_PC/ACT_PCBDATA_R0, so the "
+                                "PC-side cross-check of the same offsets did not run")
+
+            notes.append("assym.s: " + ", ".join("%s %d" % (n, assym[n]) for n in sorted(assym_names.values())))
 
     # --- 4: the hand-written stand-in the entry image's own start.s is assembled against ---------
-    boot = read_plain_defines(boot_assym_text)
-    mirrored = {name: value for name, value in boot.items()
-                if name.startswith(("SS_", "VSS_")) and not name.endswith("_NUM")}
-    if not mirrored:
-        failures.append("src/entry/assym.s declares no SS_/VSS_ constant, so the "
-                        "constants osfmk/arm/start.s is assembled with in this image are unchecked")
-    for name in sorted(mirrored):
-        if name not in assym:
-            failures.append("src/entry/assym.s declares %s %d and this "
-                            "configuration's generated assym.s has no such name - a name Apple's "
-                            "genassym.c does not declare is a constant this image invented"
-                            % (name, mirrored[name]))
-        elif mirrored[name] != assym[name]:
-            failures.append("src/entry/assym.s declares %s %d and this "
-                            "configuration's generated assym.s gives %d - two files mirroring one "
-                            "struct, and the one first on this build's include path is the wrong one"
-                            % (name, mirrored[name], assym[name]))
-    if mirrored:
-        notes.append("src/entry/assym.s: "
-                     + ", ".join("%s %d" % (k, v) for k, v in sorted(mirrored.items())))
-        if start_s_text is not None:
-            unused = [n for n in sorted(mirrored)
-                      if not re.search(r"\b%s\b" % re.escape(n), start_s_text)]
-            if unused:
-                notes.append("  of those, osfmk/arm/start.s never mentions: " + ", ".join(unused))
+    # **949: 4570-only.** `src/entry/assym.s` mirrors 4570's `start.s`, and D13's start.s/assm
+    # differ; on D13 the six frame numbers are gated by the D13 arm of `entry_saved_state.h` and the
+    # `check_asm_config.py` config clause instead.
+    if not D13:
+        boot = read_plain_defines(boot_assym_text)
+        mirrored = {name: value for name, value in boot.items()
+                    if name.startswith(("SS_", "VSS_")) and not name.endswith("_NUM")}
+        if not mirrored:
+            failures.append("src/entry/assym.s declares no SS_/VSS_ constant, so the "
+                            "constants osfmk/arm/start.s is assembled with in this image are unchecked")
+        for name in sorted(mirrored):
+            if name not in assym:
+                failures.append("src/entry/assym.s declares %s %d and this "
+                                "configuration's generated assym.s has no such name - a name Apple's "
+                                "genassym.c does not declare is a constant this image invented"
+                                % (name, mirrored[name]))
+            elif mirrored[name] != assym[name]:
+                failures.append("src/entry/assym.s declares %s %d and this "
+                                "configuration's generated assym.s gives %d - two files mirroring one "
+                                "struct, and the one first on this build's include path is the wrong one"
+                                % (name, mirrored[name], assym[name]))
+        if mirrored:
+            notes.append("src/entry/assym.s: "
+                         + ", ".join("%s %d" % (k, v) for k, v in sorted(mirrored.items())))
+            if start_s_text is not None:
+                unused = [n for n in sorted(mirrored)
+                          if not re.search(r"\b%s\b" % re.escape(n), start_s_text)]
+                if unused:
+                    notes.append("  of those, osfmk/arm/start.s never mentions: " + ", ".join(unused))
 
     notes.append("entry_saved_state.h: " + ", ".join("%s %d" % (k, v) for k, v in sorted(local.items())))
     return failures, notes
@@ -414,12 +520,16 @@ def selftest(header_text, assym_text, defines_text, proc_reg_text, boot_assym_te
     mutations = []
 
     def mutate_define(text, key):
+        # **All** occurrences, not the first: since 949 the header declares most of these twice (a
+        # D13 arm and a 4570 arm), and the first is not the one the selected tree reads. Mutating all
+        # of them is harmless and guarantees the arm the comparison actually parses is moved.
         pattern = re.compile(r"^(#define\s+%s\s+)(0x[0-9a-fA-F]+|\d+)([uUlL]*\s*)$" % re.escape(key), re.M)
-        match = pattern.search(text)
-        if not match:
+        if not pattern.search(text):
             return None
-        value = int(match.group(2), 0) + 4
-        return text[:match.start()] + "%s%d%s" % (match.group(1), value, match.group(3)) + text[match.end():]
+
+        def bump(match):
+            return "%s%d%s" % (match.group(1), int(match.group(2), 0) + 4, match.group(3))
+        return pattern.sub(bump, text)
 
     for key in ("STAGE90_SS_PC", "STAGE90_SS_SP", "STAGE90_ACT_MAP", "STAGE90_MAP_PMAP",
                 "STAGE90_TH_RECOVER", "STAGE90_ACT_PCBDATA"):
@@ -472,6 +582,14 @@ def selftest(header_text, assym_text, defines_text, proc_reg_text, boot_assym_te
     if mutated != boot_assym_text:
         mutations.append(("the hand-written assym.s's SS_SIZE moved", dict(boot_assym_text=mutated)))
 
+    # On D13 the assym.s `<name>` mutations and the boot-assym mutation are inert (D13's generated
+    # assym.s has no `SS_*` and no `ACT_PCBDATA_PC`; the `src/entry/assym.s` mirror claim is 4570's) -
+    # so they are published as skipped and only the header mutations and the struct swap remain, which
+    # still have claims to move.
+    if D13:
+        keep = ("entry_saved_state.h", "proc_reg", "pc and cpsr")
+        mutations = [m for m in mutations if any(k in m[0] for k in keep)]
+
     if not mutations:
         fail("--selftest found nothing to mutate, so it cannot say the comparison reads anything")
 
@@ -497,14 +615,18 @@ def selftest(header_text, assym_text, defines_text, proc_reg_text, boot_assym_te
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
-    parser.add_argument("--header", default=HEADER)
-    parser.add_argument("--proc-reg", default=PROC_REG)
+    parser.add_argument("--tree", default=os.environ.get("XNU_TREE") or DEFAULT_TREE,
+                        help="the XNU tree the image was built from; its osfmk/sys/types.h selects "
+                             "Darwin-13, which has a different frame type and different thread "
+                             "offsets. Defaults to $XNU_TREE, then 4570.")
+    parser.add_argument("--header", default=None)
+    parser.add_argument("--proc-reg", default=None)
     parser.add_argument("--defines", default=DEFINES)
-    parser.add_argument("--boot-assym", default=BOOT_ASSYM)
-    parser.add_argument("--start-s", default=START_S)
+    parser.add_argument("--boot-assym", default=None)
+    parser.add_argument("--start-s", default=None)
     parser.add_argument("--timebase", default=TIMEBASE)
     parser.add_argument("--assym", default=None,
-                        help="defaults to out/xnu_assym/$XNU_KERNEL_CONFIG/assym.s")
+                        help="defaults to out/xnu_assym[_d13]/$XNU_KERNEL_CONFIG/assym.s")
     parser.add_argument("--config", default=None,
                         help="the XNU configuration whose assym.s to compare against; defaults to "
                              "$XNU_KERNEL_CONFIG, then STAGE90_XNU (the configuration this image is "
@@ -514,14 +636,32 @@ def main():
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
+    d13 = configure(args.tree)
+    header = args.header or HEADER
+    proc_reg = args.proc_reg or PROC_REG
+    # D13 ships no `osfmk/arm/start.s` (its vectors are `locore.s`), and `start_s` is only used for a
+    # 4570-side note about which mirrored constants it mentions - so an absent one is `None`, not a
+    # failure.
+    start_s = args.start_s or (START_S if os.path.exists(START_S) else None)
+    # `src/entry/assym.s` is the hand-written stand-in for 4570's `start.s`; the mirror claim over it
+    # is 4570-only, so passing it (or its absence) on D13 is inert either way.
+    boot_assym = args.boot_assym or (BOOT_ASSYM if not d13 and os.path.exists(BOOT_ASSYM) else None)
+
     config = args.config or os.environ.get("XNU_KERNEL_CONFIG") or "STAGE90_XNU"
-    assym = args.assym or os.path.join(REPO_ROOT, "out", "xnu_assym", config, "assym.s")
+    # **949: the `_d13` suffix, not a literal.** The assym root is the same one
+    # `tools/xnu_tree_roots.sh` derives; a hard-coded `out/xnu_assym` compared the D13 header against
+    # 4570's file and passed.
+    assym = args.assym or os.path.join(REPO_ROOT, "out",
+                                       "xnu_assym" + ("_d13" if d13 else ""), config, "assym.s")
 
     texts = {}
-    for key, path in (("header_text", args.header), ("proc_reg_text", args.proc_reg),
+    for key, path in (("header_text", header), ("proc_reg_text", proc_reg),
                       ("defines_text", args.defines), ("assym_text", assym),
-                      ("boot_assym_text", args.boot_assym), ("start_s_text", args.start_s),
+                      ("boot_assym_text", boot_assym), ("start_s_text", start_s),
                       ("timebase_text", args.timebase)):
+        if path is None:
+            texts[key] = None
+            continue
         if not os.path.exists(path):
             fail("no %s" % path)
         with open(path, "r", errors="replace") as handle:
@@ -535,18 +675,22 @@ def main():
         for note in notes:
             say("    " + note)
     if failures:
-        print("FAIL: the frame this image reads is not the frame this kernel built (assym.s read: %s):"
-              % os.path.relpath(assym, REPO_ROOT), file=sys.stderr)
+        print("FAIL: the frame this image reads is not the frame this kernel built (tree %s, assym.s "
+              "read: %s):" % (os.path.relpath(args.tree, REPO_ROOT),
+                               os.path.relpath(assym, REPO_ROOT)), file=sys.stderr)
         for failure in failures:
             print("      " + failure, file=sys.stderr)
         return 1
-    local = read_local_defines(texts["defines_text"])
-    say("  xnu_entry_474: struct arm_saved_state is read at the offsets Apple declares, this"
-        " configuration's assym.s gives and entry_saved_state.h writes (SS_PC = %d, SS_CPSR = %d,"
-        " SS_STATUS = %d, SS_VADDR = %d, and the PCB's own +PC and +R0 agree), so the record's pc is"
-        " the faulting instruction and its cpsr is the mode it ran in"
-        % (local["STAGE90_SS_PC"], local["STAGE90_SS_CPSR"], local["STAGE90_SS_STATUS"],
-           local["STAGE90_SS_VADDR"]))
+    local = read_local_defines(read_defines_for_branch(texts["defines_text"], d13))
+    frame = "abort_information_context_t (D13, %d bytes)" % local["STAGE90_SS_SIZE"] if d13 \
+        else "struct arm_saved_state"
+    say("  xnu_entry_474: %s is read at the offsets this tree declares, this configuration's "
+        "assym.s gives and entry_saved_state.h writes (SS_PC = %d, SS_CPSR = %d, SS_STATUS = %d, "
+        "SS_VADDR = %d%s), so the record's pc is the faulting instruction and its cpsr is the mode "
+        "it ran in"
+        % (frame, local["STAGE90_SS_PC"], local["STAGE90_SS_CPSR"], local["STAGE90_SS_STATUS"],
+           local["STAGE90_SS_VADDR"],
+           "" if d13 else ", and the PCB's own +PC and +R0 agree"))
     if texts.get("timebase_text"):
         tb = read_local_defines(texts["timebase_text"])
         say("  xnu_entry_481: the four `struct cpu_data` words the timebase registration is read back"

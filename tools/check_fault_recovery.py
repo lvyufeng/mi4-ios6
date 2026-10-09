@@ -71,34 +71,83 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
-XNU = os.path.join(REPO_ROOT, "external/xnu-4570.1.46")
 BOOT = os.path.join(REPO_ROOT, "src/entry")
 
-TRAP_C = os.path.join(XNU, "osfmk/arm/trap.c")
-MACHINE_ASM = os.path.join(XNU, "osfmk/arm/machine_routines_asm.s")
+# **949: the tree is a parameter, and D13's fault arrangement is not 4570's.** Everything the claims
+# read about the *source* (`trap.c`), the *build* (`assym.s`, the kernel object pool) and the *linked
+# image*'s shape is chosen by `configure()`, the same way `check_saved_state_offsets.py` and the other
+# tree-pinned checks in this series do it. The three deltas that reach the claims:
+#
+# * 4570's copies arm a **shared** `copyio_error` (plus `copyinstr_error`); D13's four copies arm
+#   **per-copy local labels** (`.Lcopyin_fault` etc.), which `objdump` prints relative to the function,
+#   so the recovery target is identified by the address the arming `add rX, pc, #imm` computes.
+# * 4570's `sleh_abort` tries `arm_fast_fault` first and then `vm_fault`, and its recovery arm writes
+#   `regs->pc = (recover & ~0x1)` and relies on the frame's `pc` being read back; D13's handler tries
+#   `vm_fault` twice (thread map, then kernel map), and its kernel recovery arm writes `arm_ctx->pc`
+#   and `return`s - so D13's frame `pc` is *not* a post-call reading of the arm, and claim 7 is 4570's.
+# * `TH_RECOVER` is 664 in 4570 and 552 in D13.
+XNU = None
+TRAP_C = None
+MACHINE_ASM = None
+ASSYM = None
+KOBJ = None
+IS_D13 = False
+
 HEADER = os.path.join(BOOT, "entry_saved_state.h")
 TRACE_C = os.path.join(BOOT, "entry_trace.c")
 STUBS_C = os.path.join(BOOT, "entry_stubs.c")
 BUILD_ENTRY = os.path.join(BOOT, "build_entry.sh")
-ASSYM = os.path.join(REPO_ROOT, "out/xnu_assym/STAGE90_XNU/assym.s")
-KOBJ = os.path.join(REPO_ROOT, "out/xnu_kernel_obj/osfmk_arm_trap.o")
 
 NM = "arm-none-eabi-nm"
 OBJDUMP = "arm-none-eabi-objdump"
 
-# The two labels the assembly arms as recovery addresses. `copyinstr` has one of its own because it
-# returns ENAMETOOLONG or the byte count and not a plain EFAULT; everything else shares
+# 4570's copies arm these two **named** labels as recovery addresses. `copyinstr` has one of its own
+# because it returns ENAMETOOLONG or the byte count and not a plain EFAULT; everything else shares
 # `copyio_error`. A name rather than "any label with `error` in it", because the claim is about these
 # two and a pattern would grow to fit whatever the file happened to contain.
-RECOVERY_LABELS = ("copyio_error", "copyinstr_error")
-ARMED_COPIES = ("copyin", "copyout")
+RECOVERY_LABELS_4570 = ("copyio_error", "copyinstr_error")
+ARMED_COPIES_4570 = ("copyin", "copyout")
+# D13's copies: the same two the exec path runs, plus the two string copies (which arm their own local
+# labels). `ARMED_COPIES` is what claim 2 checks by name; on D13 it is all four.
+ARMED_COPIES_D13 = ("copyin", "copyout", "copyinstr", "copyoutstr")
+# The two of D13's four that arm an **EFAULT** exit. `copyinstr`/`copyoutstr` arm a shared label at
+# the end of `copyoutstr` that preserves `r0` (the terminator count), not an EFAULT exit.
+D13_EFAULT_COPIES = ("copyin", "copyout")
 
-OFFSET = 664
+OFFSET_4570 = 664
+OFFSET_D13 = 552
+OFFSET = OFFSET_4570
+ARMED_COPIES = ARMED_COPIES_4570
+RECOVERY_LABELS = RECOVERY_LABELS_4570
 EFAULT = 14
+
+
+def is_d13(tree):
+    """D13 ships the legacy private `osfmk/sys/types.h`; 4570 does not."""
+    return os.path.isfile(os.path.join(tree, "osfmk/sys/types.h"))
+
+
+def configure(tree):
+    """Bind every tree-pinned path and constant the claims read. Called from `main()`."""
+    global XNU, TRAP_C, MACHINE_ASM, ASSYM, KOBJ, IS_D13, OFFSET, ARMED_COPIES
+    IS_D13 = is_d13(tree)
+    XNU = tree
+    TRAP_C = os.path.join(XNU, "osfmk/arm/trap.c")
+    # 4570 has `machine_routines_asm.s`; D13 carries the same `COPYIO_*` macros in
+    # `osfmk/arm/bcopyinout.s` instead, so this path is only used for its existence check in `main()`.
+    MACHINE_ASM = (os.path.join(XNU, "osfmk/arm/bcopyinout.s") if IS_D13
+                   else os.path.join(XNU, "osfmk/arm/machine_routines_asm.s"))
+    ASSYM = os.path.join(REPO_ROOT, "out/xnu_assym" + ("_d13" if IS_D13 else "")
+                         + "/STAGE90_XNU/assym.s")
+    KOBJ = os.path.join(REPO_ROOT, "out/xnu_kernel_obj" + ("_d13" if IS_D13 else "")
+                        + "/osfmk_arm_trap.o")
+    OFFSET = OFFSET_D13 if IS_D13 else OFFSET_4570
+    ARMED_COPIES = ARMED_COPIES_D13 if IS_D13 else ARMED_COPIES_4570
+    return IS_D13
 INSN = re.compile(r"^\s*([0-9a-f]+):\s+([0-9a-f]{8})\s+(.*?)\s*$")
 SYMBOL = re.compile(r"^([0-9a-f]{8}) <(.+)>:$")
-STORE_RECOVER = re.compile(r"^str\s+(r\d+),\s*\[(\w+), #(\d+)\]")
-ADR_PC = re.compile(r"^(add|sub)\s+(r\d+),\s*pc,\s*#(0x[0-9a-fA-F]+|\d+)")
+STORE_RECOVER = re.compile(r"^str\s+(r\d+|ip|fp|sl|sb|lr|sp),\s*\[(\w+), #(\d+)\]")
+ADR_PC = re.compile(r"^(add|sub)\s+(r\d+|ip|fp|sl|sb|lr|sp),\s*pc,\s*#(0x[0-9a-fA-F]+|\d+)")
 WRITES = re.compile(r"^([a-z][a-z0-9.]*)\s+(r\d+|ip|fp|sl|sb|lr|sp),\s*[^,\]]")
 NO_WRITE = {"str", "strb", "strh", "strd", "stm", "stmia", "stmdb", "push", "vstr", "vstm",
             "cmp", "cmn", "tst", "teq", "mcr", "mcrr", "svc", "bkpt", "b", "bl", "bx", "blx"}
@@ -186,14 +235,18 @@ def body_of(insns, globals_, name):
     for every lookup and turned the selftest into a five-minute job. A helper that parses its input
     on every call is a helper that will be called in a loop.
     """
-    start = end = None
-    for index, (address, symbol) in enumerate(globals_):
+    start = None
+    for address, symbol in globals_:
         if symbol == name:
             start = address
-            end = globals_[index + 1][0] if index + 1 < len(globals_) else None
             break
     if start is None:
         return None
+    # **The next global at a *strictly greater* address.** `copyin`/`copyinmsg` are two global
+    # symbols at one address (the assembler's `EnterARM` alias), so taking the next table entry gives
+    # a zero-length body; the end is the next entry after all the aliases.
+    later = [a for a, _ in globals_ if a > start]
+    end = min(later) if later else None
     addresses = [a for a, _ in insns]
     first = bisect.bisect_left(addresses, start)
     last = len(insns) if end is None else bisect.bisect_left(addresses, end)
@@ -253,6 +306,54 @@ def address_of(dis_text, name):
         if symbol == name:
             return address
     return None
+
+
+def _pc_relative_value(address, insn):
+    """The target address an `add`/`sub rX, pc, #imm` computes, else None."""
+    adr = ADR_PC.match(insn)
+    if not adr:
+        return None
+    size = int(adr.group(3), 16) if adr.group(3).startswith("0x") else int(adr.group(3))
+    value = address + 8 + size if adr.group(1) == "add" else address + 8 - size
+    return value & 0xFFFFFFFF
+
+
+def _copy_arm_sites(facts, name):
+    """`[(store_addr, source_reg, target_value, defining_addr, defining_text)]` for one copy's arms.
+
+    D13's recovery labels are **local** (`.Lcopyin_fault`), which `objdump` does not print as a
+    heading, so the target is not a symbol to look up: it is the address the arming
+    `add rX, pc, #imm` computes, and this resolves the store's source register back to that add the
+    same way the 4570 path resolves it to `copyio_error`'s address. Returns `(body, sites)`.
+    """
+    body = body_of(facts["insns"], facts["globals"], name)
+    if not body:
+        return None, []
+    sites = []
+    for index, (address, insn) in enumerate(body):
+        store = STORE_RECOVER.match(insn)
+        if not store or int(store.group(3)) != OFFSET:
+            continue
+        defining, text, value = value_of_previous_definition(body, index, store.group(1))
+        if isinstance(value, int):
+            sites.append((address, store.group(1), value, defining, text))
+    return body, sites
+
+
+def _is_efault_exit(body, address, window=5):
+    """Does a `mov rX, #14` sit at or just after `address`? D13's local fault label restores the
+    saved recovery word before it sets EFAULT, so the EFAULT move is not the label's first
+    instruction and this looks a few instructions past it rather than at it. **The window is tight
+    on purpose**: an arm mis-pointed a few instructions up (into the copy's own body) must not find
+    the *real* exit's `mov r0, #14` and pass - which is the mutation the selftest writes."""
+    for index, (at, insn) in enumerate(body):
+        if at != address:
+            continue
+        for ahead in range(index, min(len(body), index + window + 1)):
+            if re.match(r"^mov\s+r\d+,\s*#%d(;|\s|$)" % EFAULT, body[ahead][1]):
+                return True, body[ahead][0], body[ahead][1]
+        return False, None, None
+    return None, None, None
 
 
 # ------------------------------------------------------------------------------------------------
@@ -706,6 +807,210 @@ def claim_the_user_path_never_comes_back(facts, failures, notes):
                      "two `user = 1` records are the two with no `xnu_live_sleh_back`")
 
 
+def claim_d13_the_copies_arm_a_fault_exit(facts, failures, notes):
+    """D13-2/D13-3. The copies that arm `TH_RECOVER` are exactly the copies, and the two the exec
+    path runs arm an address that sets EFAULT.
+
+    D13's copies (`bcopyinout.s`) arm **local** labels of their own (`.Lcopyin_fault` etc.) rather
+    than sharing 4570's `copyio_error`, and the labels live inside the functions so `objdump` gives
+    them no heading - so the target is the address the arming `add rX, pc, #imm` computes. The
+    property has two halves: nothing outside a copy function arms the field (so a non-zero value there
+    at a fault is a copy's doing), and `copyin`/`copyout`'s own arms point at a place that leaves
+    `EFAULT` in `r0`.
+
+    **D13's string copies are why this is not "all four".** `copyinstr`/`copyoutstr` arm a shared
+    label at the end of `copyoutstr` that *preserves* `r0` (or leaves the terminator count in it) and
+    returns - the label serves both copies and is not an EFAULT exit. So the EFAULT check is
+    `ARMED_COPIES` (`copyin`, `copyout`) only, while the "armed at all" set is the four the
+    instrument's records cover.
+    """
+    str_copies = ARMED_COPIES_D13
+    armed_functions = []
+    # `ARMED_COPIES` on D13 is `copyin`/`copyout` - the two the exec path runs and the two the EFAULT
+    # check below applies to. `copyinstr`/`copyoutstr` are only required to arm *something*.
+    arming_sites = 0
+    for name in str_copies:
+        body, sites = _copy_arm_sites(facts, name)
+        if not body:
+            failures.append("no `%s` in the linked image: the copy this build's exec path runs is "
+                            "not there to arm a recovery address" % name)
+            continue
+        if not sites:
+            failures.append("`%s` contains no store into `[..., #%d]`: the recovery address is never "
+                            "armed, so a fault inside this copy is not a fault the kernel planned for"
+                            % (name, OFFSET))
+            continue
+        armed_functions.append(name)
+        arming_sites += len(sites)
+        if name in D13_EFAULT_COPIES:
+            for address, register, value, defining, text in sites:
+                is_efault, at, mov = _is_efault_exit(body, value)
+                if is_efault is None:
+                    failures.append("`%s` arms `[..., #%d]` with 0x%08x (from `%s` at 0x%x) and the "
+                                    "label is not in this function's instructions: the address the "
+                                    "fault would be redirected to is not one this check can read"
+                                    % (name, OFFSET, value, text, defining))
+                elif not is_efault:
+                    failures.append("`%s` arms `[..., #%d]` with 0x%08x (from `%s` at 0x%x) and the "
+                                    "instructions at that address never set `r0` to EFAULT: a fault "
+                                    "recovered to a label that is not the failure exit is not the "
+                                    "`EFAULT` return this reading rests on"
+                                    % (name, OFFSET, value, text, defining))
+                else:
+                    notes.append("`%s` arms `[..., #%d]` with **0x%08x** (from `%s` at 0x%x) and "
+                                 "that label sets EFAULT (`%s`)"
+                                 % (name, OFFSET, value, text, defining, mov))
+
+    # Nothing outside a copy function may put a computed address there.
+    others = []
+    for index, (address, insn) in enumerate(facts["insns"]):
+        store = STORE_RECOVER.match(insn)
+        if not store or int(store.group(3)) != OFFSET:
+            continue
+        _at, defining, value = value_of_previous_definition(facts["insns"], index, store.group(1))
+        if not isinstance(value, int):
+            continue
+        _start, _end, owner = function_span(facts["globals"], address)
+        if not (owner or "").startswith("copy"):
+            others.append((address, owner, value, defining))
+    if others:
+        failures.append("`%s` store a computed address into `[..., #%d]` and are not copy functions: "
+                        "a non-zero recovery address at a fault would then not be evidence that a "
+                        "copy armed it"
+                        % (", ".join("`%s`" % (o[1] or "?") for o in others[:3]), OFFSET))
+    else:
+        notes.append("the whole image puts a computed address into `[..., #%d]` at %d sites, every "
+                     "one of them in a copy function (%s), so a non-zero value there at a fault can "
+                     "only have been put there by one"
+                     % (OFFSET, arming_sites, ", ".join(armed_functions)))
+    missing = [n for n in str_copies if n not in armed_functions]
+    if missing:
+        failures.append("`%s` do not appear among the functions that arm `[..., #%d]`: the copies "
+                        "the exec path runs are the ones whose recovery this reading is about"
+                        % ("`, `".join(missing), OFFSET))
+
+
+def claim_d13_the_handler_gates_on_it(facts, failures, notes):
+    """D13-4. `sleh_abort` reads the word only after both page-in attempts fail, and its recovery arm
+    writes `arm_ctx->pc` and returns.
+
+    D13's handler is a different shape from 4570's: it tries `vm_fault` on the thread's map and then
+    `vm_fault` on the kernel map (no `arm_fast_fault`), and it reads `thread->recover` **inline** - the
+    zero is materialised into a register *before* the read and stored back after it - rather than into
+    a named local. So this claim reads the C for the two page-in calls in order and for the recovery
+    arm that assigns to the frame's `pc` inside a `if (thread->recover)` test, and it reads the *kernel
+    object* for the read-then-zero the 4570 C spelled as two statements.
+    """
+    text = facts["trap"]
+    body = re.search(r"\bvoid\s+sleh_abort\s*\([^)]*\)\s*\{(.*?)\n\}", text, re.S)
+    if not body:
+        failures.append("no `sleh_abort` definition in `trap.c`: the handler whose recovery arm this "
+                        "claim is about is not in the file the image is built from")
+        return
+    body = body.group(1)
+
+    # D13 has no `arm_fast_fault`; the two attempts are the two `vm_fault` calls (thread map, kernel
+    # map). The 4570 branch requires `arm_fast_fault` before `vm_fault`; here the check is that the
+    # page-in is attempted (twice, one of them against the kernel map) before the recovery arm.
+    recover_read = body.find("thread->recover")
+    if recover_read < 0:
+        failures.append("`sleh_abort` never reads `thread->recover`: the field the copies arm is not "
+                        "consulted, so a fault inside a copy would not be recoverable at all")
+        return
+    faults = [m.start() for m in re.finditer(r"\bvm_fault\s*\(", body)]
+    kernel_fault = body.find("vm_fault(kernel_map")
+    if len(faults) < 2:
+        failures.append("`sleh_abort` does not attempt the page-in twice (thread map then kernel map, "
+                        "`vm_fault`): the recovery arm comes after both, and with one attempt a fault "
+                        "the kernel could have serviced would be turned into a failed copy")
+    else:
+        notes.append("`sleh_abort` attempts the page-in with `vm_fault` twice (the thread's map and "
+                     "then `kernel_map`); D13's handler has no `arm_fast_fault`, so those two are the "
+                     "attempts the recovery arm comes after")
+
+    assign = re.search(r"arm_ctx->pc\s*=\s*thread->recover\s*;", body)
+    if not assign:
+        failures.append("the recovery arm that points the frame's `pc` at `thread->recover` is gone, "
+                        "or no longer tests the field: with the arm gone a fault inside a copy would "
+                        "be a retry forever or a panic instead of the `EFAULT` return a recovered "
+                        "copy makes")
+        return
+    test = re.search(r"if\s*\(\s*!?\s*thread->recover\s*\)", body[:assign.start()])
+    if not test:
+        failures.append("`sleh_abort`'s `arm_ctx->pc = thread->recover` is not guarded by a test on "
+                        "`thread->recover`: an unarmed fault would then be redirected to a stale word")
+    else:
+        notes.append("`arm_ctx->pc` is pointed at `thread->recover` only inside a test on the field, "
+                     "and only after both `vm_fault` attempts")
+    if kernel_fault >= 0 and not (kernel_fault < assign.start()):
+        failures.append("the `arm_ctx->pc = thread->recover` assignment appears *before* the "
+                        "`vm_fault(kernel_map, ...)` attempt: the recovery address is used on a fault "
+                        "the page-in might still have serviced")
+    # The handler leaves by zeroing the field and returning (D13's kernel recovery arm does not rely on
+    # a later read of the frame's `pc`): the zeroing store is in the *compiled* object, which claim 5
+    # reads, and here the C is checked to clear the field on the recovery path.
+    if not re.search(r"thread->recover\s*=\s*NULL\s*;|thread->recover\s*=\s*0\s*;", body):
+        failures.append("`sleh_abort`'s recovery arm does not clear `thread->recover`: the field "
+                        "would survive the handler, and the wrapper's before-call read would then "
+                        "mean something different from what it means on 4570")
+
+
+def claim_d13_the_user_path_never_comes_back(facts, failures, notes):
+    """D13-8. D13's user half has no `goto exception_return;`: a serviced user fault **returns from
+    the handler** and a failed one leaves through `doexception()`.
+
+    This is why D13's user half returns to `__wrap_sleh_abort` (so the wrapper's post-call read *is*
+    reached) while the kernel recovery arm also returns - and it means the 4570 claim about
+    `thread_exception_return()` does not apply. What this claim states instead is the property the
+    instrument's before/after pair rests on for D13: the handler **returns** on the serviced-user path
+    (`ml_set_interrupts_enabled(TRUE); return;` in the user branch) and reaches `doexception()` only
+    when the page-in failed - so a returned entry the wrapper sees is a serviced fault, not a panic.
+    """
+    text = facts["trap"]
+    body = re.search(r"\bvoid\s+sleh_abort\s*\([^)]*\)\s*\{(.*?)\n\}", text, re.S)
+    if not body:
+        failures.append("no `sleh_abort` definition in `trap.c`: the handler whose user tail this "
+                        "claim is about is not in the file the image is built from")
+        return
+    body = body.group(1)
+
+    # The user-mode branch is the `else if (cpsr == 0x10)` half; inside it the two abort cases each
+    # end a serviced fault with `ml_set_interrupts_enabled(TRUE); return;`.
+    user = body.find("cpsr == 0x10")
+    if user < 0:
+        failures.append("`sleh_abort` has no `cpsr == 0x10` user-mode branch: the half whose return "
+                        "this claim is about is not in the function")
+        return
+    serviced = body.find("ml_set_interrupts_enabled(TRUE);", user)
+    ret = body.find("return;", serviced if serviced >= 0 else user)
+    if serviced < 0 or ret < 0:
+        failures.append("`sleh_abort`'s user branch no longer ends a serviced fault with "
+                        "`ml_set_interrupts_enabled(TRUE); return;`: the serviced-user path would not "
+                        "reach the wrapper's post-call read")
+        return
+    if "goto exception_return;" in body[user:]:
+        failures.append("`sleh_abort`'s user branch reaches `goto exception_return;`: that is 4570's "
+                        "arrangement (the serviced user fault leaves through "
+                        "`thread_exception_return()`), and D13's handler returns instead - the two "
+                        "shapes make the wrapper's post-call read mean different things")
+    else:
+        notes.append("`sleh_abort`'s user branch ends a serviced fault with "
+                     "`ml_set_interrupts_enabled(TRUE); return;` and never reaches "
+                     "`thread_exception_return()` - D13's serviced user fault returns to "
+                     "`__wrap_sleh_abort`, so its post-call `pc` read is reached")
+
+    # A failed user fault leaves through `doexception`, which does not return to the wrapper.
+    if "doexception(" not in body:
+        failures.append("`sleh_abort` no longer calls `doexception()`: a user fault the kernel could "
+                        "not service has no way out that the wrapper can distinguish from a return")
+
+
+D13_CLAIMS = (claim_d13_the_copies_arm_a_fault_exit,
+              claim_d13_the_handler_gates_on_it,
+              claim_the_offset_is_materialised,
+              claim_the_instrument_reads_it_first,
+              claim_d13_the_user_path_never_comes_back)
+
 CLAIMS = (claim_target_is_a_failure_exit, claim_the_copies_arm_it,
           claim_no_other_function_arms_it, claim_the_handler_gates_on_it,
           claim_the_offset_is_materialised, claim_the_instrument_reads_it_first,
@@ -716,7 +1021,7 @@ def compare(facts, mutate=None):
     if mutate is not None:
         facts = mutate_facts(facts, mutate)
     failures, notes = [], []
-    for claim in CLAIMS:
+    for claim in (D13_CLAIMS if IS_D13 else CLAIMS):
         claim(facts, failures, notes)
     return failures, notes
 
@@ -775,6 +1080,72 @@ def mutate_facts(facts, mutate):
     mutating and were reported as accepted claims on a check that was right.
     """
     facts = dict(facts)
+    if IS_D13:
+        # **949: D13's mutations, over D13's arrangement.** The table below is 4570's: every entry
+        # edits a 4570 form - the shared `copyio_error`, `arm_fast_fault`, `regs->pc = (recover &
+        # ~0x1)`, `thread_exception_return()`, `TH_RECOVER #664` - none of which D13 has. These three
+        # mutate the D13 forms the D13 claims read, and `selftest()` runs this set on D13.
+        if mutate == "a_copy_stops_arming_the_recovery_address":
+            body = body_of(facts["insns"], facts["globals"], "copyin")
+            address = next(a for a, insn in body
+                           if STORE_RECOVER.match(insn)
+                           and int(STORE_RECOVER.match(insn).group(3)) == OFFSET)
+            _edit_line_at(facts, address, lambda line: re.sub(r"str\s+\w+,", "str\tr0,", line))
+        elif mutate == "a_copy_arms_an_address_that_is_not_its_exit":
+            # Redirect the arm 0x100 past where it pointed - still inside the copy's own body, so the
+            # target is a real instruction this check can read, but it is a loop instruction and not
+            # the fault exit.
+            body = body_of(facts["insns"], facts["globals"], "copyin")
+            address = next(a for a, insn in body if ADR_PC.match(insn))
+            _edit_line_at(facts, address,
+                          lambda line: re.sub(r"#(0x[0-9a-fA-F]+|\d+)", "#0x100", line, count=1))
+        elif mutate == "a_copy_leaves_the_functions_that_arm_it":
+            facts["image_dis"] = re.sub(r"^%08x <copyin>:$" % facts["syms"]["copyin"],
+                                        "%08x <copies_in>:" % facts["syms"]["copyin"],
+                                        facts["image_dis"], count=1, flags=re.M)
+            facts["nm_text"] = re.sub(r"^%08x T copyin$" % facts["syms"]["copyin"],
+                                      "%08x T copies_in" % facts["syms"]["copyin"],
+                                      facts["nm_text"], count=1, flags=re.M)
+        elif mutate == "the_handler_stops_gating_on_the_word":
+            facts["trap"] = _bump(facts["trap"],
+                                  "arm_ctx->pc = thread->recover;", "arm_ctx->pc = 0;")
+        elif mutate == "assym_moves_the_offset":
+            facts["assym"] = _bump(facts["assym"], "#define TH_RECOVER\t#552",
+                                   "#define TH_RECOVER\t#556")
+        elif mutate == "assym_forgets_the_offset":
+            facts["assym"] = _bump(facts["assym"], "#define TH_RECOVER\t#552\n", "")
+        elif mutate == "the_kernel_object_moves_the_field":
+            facts["kobj_dis"] = _bump(facts["kobj_dis"], "ldr\tr0, [sl, #552]\t; 0x228",
+                                      "ldr\tr0, [sl, #556]\t; 0x22c")
+        elif mutate == "the_kernel_object_loses_the_read":
+            facts["kobj_dis"] = _bump(facts["kobj_dis"], "ldr\tr0, [sl, #552]\t; 0x228",
+                                      "ldr\tr0, [sl, #548]\t; 0x224")
+        elif mutate == "the_header_stops_defining_the_offset":
+            facts["header"] = _bump(facts["header"],
+                                    "#define STAGE90_TH_RECOVER     552",
+                                    "#define STAGE90_TH_RECOVER_VALUE 552")
+        elif mutate == "the_wrapper_reads_after_the_handler":
+            facts["trace"] = _bump(
+                facts["trace"],
+                "    recover = ((const uint32_t *)(uintptr_t)thread)[STAGE90_TH_RECOVER / 4];\n\n"
+                "    entry_note_sleh((uint32_t)type, fsr, far_, thread, (const uint32_t *)regs, recover);\n"
+                "\n    __real_sleh_abort(regs, type);",
+                "    entry_note_sleh((uint32_t)type, fsr, far_, thread, (const uint32_t *)regs, recover);\n"
+                "\n    __real_sleh_abort(regs, type);\n\n"
+                "    recover = ((const uint32_t *)(uintptr_t)thread)[STAGE90_TH_RECOVER / 4];")
+        elif mutate == "the_wrapper_reads_and_drops_it":
+            facts["trace"] = _bump(
+                facts["trace"],
+                "    entry_note_sleh((uint32_t)type, fsr, far_, thread, (const uint32_t *)regs, recover);",
+                "    entry_note_sleh((uint32_t)type, fsr, far_, thread, (const uint32_t *)regs, 0u);")
+        else:
+            raise SystemExit("unknown D13 mutation %s" % mutate)
+        facts["headings"] = symbol_table(facts["image_dis"])
+        facts["syms"] = {name: address for address, name in facts["headings"]}
+        facts["insns"] = instructions(facts["image_dis"])
+        facts["globals"] = globals_of(facts["nm_text"])
+        facts["kobj_insns"] = instructions(facts["kobj_dis"])
+        return facts
     target = facts["syms"].get("copyio_error")
 
     if mutate == "the_recovery_target_stops_setting_efault":
@@ -980,6 +1351,21 @@ MUTATIONS = (
 )
 
 
+D13_MUTATIONS = (
+    "a_copy_stops_arming_the_recovery_address",
+    "a_copy_arms_an_address_that_is_not_its_exit",
+    "a_copy_leaves_the_functions_that_arm_it",
+    "the_handler_stops_gating_on_the_word",
+    "assym_moves_the_offset",
+    "assym_forgets_the_offset",
+    "the_kernel_object_moves_the_field",
+    "the_kernel_object_loses_the_read",
+    "the_header_stops_defining_the_offset",
+    "the_wrapper_reads_after_the_handler",
+    "the_wrapper_reads_and_drops_it",
+)
+
+
 def selftest(facts):
     baseline, _notes = compare(facts)
     if baseline:
@@ -987,8 +1373,9 @@ def selftest(facts):
         for failure in baseline:
             print("      " + failure, file=sys.stderr)
         return 1
+    mutations = D13_MUTATIONS if IS_D13 else MUTATIONS
     accepted = []
-    for name in MUTATIONS:
+    for name in mutations:
         try:
             failures, _notes = compare(facts, mutate=name)
         except SystemExit:
@@ -1004,9 +1391,10 @@ def selftest(facts):
             say("      refused: %-48s %s" % (name, failures[0][:90]))
     if accepted:
         print("FAIL: %d of %d mutations were not refused: %s"
-              % (len(accepted), len(MUTATIONS), ", ".join(accepted)), file=sys.stderr)
+              % (len(accepted), len(mutations), ", ".join(accepted)), file=sys.stderr)
         return 1
-    say("  --selftest: all %d mutations were refused" % len(MUTATIONS))
+    say("  --selftest: all %d %smutations were refused"
+        % (len(mutations), "D13 " if IS_D13 else ""))
     return 0
 
 
@@ -1034,9 +1422,15 @@ def gather(image):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     parser.add_argument("--image", required=True, help="the linked entry image")
+    parser.add_argument("--tree", default=None,
+                        help="the XNU tree the image was built from (D13 detected by osfmk/sys/types.h)")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+
+    tree = args.tree or os.environ.get("XNU_TREE") or os.path.join(
+        REPO_ROOT, "external/xnu-4570.1.46")
+    configure(tree)
 
     missing = [path for path in (args.image, KOBJ, ASSYM, TRAP_C, MACHINE_ASM)
                if not os.path.exists(path)]
@@ -1060,16 +1454,25 @@ def main():
         for failure in failures:
             print("      " + failure, file=sys.stderr)
         return 1
-    say("  xnu_entry_490: the fault inside `copyin` is the design, not the frontier - both copy "
-        "paths arm `TH_RECOVER` with `copyio_error`'s own address out of the instructions this build "
-        "linked, nothing else in the image puts a computed address there, the handler consumes the "
-        "word and is redirected to it only after both page-in attempts fail, the kernel's own "
-        "compiled `sleh_abort` reads and zeroes the same offset, the instrument publishes it before "
-        "the call that would spend it, and it reads the frame after that call so the run reports the "
-        "faults the kernel planned for and the faults it actually converted into `EFAULT` as two "
-        "numbers under two names - while the handler's user half leaves through "
-        "`thread_exception_return()`, which is why the two records with no `_back` are the two the "
-        "kernel serviced for a user thread")
+    if IS_D13:
+        say("  xnu_entry_490: the fault inside `copyin` is the design, not the frontier - each of the "
+            "four copies arms `TH_RECOVER` (= %d in this tree) with its own local fault label, out of "
+            "the instructions this build linked, and nothing else in the image puts a computed address "
+            "there; `sleh_abort` consults the word only after attempting the page-in twice and, in the "
+            "recovery arm, points the frame's `pc` at it; the kernel's own compiled `sleh_abort` reads "
+            "and zeroes the same offset; and the instrument publishes the before-call read and the "
+            "after-call frame read as two numbers under two names" % OFFSET)
+    else:
+        say("  xnu_entry_490: the fault inside `copyin` is the design, not the frontier - both copy "
+            "paths arm `TH_RECOVER` with `copyio_error`'s own address out of the instructions this "
+            "build linked, nothing else in the image puts a computed address there, the handler "
+            "consumes the word and is redirected to it only after both page-in attempts fail, the "
+            "kernel's own compiled `sleh_abort` reads and zeroes the same offset, the instrument "
+            "publishes it before the call that would spend it, and it reads the frame after that call "
+            "so the run reports the faults the kernel planned for and the faults it actually converted "
+            "into `EFAULT` as two numbers under two names - while the handler's user half leaves "
+            "through `thread_exception_return()`, which is why the two records with no `_back` are the "
+            "two the kernel serviced for a user thread")
     return 0
 
 
