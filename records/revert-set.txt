@@ -12583,3 +12583,46 @@ set=armed-d13-96f53c02 sha256=5bd897d20e71655bb0355d7ff9447ee21fbd690fdd834f5e8c
 set=armed-d13-96f53c02 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-96f53c02 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-every-arm-6c2b6038-because-USB_PROBE-and-MEM_TOTAL-are-ENTRY-build-parameters
 set=armed-d13-96f53c02 sha256=18844a7bcf09f349ed234c1358f0cbddb9eb69672b1f1cae50b3da672e23e622 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+
+# =================================================================================================
+# armed-d13-89210a26 - THE FIRST D13 USB DEVICE ARM (2026-10-09)
+#
+# The second rung of the goal's clause 3 ladder, on D13. It is the 959 arm PLUS ONE KEY:
+# STAGE90_XNU_USB_DEV=1. 910a2 (`b3fbcd31`) is this rung on 4570, and it was DEFECTIVE: its probes sat
+# in dead code so a press returned ZERO keys. That defect is fixed here by construction - the probes
+# live at `__wrap_machine_idle` (951), the one idle site every pass reaches on this tree, and the
+# xnu_entry_910 clause confirms it from the LINKED image, not the command line:
+#   `entry_usb_probe`/`entry_usb_dev_init` called from `__wrap_machine_idle` and nowhere else
+#   (read_probe=1, write_arm=1, enum=0, stream=0).
+#
+# This is the FIRST arm that WRITES to the USB port. `entry_usb_dev.c` runs the vendor's PHY sequence
+# (`msm_otg.c`'s `msm_otg_reset`) and the ChipIdea device-mode sequence (`ci13xxx_udc.c`'s
+# `hw_device_reset`): 8 distinct registers (`USBCMD`/`USBSTS`/`USBMODE`/`DEVICEADDR`/`ENDPOINTLISTADDR`/
+# `USBINTR`/... + the PHY/ULPI ports). It is bounded by a MODE GATE - it writes nothing unless 910a
+# found the core already a device (`USBMODE[1:0] == 2`); `STAGE90_XNU_USB_DEV_FORCE=1` is the opt-in
+# that relaxes it and is LEFT OFF (0) here. The hazard the gate bounds: `USBCMD.RST` can drop the
+# host's enumeration. make check's `check_usb_dev.py` re-derives 5 transcribed offsets, 36 written
+# values and 8 write-targets against the Android header that owns them, and certifies the mode gate is
+# the body's first store.
+#
+# The D13 kernel pool is the STAGE90_XNU kernel (705 objects, marker entry_xnu_mem_total_arm_on for
+# STAGE90_XNU_MEM_TOTAL=1); the payload was built with XNU_TREE=.../xnu-hd2-darwin13/xnu and
+# STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'. The payload switch set is UNCHANGED (6c2b6038):
+# USB_PROBE/USB_DEV and MEM_TOTAL are ENTRY build parameters.
+#
+# NOT PRESSED. A press must show the `xnu_live_usb_*` readings (the probe ran at the D13 idle site)
+# AND the `xnu_live_usb_dev_*` readings (the device arm wrote). If the probe keys are present but the
+# dev keys are absent, the mode gate refused - the core was not in device mode, which is a reading of
+# its own. PRESS IS THE OPERATOR'S.
+# =================================================================================================
+set=armed-d13-89210a26 sha256=89210a26eb4d531d250e6124b456341a7fbfdc3d5ded81bfe4f609c7566cbaa4 bytes=6323284 file=xnu_arm_entry.bin role=THE-ARM:-the-first-D13-USB-DEVICE-entry-image-;-the-suffix-89210a26-is-THIS-member-s-hash-;-the-959-probe-arm-PLUS-STAGE90_XNU_USB_DEV=1-;-entry_usb_dev_init-WRITES-the-device-mode-registers-behind-a-mode-gate
+set=armed-d13-89210a26 sha256=d198c6f0075b66188342678194154c72a8bb7218eae6a39a9c79b8ba772be6c6 bytes=7360608 file=xnu_arm_entry.elf role=the-entry-ELF-;-the-linked-D13-entry-image-;-the-xnu_entry_910-clause-reads-it-write_arm=1
+set=armed-d13-89210a26 sha256=fd6a686c7b6ef58dc68654e5fab6eb2cd2cea81fa7da6478681ea1aacc13c8a2 bytes=1360 file=xnu_arm_entry-config.txt role=the-entry-record-;-STAGE90_XNU_TREE_D13=1-STAGE90_XNU_MEM_TOTAL=1-STAGE90_XNU_USB_PROBE=1-STAGE90_XNU_USB_DEV=1-plus-the-33-arm-keys
+set=armed-d13-89210a26 sha256=27332a1f9a33a8ace42aa660b35a245012908e6a1b0b2a94d4504edb800701b0 bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest
+set=armed-d13-89210a26 sha256=85d57b15f3ed277b43dc12b38a2980de49dbe08579b5ebfeebe4832ae4e7c9d3 bytes=6818684 file=stage90.bin role=the-payload-binary-embedding-the-D13-entry-image
+set=armed-d13-89210a26 sha256=e1fb1522e8febb93bd1628c56e9fa990645cec21f037a044a956dbca47cf1c74 bytes=6880756 file=stage90.elf role=the-payload-ELF
+set=armed-d13-89210a26 sha256=d910684e5777534e3457862153306d40739a65aca3c6946c7f444392e6341914 bytes=6821888 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-89210a26 sha256=9eaf45bbced9fd8b299d33805ca31d3b157ef6fea05153acca9a262187bc4cc1 bytes=9342976 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT
+set=armed-d13-89210a26 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-89210a26 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-every-arm-6c2b6038-because-USB_PROBE-USB_DEV-and-MEM_TOTAL-are-ENTRY-build-parameters
+set=armed-d13-89210a26 sha256=c9596e35215f2f8605963f4883733ce750396f7d15eaac317596cc8a0924e2a5 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
