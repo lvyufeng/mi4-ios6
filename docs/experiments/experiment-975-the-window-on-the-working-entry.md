@@ -210,11 +210,36 @@ without any recovery. Two **stale comments** name the pre-951 site (`__wrap_Idle
 site is `__wrap_machine_idle` — corrected in `entry_usb_enum.c` (comment-only, rebuild-proven byte-neutral:
 entry bin `73475747…` and record `72567a2a…` reproduced).
 
+**§6d — THE PRESS, SENT 2026-10-10: DEVICE DID NOT RETURN, USB CAPTURE EMPTY. Arm `armed-window-1091566c`,
+`RUN_RC=2`.** The one press §6b calls for was sent (payload `1091566c…`, the arm the gate read, unchanged
+across the send; `fastboot boot`, never flashed — the runner itself asserts "no outcome of this run can
+write to storage"). The runner's bounded 180 s wait expired with **no adb entry and no new enumeration of
+serial `4a2fe00b`** on usb 3-10; exit **2** = *the payload ran and the device did NOT come back* — a
+device verdict, not a capture failure (the dmesg ring did not rotate: 47→47 enumerations). Order on the
+host: `18d1:d00d` (fastboot) → disconnect ⇒ the payload took the CPU; thereafter silence on 3-10. **The
+USB console capture is EMPTY** (`out/stage90/captures/usb-console-975-…txt`, 0 bytes): the D13 ladder
+never enumerated `18d1:0910` on EP1-IN — `idProduct=0910` appears **0 times** in the entire host dmesg.
+
+**What the empty capture does and does not mean (§6a's dichotomy, resolved only half-way).** §6a retired
+"the ladder code is absent"; the empty capture therefore reads EITHER (a) the run faulted before the idle
+path (`__wrap_machine_idle`), OR (b) the ladder reached the idle path and is buggy — and it does **not**
+divide them. §6c narrows it: the enum state machine is correct, so the silence's determinant is the
+arming gate (`USBMODE[1:0]==2`) — but the gate's own key (`xnu_live_usb_enum_armed`) is in the **lost
+log**, which a resident arm keeps no `/proc/last_kmsg` for (`build_entry.sh:1094-1103`). So this press
+**owes a log**, and until that log is read the "faulted before idle vs. ladder buggy" question is open.
+
+**The pattern is now three.** 973 (`armed-d13-…`), 975's first press (this session's earlier run on entry
+bin `7107b998`), and this press (entry bin `73475747`) all: ran → took the CPU → never returned. Only the
+first two logged; this one is unread. The recovery carrier is the installed ROM read on the phone's NEXT
+boot (`scripts/recover_last_kmsg.sh` — plain reboot, NOT `fastboot boot`; the recovery's own measured
+rule), which is why the device's next wake-up reads this run's RAM console before any other boot burns the
+single slot. The device is dark and **needs the operator's power press**, then the recovery read.
+
 
 ## 7. Provenance
 
 *Provenance: 970 (design + §3 ceiling + §6c/§6d), 969 (the 301 MiB measurement), 971/973/974 (the
 working entry line) read this session; the entry image and payload built and verified by value in
-`out/`; `make check` 0 and `verify_press_ready` run this session; the press sent 2026-10-10 (device did
-not return; log owed). Device unmodified by the host. Follows
+`out/`; `make check` 0 and `verify_press_ready` run this session; the press sent 2026-10-10 (**device did NOT return, exit 2; USB capture EMPTY, `18d1:0910`
+never enumerated; RAM console owed and to be recovered on the operator's next power press**). Device unmodified by the host. Follows
 [[mi4-970-the-window-is-ram]], [[mi4-969-the-16mb-window-is-the-wall]], [[mi4-974-board-pe-console-sink]].*
