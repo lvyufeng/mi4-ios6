@@ -13233,3 +13233,45 @@ set=armed-window-1091566c sha256=1091566c491055b3bc9170040348ae4db0ce810e60f61b0
 set=armed-window-1091566c sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-stage90_fixture.macho
 set=armed-window-1091566c sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-stage90-build-config.txt
 set=armed-window-1091566c sha256=5be46435ad0b12c0b95466b065c58baafd2a9edd707af8d1b178cb96b03285d4 bytes=560 file=SHA256SUMS.txt role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-SHA256SUMS.txt
+# armed-d13-d693864f  —  977: the 975 window arm with the D13 residence rung WATCHDOG PET linked, so a
+# resident D13 press is no longer dark (the SoC watchdog is fed from __wrap_machine_idle).
+#
+# WHY. 975 (armed-window-1091566c) was pressed 2026-10-10 on the WORKING entry bin 73475747:
+# RUN_RC=2 (ran, did NOT return) and the USB console capture was EMPTY (idProduct=0910 seen 0
+# times). ROOT CAUSE (experiment-977): the payload arms the MSM8974 WDT ~28 s before the jump
+# and never disarms it; the D13 entry line could not feed it because the whole entry_wdt_pet
+# machinery sat inside the 4570-only `#if !STAGE90_ENTRY_D13` idle block, so a RESIDENT=1 D13
+# image linked NO pet at all. The boot therefore reset mid-boot, before the 959-962 USB ladder
+# reached __wrap_machine_idle - hence the empty capture AND the non-return.
+#
+# THE FIX (src/entry/entry_trace.c). The pet compiles under `#if STAGE90_XNU_RESIDENT` alone
+# (declaration guard drops `&& !STAGE90_ENTRY_D13`); the pet block moves out of the 4570 gate
+# to sit before __wrap_machine_idle; a D13 call site is added inside __wrap_machine_idle. The
+# two 4570 call sites stay; the pet body is unchanged. tools/test_resident_guard.py (run by
+# build_entry.sh for any RESIDENT=1 image) now asserts the pet IS in a D13 image and called
+# once from __wrap_machine_idle, with its own two --selftest mutations.
+#
+# THE ARM = 975 (armed-window-1091566c) with the pet linked. Every switch is 975 s (window
+# 0x1e400000 = 484 MiB, RESIDENT=1, USB_PROBE/DEV/ENUM/STREAM=1, MEM_TOTAL=1, CARD_TOTAL=1,
+# SMEM_PROBE=1, IDLE_NO_SLEEP=0). The ENTRY BIN MOVED (73475747 -> d693864f) because the pet
+# is now in the link, so this is an `armed-d13-*` set named from xnu_arm_entry.bin, NOT a
+# payload-only `armed-window-*` set. The qcdt moves too (1091566c -> 47fb6590).
+#
+# VERIFIED BY VALUE: arm-none-eabi-nm shows `entry_wdt_pet` defined and one `bl` to it inside
+# __wrap_machine_idle; the payload embeds entry blob d693864f; stage90.elf carries exactly one
+# e3a08579 (mov r8,#0x1e400000). make check 0. Medium: 968 real iOS 7.1.2 HFSX rootfs over
+# hfs_rmd0; CARD_COW=1, HDD_WRITE=0, the base is never written - fully reversible. fastboot
+# boot only, NEVER flash. PRESS IS THE OPERATOR S.
+# =================================================================================================
+set=armed-d13-d693864f sha256=d693864feb16b7beb60899343f09d2337b6a3140295ac03f86471dfd5d81da83 bytes=6331476 file=xnu_arm_entry.bin role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-xnu_arm_entry.bin
+set=armed-d13-d693864f sha256=9956f228dedbd49e2bb92b100a675a64f68d1db09ad0731a6afeb7b170379ef0 bytes=7371080 file=xnu_arm_entry.elf role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-xnu_arm_entry.elf
+set=armed-d13-d693864f sha256=b40bbd57e5377dc305c0e20d45b33a62a5e9c8d0386cc1e313f85a44d273fe37 bytes=1912 file=xnu_arm_entry.h role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-xnu_arm_entry.h
+set=armed-d13-d693864f sha256=08fcc09020defc8cdb82dd59e035a52d4d13517486130dd87b345d8d6bf485f0 bytes=1409 file=xnu_arm_entry-config.txt role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-xnu_arm_entry-config.txt
+set=armed-d13-d693864f sha256=2fb79e7756931f8c30d58fd19a4262ae4332516a3c3f3559709cb3fc52733ed5 bytes=3149 file=xnu_arm_entry-sources.txt role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-xnu_arm_entry-sources.txt
+set=armed-d13-d693864f sha256=d3bf013a9128427dae7c430ca97bc3291cd5b302fd46955970ad9a220b259495 bytes=6826884 file=stage90.bin role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-stage90.bin
+set=armed-d13-d693864f sha256=ea5748456590147d30cf4b4334a302e515b3e353287ecad319740b8479586e21 bytes=6888956 file=stage90.elf role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-stage90.elf
+set=armed-d13-d693864f sha256=fda4b151a3a225df470bfae02cb931f9c4b5c0ab8b0d8323196ee2289f4b8c65 bytes=6830080 file=stage90.img role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-stage90.img
+set=armed-d13-d693864f sha256=47fb659006467aaf76ccfd9eda1beeaf387d427532769a6976bd0aa8895bfd8f bytes=9351168 file=stage90-qcdt.img role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-stage90-qcdt.img
+set=armed-d13-d693864f sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-stage90_fixture.macho
+set=armed-d13-d693864f sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-stage90-build-config.txt
+set=armed-d13-d693864f sha256=de2b27b56fe7d891b359c6470660a27ae1d787719b857270bbfa0de8261577e8 bytes=560 file=SHA256SUMS.txt role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-SHA256SUMS.txt

@@ -1,6 +1,8 @@
 # Experiment 977 — the D13 resident arm arms the watchdog and cannot pet it
 
-**Status:** ✅ **ROOT CAUSE ESTABLISHED (read-only, by value; 2026-10-10).** The D13 entry line **cannot**
+**Status:** ✅ **ROOT CAUSE ESTABLISHED AND FIXED (2026-10-10).** The fix is built and parked as
+`armed-d13-d693864f` (`scripts/park_977.sh`), press-ready (`verify_press_ready` 4/5, the 5th the dark
+device). The D13 entry line **cannot**
 pet the SoC watchdog, because the resident signature the whole **cancro bring-up is built on** —
 `arm_vm_init.c` ends → the boot spins in **`machine_idle`** (`osfmk/kern/sched_prim.c:4532`) — is only
 true for the **bounded** build; a **resident** D13 build carries **no pet at all**, while the payload
@@ -64,11 +66,19 @@ and because the ladder had not started, the USB stream is **empty**. This is the
 - [[mi4-goal-is-press-gated]] reads a non-return as the *expected* form of "`保持在 xnu 里`" and defers
   to the RAM console — which a reset-and-power-off does not leave.
 
-## 4. The fix (designed here; not yet built)
+## 4. The fix (BUILT, PARKED `armed-d13-d693864f`, 2026-10-10)
 
 **Give the D13 resident arm a pet at the one D13-live site.** The pet body is already
 tree-independent: it touches only `entry_mmio_section`, `entry_live_write`, `entry_live_ready`, and
-`STAGE90_WDT_*`, none of which is 4570-only.
+`STAGE90_WDT_*`, none of which is 4570-only. Steps 1–3 below are the fix that landed (commit
+`de6d9f1`); step 4's build-side refusal is `tools/test_resident_guard.py` run from
+`build_entry.sh:38003` for any `RESIDENT=1` image (the preflight half is the peer lane's file, not
+touched here). **Verified by value:** `arm-none-eabi-nm` shows `entry_wdt_pet` defined and `objdump`
+shows exactly one `bl … <entry_wdt_pet>` inside `__wrap_machine_idle`; the rebuilt payload embeds
+entry blob `d693864f`; `stage90.elf` still carries one `e3a08579` (`mov r8,#0x1e400000`); the
+resident guard and its `--selftest` both exit 0; `make check` 0; `verify_press_ready` 4/5. The entry
+bin moved `73475747 → d693864f` (the pet is now linked), so the arm names from
+`xnu_arm_entry.bin` — an `armed-d13-*` set, not a payload-only `armed-window-*` one.
 
 1. **`entry_trace.c`** — move the trace of `entry_wdt_pet` (the definitions of `STAGE90_WDT_*`, the
    `g_wdt_*` statics, and the function body, `:2701-2866`) **out of** the `#if !STAGE90_ENTRY_D13`
