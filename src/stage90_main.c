@@ -46,9 +46,22 @@ static void build_chosen_random_seed(uint8_t *out, uint32_t len)
 
 static void build_stage90_apple_dt(struct apple_dt_builder *b)
 {
+    /* 915-B rung 1 (STAGE90_XNU_REGIONS=1): append the low bank [0, 0x60000000) as reg[2]/[3],
+     * leaving the boot pair at index 0/1. Deliberately INERT: every reader of /memory/reg
+     * (pe_state.c:38-39, pexpert.c:68, xnu_pe_init_platform_false.c:423-425) reads pair 0 alone and
+     * compares it to the boot region, so an extra pair below the boot pair changes no reader's
+     * reading. It only puts the region list into the DT where a later rung (region registration,
+     * arm_vm_init.c) can read it. `#if` not `#ifdef`: the switch is always defined 0 or 1 (an
+     * undefined-name would be a different spelling of off - [[mi4-off-option-two-spellings]]). */
+#if STAGE90_XNU_REGIONS
+    static const uint32_t memory_reg[] = {
+        RAM_PHYS_BASE, RAM_BOOT_BANK_SIZE, 0x00000000u, 0x60000000u,
+    };
+#else
     static const uint32_t memory_reg[] = {
         RAM_PHYS_BASE, RAM_BOOT_BANK_SIZE,
     };
+#endif
     static const uint32_t gic_reg[] = {
         0xf9000000u, 0x00001000u,
         0xf9002000u, 0x00001000u,

@@ -334,6 +334,16 @@ check:
 # Source half, no build and no device; `--selftest` mutates each of the three and asserts each is refused.
 	@tools/check_usb_host_reader.py --selftest >/dev/null
 	@tools/check_usb_host_reader.py
+# 915-B rung 1: the low bank appended to DT /memory, and PROVABLY INERT. `STAGE90_XNU_REGIONS=1`
+# appends `[0x00000000, 0x60000000)` to /memory/reg as words 2/3, leaving the boot pair at 0/1. It is
+# a NO-OP for every reader (pe_state.c, pexpert.c, xnu_pe_init_platform_false.c all read pair 0), so
+# the inertness is the arm's WHOLE claim. `check_d13_regions.py` makes it structural: the switch is
+# `#if` not `#ifdef` (always-defined 0/1); the boot pair is FIRST in both arms and the off arm is the
+# boot pair ALONE; the three readers read words 0/1 only (a reader reaching word 2/3 consumes the low
+# bank without the rest of the port -> refused); build.sh records the switch. Source half, no build, no
+# device; `--selftest` mutates each fact and asserts the refusal.
+	@tools/check_d13_regions.py --selftest >/dev/null
+	@tools/check_d13_regions.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not

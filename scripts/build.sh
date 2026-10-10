@@ -173,6 +173,19 @@ STAGE90_XNU_TREE_D13=0
 [[ -f $XNU_TREE/osfmk/sys/types.h ]] && STAGE90_XNU_TREE_D13=1
 CFLAGS+=(-DSTAGE90_XNU_TREE_D13=$STAGE90_XNU_TREE_D13)
 
+# **915-B rung 1: the low bank injected into the DT's /memory, INERT.** `STAGE90_XNU_REGIONS=1`
+# appends `[0x00000000, 0x60000000)` to `/memory/reg` as words 2/3, leaving the boot pair at 0/1.
+# Every reader (`pe_state.c`, `pexpert.c`, `xnu_pe_init_platform_false.c`) reads pair 0 only, so the
+# extra pair changes no reader's reading - it only puts the region list where a later rung can read it.
+# DEFAULT 0, and the macro is ALWAYS defined (0 or 1) so `#if STAGE90_XNU_REGIONS` is not an
+# undefined-name spelling of off ([[mi4-off-option-two-spellings]]); at 0 the DT bytes are unchanged.
+STAGE90_XNU_REGIONS=${STAGE90_XNU_REGIONS:-0}
+case "$STAGE90_XNU_REGIONS" in
+  0|1) ;;
+  *) echo "REFUSING: STAGE90_XNU_REGIONS='$STAGE90_XNU_REGIONS' is neither 0 nor 1" >&2; exit 1 ;;
+esac
+CFLAGS+=(-DSTAGE90_XNU_REGIONS=$STAGE90_XNU_REGIONS)
+
 LDFLAGS=(
   -nostdlib
   -Wl,-T,linker.ld
@@ -454,6 +467,12 @@ sha256sum $REPO_ROOT/out/stage90/stage90_fixture.macho $REPO_ROOT/out/stage90/st
 $CC "${CFLAGS[@]}" -E -dM -include stage90.h - </dev/null \
   | grep -E '^#define STAGE90_(HANDOFF_MODE|ENTRY_LADDER_LEVEL|DEADMAN_ENABLE|DEADMAN_SELFTEST|BYPASS_ENTRY_STUB|EXCLUSIVE_PROBE|PMAP_ATTR_MODE|HW_WATCHDOG|HW_WATCHDOG_SELFTEST|XNU_BOOT_ARGS|HANDOFF_FAULT_INJECT_VA|XNU_MSM8974_SHIM|CACHE_MODE|XNU_REAL_DT|XNU_ENTRY|XNU_MSM8974_FIQ_PROBE) ' \
   > $REPO_ROOT/out/stage90/stage90-build-config.txt
+# 915-B rung 1 records its switch ONLY WHEN ON, so the default (0) leaves the record byte-identical to
+# the shipped arms (the "an absent key is not a missing value but the value" idiom preflight_boot_check
+# uses for SMEM_PROBE/MEM_TOTAL). A press of a REGIONS=1 image can then tell which DT shape it carries.
+if [[ $STAGE90_XNU_REGIONS -eq 1 ]]; then
+  echo "#define STAGE90_XNU_REGIONS 1" >> $REPO_ROOT/out/stage90/stage90-build-config.txt
+fi
 cat $REPO_ROOT/out/stage90/stage90-build-config.txt
 
 ls -l $REPO_ROOT/out/stage90/stage90.elf $REPO_ROOT/out/stage90/stage90.bin $REPO_ROOT/out/stage90/stage90.img \
