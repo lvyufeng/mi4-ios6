@@ -291,6 +291,63 @@ host-side and reversible; the press to observe it is the operator's. **The windo
 later question** — this cause is independent of window size, which is why the 16 MiB and 484 MiB arms
 failed identically (§6c).
 
+## 6e. The fix — adopt the inherited console mapping (built, PARKED `armed-d13-2544428e`)
+
+The cause above has a minimal fix that does **not** touch the D13 kernel `locore.s` at all: it is
+gated to the **entry sources**, and it changes what the entry does with the mapping the payload left it.
+
+`entry_live_init` (`src/entry/entry_stubs.c`) used to **refuse** (`why=2`) when the console's L1 slot
+was already occupied. On D13 that is the normal state — the payload's table is still TTBR0 (§6d step 3),
+and it maps the console (§6d step 2) — so the refusal killed the channel and made the whole line
+unobservable. The fix **accepts the pre-existing mapping** when it is (a) a section descriptor
+(bits[1:0]=`0b10`), (b) whose PA is the console's own (`0xde500000`), and (c) AF set — and then **still
+requires the signature check through it** (`entry_stubs.c:2370`, the same proof a fresh install must
+pass). Nothing is written to the table; someone else's mapping is *verified and used*:
+
+```c
+#if STAGE90_ENTRY_D13
+    if ((installed & 1u) == 0u) {
+        uint32_t before = g_live_slot_before;   /* the console slot's own value, latched by the map */
+        if ((before & LIVE_TTE_TYPE_MASK) == LIVE_TTE_TYPE_BLOCK &&
+            (before & LIVE_TTE_PA_MASK)   == (RAM_CONSOLE_BASE & LIVE_TTE_PA_MASK) &&
+            (before & LIVE_TTE_BLOCK_AF)  != 0u) {
+            installed |= 1u; g_live_installed = installed; g_live_adopted = 1u;
+        }
+    }
+#endif
+```
+
+**Why this and not moving the TTBR0 write.** Rewriting `locore.s` to fall into `mmu_reinitialize` with
+the MMU on is the *surgical* fix, but that cold path builds its MV table at `topOfKernelData + 0x18`
+while the live TTBR0 points at the payload's table — a window where the running PC's own section is not
+yet mapped. 4570 tolerates it; D13 was never tested that way, and "don't brick" forbids discovering a
+D13-specific difference on hardware. Adoption cannot fault (it is a comparison plus a store to two
+`.bss` words), and the two `.bss` words it stores are **already identity-mapped and cache-coherent**
+with the console's own section.
+
+**The gate is what keeps the proven 4570 image byte-identical.** `#if STAGE90_ENTRY_D13` wraps the
+adoption block, the `g_live_adopted` global and the `xnu_live_adopted` key, so a 4570 entry build
+compiles none of them and its bytes are unchanged. **The single switch that moved** is the entry source:
+`entry_stubs.c`. The D13 arm is otherwise 968's exact switch set.
+
+- **`armed-d13-2544428e`** — PARKED. The entry bin is `2544428e…` (6331476 B); its `xnu_arm_entry-config.txt`
+  is byte-identical to 968's (same switch set), and the **only** diff in `xnu_arm_entry.elf` is the
+  adoption block. The payload embeds the entry image, so `stage90.bin`/`.elf`/`.img`/`-qcdt.img` moved too
+  (payload `1fd1c060…`); `stage90-build-config.txt` and `stage90_fixture.macho` are unchanged.
+- **Verified by value, not by the record.** In the linked `xnu_arm_entry.elf`, entry_live_init+0x1dc is
+  the adoption: `orr fp,fp,#1` (installed |= 1), `str fp,[r4,#108]` (g_live_installed),
+  `str r3,[r4,#112]` (= `g_live_adopted` @ `0x8060b070`), reached from a predicated
+  `before & 0xfff00403 == 0xde50402` (PA `0xde500000`, section type, AF). The `xnu_live_adopted` string
+  is in `.rodata`.
+- **What the press decides.** The D13 line becomes **observable** for the first time. `xnu_live_adopted=1`
+  in the log *proves* this cause: it means the console came up through an inherited mapping, exactly the
+  scenario §6d predicts. Then the existing keys (`xnu_live_console`, `xnu_live_tmr_setup_*`) name how far
+  `__start`→`arm_init` got — the first real reading of the D13 entry line. If instead the log still shows
+  zero, adoption alone was not enough and the fault is genuinely below `entry_live_init` (a distinct,
+  now-separated question).
+- **Reversible, non-destructive.** `fastboot boot` only, `CARD_COW=1` never writes the base; a power cycle
+  reverts everything. `tools/verify_press_ready.sh` = **5/5**, `make check` = 0. **PRESS IS THE OPERATOR'S.**
+
 ## 7. What it does NOT do
 
 It does **not** make XNU *recognize 3 GB*. `max_mem`/`mem_size`/`sane_size` are all `gMemSize` here, so

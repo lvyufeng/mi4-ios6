@@ -741,6 +741,9 @@ uint32_t g_live_alias_read;
 uint32_t g_live_sctlr;
 uint32_t g_live_prrr;
 uint32_t g_live_attr;
+#if STAGE90_ENTRY_D13
+uint32_t g_live_adopted;    /* D13: 1 if the console's pre-existing mapping was accepted (Fix A) */
+#endif
 /* 484: the table the last `entry_mmio_section` installed into, read at the install rather than
  * latched at the console's first write, and whether that table was the one the console latched. */
 uint32_t g_live_mmio_l1;
@@ -2360,6 +2363,41 @@ static void entry_live_init(void)
     installed |= entry_live_map(LIVE_CONSOLE_ALIAS_BASE, RAM_CONSOLE_BASE, l1, 4u);
     g_live_installed = installed;
 
+#if STAGE90_ENTRY_D13
+    /*
+     * **D13: the console's section can arrive already mapped, and that is not a refusal.**
+     *
+     * This entry is entered with the *payload's* identity table still installed, because D13's
+     * `__start` branches on `beq mmu_initialized` when the MMU is already on (`locore.s:61`) and so
+     * skips the boot path's only TTBR0 write (`locore.s:108`). 4570's `_start` has no such branch -
+     * it writes TTBR0 unconditionally (`start.s:152`) - so it always presents a fresh table in which
+     * this instrument's console slot is free. D13 does not: the payload maps the console at
+     * `mmu.c:5478` (`RAM_CONSOLE_BASE`, descriptor `0x00010c02` = section, AF set).
+     *
+     * `entry_live_map` *skips* an occupied slot by design - it is not this instrument's to clobber -
+     * so on D13 the console's own MB always reads "occupied", the old code refused (`why=2`) and the
+     * whole channel went off. That failure is silent by construction, because the refusal's own
+     * record would go through the channel it just refused. It is the whole reason the D13 entry
+     * image - which is otherwise statically correct - boots to zero output on hardware.
+     *
+     * Here the pre-existing mapping is **accepted, not overwritten.** A valid section descriptor
+     * whose PA is the console's own is a usable path to the console, and the signature check below
+     * still has to pass *through it* - the same proof a freshly installed descriptor must pass. If
+     * the descriptor is anything else (fault, wrong PA, AF clear) the adoption declines and the
+     * refusal stands. Nothing is written to the table; someone else's mapping is verified and used.
+     */
+    if ((installed & 1u) == 0u) {
+        uint32_t before = g_live_slot_before;   /* the console slot's own value, latched by the map */
+        if ((before & LIVE_TTE_TYPE_MASK) == LIVE_TTE_TYPE_BLOCK &&
+            (before & LIVE_TTE_PA_MASK) == (RAM_CONSOLE_BASE & LIVE_TTE_PA_MASK) &&
+            (before & LIVE_TTE_BLOCK_AF) != 0u) {
+            installed |= 1u;
+            g_live_installed = installed;
+            g_live_adopted = 1u;
+        }
+    }
+#endif /* STAGE90_ENTRY_D13 */
+
     if ((installed & 1u) == 0u) {
         /* Every candidate was already mapped: the address is someone else's and the console is off. */
         entry_live_refuse(2u);
@@ -2388,6 +2426,9 @@ static void entry_live_init(void)
     entry_write_kv("xnu_live_l1", l1);
     entry_write_kv("xnu_live_installed", installed);
     entry_write_kv("xnu_live_slot_before", g_live_slot_before);
+#if STAGE90_ENTRY_D13
+    entry_write_kv("xnu_live_adopted", g_live_adopted);
+#endif
     entry_write_kv("xnu_live_desc", g_live_desc);
     entry_write_kv("xnu_live_desc2", g_live_desc2);
     entry_write_kv("xnu_live_alias_read", g_live_alias_read);
