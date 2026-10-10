@@ -12894,3 +12894,59 @@ set=armed-d13-321e3332 sha256=2ded1d0d998a10032ed34763fd12960d267d9e7a5ec18d4d48
 set=armed-d13-321e3332 sha256=ec95f10ebe0877aa8c32d910f05fe461e1a1e0693d0f9cf7358083383480eac9 bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-THIS-is-what-the-press-sends
 set=armed-d13-321e3332 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-321e3332 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968-s-6c2b6038-(the-970g-change-is-entry-side-only)
+
+# =================================================================================================
+# 970h - the D13 boot-path PRE-SWITCH TLB-flush removal (armed-d13-299ee994).  The 970g press is
+# SILENT (capture 970g-armed-d13-321e3332-20261010, ZERO xnu_live_* keys, log ends at 'jumping to
+# XNU's _start'), so 970g is FALSIFIED and the boot path was NOT the whole cause.
+#
+# THE CAUSE (doc 970h).  D13 mmu_reinitialize ran a WHOLE-TLB invalidate (locore.s:85,
+# 'mcr p15,0,r4,c8,c7,0') BEFORE the TTBR0 write (:113) and before the zero/map loops build the boot
+# table.  The payload jumps into the entry with the MMU ON (sctlr_before=0x00c5487b, caches OFF) and
+# its L1 identity-maps [0x80000000,0x81000000) (src/mmu.c:5506), so at the jump VA 0x80a00000 (the
+# boot table, topOfKernelData) a valid identity TLB entry is LIVE.  4570 relies on exactly that: its
+# _start has NO pre-switch TLB maintenance (its only c8,c7,0 is at start.s:337, AFTER the table is
+# built), and its first post-switch store - invalidate_tte's str to the SAME VA 0x80a00000 - does not
+# fault, which is only possible if a live identity entry survived the switch (ARMv7 does not
+# auto-invalidate the TLB on a TTBR write).  D13's pre-switch flush DESTROYED that entry, so 970g's
+# zero loop's first store (str r3,[r5],#4 to VA 0x80a00000) had to WALK the just-switched stale table,
+# whose slot 0x80a holds DRAM (no descriptor) -> translation fault.  With cpsid if set (locore.s:55)
+# and VBAR still the PAYLOAD's (D13 sets its own only at :235), the abort-vector fetch itself faults:
+# a double fault, no print, watchdog reset.  That is the WHOLE D13-line silence.
+#
+# THE FIX (970h, D13 osfmk/arm/locore.s ONLY - a tree edit, scripted in tools/patch_d13_boot_path_970h.py
+# + tools/stage_d13_boot_path_970h.sh, so a re-checkout re-applies it): REMOVE the pre-switch whole-TLB
+# invalidate at :85, exactly as 4570's _start has none.  D13 already performs a safe whole-TLB invalidate
+# AFTER the table is built (:274, in mmu_initialized - the same place 4570 does it), so the removed one
+# is redundant.  The TTBCR write just below stays (a different operation).  The 970g edits (fast-path
+# removal, boot-table zeroing) REMAIN.
+#
+# Verified BY VALUE in the LINKED image (out/stage90/xnu_arm_entry.elf): mmu_reinitialize @0x80000008
+# runs DACR(0x8000000c)/I-cache(0x80000018)/TTBCR(0x8000001c) with NO cr8,cr7 before the TTBR0 write
+# @0x80000048; _970g_zero_tte @0x80000060; the post-build flush cr8,cr7 @0x8000012c (mmu_initialized,
+# :274) REMAINS.  The 970g elf had cr8,cr7 at 0x80000018 (where the new elf has the I-cache flush) -
+# the whole difference is the one removed instruction, so the arm's switch record is byte-identical to
+# 970g's (only the SHA256/BYTES fields move).  Entry bin 299ee994 (was 321e3332); payload switch set
+# 6c2b6038 UNCHANGED (the change is entry-side only).  make check 0 (check_d13_boot_path_970h_staged
+# wired in).  PRESS IS THE OPERATOR'S.
+#
+# WHAT THE PRESS DECIDES.  If the cause is right, the D13 entry line becomes OBSERVABLE for the first
+# time: xnu_live_console and the first ~15 keys (the init block and the first wrapped probes, which fire
+# inside arm_init BEFORE arm_vm_init).  The console is still lost AT arm_vm_init (D13 arm_vm_init.c:352
+# bzero`s a FRESH cpu_ttb where 4570 bcopy`s the boot table - 971, staged, a LATER rung), so keys after
+# that switch are not expected yet.  STILL ZERO keys => the cause is below __start too; recorded, not
+# papered over.
+#
+# SCOPE.  Not 3 GB (958/915-B).  Not the arm_vm_init boot-table copy (971, staged).  Reversible:
+# fastboot boot only, never flash; the card base is never written (CARD_COW=1).  PRESS IS THE OPERATOR.
+# =================================================================================================
+set=armed-d13-299ee994 sha256=299ee9943ad9335b38c73be1b814e38665f95d4a07a5ac1ddf9845b0b460d1eb bytes=6331476 file=xnu_arm_entry.bin role=THE-ARM:-970h-s-removal-of-D13-s-PRE-SWITCH-whole-TLB-invalidate-in-locore.s-(the-boot-table-s-live-identity-entry-must-survive-the-TTBR0-switch,-exactly-as-4570-s-start.s-keeps-it).-The-only-source-that-moved-is-external/xnu-hd2-darwin13/xnu/osfmk/arm/locore.s,-re-applied-by-tools/stage_d13_boot_path_970h.sh;-the-suffix-299ee994-is-THIS-member-s-hash-(the-armed-d13-family-names-from-the-entry-bin)
+set=armed-d13-299ee994 sha256=e510b8cc3892437ba063b2f739ac72930d33f4dca7550e77a9eed00005138b4c bytes=7370416 file=xnu_arm_entry.elf role=the-entry-ELF
+set=armed-d13-299ee994 sha256=858d20d9dc5b0ceb64de3b18bde6c2ce40834653c568cfc6927469cae9871e18 bytes=1409 file=xnu_arm_entry-config.txt role=the-entry-record-;-968/970f-s-38-arm-keys,-UNCHANGED-(the-970h-change-is-a-tree-edit,-not-a-switch)-so-this-record-s-non-hash-lines-are-byte-identical-to-armed-d13-321e3332-s
+set=armed-d13-299ee994 sha256=8980fd678524f1af61ad4004df66b77b383cb2e531f6a755abe22760f2b4d86f bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest-;-the-locore.s-entry-moved-(the-source-that-changed-is-out/xnu_asm_obj_d13/locore.o,-reassembled-by-tools/assemble_arm_layer.sh)
+set=armed-d13-299ee994 sha256=df32cb93fdf22426d81007316329cd00afc9956214c1bc0a5204ee67d5725bc7 bytes=6826876 file=stage90.bin role=the-payload-binary-embedding-the-970h-entry-image-(the-entry-bin-moved-321e3332->299ee994,-so-the-embedded-copy-did-too;-the-payload-s-own-sources-are-unchanged)
+set=armed-d13-299ee994 sha256=63f75988e4429eb051e5988ae9c59138ece18a2c8389fea42e45c6078fafd73b bytes=6888948 file=stage90.elf role=the-payload-ELF
+set=armed-d13-299ee994 sha256=b79b2c7636237755345d4079abccdddacaf3c1f9cb4230d628963afda6467110 bytes=6830080 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-299ee994 sha256=f3b082ba215f3a6c040f1bee691579e14af25a4acb303e5231750a1b1c0412d7 bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-THIS-is-what-the-press-sends
+set=armed-d13-299ee994 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-299ee994 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968-s-6c2b6038-(the-970h-change-is-entry-side-only)

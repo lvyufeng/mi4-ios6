@@ -196,6 +196,16 @@ check:
 # drift, so a re-provisioned `external/` cannot leave the second half silently unapplied. Source half,
 # no compiler, no device.
 	@tools/check_d13_vm_init_staged.sh
+# 970h: the LAST instruction of the D13 `_start` silence. 970g restored the boot path, but left a
+# whole-TLB invalidate (`locore.s:85`) running BEFORE the TTBR0 write and before the zero/map loops
+# build the boot table. The payload hands off with the MMU ON and its L1 identity-maps
+# [0x80000000,0x81000000), so VA 0x80a00000 (the boot table) has a live identity TLB entry at the jump;
+# the flush destroys it and the zero loop's first store walks the just-switched stale table and faults -
+# silently. 4570's `_start` has no pre-switch invalidate (its only one is after the table is built).
+# `tools/stage_d13_boot_path_970h.sh` removes the one instruction; `check_d13_boot_path_970h_staged.sh`
+# re-derives the property BY POSITION (no `c8,c7,0` between `mmu_reinitialize:` and `mmu_initialized:`,
+# exactly one post-build `c8,c7,0` remains) and refuses drift. Source half, no compiler, no device.
+	@tools/check_d13_boot_path_970h_staged.sh
 # 926: the entry link's object pool must follow the selected tree. `build_entry.sh` read one
 # hard-pinned tree (4570) and one hard-pinned pool, 289 times; the D13 link needs the `_d13` pool.
 # Re-derives the derivation from the tree's own header and refuses a re-pin. Source half, no device.
