@@ -198,6 +198,18 @@ the four `STAGE90_XNU_USB_{PROBE,DEV,ENUM,STREAM}=1` (959–962 — 「可以通
 — it is the goal's clause-2/3/5a/5b observation AND the window/wall decision at once. Nothing about the
 arm is missing; only the press is.
 
+**§6c — enumeration-state-machine audit (2026-10-10).** Read `src/entry/entry_usb_enum.c` by value: the
+D13 EP0 poll (`usb_enum_ui`/`usb_enum_get_descriptor`/`usb_enum_bus_reset`/`usb_enum_arm_ep0`) is
+correct — it handles GET_DESCRIPTOR(device/config/string), SET_ADDRESS, SET_CONFIGURATION, GET_STATUS, and
+bus reset (URI), primes via the qh-INDEX bit, and reads the SETUP under `USBCMD.SUTW`. So the **hard
+determinant of 975's 2026-10-10 silence is the arming gate** (`entry_usb_enum_poll:533-540`): arming is
+one-shot and gated on `USBMODE[1:0]==2`, so NO `xnu_live_usb_enum_armed` ⇒ never reached the idle path in
+device mode (⇒ the run faulted before entering, or `USBMODE≠2` despite 960's redo); `armed=1` but no
+`ENDPTCOMPLETE` progression ⇒ reached, wrote, host not driving. The ladder's own keys divide the two
+without any recovery. Two **stale comments** name the pre-951 site (`__wrap_Idle_load_context`); on D13 the
+site is `__wrap_machine_idle` — corrected in `entry_usb_enum.c` (comment-only, rebuild-proven byte-neutral:
+entry bin `73475747…` and record `72567a2a…` reproduced).
+
 
 ## 7. Provenance
 

@@ -22,7 +22,10 @@
  * The vendor's `udc_irq` (`ci13xxx_udc.c:3653`) is an interrupt handler. This image runs no USB
  * interrupt: the USB2 core is not in its vector table and wiring a GIC SPI for it would grow the GIC
  * probe. So `entry_usb_enum_poll` does exactly what `udc_irq` does, minus enable/ack, **once per idle
- * pass** (it is called from `__wrap_Idle_load_context`, the one wrapper every pass reaches - §9.6):
+ * pass** (D13: it is called from `__wrap_machine_idle`, the one wrapper every pass reaches - 951;
+ * on 4570 it was `__wrap_Idle_load_context`). NOTE: whichever the tree, the site must be the one the
+ * boot REACHES - a probe placed at a site the arm never enters is dead code ([[mi4-a-lower-rungs-
+ * side-effect-poisoned-the-rung-above]], the 951 defect):
  *
  *     intr = USBSTS & USBINTR;   ... run the vendor's fixed-priority handlers ...   USBSTS = intr;
  *
@@ -522,7 +525,8 @@ static void usb_enum_ui(void)
 }
 
 /* ------------------------------------------------------------------------------------------------
- * The poll - the one entry point, called once per idle pass from `__wrap_Idle_load_context`.
+ * The poll - the one entry point. D13 calls it from `__wrap_machine_idle` (951); 4570 from
+ * `__wrap_Idle_load_context`. It runs only when the boot REACHES the idle path.
  * ------------------------------------------------------------------------------------------------
  */
 void entry_usb_enum_poll(void)
