@@ -135,11 +135,13 @@ boot continues into the kernel — where, with the USB ladder off, **nothing enu
 what a boot past the diagnostic endpoint looks like; the log's `wdt_pets` alone divides residency from a
 hang.
 
-**Recovery owed (operator, at the device):** Vol-Down+Power → fastboot →
-`fastboot boot xiaomi4-cancro-backup-20260604-112053/boot.img` (the STOCK image, never flashed) →
-`cat /proc/last_kmsg`. This returns the *previous* boot's RAM console = 975's. A cold boot clears it;
-TWRP has no `/proc/last_kmsg` and its own boot takes the slot. The recovery was attempted this session
-but the device never re-enumerated (no fastboot, no adb, no USB), so the log is still owed.
+**Recovery owed (operator, at the device):** `scripts/recover_last_kmsg.sh` — the one command. It
+boots the stock image non-persistently, reads `/proc/last_kmsg` (the *previous* boot's RAM console =
+975's), stores a dated capture, and prints the keys this experiment waits on. Equivalent by hand:
+Vol-Down+Power → fastboot → `fastboot boot xiaomi4-cancro-backup-20260604-112053/boot.img` (the STOCK
+image, never flashed) → `cat /proc/last_kmsg`. A cold boot clears it; TWRP has no `/proc/last_kmsg` and
+its own boot takes the slot. The recovery was attempted this session but the device never
+re-enumerated (no fastboot, no adb, no USB), so the log is still owed.
 
 **Next rung (once the log is read):** `xnu_entry_args_memSize=0x1e400000` proves the window rung ran;
 `BSD root:`/launchd-past-`__TEXT` decides the wall; a fault's `far`/`fsr` or the last key before silence

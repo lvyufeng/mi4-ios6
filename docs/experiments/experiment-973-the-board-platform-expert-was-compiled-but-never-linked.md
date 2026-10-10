@@ -140,7 +140,11 @@ the top of DRAM (lost on a cold power transition).
 
 **The device is dark, not bricked.** It needs an operator power press. Two routes:
 
-1. **Recover the log (preferred).** VolDown+Power → fastboot, then
+0. **`scripts/recover_last_kmsg.sh` (the one command).** Boots the stock image non-persistently,
+   waits for adb, reads `/proc/last_kmsg`, stores a dated capture, and prints the keys the open
+   experiments wait on (`wdt_pets`, `xnu_entry_args_memSize`, the USB ladder). Nothing is written to
+   storage; it is not a press. `--read-only` reads from an already-running Android.
+1. **Recover the log by hand (preferred).** VolDown+Power → fastboot, then
    `fastboot boot xiaomi4-cancro-backup-20260604-112053/boot.img` (the STOCK Android image, never
    flashed), and in the Android shell `cat /proc/last_kmsg`. That returns the *previous* boot's RAM
    console — 973's. **Do NOT do a normal power-on first** (a cold boot clears the buffer), and do
