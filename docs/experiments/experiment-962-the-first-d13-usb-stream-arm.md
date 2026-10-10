@@ -49,6 +49,32 @@ wrote) → `xnu_live_usb_enum_*` (a host drove enumeration) → the stream's own
 
 **PRESS IS THE OPERATOR'S.**
 
+## The host half (2026-10-10)
+
+The ladder (959–962) shipped **without a host reader** — so a press of any rung, or of a **resident**
+arm (which streams this way), went dark with nothing reading EP1-IN. That is why 975's 2026-10-10 press
+was unreadable: a resident arm has **no ending by construction** (`build_entry.sh:1094-1103` refuses
+`POST_END_*` when `STAGE90_XNU_RESIDENT=1`), so it keeps **no** `/proc/last_kmsg` and its log survives at
+most one boot ([[mi4-975-window-on-the-working-entry]], [[mi4-last-kmsg-reader-carrier]]). The stream is
+the **only** live read — the goal's 「可以通过usb进行调试」 in host form.
+
+- **`tools/usb_console_read.py`** — ctypes `libusb-1.0.so.0` (no pyusb), opens **EP1-IN `0x81`** of
+  **`18d1:0910`**, finds the interface carrying that endpoint, claims it, and drains
+  `libusb_bulk_transfer` into a capture. `--out FILE` (default `out/stage90/captures/usb-console-*.txt`),
+  `--seconds N` idle window (0 = until Ctrl-C), **`--wait N`** to attach when the payload enumerates
+  *after* the reader starts (start it with `--wait 600 --seconds 0`, **then** press). Exit **2** = device
+  never seen, **3** = claimed but EP1-IN silent — distinct, so "not there" and "there but silent" are not
+  the same reading ([[mi4-silence-is-a-reading-only-if-success-is-silent]]).
+- **`tools/check_usb_host_reader.py`** — the reader's three literals are a **contract** with
+  `src/entry/entry_usb_enum.h`; the guard **derives** `ID_VENDOR`/`ID_PRODUCT`/`DIR_IN|EP_IN` from that
+  header and refuses drift (wired into `make check`; `--selftest` mutates each and asserts refusal). A
+  reader with hard-coded literals would open the wrong device/endpoint and go dark
+  ([[mi4-one-value-two-definitions]]).
+- **`scripts/press_975.sh`** now arms the reader (`--wait 600 --seconds 0`) **before** the press and
+  reports the capture afterward, and **refuses** unless the arm's record carries
+  `STAGE90_XNU_USB_STREAM=1`.
+
 *Provenance: `src/entry/build_entry.sh`'s `xnu_entry_910` clause; `out/stage90/xnu_arm_entry-config.txt`;
-the payload build (`scripts/build.sh` rc=0); `make check`'s `check_usb_stream.py`. Host-side, reversible,
-**device unmodified**. Follows 961 and 910c; see [[mi4-961-first-d13-usb-enum-arm]].*
+the payload build (`scripts/build.sh` rc=0); `make check`'s `check_usb_stream.py`,
+`check_usb_host_reader.py`. Host-side, reversible, **device unmodified**. Follows 961 and 910c; see
+[[mi4-961-first-d13-usb-enum-arm]].*

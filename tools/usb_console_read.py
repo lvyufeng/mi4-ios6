@@ -21,6 +21,9 @@ Usage:
 
   --out FILE      capture file (default out/stage90/captures/usb-console-<stamp>.txt; '-' = discard)
   --seconds N     stop after N seconds with no new bytes (default 120; 0 = run until Ctrl-C)
+  --wait N        wait up to N seconds for the device to appear before giving up (default 0).
+                  Start the reader with `--wait 180 --seconds 0`, THEN press: the reader attaches when
+                  the payload enumerates and streams until Ctrl-C.
   --stdout        also echo bytes to stdout as they arrive
 
 Exit: 0 = bytes were read; 2 = the device was never seen (nothing read); 3 = device seen but the
@@ -124,6 +127,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=None)
     ap.add_argument("--seconds", type=int, default=120)
+    ap.add_argument("--wait", type=int, default=0)
     ap.add_argument("--stdout", action="store_true")
     ap.add_argument("--vid", type=lambda s: int(s, 0), default=0x18d1)
     ap.add_argument("--pid", type=lambda s: int(s, 0), default=0x0910)
@@ -138,6 +142,13 @@ def main():
         return 2
 
     handle = lib.libusb_open_device_with_vid_pid(ctx, a.vid, a.pid)
+    if not handle and a.wait > 0:
+        deadline = time.time() + a.wait
+        sys.stderr.write("usb_console_read: waiting up to %ds for %04x:%04x to appear (press now)...\n"
+                         % (a.wait, a.vid, a.pid))
+        while not handle and time.time() < deadline:
+            time.sleep(0.5)
+            handle = lib.libusb_open_device_with_vid_pid(ctx, a.vid, a.pid)
     if not handle:
         sys.stderr.write("usb_console_read: no device %04x:%04x - is the ladder arm running "
                          "(device mode) and the phone connected?\n" % (a.vid, a.pid))
