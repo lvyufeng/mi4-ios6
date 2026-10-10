@@ -258,6 +258,17 @@ granularity and the console alias step. **A proposal, not a derivation.** A buil
 *caller exceeding* the window a build error; a *too-small* window is a runtime failure that no build
 refusal can catch — that is the residual risk, stated.
 
+**Reference check (operator directive 「必须先参考 HTC-Leo-Revival-Project/xnu」, 2026-10-10).** The
+canonical HD2/Darwin-13 tree (`external/xnu-hd2-darwin13/xnu`) **declares** `pmap_mem_regions[]` /
+`pmap_mem_regions_count` (`osfmk/arm/pmap.h:304-305`, `PMAP_MEM_REGION_MAX 26`, `struct mem_region
+{start; phys_table; end}`) but **never defines or uses them** in the ARM implementation — `grep` over
+`osfmk/arm/*.c` finds no `pmap_mem_regions[...]` and no `pmap_mem_regions_count =`; `pmap_next_page` is
+single-interval, exactly as here; arm64 `stubs.s` makes both symbols `panic("not implemented")`. So the
+reference **neither supplies nor forbids** the region port, and it carries **no bounce-window / multibank
+code** to borrow. Open input #1 (bounce SIZE) is confirmed **still open** — there is no upstream value to
+adopt. This matches the reference directive's own note ([[mi4-reference-xnu-repo]]: its `arm_vm_init.c` is
+our PRE-971/PRE-958 state).
+
 ### 3.4 On-demand mapping
 
 The window is a page-slot cache, not a linear map. A helper maps a target low-bank page into
