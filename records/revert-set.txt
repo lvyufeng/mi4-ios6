@@ -12842,3 +12842,55 @@ set=armed-d13-2544428e sha256=95ef485cfcb992baaf5275cac390401545f7557a2ac7200c40
 set=armed-d13-2544428e sha256=2d37c554918474008b43a807b6644a49350f8b460563db90f5a80d4eb76c9182 bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT
 set=armed-d13-2544428e sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-2544428e sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set
+
+# =================================================================================================
+# 970g - the D13 boot-path restore (armed-d13-321e3332).  The fix for the D13 entry silence.
+#
+# THE CAUSE (doc section 6f, corrected 2026-10-10).  The whole Darwin-13 entry->kernel line emitted
+# ZERO console output (both D13 presses = the same entry bin 7107b998).  Real 970 capture:
+#   mmu_ttbr0_after=0x006c4000  mmu_l1_table=0x006c4000   (the payload writes TTBR0 =
+#   stage90_l1_table, PA 0x6c4000, BELOW 0x80000000).  entry_live_init refuses a table outside the
+#   kernel window (entry_stubs.c:2308, why=1), and that refusal is SILENT (its own record travels
+#   through the console it just refused).  The table stays low because D13 __start takes its MMU
+#   fast path (locore.s:61 beq mmu_initialized, taken - the payload jumps in with M=1), which
+#   SKIPS the boot path: TTBR0 is never set high and the boot table at topOfKernelData is never
+#   built.  4570 boots because its start.s has no such branch.
+#
+# THE FIX (970g, D13 osfmk/arm/locore.s ONLY - a tree edit, scripted in
+# tools/patch_d13_boot_path.py + tools/stage_d13_boot_path.sh, so a re-checkout re-applies it):
+#   edit 1 - REMOVE the fast path, so __start always runs the boot path (builds the boot table,
+#            sets TTBR0 = topOfKernelData|0x18, a HIGH base);
+#   edit 2 - ZERO the boot table after the TTBR0 write, exactly as 4570 start.s:159-167 does
+#            (invalidate_tte: ARM_TTE_TYPE_FAULT=0 over 10240 words = 0xa000 bytes =
+#            STAGE90_XNU_ENTRY_TABLE_BYTES).  D13 omitted it, so every slot the map: loop does not
+#            reach - INCLUDING the console L1 slot (0xde500000>>20 = 0xde5), far above memSize -
+#            kept stale DRAM and entry_section_install refused it as OCCUPIED even with a HIGH
+#            table.  The working 4570 capture reads xnu_live_slot_before=0x00000000: the slot was
+#            zero before the install.  Edit 1 alone is NOT sufficient.
+#
+# VERIFIED BY VALUE (the linked image, not source): __start at 0x80000000 falls straight into
+# mmu_reinitialize (no beq); TTBR0 write at 0x4c; _970g_zero_tte (0x64) runs the 10240-word loop;
+# then the PC section map and the map: loop - exactly 4570 order.  The PC section is mapped after
+# the zeroing and before the walk, so the TTBR0 switch cannot fault the running code (its section
+# TLB entry, taken at the payload invalidate_tlbs, is still warm).
+#
+# WHAT THE PRESS DECIDES.  If the cause is right, the D13 entry line becomes OBSERVABLE for the
+# first time: xnu_live_console and the first ~15 keys (the init block and the first wrapped probes,
+# which fire inside arm_init BEFORE arm_vm_init) appear.  The console is still lost AT arm_vm_init
+# (D13 arm_vm_init.c:352-353 bzero`s a FRESH cpu_ttb where 4570 bcopy`s the boot table - a SECOND,
+# separate defect, a later rung), so keys after that switch are not expected yet.
+#
+# SCOPE.  Not 3 GB (958/915-B).  Not the arm_vm_init boot-table copy (a later rung).  Reversible:
+# fastboot boot only, never flash; the card base is never written (CARD_COW=1).  PRESS IS THE
+# OPERATOR.
+# =================================================================================================
+set=armed-d13-321e3332 sha256=321e333221df8aa696b0954c06501891f3b182b5e3f09349be4862fa9361ace3 bytes=6331476 file=xnu_arm_entry.bin role=THE-ARM:-970g-s-D13-boot-path-restore-in-locore.s-(edit-1-remove-the-MMU-fast-path,-edit-2-zero-the-boot-table-like-4570).-The-only-source-that-moved-is-external/xnu-hd2-darwin13/xnu/osfmk/arm/locore.s,-re-applied-by-tools/stage_d13_boot_path.sh;-the-suffix-321e3332-is-THIS-member-s-hash-(the-armed-d13-family-names-from-the-entry-bin)
+set=armed-d13-321e3332 sha256=f0d3e19ae8d52e4d6e57a0d888480fc1173351af2ef8672d14bb38547f5ad10e bytes=7370416 file=xnu_arm_entry.elf role=the-entry-ELF
+set=armed-d13-321e3332 sha256=9338aea381e01a0b451e6748c8aa04e0bb46f4b7b9d385ae339c2e8518bb6529 bytes=1409 file=xnu_arm_entry-config.txt role=the-entry-record-;-968/970f-s-38-arm-keys,-UNCHANGED-(the-970g-change-is-a-tree-edit,-not-a-switch)-so-this-record-is-byte-identical-to-armed-d13-2544428e-s
+set=armed-d13-321e3332 sha256=80df0f0355ba2f6f97b51ddce816c8586f9203e3a1e64e5c3be78c5cdf632c83 bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest-;-the-locore.s-entry-moved-(the-source-that-changed-is-out/xnu_asm_obj_d13/locore.o,-reassembled-by-tools/assemble_arm_layer.sh)
+set=armed-d13-321e3332 sha256=a42d7386caf3f9a8c6ad5b6fcbc63bf62809419be8e7a6138901ce8b38b208ad bytes=6826876 file=stage90.bin role=the-payload-binary-embedding-the-970g-entry-image-(the-entry-bin-moved-7107b998/2544428e->321e3332,-so-the-embedded-copy-did-too)
+set=armed-d13-321e3332 sha256=30bcf5a32b33dbb525b399e541091e13ebb2a0c228fbb55347f8dd3ce36b4fed bytes=6888948 file=stage90.elf role=the-payload-ELF
+set=armed-d13-321e3332 sha256=2ded1d0d998a10032ed34763fd12960d267d9e7a5ec18d4d482fecdf6798daae bytes=6830080 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-321e3332 sha256=ec95f10ebe0877aa8c32d910f05fe461e1a1e0693d0f9cf7358083383480eac9 bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-THIS-is-what-the-press-sends
+set=armed-d13-321e3332 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-321e3332 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968-s-6c2b6038-(the-970g-change-is-entry-side-only)

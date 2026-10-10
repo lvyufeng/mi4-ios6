@@ -416,6 +416,76 @@ that enters the boot path — the option §6e explicitly rejected — plus the b
 build is the next rung (970g), and it must be validated against the same two-by-value endpoints §6e already
 verified (`0xde511c02` at L1 index `0xde5`; the boot-table copy is absent on D13).
 
+## 6g. THE FIX (2026-10-10) — 970g: restore D13's boot path, TWO edits, built & PARKED `armed-d13-321e3332`
+
+§6f named the fix as `locore.s` entering the boot path ***plus* the boot-table console mapping**. Reading
+4570's `start.s` line by line showed the second half is not a separate instrument change: it is a **second
+D13 omission in the same boot path**, and 4570 does it in assembly.
+
+**The sufficiency gap — 4570 zeroes its boot table; D13 does not.** 4570's `start.s:159-167` is
+
+```
+mov  r5, r4              // r5 = topOfKernelData
+mov  r11, #ARM_TTE_TYPE_FAULT   // == 0
+mov  r2, PGBYTES >> 2    // 1024
+add  r2, r2, r2, LSL #2  // *5   (8 ttes + 2 ptes to clear)
+mov  r2, r2, LSL #1      // *2   -> 10240 words = 0xa000 bytes
+invalidate_tte:
+str  r11, [r5], #4
+subs r2, r2, #1
+bne  invalidate_tte
+```
+
+10240 words = `0xa000` bytes — **exactly this project's `STAGE90_XNU_ENTRY_TABLE_BYTES`**, the size the entry
+layout reserves for the boot table (`build_entry.sh:97`). It runs *before* the `mapveqp` section loop and
+*after* the TTBR0 write. D13's `locore.s` boot path has **no such loop** (grep of the whole D13 `arm/` dir
+finds no `invalidate_tte`, no `ARM_TTE_TYPE_FAULT`) — it goes straight from the TTBR0 write (`:112-113`) into
+`map:` (`:137`), which maps only `[physBase, physBase + memSize)`. Every slot above `memSize` keeps whatever
+DRAM had there.
+
+**Why that alone would still refuse the console.** The console's L1 slot is `0xde500000 >> 20` = index
+`0xde5`, far above a 16 MiB `memSize`, so it is never in the `map:` loop's coverage. `entry_section_install`
+refuses an occupied slot (`before & LIVE_TTE_TYPE_MASK != 0`, `entry_stubs.c:2122`) — it is not this
+instrument's to clobber — so with stale DRAM in that slot the console is refused **even with a HIGH table**.
+The entry's own source states the dependency and names the loop (`entry_stubs.c:718`): *"nothing the payload
+plants in the boot table before the jump can survive, because `start.s`'s `invalidate_tte` writes FAULT over
+10240 entries starting at `topOfKernelData`"* — true of 4570, **false of D13**.
+
+**And the device confirms it.** The one working 4570 capture reads
+`xnu_live_slot_before=0x00000000` (`cb4e17f1-20261008-last_kmsg.txt`) — the console's slot held **zero**
+before the entry installed into it. That zero is 4570's `invalidate_tte` loop, and D13 omits it.
+
+**THE FIX — two edits to D13's `osfmk/arm/locore.s`, exactly 4570's order.** In
+`tools/patch_d13_boot_path.py`, applied by `tools/stage_d13_boot_path.sh` (a re-checkout re-applies it):
+
+1. **Remove the MMU fast path** (`:57-61`) — `__start` then falls into `mmu_reinitialize`.
+2. **Zero the boot table** after the TTBR0 write, before any section is mapped: 4570's `invalidate_tte`
+   loop, verbatim in effect (10240 words from `topOfKernelData`), using registers `r2/r3/r5` (free there;
+   `r4, r10, r11, r12, r0` are all preserved for the `map:` loop).
+
+Order is `write TTBR0 → zero table → map the PC's own section → map [physBase, physBase+memSize)`. The PC's
+section is mapped *after* the zeroing and *before* the table is walked again, so the TTBR0 switch cannot
+fault the running code — the section TLB entry taken at the payload's `invalidate_tlbs` (before the TTBR0
+write) is still cached, and `entry_stubs.c`'s own comment says a cacheable walk is coherent.
+
+**Verified by value** (the linked image, not source): `__start` at `0x80000000` falls straight into
+`mmu_reinitialize` (`0x80000008`) with no `beq`; the TTBR0 write is at `0x8000004c`; `_970g_zero_tte`
+(`0x80000064`) runs `mov r2,#1024 / add r2,r2,r2,lsl#2 / lsl r2,r2,#1 / str r3,[r5],#4 / subs / bne`; then
+the PC section map and `map:` at `0x800000b4`. The entry bin is `321e3332` (6331476 bytes), payload
+`a42d7386`; **`armed-d13-321e3332`**, 5/5 press-ready.
+
+**What the press decides.** If the cause is right, the D13 entry line becomes **observable for the first
+time**: `xnu_live_console` and the first ~15 keys (the init block and the first wrapped probes, which fire
+inside `arm_init` *before* `arm_vm_init`, `arm_init.c:150` vs `:168`) appear. The console is still lost **at
+`arm_vm_init`** — D13's `arm_vm_init.c:352-353` `bzero`s a **fresh** `cpu_ttb` where 4570 `bcopy`s the boot
+table (`4570 arm_vm_init.c:385-391`), a SECOND, separate defect (a later rung) — so keys after that switch
+are not expected from this arm. Falsification: still zero output → the boot path was not the cause, recorded
+and not papered over.
+
+**Scope.** Not 3 GB (958/915-B). Not the `arm_vm_init` boot-table copy (a later rung). Reversible:
+`fastboot boot` only, never flash; the card's base is never written (`CARD_COW=1`). **PRESS IS THE
+OPERATOR'S.**
+
 ## 7. What it does NOT do
 
 It does **not** make XNU *recognize 3 GB*. `max_mem`/`mem_size`/`sane_size` are all `gMemSize` here, so
