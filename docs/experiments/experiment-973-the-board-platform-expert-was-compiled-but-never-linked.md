@@ -152,3 +152,24 @@ the top of DRAM (lost on a cold power transition).
 key before silence names which (`msm8974_putc` output, the QTimer read, the GIC init, or a fault's
 `far`/`fsr`). A build that links only *part* of the board PE (e.g. the console method alone) would
 narrow it — but that is the next experiment, not this one.
+
+### 8.1 A non-return is NOT automatically a wedge — check `wdt_pets`
+
+**The project has seen this exact shape before and it was residency, not a hang.** 911's arm
+(`21086959`, `IDLE_NO_SLEEP=1`) also did not return and the log was lost;
+`[[mi4-911-resident-nonreturn-is-not-a-wedge]]` records the resolution: **`wdt_pets > 0` means the
+kernel is resident** (it entered the idle loop and is staying in XNU) — which is the goal's own
+"保持在 xnu 里" state — not a fault. So the 973 non-return has **two readings the log distinguishes,
+and the build cannot**:
+
+- **residency** (`wdt_pets > 0`): the boot advanced PAST the last missing symbol
+  (`PE_init_SocSupport_stub`, now the real board PE) far enough to enter the idle/resident path — i.e.
+  **progress, possibly a first**, not a defect. The 972 record already carries
+  `STAGE90_XNU_RESIDENT=1`; a run that reaches the resident path does not return by design.
+- **a hang/fault** (`wdt_pets == 0`, or a fault's `far`/`fsr`): the board PE (or what follows it)
+  blocks. That would be the defect the narrow-the-PE rung is for.
+
+**Which one it is is the recovered log's first question, and it is not answerable from the host** —
+the entry image's controller `PE_init_SocSupport_stub` is a plain table-fill with no blocking call
+(read line by line), so a hang would be *after* it, in the generic PE or the boot tail; a residency
+would be the run reaching the idle path. The log (§8 recovery) settles it.
