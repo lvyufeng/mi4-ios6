@@ -178,6 +178,18 @@ streams its console to EP1-IN; once it does, a resident run is observable live a
 loses its log" problem is closed for good — which is also the goal's 「可以通过 usb 进行调试」. Only after
 that does a 975 re-press carry a readable outcome. **PRESS IS THE OPERATOR'S.**
 
+**§6a — VERIFIED 2026-10-10: the ladder IS in 975's image, at a live site. The next press is decisive.**
+Disassembled the built `out/stage90/xnu_arm_entry.elf` by value: `__wrap_machine_idle` (951's D13 site)
+carries all four calls contiguously — `bl entry_usb_probe` / `entry_usb_dev_init` / `entry_usb_enum_poll`
+/ `entry_usb_stream_poll` (`8049c8b8+0x60…0x6c`), tail-`b machine_idle` — and the four symbols are in the
+image (`entry_usb_stream_poll T 0x80015388`). So the ladder is **not** a dead site and **not** compiled
+out on D13: on any arm that *reaches* the idle path it runs on every pass. This retires reading (c) from
+§6's dichotomy — "the ladder code is absent" is false. An **empty** capture on the next press therefore
+means EITHER (a) the run faulted before the idle path, OR (b) the ladder reaches the idle path and is
+**buggy**; the two are divided by 974's board-PE console, which now lands in the same RAM console and is
+handed to EP1-IN. A **non-empty** capture proves (b) false and closes the live-read problem outright.
+
+
 ## 7. Provenance
 
 *Provenance: 970 (design + §3 ceiling + §6c/§6d), 969 (the 301 MiB measurement), 971/973/974 (the
