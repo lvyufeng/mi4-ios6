@@ -2,37 +2,43 @@
 # recover_last_kmsg.sh - RECOVER THE OWED LOG OF A RUN THAT DID NOT RETURN.
 #
 # Run this when you are back at the device AFTER a resident/non-returning press (973 / 974 / 975).
-# It boots the STOCK Android image non-persistently (fastboot boot, NEVER flash), waits for adb,
-# reads the PREVIOUS boot's RAM console out of /proc/last_kmsg, stores it as a dated capture, and
+# It reads the PREVIOUS boot's RAM console out of /proc/last_kmsg, stores it as a dated capture, and
 # runs the project's own --summarise over it - printing exactly the keys the pending experiments
 # are waiting on.
 #
-# WHY THIS EXISTS. The decisive reading of the current line is the log of the boot that did NOT
-# return, and the log survives only until the phone's next POWER CYCLE. The 973 log was LOST because
-# the recovery was a set of manual steps and a plain power-on cleared the buffer first. This script
-# turns recovery into ONE command so the buffer is captured before anything clears it. It is a
-# READ plus one non-persistent boot; it writes NOTHING to storage and cannot brick.
+# *** THE READER CARRIER IS THE FLASHED ROM, REACHED BY A PLAIN REBOOT - *NOT* `fastboot boot`. ***
+# Measured 2026-10-10 on this device: after `adb reboot` (which boots the *installed* ROM), the
+# flashed kernel exposes `/proc/last_kmsg` = the previous boot's RAM console, a full ~2 MB. But after
+# `fastboot boot <golden boot.img>` the very same kernel exposed NO `/proc/last_kmsg` ("No such file
+# or directory"). This CORRECTS the earlier belief (in the 973/975 docs and the first version of this
+# script) that the recovery carrier is a non-persistent `fastboot boot` of the golden image. Booting
+# `fastboot boot <anything>` installs that new kernel AND burns the single-slot record, so it both
+# fails to expose the log and destroys it. **The correct carrier is a plain reboot of the flashed ROM.**
 #
-# *** THIS IS NOT A PRESS. *** It does not send a payload and does not spend a run. It boots the
-# stock image only, to read the log the last press left behind. (PRESS IS THE OPERATOR'S.)
+# WHY THIS EXISTS. The decisive reading of the current line is the log of the boot that did NOT
+# return, and the single-slot ram-console record survives only until the phone's NEXT boot. So the
+# recovery is: bring the phone back up (that boot IS the one that holds the run's log as its
+# previous), then read `/proc/last_kmsg` BEFORE booting anything else. The 973 log was LOST because a
+# plain power-on was done first, and every boot since overwrites the single slot.
+#
+# *** THIS IS NOT A PRESS. *** It does not send our payload and does not spend a run. It only
+# reboots the installed ROM and reads the log. (PRESS IS THE OPERATOR'S.)
 #
 # WHAT IT ANSWERS (see docs/experiments/experiment-973-...md §8 / experiment-975-...md §6):
 #   xnu_live_wdt_pets            > 0  => the run was RESIDENT (idle loop), the goal's 「保持在 xnu 里」
 #   xnu_entry_args_memSize       == 0x1e400000 => 975's 484 MiB window rung actually ran
-#   xnu_live_usb_enum_device_*   N/A  => the full USB ladder DID reach the host (device mode)
-#   xnu_live_uboot_enum_* / stream=> the ladder's further rungs
+#   xnu_live_usb_live_state / _dev_*  => the full USB ladder DID reach the host (device mode)
+#   xnu_live_usb_enum_* / _stream_*   => the ladder's further rungs
 #   BSD root: / launchd past __TEXT  => the 969 wall (16 MiB window) held or not
 #
 # Usage:
-#   scripts/recover_last_kmsg.sh              # boot stock, read, summarise
+#   scripts/recover_last_kmsg.sh              # (fastboot) reboot the ROM, read, summarise
 #   scripts/recover_last_kmsg.sh --read-only  # device is ALREADY in Android: just read + summarise
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SERIAL=4a2fe00b
 OTHER=33e80afe
-GOLDEN_DIR=xiaomi4-cancro-backup-20260604-112053
-STOCK=$GOLDEN_DIR/boot.img
 OUTDIR=out/stage90/captures
 STAMP=$(date +%Y%m%d-%H%M%S)
 CAPTURE_TPL="$OUTDIR/recovered-ARM-${STAMP}-last_kmsg.txt"
@@ -51,28 +57,28 @@ if (( ! READ_ONLY )); then
   if fastboot devices 2>/dev/null | grep -q "$OTHER"; then
     die "$OTHER (the OTHER phone) is present - unplug it first (hardware gate)"
   fi
-  if ! fastboot devices 2>/dev/null | grep -q "$SERIAL"; then
-    if adb devices 2>/dev/null | grep -q "$SERIAL"; then
-      die "the device is up in Android already - re-run with --read-only (do NOT re-boot it: the boot would overwrite the log you are trying to read)"
-    fi
-    die "no device in fastboot. If the phone is dark: hold Power ~10-15s to bring it back, then
-         VolDown+Power -> fastboot, and re-run. Do NOT do a normal power-on first: it CLEARS the
-         RAM console this script is here to read."
+  if fastboot devices 2>/dev/null | grep -q "$SERIAL"; then
+    # In fastboot: the ONLY way forward is to boot the installed ROM (plain reboot to system), because
+    # that is the kernel whose /proc/last_kmsg exposes the previous boot's console. `fastboot boot
+    # <image>` would install a different kernel AND burn the record (measured 2026-10-10).
+    say "== 2. reboot into the INSTALLED ROM (plain reboot; NO fastboot boot, NEVER flash) =="
+    say "   (fastboot boot <anything> would install a new kernel and destroy the single-slot record)"
+    timeout 30 sudo fastboot -s "$SERIAL" reboot || die "fastboot reboot failed"
+    say "   sent. Waiting for Android to come up (adbd is ~30-60s behind the kernel)..."
+    for _ in $(seq 1 60); do
+      adb devices 2>/dev/null | grep -q "$SERIAL" && break
+      sleep 3
+    done
+    adb devices 2>/dev/null | grep -q "$SERIAL" \
+      || die "Android did not reach adb within ~180s. Do not power-cycle: retry the read by hand:
+              sudo adb -s $SERIAL exec-out 'cat /proc/last_kmsg' > /tmp/k.txt"
+  elif adb devices 2>/dev/null | grep -q "$SERIAL"; then
+    die "the device is up in Android already - re-run with --read-only (do NOT re-boot it: the boot would overwrite the log you are trying to read)"
+  else
+    die "no device on fastboot or adb. If the phone is dark: hold Power ~10-15s to bring it back (that
+         boot's own log becomes /proc/last_kmsg), then re-run. If it is in Android, re-run with
+         --read-only. Do not boot anything else first: each boot overwrites the single-slot record."
   fi
-  [[ -r $STOCK ]] || die "stock image not found: $STOCK (the recovery carrier; booted, never flashed)"
-
-  say "== 2. boot the STOCK image (fastboot boot only, NEVER flash) =="
-  say "   image: $STOCK"
-  fastboot -s "$SERIAL" boot "$STOCK"
-  say "   sent. Waiting for Android to come up (adbd is ~30-60s behind the kernel)..."
-  # Bounded wait: adb is slow, so allow up to ~180s without treating slowness as failure.
-  for _ in $(seq 1 60); do
-    adb devices 2>/dev/null | grep -q "$SERIAL" && break
-    sleep 3
-  done
-  adb devices 2>/dev/null | grep -q "$SERIAL" \
-    || die "Android did not reach adb within ~180s. The log is STILL in DRAM (do not power-cycle):
-            retry the read by hand: sudo adb -s $SERIAL exec-out 'cat /proc/last_kmsg' > /tmp/k.txt"
 else
   say "== --read-only: reading the log from the already-running device =="
   adb devices 2>/dev/null | grep -q "$SERIAL" || die "no adb device $SERIAL"

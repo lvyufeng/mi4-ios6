@@ -140,17 +140,23 @@ the top of DRAM (lost on a cold power transition).
 
 **The device is dark, not bricked.** It needs an operator power press. Two routes:
 
-0. **`scripts/recover_last_kmsg.sh` (the one command).** Boots the stock image non-persistently,
-   waits for adb, reads `/proc/last_kmsg`, stores a dated capture, and prints the keys the open
-   experiments wait on (`wdt_pets`, `xnu_entry_args_memSize`, the USB ladder). Nothing is written to
-   storage; it is not a press. `--read-only` reads from an already-running Android.
-1. **Recover the log by hand (preferred).** VolDown+Power → fastboot, then
-   `fastboot boot xiaomi4-cancro-backup-20260604-112053/boot.img` (the STOCK Android image, never
-   flashed), and in the Android shell `cat /proc/last_kmsg`. That returns the *previous* boot's RAM
-   console — 973's. **Do NOT do a normal power-on first** (a cold boot clears the buffer), and do
-   NOT boot TWRP (its kernel has no `/proc/last_kmsg` and its boot takes the slot the log is in).
-2. **Plain recovery.** Hold Power ~10–15 s, release, press Power normally → back to Android. This
-   loses 973's log.
+0. **`scripts/recover_last_kmsg.sh` (the one command).** Reads `/proc/last_kmsg` (the *previous*
+   boot's RAM console), stores a dated capture, and prints the keys the open experiments wait on
+   (`wdt_pets`, `xnu_entry_args_memSize`, the USB ladder). It is not a press. `--read-only` reads
+   from an already-running Android.
+1. **Recover the log by hand (preferred).** Bring the phone back to the **installed ROM** — a normal
+   power-on, or `fastboot reboot` from fastboot — and in the Android shell `cat /proc/last_kmsg`.
+   That returns the *previous* boot's RAM console — the payload's.
+
+**⚠️ CARRIER CORRECTED 2026-10-10 (measured): the reader is the FLASHED ROM via a plain reboot, NOT
+`fastboot boot`.** The earlier text here prescribed `fastboot boot <golden boot.img>`. Measured on the
+device: after `adb reboot` (installed ROM) `/proc/last_kmsg` is present and full (~2 MB, the previous
+boot); after `fastboot boot <golden>` the **same** kernel exposes **no** `/proc/last_kmsg`. `fastboot
+boot` installs a different kernel *and* burns the single-slot record, so it both fails to expose the
+log and destroys it. **The mechanism:** a payload that ends (or stops) leaves its console in the
+single-slot ramoops record; the **automatically-next boot** (the installed ROM) then exposes it as
+`/proc/last_kmsg`. That is how 972's log was captured — and it is why, for a *non-returning* run, the
+operator must read it on the **very next** boot: every boot after that overwrites the slot.
 
 **Next rung (once the log is read).** The board PE's four methods are the suspects; the log's last
 key before silence names which (`msm8974_putc` output, the QTimer read, the GIC init, or a fault's

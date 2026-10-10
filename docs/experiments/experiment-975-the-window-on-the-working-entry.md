@@ -136,12 +136,22 @@ what a boot past the diagnostic endpoint looks like; the log's `wdt_pets` alone 
 hang.
 
 **Recovery owed (operator, at the device):** `scripts/recover_last_kmsg.sh` — the one command. It
-boots the stock image non-persistently, reads `/proc/last_kmsg` (the *previous* boot's RAM console =
-975's), stores a dated capture, and prints the keys this experiment waits on. Equivalent by hand:
-Vol-Down+Power → fastboot → `fastboot boot xiaomi4-cancro-backup-20260604-112053/boot.img` (the STOCK
-image, never flashed) → `cat /proc/last_kmsg`. A cold boot clears it; TWRP has no `/proc/last_kmsg` and
-its own boot takes the slot. The recovery was attempted this session but the device never
-re-enumerated (no fastboot, no adb, no USB), so the log is still owed.
+reads `/proc/last_kmsg` (the *previous* boot's RAM console = 975's), stores a dated capture, and prints
+the keys this experiment waits on. Equivalent by hand: get back to the **installed ROM** (a normal
+power-on, or `fastboot reboot`) and `cat /proc/last_kmsg`.
+
+**⚠️ CARRIER CORRECTED 2026-10-10 (measured).** This section previously prescribed
+`fastboot boot xiaomi4-cancro-backup-20260604-112053/boot.img`. That is wrong: measured on the device,
+`/proc/last_kmsg` is exposed by the **installed ROM** after a plain reboot (a full ~2 MB = the previous
+boot), while `fastboot boot <golden>` exposes **no** `/proc/last_kmsg` — it installs a different kernel
+*and* burns the single-slot record. The console the payload left is read by the **very next** boot; every
+boot after that overwrites the slot. **Recovery was attempted this session** (the operator had the device
+in fastboot): a non-persistent `fastboot boot <golden>` returned *no* `/proc/last_kmsg` (the carrier had
+been confused, and the fastboot-boot itself burned the slot); a plain `adb reboot` then exposed
+`/proc/last_kmsg`, but by then **975's console had been overwritten** by earlier boots (the 2 MB capture
+held 0 `MI4IOS6` / 0 `xnu_live` lines — it was the stock Android kernel's own previous boot). So 975's
+log is **gone**: too many boots elapsed for the single-slot ring. The lesson is the carrier and the
+one-boot window, now fixed in the script.
 
 **Next rung (once the log is read):** `xnu_entry_args_memSize=0x1e400000` proves the window rung ran;
 `BSD root:`/launchd-past-`__TEXT` decides the wall; a fault's `far`/`fsr` or the last key before silence
