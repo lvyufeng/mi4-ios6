@@ -205,3 +205,26 @@ non-return ([[mi4-911-resident-nonreturn-is-not-a-wedge]]). So 973/974/975's dar
 *expected* consequence of retiring the last generated stub, **not by itself a regression**; whether
 the continuing boot is resident (the goal's 「保持在 xnu 里」) or blocked is still only the recovered
 log's `wdt_pets` that says — §8.1 stands, and this sharpens *why* the log is owed rather than guessed.
+
+### 8.3 The board PE is non-blocking by value — no method on the boot path blocks (source, 2026-10-10)
+
+§8.1 asserted the controller is "a plain table-fill with no blocking call (read line by line)." That is
+now *checked*, method by method, in `src/platform/darwin13/pe_msm8974.c` (195 lines, the whole file):
+
+- `PE_init_SocSupport_stub` → `PE_early_puts` (our sink) → `PE_init_SocSupport_msm8974`. The latter is
+  **pointer stores into `gPESocDispatch`** (no call), plus **one** call: `msm8974_timebase_init()`.
+- `msm8974_timebase_init` — `mrc p15,0,%0,c14,c0,0` (read CNTFRQ) + a conditional register write. **CP15
+  c14, which the entry image already uses** (`src/entry/entry_timebase.h`); not a device load.
+- `msm8974_uart_init` / `msm8974_interrupt_init` — **empty bodies**. `msm8974_getc` — `return -1`.
+- `msm8974_handle_interrupt` is the only **device load** (`*gicc_iar`) but it is a **table pointer the
+  stub only stores** — not called during `PE_init_SocSupport`. `msm8974_timer_enabled` is a no-op.
+- `msm8974_putc` (thus every XNU `PE_kputc` char after line 151) → `entry_os_console_char`
+  (`entry_stubs.c:2696`), which is **bounded**: before the live tables install it appends to a fixed
+  `.bss` tank `g_os_tank[ENTRY_OS_TANK]` (overflow counted in `g_os_tank_dropped`); after, it is bounded
+  by `g_os_end` with a one-time `xnu_live_ostext_limited` marker. No unbounded loop, no block.
+
+**Consequence.** A non-return is therefore **not** a hang inside the board PE (or inside
+`PE_init_platform`'s call to it) on this image. So the log's `wdt_pets` asks a *narrow* question: the
+boot is either **resident** (past `PE_init_platform` into the scheduler/idle — the goal's 「保持在 xnu
+里」) or **blocked later**, in the *generic* PE or the boot tail — never here. This also says 974 was the
+right rung: the console fix is exactly what makes that reading recoverable.
