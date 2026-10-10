@@ -50,13 +50,21 @@
  * it is the measured 19.2 MHz, not a nominal 19.2/24 MHz guess. */
 #define MSM8974_CNTFRQ_HZ     19200000ULL
 
-/* A bounded console witness. It is deliberately NOT the 0xde500000 RAM console: our entry image
- * already owns that buffer and its `persistent_ram_buffer` header, and writing it from a second
- * writer is how one value gets two definitions. This ring is this TU's own; a reader is added when
- * the PE's output is wired to a capture, not before. */
-#define MSM8974_CONSOLE_BYTES 1024u
-static volatile char           msm8974_console[MSM8974_CONSOLE_BYTES];
-static volatile unsigned int   msm8974_console_count;
+/* **974: the console sink is the ENTRY IMAGE's captured one, not a private ring.** Before 973 the
+ * boot STOPPED at `pe_init.c:146`'s `PE_init_SocSupport()` (the generated stub), so line 151
+ * (`PE_kputc = gPESocDispatch.uart_putc`) was never reached, and XNU's console text went through
+ * whatever sink the image put in `gPESocDispatch.uart_putc`. 973 made the board PE RUN and RETURN,
+ * so line 151 now executes and `PE_kputc` - plus `PE_early_puts` (`pe_serial.c:44`) - becomes THIS
+ * function. A private ring with no reader therefore makes every XNU message after that point
+ * INVISIBLE, and the 973 press going silent is consistent with exactly that (the boot may be
+ * resident, not hung). The entry image exports `entry_os_console_char(int, uint32_t)` (`T`,
+ * src/entry/entry_stubs.c:2696) - the SAME sink `__wrap_vcputc` uses, which appends to the captured
+ * RAM console block and is safe at any point (it holds text in `.bss` before the live tables are
+ * installed). `which = 2u` is that source's own tag for the serial/uart route. So this function is
+ * the board PE's `uart_putc`, feeding the capture - the 458 route, not a second definition.
+ * [[mi4-one-value-two-definitions]] */
+extern void entry_os_console_char(int ch, uint32_t which);
+
 static volatile unsigned long long msm8974_cntfrq = MSM8974_CNTFRQ_HZ;
 
 static inline unsigned long long
@@ -79,9 +87,9 @@ msm8974_barrier(void)
 void
 msm8974_putc(char c)
 {
-	if (msm8974_console_count < MSM8974_CONSOLE_BYTES) {
-		msm8974_console[msm8974_console_count++] = c;
-	}
+	/* 974: the capture sink, not a private ring - see the extern's derivation above. One character
+	 * per call; the sink appends to the RAM console block the runner reads. */
+	entry_os_console_char((int)(unsigned char)c, 2u);
 }
 
 static int

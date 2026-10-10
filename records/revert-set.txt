@@ -13151,3 +13151,45 @@ set=armed-d13-12427611 sha256=7d12735f0b87bb463d2fa9347982747d3b266d23806f35d42d
 set=armed-d13-12427611 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-12427611 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968/970h/971/972-s-6c2b6038-(973-moves-NO-arm-switch)
 set=armed-d13-12427611 sha256=c93c6a0b34f4646a9b26bddefb1f7f33cae6002bc9c92dd99ab492e241eb7b80 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+# =================================================================================================
+# armed-d13-73475747  —  974: the board PE's console (uart_putc / PE_kputc) routes into the ENTRY
+# IMAGE's captured RAM console, not a private ring — so the text XNU prints after
+# `PE_init_platform` resumes is VISIBLE, and the frontier is observable again.
+#
+# WHY. 973 linked the 914 board PE and its press (2026-10-10) DID NOT RETURN (972, one rung below,
+# returned clean in ~17 s). The board PE fills `gPESocDispatch`; `pe_init.c:146` calls
+# `PE_init_SocSupport()` and `:151` then sets `PE_kputc = gPESocDispatch.uart_putc` (and
+# `PE_early_puts` reaches the same pointer via `pe_serial.c:44`). BEFORE 973 the boot STOPPED at
+# :146 (the generated stub), so :151 never ran. AFTER 973 the board PE RETURNS, :151 runs, and
+# `PE_kputc` became OUR private 1 KB ring with NO reader — every XNU message after that point was
+# discarded in silence. So the 973 non-return is consistent with a boot that is RESIDENT (not hung)
+# whose output nobody could see. [[mi4-one-value-two-definitions]] with the value being "the console".
+#
+# THE FIX (src/platform/darwin13/pe_msm8974.c ONLY — no tree edit, no arm switch).
+# `msm8974_putc` becomes `entry_os_console_char((int)(unsigned char)c, 2u)` — the ENTRY IMAGE's own
+# capture sink (`T entry_os_console_char` @0x800043a0, src/entry/entry_stubs.c:2696), the SAME sink
+# `__wrap_vcputc` uses, which appends to the RAM console block the runner reads and is safe BEFORE
+# the live tables are installed (it holds text in `.bss`). `which = 2u` is the source's own tag for
+# the serial/uart route. The old private ring (MSM8974_CONSOLE_BYTES / msm8974_console) is deleted.
+#
+# VERIFIED BY VALUE in the linked image out/stage90/xnu_arm_entry.elf:
+#   msm8974_putc @0x801ae290 == `mov r1, #2 ; b 800043a0 <entry_os_console_char>` (2 instructions)
+#   pe_msm8974.o carries `U entry_os_console_char` (satisfied by the entry image's `T`).
+#
+# SCOPE. Not 3 GB (958); not the USB ladder (959–962). stage90-build-config.txt is BYTE-IDENTICAL to
+# 968/970h/971/972/973's 6c2b6038 — 974 moves NO arm switch (the sink is a link, not a switch).
+# Medium: 968's real iOS 7.1.2 HFSX rootfs over hfs_rmd0; HDD_WRITE=0, the base is never written —
+# fully reversible. fastboot boot only, NEVER flash. PRESS IS THE OPERATOR'S.
+# =================================================================================================
+set=armed-d13-73475747 sha256=73475747722e65dd020c02b3d1cce54d229a0610f22eaa31353c58ec64e64c12 bytes=6331476 file=xnu_arm_entry.bin role=THE-ARM:-974-routes-the-board-PE-s-console-into-the-entry-image-s-captured-RAM-console.-973-linked-the-914-board-PE;-pe_init.c-151-then-set-PE_kputc=gPESocDispatch.uart_putc-bound-plus-PE_early_puts-via-pe_serial.c-44),-and-the-board-PE-pointed-it-at-a-PRIVATE-1-KB-ring-with-no-reader-so-XNU-s-console-text-after-PE_init_platform-became-INVISIBLE.-974-makes-msm8974_putc-call-the-entry-image-s-own-entry_os_console_char,(int-c,-2u)-the-same-captured-sink-__wrap_vcputc-uses;-the-suffix-73475747-is-THIS-member-s-hash
+set=armed-d13-73475747 sha256=a9cff1858d22b2656e4a4d4576e296e57a76908797a09669a28266a1805ea911 bytes=7370932 file=xnu_arm_entry.elf role=the-entry-ELF-;-msm8974_putc-@0x801ae290-is-mov-r1,#2-;-b-800043a0-<entry_os_console_char>-(2-instructions),-not-a-private-ring
+set=armed-d13-73475747 sha256=0a309e1ceed2b19ba78abd54bbd47a1d8cf509e2a96abb600b4feb4d81f07bd8 bytes=1911 file=xnu_arm_entry.h role=the-entry-header
+set=armed-d13-73475747 sha256=6e56e9803fc4f61f1d9fde7c81705635044fefbfd36586a49e340418dda249ab bytes=1409 file=xnu_arm_entry-config.txt role=the-entry-record-;-switch-set-UNCHANGED
+set=armed-d13-73475747 sha256=17ee93913de49c7f83ee4dda4640e7e517e6ee2b1c79a4b2162cd95098bdbab9 bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest
+set=armed-d13-73475747 sha256=82b8ccd2c871b3b9e777388765bd35ba5bfcd0e025c65c52c004ab09de4da799 bytes=6826876 file=stage90.bin role=the-payload-binary-embedding-the-974-entry-image
+set=armed-d13-73475747 sha256=1713d9ac4ebce0f32a6e3b3ed5da81c08843e52e31865fd6c603578619deb766 bytes=6888948 file=stage90.elf role=the-payload-ELF
+set=armed-d13-73475747 sha256=558e2cf8ba5c037fc37a8213a833f220fc42f19cb36b1952f2eff2b919d4bdbb bytes=6830080 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-73475747 sha256=c70b3c75cea456f6d243ea868492cced8da745ed74461f3b269faa0c85d43403 bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-THIS-is-what-the-press-sends
+set=armed-d13-73475747 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-73475747 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968/970h/971/972/973-s-6c2b6038-(974-moves-NO-arm-switch)
+set=armed-d13-73475747 sha256=4b2e3264e86a088cbef1f26d5189094f679ffd0fc2527d50997a94665db11b9b bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
