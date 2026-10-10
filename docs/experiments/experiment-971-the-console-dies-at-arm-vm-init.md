@@ -1,11 +1,44 @@
 # Experiment 971 — the console dies at `arm_vm_init`: D13 builds a fresh system table where 4570 copies the boot table
 
-**Status:** host-side COMPLETE and STAGED in the D13 tree (`tools/stage_d13_vm_init.sh` +
-`check_d13_vm_init_staged.sh`, wired into `make check`). **NOT BUILT, NOT PARKED, NOT PRESSED** — it
-must follow 970g's press, which is the operator's. The D13 tree now carries **970g + 971**; nothing
-references 971 until a build runs.
+**Status:** ✅ **BUILT and PARKED (`armed-d13-89bcc6e3`, entry bin `89bcc6e3`) — NOT PRESSED.**
+Continues the 970h press (2026-10-10), which BOOTED the D13 line for the first time and stopped dead
+on `arm_vm_init: switching translation-tables now...` — exactly this rung's frontier. The kernel
+object `out/xnu_kernel_obj_d13/osfmk_arm_arm_vm_init.o` was rebuilt from the staged source and the
+linked image now calls `bcopy` where it called `bzero` (verified by value, §6). `verify_press_ready`
+5/5; `make check` 0; the live tree matches `armed-d13-89bcc6e3` exactly. **THE PRESS IS THE
+OPERATOR'S.**
 
-Supersedes nothing; continues `experiment-970-the-window-is-ram-not-just-address.md` §6g (970g).
+Supersedes nothing; continues `experiment-970-the-window-is-ram-not-just-address.md` §6g (970g) and
+`experiment-970h-the-pre-switch-tlb-flush-destroys-the-boot-tables-live-entry.md` (whose press this
+follows).
+
+---
+
+## 0. The arm — how it was built, and one discrepancy found on the way
+
+The entry image was linked with the arm's own switch set and the kernel object recompiled from the
+971-staged source. **The pressed line (970h, `armed-d13-299ee994`) had `STAGE90_XNU_MEM_TOTAL=1` in
+its record but NO `MEM_TOTAL` edit in the LINKED image** — its `arm_vm_init` disassembles to `bzero`
+only and never branches to `PE_get_default`, and the live pool object `U bzero` (only) agrees. So
+`MEM_TOTAL` was inert on the pressed arm: the 958 3 GB-report change is **not in any image that has
+been shipped** and is a separate rung, not a live defect. To reproduce the pressed line faithfully
+(970h + 971, no MEM_TOTAL) the 971 object was compiled WITHOUT `-DSTAGE90_XNU_MEM_TOTAL=1` and
+installed over the live pool object. Verified faithful: its defined-symbol set is byte-identical to
+the old object's and its undefined set differs by exactly `+bcopy` (the 971 change). The platform
+block (`out/xnu_platform_obj_d13/`) was rebuilt with the arm's mount define set
+(`MOUNT/HFS_ROOT_MEDIA/EMMC_STRATEGY/ROOT_FROM_CARD/CARD_TOTAL/FULL_EXTENT/CARD_COW/STORAGE_PROBE`,
+`HDD_WRITE=0`) and **without** the HFS port (`STAGE90_HFS=0`), because D13 defines `is_suser`,
+`is_suser1`, `vnode_name`, `proc_tbe` natively — the parked ELF's `is_suser1` is the native one the
+shim never supplies.
+
+**Two defects in the *journal* environment, not the artifact, are recorded here because they cost
+this session time:** (a) an early scratch compile that did not pass `XNU_PLATFORM_OBJ_OUT` wrote the
+LIVE platform pool with the default (mount-off) defines — `stage90_root_media.o` silently went from
+`ROOT_FROM_CARD=1` to the default; this is the "one value, two definitions" class with a build in the
+middle, caught only because `build_entry.sh`'s `xnu_entry_882/888` comparisons refuse a two-script
+disagreement. The platform pool was rebuilt with the correct set and the full build then ran clean.
+(b) `tools/build_xnu_arm_kernel.sh --dir osfmk` also runs the out-of-manifest platform block, so a
+`--dir` run is not a single-object build; the pool wipe at `:444` applies to it too.
 
 ---
 
@@ -80,9 +113,18 @@ compiles — 609 C + 96 C++, `fail: 0`** — with the patched `arm_vm_init.c`, a
 object `out/xnu_arm_obj_d13/arm_vm_init.o` references **only `bzero`**. And the link resolves with **no
 new closure**: `bcopy` is already **defined** in the live entry ELF (`out/stage90/xnu_arm_entry.elf`,
 `T bcopy` at `0x80015d20`, from `osfmk/arm/bcopy.s`), and `bcopy_phys` at `0x8001849c`. So the patch
-compiles, emits the call, and links; the only remaining step is the real-pool build (which must wait
-for 970g's press). The live 970g arm (`xnu_arm_entry.bin` `321e3332…`) and the live pool object are
-byte-unchanged by this scratch run.
+compiles, emits the call, and links.
+
+**BUILT AND PARKED (host, 2026-10-10).** The real-pool object was produced by compiling
+`osfmk/arm/arm_vm_init.c` with this tree's flags into a scratch root (no `MEM_TOTAL` — see §0) and
+installing it at `out/xnu_kernel_obj_d13/osfmk_arm_arm_vm_init.o`; its undefined set went `bzero` →
+`bzero + bcopy` and its defined set was unchanged. The entry image was then relinked
+(`xnu_arm_entry.bin` `299ee994` → `89bcc6e3`) and the payload rebuilt around it (`stage90-qcdt.img`
+`f3b082ba` → `89e86c77`). **By value in the LINKED image** `out/stage90/xnu_arm_entry.elf`:
+`arm_vm_init @0x8001e928` now has `bl 80015d20 <bcopy>` at `0x8001e9d4`; the 299ee994 elf had `bl
+…<bzero>` there. Parked as `armed-d13-89bcc6e3` (all members in
+`out/stage90/frozen/armed-d13-89bcc6e3/`, recorded in `records/revert-set.txt`), `verify_press_ready`
+5/5, `make check` 0 (incl. `check_d13_vm_init_staged`).
 
 Press side (operator; the *second* D13 press): keys **after** `arm_vm_init` appear for the first time —
 the SMC/USB/storage probes and, if the boot is clean, the Darwin banner. Contrast the 970g-only press,

@@ -12950,3 +12950,59 @@ set=armed-d13-299ee994 sha256=b79b2c7636237755345d4079abccdddacaf3c1f9cb4230d628
 set=armed-d13-299ee994 sha256=f3b082ba215f3a6c040f1bee691579e14af25a4acb303e5231750a1b1c0412d7 bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-THIS-is-what-the-press-sends
 set=armed-d13-299ee994 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-299ee994 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968-s-6c2b6038-(the-970h-change-is-entry-side-only)
+# =================================================================================================
+# 971 - D13's arm_vm_init carries the BOOT TABLE into the system table (armed-d13-89bcc6e3).  The
+# 970h press BOOTED the D13 line for the first time (capture
+# 970h-armed-d13-299ee994-20261010-last_kmsg.txt, 426731 B / 3981 lines: 32 xnu_live_* keys and the
+# arm_vm_init console), and it stopped DEAD on the line 'arm_vm_init: switching translation-tables
+# now...' with no abort and no panic - exactly the 971 frontier.
+#
+# THE CAUSE (doc 971).  D13 osfmk/arm/arm_vm_init.c:352-353 built the system table WRONG:
+#     cpu_ttb = gTopOfKernel + L1_SIZE;
+#     bzero((void*)phys_to_virt(cpu_ttb), L1_SIZE);     <-- a FRESH table, nothing copied
+# 4570 (arm_vm_init.c:385-391) instead COPIES the boot table into the system table:
+#     boot_ttep = args->topOfKernelData;
+#     cpu_ttep  = boot_ttep + ARM_PGBYTES * 4;           <-- the SAME address D13 bzeroes
+#     bcopy(boot_tte, cpu_tte, ARM_PGBYTES * 4);
+# The entry's own source states the dependency by name (src/entry/entry_stubs.c:2210-2214): the
+# console's descriptors survive set_mmu_ttb(cpu_ttb) BECAUSE arm_vm_init copies the boot table into
+# the table the MMU walks afterwards.  D13 does no such copy, and D13's managed map is
+# [MANAGED_BASE 0xC0000000, 0xC0000000 + gMemSize), which does NOT contain the console VA 0xde500000
+# (RAM_CONSOLE_BASE).  So after the table switch the console's sections were gone, the slot fault
+# had no translation, and every record written after arm_vm_init was dropped - the console died one
+# rung later than 970g/970h, in exactly the way they were silent at _start.
+#
+# THE FIX (971, D13 osfmk/arm/arm_vm_init.c ONLY - a tree edit, scripted in tools/patch_d13_vm_init.py
+# + tools/stage_d13_vm_init.sh, so a re-checkout re-applies it): replace the bzero with the 4570
+# bcopy.  ONE statement.  4570 follows its copy with a loop writing ARM_TTE_TYPE_FAULT over the
+# copied V==P L1 slots; D13 needs NO such loop because it maps the identity region FRESH after this
+# point (l2_cache_to_range / l2_map_linear_range overwrite the L1 slots for [gVirtBase,
+# gVirtBase+gMemSize)), and on this arm gPhysBase == gVirtBase == 0x80000000, so 4570's clear range
+# is EMPTY.  The 970g + 970h locore.s edits REMAIN.
+#
+# Verified BY VALUE in the LINKED image (out/stage90/xnu_arm_entry.elf): arm_vm_init @0x8001e928
+# calls bcopy @0x80015d20 at 0x8001e9d4 (the 299ee994 elf called bzero there).  The kernel object
+# out/xnu_kernel_obj_d13/osfmk_arm_arm_vm_init.o moved from U bzero (only) to U bcopy + U bzero; its
+# defined-symbol set is UNCHANGED (a faithful recompile of the same flags).  Entry bin 89bcc6e3 (was
+# 299ee994); the payload's own switch record 6c2b6038 is BYTE-IDENTICAL (the 971 change is a kernel
+# tree edit, so no arm switch moved; only the embedded entry copy did).
+#
+# WHAT THE PRESS DECIDES.  If the cause is right, keys AFTER arm_vm_init appear for the first time -
+# the SMC/USB/storage probes and, if the boot is clean, the Darwin banner.  The 970h-only press is the
+# control: it went silent right after the pre-arm_vm_init keys.  STILL STOPPING at arm_vm_init => the
+# boot table is not the only place the console's descriptors live; the model is wrong one rung out.
+# recorded, not papered over.
+#
+# SCOPE.  Not 3 GB (958/915-B).  Reversible: fastboot boot only, never flash; the card base is never
+# written (CARD_COW=1).  PRESS IS THE OPERATOR'S.
+# =================================================================================================
+set=armed-d13-89bcc6e3 sha256=89bcc6e3f64e6b3efc4ef23d302cb63677a4f54941a5f30b88fcb55f7993d01e bytes=6331476 file=xnu_arm_entry.bin role=THE-ARM:-971-s-D13-arm_vm_init-boot-table-copy-(bcopy-the-boot-table-instead-of-bzero-a-fresh-system-table,-so-the-entry-s-console-descriptors-survive-set_mmu_ttb,-exactly-as-4570-s-arm_vm_init-keeps-them).-The-only-source-that-moved-is-external/xnu-hd2-darwin13/xnu/osfmk/arm/arm_vm_init.c,-re-applied-by-tools/stage_d13_vm_init.sh;-the-suffix-89bcc6e3-is-THIS-member-s-hash-(the-armed-d13-family-names-from-the-entry-bin)
+set=armed-d13-89bcc6e3 sha256=45531c283184461c2bc1f78443d934c0f778caa9fd63efdc1cd770b701e42f3a bytes=7370416 file=xnu_arm_entry.elf role=the-entry-ELF
+set=armed-d13-89bcc6e3 sha256=11fda9a3f98bcf37d90b8eef7c7db5a31367dc629c0483296ffc66e12699a185 bytes=1409 file=xnu_arm_entry-config.txt role=the-entry-record-;-968/970f-s-38-arm-keys,-UNCHANGED-(the-971-change-is-a-tree-edit,-not-a-switch)-so-this-record-s-non-hash-lines-are-byte-identical-to-armed-d13-299ee994-s
+set=armed-d13-89bcc6e3 sha256=fe3c2b1f8046dec512975ec079fdb6067b81855e6d78ec0b9531e7727c73d85e bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest-;-the-arm_vm_init-entry-moved-(the-source-that-changed-is-out/xnu_kernel_obj_d13/osfmk_arm_arm_vm_init.o,-recompiled-by-tools/build_xnu_arm_kernel.sh)
+set=armed-d13-89bcc6e3 sha256=53201b3d5e2575052c0ba0ccee512de1199d4c0bf9ee5d4f976a727a02f6cc35 bytes=6826876 file=stage90.bin role=the-payload-binary-embedding-the-971-entry-image-(the-entry-bin-moved-299ee994->89bcc6e3,-so-the-embedded-copy-did-too;-the-payload-s-own-sources-are-unchanged)
+set=armed-d13-89bcc6e3 sha256=bedca4f2ff3d2ac5329b7d221a6fa00bd8dd3b12e40b7b9fc3b5d8b732ebbe5e bytes=6888948 file=stage90.elf role=the-payload-ELF
+set=armed-d13-89bcc6e3 sha256=13d83a4da710ca460c13d4c5f9c19502106bccf3a915b3bd8087e105ba9a5193 bytes=6830080 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-89bcc6e3 sha256=89e86c7793faca26515df4c0c9b1ee7ca0b129209a8678c8c50ef239a4eded6f bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-THIS-is-what-the-press-sends
+set=armed-d13-89bcc6e3 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-89bcc6e3 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968/970h-s-6c2b6038-(the-971-change-is-a-kernel-tree-edit,-not-an-arm-switch)
