@@ -60,12 +60,10 @@ def is_d13(tree):
 
 
 def configure(tree):
-    """**949/950: on D13 the resident pet is compiled out, and this check says so rather than reading
-    an image that has no pet.** 937 pruned the 513-535 idle block (D13 ships no `cpu_idle`), and the
-    pet's declaration and every call site are behind `#if STAGE90_XNU_RESIDENT && !STAGE90_ENTRY_D13`
-    in `entry_trace.c`. So on D13 there is no `entry_wdt_pet` to check: this publishes a skip, after
-    confirming the gate that compiles it out is really there (a skip that could not tell "pruned" from
-    "deleted" would hide a broken pet)."""
+    """**977: on D13 the resident pet IS present, at `__wrap_machine_idle`.** 937 pruned the 513-535
+    idle block (D13 ships no `cpu_idle`), so the 4570 pet sites are gone, but a resident D13 image
+    with NO pet would arm the SoC watchdog and never feed it (975). The D13 branch below checks the
+    pet is in the linked image and called from that one wrapper."""
     global IS_D13
     IS_D13 = is_d13(tree)
     return IS_D13
@@ -206,6 +204,8 @@ def gather(image):
     facts["pet_body"] = body_of(image, "entry_wdt_pet") if image else None
     facts["wrap_body"] = body_of(image, "__wrap_platform_cache_idle_exit") if image else None
     facts["idle_body"] = body_of(image, "__wrap_Idle_load_context") if image else None
+    # 977: D13's own pet site is `__wrap_machine_idle` (937 pruned the idle-exit wrappers).
+    facts["machine_idle_body"] = body_of(image, "__wrap_machine_idle") if image else None
     # Which arm the image is (see image_arm): `__wrap_poll` carries the only call to
     # `cpu_signal_handler_internal`, and its presence or absence is the arm.
     facts["poll_body"] = body_of(image, "__wrap_poll") if image else None
@@ -827,54 +827,73 @@ def selftest(facts):
     return 0
 
 
-D13_GATE = "#if STAGE90_XNU_RESIDENT && !STAGE90_ENTRY_D13"
+D13_PET_SITE = "__wrap_machine_idle"
 
 
-def d13_pet_is_pruned(facts, trace_text=None, symbols=None):
-    """1 if D13's resident pet is compiled out as this check expects, else 0 with the reason printed."""
-    trace_text = facts["trace_text"] if trace_text is None else trace_text
-    symbols = facts["symbols"] if symbols is None else symbols
-    if D13_GATE not in trace_text:
-        print("FAIL: D13 was selected and this check expects the resident pet to be compiled out, but "
-              "`%s` is not in entry_trace.c: either the gate was removed (a D13 image with no pet that "
-              "nothing refuses) or this check's premise has changed" % D13_GATE, file=sys.stderr)
+def d13_pet_is_present(facts):
+    """1 if D13's resident pet is in the image and called from the one D13-live site, else 0 with the
+    reason printed.
+
+    **977 (2026-10-10): the premise of this check was inverted.** 949/950 LEFT the pet compiled out on
+    D13 (`#if STAGE90_XNU_RESIDENT && !STAGE90_ENTRY_D13`) and this check asserted that skip. But a
+    RESIDENT D13 arm then arms the SoC watchdog and **never feeds it** - the payload calls
+    `stage90_hw_watchdog_arm(25)` before the jump and D13 ships no watchdog driver, so the reset lands
+    ~28 s in, while a resident image has no ending either. That is 975's empty USB capture: the run
+    reset mid-boot before the ladder started. So the pet must now be PRESENT on D13, called from
+    `__wrap_machine_idle` (937 pruned the 4570 idle-exit wrappers; D13 ships no `cpu_idle`).
+    """
+    symbols = facts.get("symbols") or {}
+    if "entry_wdt_pet" not in symbols:
+        print("FAIL: D13 was selected but the linked image has NO `entry_wdt_pet`: a resident D13 "
+              "image with no pet arms the SoC watchdog and never feeds it, so it resets mid-boot "
+              "(975; 977)", file=sys.stderr)
         return 1
-    if "entry_wdt_pet" in symbols:
-        print("FAIL: D13 was selected but the linked image has an `entry_wdt_pet`: the gate is present "
-              "in the source and the symbol is in the image, so the image is not the one this check's "
-              "gate names", file=sys.stderr)
+    type_letter = symbols["entry_wdt_pet"][1]
+    if type_letter in ("U", "w", "v"):
+        print("FAIL: D13's `entry_wdt_pet` linked as a `%s` symbol (undefined/weak): the pet moves no "
+              "store, so the watchdog is not fed" % type_letter, file=sys.stderr)
         return 1
-    say("  xnu_entry_909: SKIPPED on D13 - the resident watchdog pet is compiled out. 937 pruned the "
-        "513-535 idle block (D13 ships no `cpu_idle`/`caches.c`), and the pet's declaration and every "
-        "call site are behind `#if STAGE90_XNU_RESIDENT && !STAGE90_ENTRY_D13` in entry_trace.c, so "
-        "`entry_wdt_pet` is not in the linked image and there is no pet for this check's claims to "
-        "read. The gate itself is confirmed present (a skip that could not tell 'pruned' from "
-        "'deleted' would hide a broken pet).")
+    idle_body = facts.get("machine_idle_body")
+    if idle_body is None:
+        print("FAIL: D13 was selected but the image has no `%s` to carry the pet" % D13_PET_SITE,
+              file=sys.stderr)
+        return 1
+    if not re.search(r"bl?\s+[0-9a-f]+ <entry_wdt_pet>", idle_body):
+        print("FAIL: D13 was selected but `%s` does not call `entry_wdt_pet`: the pet is in the image "
+              "but at no live site, so the watchdog is still not fed (977)" % D13_PET_SITE,
+              file=sys.stderr)
+        return 1
+    say("  xnu_entry_909: D13 - the residence rung's pet IS in the image, called from "
+        "`%s`. 937 pruned the 4570 idle-exit wrappers (D13 ships no `cpu_idle`), so 977 moved the "
+        "pet's call site to the one wrapper every D13 pass reaches; the pet body is the 4570 one, "
+        "unchanged (`entry_mmio_section` -> store 1 to base+RST)." % D13_PET_SITE)
     return 0
 
 
 def d13_selftest(facts):
-    """A skip is a claim too, so it gets the same treatment: mutate the two things it rests on and
-    require a refusal. A skip that cannot go red is 228's class - a claim that mutates nothing is
-    indistinguishable from one that holds."""
-    baseline = d13_pet_is_pruned(facts)
+    """A claim that the pet is present and called must be able to go red, or it is 228's class - a
+    claim that mutates nothing is indistinguishable from one that holds."""
+    baseline = d13_pet_is_present(facts)
     if baseline:
-        print("FAIL: the D13 skip does not hold for the image it was written against:", file=sys.stderr)
+        print("FAIL: the D13 pet claim does not hold for the image it was written against:",
+              file=sys.stderr)
         return baseline
     accepted = []
-    # (a) the gate removed from the source: the skip must refuse rather than pass silently.
-    if d13_pet_is_pruned(facts, trace_text=facts["trace_text"].replace(D13_GATE, "#if 0")) == 0:
-        accepted.append("the_gate_that_prunes_the_pet_is_removed")
-    # (b) the symbol present in the image: the skip must refuse.
-    symbols = dict(facts["symbols"])
-    symbols["entry_wdt_pet"] = (0, "t")
-    if d13_pet_is_pruned(facts, symbols=symbols) == 0:
-        accepted.append("the_linked_image_has_a_pet")
+
+    # (a) the pet missing from the image: the claim must refuse.
+    symbols = {k: v for k, v in (facts.get("symbols") or {}).items() if k != "entry_wdt_pet"}
+    if d13_pet_is_present(dict(facts, symbols=symbols)) == 0:
+        accepted.append("the_linked_image_has_no_pet")
+
+    # (b) the pet present but at no live site: a wrapper body that never calls it must refuse.
+    if d13_pet_is_present(dict(facts, machine_idle_body="<%s>:\n  bx lr\n" % D13_PET_SITE)) == 0:
+        accepted.append("the_pet_is_at_no_live_site")
+
     if accepted:
         print("FAIL: %d D13 mutations were not refused: %s"
               % (len(accepted), ", ".join(accepted)), file=sys.stderr)
         return 1
-    say("  --selftest: both D13 mutations were refused (the gate removed, the symbol present)")
+    say("  --selftest: both D13 mutations were refused (no pet in the image, pet at no live site)")
     return 0
 
 
@@ -898,10 +917,12 @@ def main():
         return 1
     facts = gather(args.image)
     if IS_D13:
-        # The pet is compiled out on D13; all eight claims are about a pet the image does not have.
+        # 977: on D13 the pet is at __wrap_machine_idle (not the 4570 idle-exit wrappers), so the
+        # eight claims below are about a pet the 4570 wrappers do not carry; the D13 branch checks
+        # the pet is present and called there instead.
         if args.selftest:
             return d13_selftest(facts)
-        return d13_pet_is_pruned(facts)
+        return d13_pet_is_present(facts)
     if args.selftest:
         return selftest(facts)
 
