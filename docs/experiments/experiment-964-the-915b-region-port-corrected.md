@@ -1,5 +1,10 @@
 # 964 — the 915-B region-list port, corrected against 958: the total rides `max_mem` alone (2026-07-…)
 
+> **Superseded in shape by [`experiment-915b-the-region-port-v2.md`](experiment-915b-the-region-port-v2.md)**
+> (2026-10-10), which fixes 16 defects an adversarial pass found in 915 §5's shape (including §3's underflow
+> wording below, now corrected there §3.1). This doc's **964 correction stands** — the port must not touch
+> `max_mem`/`mem_size`/`sane_size`. Read v2 for the concrete, line-anchored edit sites.
+
 915 designed the multi-bank region list before 958 existed. 958 then implemented the "reported total"
 half a different way (`/defaults hw.memsize` → `max_mem`), and **915 §5's design row is now stale in a
 way that would produce the exact defect this project names most often.** This rung records the
