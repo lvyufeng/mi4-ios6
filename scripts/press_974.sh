@@ -37,6 +37,11 @@ cd "$(dirname "$0")/.."
 
 EXPECT_ARM=armed-d13-73475747
 
+# *** SUPERSEDED BY 975 (armed-window-1091566c). ***  975's entry bin is BYTE-IDENTICAL to this arm's
+# (73475747) and differs only in STAGE90_XNU_ENTRY_WINDOW (16 MiB -> 484 MiB), so a single press of
+# scripts/press_975.sh yields BOTH this arm's console observability AND the 484 MiB window test.
+# Press 975, not this one, unless you specifically want the 16 MiB control.
+
 echo "== 1. device present? =="
 adb devices | grep -q 4a2fe00b || { echo "NO DEVICE - hold Power ~10-15s to boot it back, then re-run"; exit 1; }
 fastboot devices | grep -q 33e80afe && { echo "33e80afe (the OTHER phone) is present - unplug it first (hardware gate)"; exit 1; }
