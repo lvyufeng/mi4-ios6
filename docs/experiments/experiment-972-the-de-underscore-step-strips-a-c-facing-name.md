@@ -67,7 +67,7 @@ Confirmed **by value** in the previously-linked image: `printf+0x1c` `bl___disab
    UNDERSCORE_KEEP=$(grep -rhoE '^#define[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+_[a-zA-Z][A-Za-z0-9_]*[[:space:]]*$' \
        "$XNU/osfmk/arm/"*.h | awk '{print $NF}' | sort -u)
    ```
-   (the `#[30m…]` forms are the builder's own; the guard re-derives the same set).
+   (the anchored `#define NAME _NAME` form is the builder's own; the guard re-derives the same set).
 2. **Skip those names in the rename loop** — `continue 2` (out of the inner compare, past the
    `--redefine-sym`), keeping `_start`'s existing skip.
 
