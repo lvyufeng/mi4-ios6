@@ -348,6 +348,74 @@ compiles none of them and its bytes are unchanged. **The single switch that move
 - **Reversible, non-destructive.** `fastboot boot` only, `CARD_COW=1` never writes the base; a power cycle
   reverts everything. `tools/verify_press_ready.sh` = **5/5**, `make check` = 0. **PRESS IS THE OPERATOR'S.**
 
+## 6f. RETRACTION (2026-10-10) — §6d/§6e are WRONG: the cause is the LOW window, not a refused slot, and §6e's fix is DEAD CODE
+
+§6d named the mechanism "the console install is refused (`why=2`, occupied slot)"; §6e built the fix on it.
+**Both are refuted by the payload's own reading in the real D13 capture.** The discriminator is not a slot -
+it is a *window*, and the adoption block §6e added sits **after** the check that fires, so it is unreachable.
+
+**The measurement (the real 970 capture, `out/stage90/captures/970-484mib-window-20261009-last_kmsg.txt`):**
+
+```
+mmu_ttbr0_before=0x0f210000     mmu_l1_table=0x006c4000
+mmu_ttbr0_after =0x006c4000     xnu_entry_status=0x90000001      xnu_live_* = 0 (none)
+```
+
+The payload's `enable_identity_mmu` (`src/mmu.c:5525`) writes **`TTBR0 = stage90_l1_table`**, and that table
+lives at PA **`0x006c4000`** — inside the payload's own low image (`.bss`, `nm` confirms `006c4000 b
+stage90_l1_table`), **below `0x80000000`**. Every capture with a working channel shows
+`xnu_live_l1 = 0x80700000`/`0x80800000` — **above** it. One byte of structure, opposite sides of the line.
+
+**Why that refuses the channel — `why=1`, not `why=2`, and before the adoption.** `entry_live_init`'s *first*
+guard (`entry_stubs.c:2308`) is
+
+```c
+if (l1 < 0x80000000u || (l1 & 0x3fffu) != 0u) { ... if (attempts >= 8) entry_live_refuse(1u); return; }
+```
+
+With `l1 = 0x006c4000` this is **true**, so the retry runs eight times and then refuses **`why=1`**. The
+`why=2` block §6d named is at `:2401`, *below* the guard; **the adoption block §6e added is at `:2389`, also
+below it.** On D13 both are unreachable — §6e's fix never executes. (The refusal is still **silent**: the
+record that would report `why=1` travels through the console, which was just refused. §6d's "the refusal is
+silent by construction" survives; only *which* refusal was wrong.)
+
+**Why 4570 boots — confirmed by value, and it is §6d's own observation, mis-read.** 4570's
+`osfmk/arm/start.s:151-152` writes `TTBR0 = topOfKernelData | TTBR_SETUP` **unconditionally** — there is **no
+`beq mmu_initialized` in 4570's `start.s` at all** (the fast path is D13's `locore.s` alone). So 4570 always
+presents a *high* table (`0x80800000`) and the guard passes. §6d had the fact and attached the wrong meaning:
+on the fast path the payload's table is still active **and it is low**, which is not "an occupied slot" but
+"a table this instrument will not write into".
+
+**And the window guard is RIGHT, not a bug to route around.** The instrument's own comment (`:2301-2307`)
+and 482/484's story say why it must be high: `arm_vm_init` **copies the boot table** into the table the MMU
+walks afterwards, and the console's descriptors survive *because of that copy*. 4570 does
+`bcopy(boot_tte, cpu_tte, ARM_PGBYTES*4)` (`xnu-4570.1.46/osfmk/arm/arm_vm_init.c:391`). **D13 does not** —
+`arm_vm_init.c:352-353` is `cpu_ttb = gTopOfKernel + L1_SIZE; bzero(phys_to_virt(cpu_ttb), L1_SIZE)`: a
+**fresh table, no copy**. So anything the entry maps (or `_start` maps) is **discarded** when D13 switches to
+`cpu_ttb` (`:428`) — which is why the console *must* be mapped inside the boot table at `topOfKernelData`.
+Adopting the payload's low table would put the console in a table that is thrown away a few hundred
+instructions later.
+
+**The real cause, then, is two D13 facts with one fix.** D13's `__start` takes the fast path (M=1, set by the
+payload) and so (1) never builds the boot table at `topOfKernelData` and (2) leaves the payload's low table
+as TTBR0. Fixing (2) alone is not enough: **the boot path must run** — `mmu_reinitialize … fix_boot_args_hack`
+is where the boot table is built at `topOfKernelData` and TTBR0 becomes high. Making `entry_live_init` also
+map the console into *that* table is a **second, required** change (an instrument change, not an architectural
+one) before any post-`arm_vm_init` key can survive.
+
+**Where the console dies is nonetheless bounded and useful.** `xnu_live_console` is the **first** key any
+working run writes, and it fires inside `arm_init` before `PE_init_platform` (`arm_init.c:150`) and hence
+before `arm_vm_init` (`:168`). So the first ~15 keys (the init block and the first wrapped probes) fire under
+the boot table; the console is lost when `arm_vm_init` switches away. The D13 line **is** observable in that
+window — it merely has none today, because `_start` never built the table the probe needs.
+
+**What this means for §6e's arm.** `armed-d13-2544428e` is **not the fix**; its adoption block cannot run. It
+is not harmful, and the parked arm is kept for the record, but **pressing it will not make the D13 line
+observable** and its whole premise is herewith retracted. The correct fix is a `locore.s` change (D13-only)
+that enters the boot path — the option §6e explicitly rejected — plus the boot-table console mapping. Its
+build is the next rung (970g), and it must be validated against the same two-by-value endpoints §6e already
+verified (`0xde511c02` at L1 index `0xde5`; the boot-table copy is absent on D13).
+
 ## 7. What it does NOT do
 
 It does **not** make XNU *recognize 3 GB*. `max_mem`/`mem_size`/`sane_size` are all `gMemSize` here, so
