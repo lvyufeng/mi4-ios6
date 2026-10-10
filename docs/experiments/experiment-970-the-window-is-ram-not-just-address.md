@@ -199,14 +199,15 @@ same silence.
   the current builder: if it boots, the builder is sound and a 968 switch breaks XNU's early boot; if it
   fails, the builder regressed.
 
-## 6d. The D13 entry has NEVER booted — cause NOT ESTABLISHED (all six static hypotheses refuted or unproven)
+## 6d. The D13 entry has NEVER booted — cause CONFIRMED: the console install is refused (all six *original* hypotheses refuted/unproven)
 
 The control press established the window is not the cause (§6c). Six independent read-only
 investigations were run against the real ELFs, **each then adversarially re-verified by a second agent
-tasked to refute it.** The honest outcome: **no hypothesis survived as a cause.** The earlier revision of
-this section named D13's `__start` MMU fast path as the "CONFIRMED cause"; that claim was **REFUTED by
-the verifier** and is retracted below. ⚠️ The commit that carried it (`3662bcf`) and the first memory
-draft were **overclaiming** — corrected here.
+tasked to refute it.** The first revision of this section named D13's `__start` MMU fast path as the
+"CONFIRMED cause"; the verifier **REFUTED that particular claim** (commit `3662bcf` overclaimed), and it
+is retracted below. The verifier's *objection*, however, turned out to be the door to the real cause —
+which **is** the fast path, but via a mechanism the first draft got wrong: the fast path does **not** cause
+a fault, it **refuses the console**. The cause is now CONFIRMED by construction (see "Branch 2" below).
 
 **Fact that survives: the whole Darwin-13 entry line has never run.** The two D13 presses (968's
 `armed-d13-7107b998`, 970's `armed-window-c74bde1d` — the *same* entry bin, byte-identical
@@ -249,12 +250,46 @@ cannot tell them apart:
    `entry_live_map` finds the slot taken → `entry_live_refuse(2u)` → every record dropped, and the run
    is simply **unobservable** — not necessarily a crash).
 
-The discriminator must be a measurement **not masked by the console install**: e.g. a pre-console
-raw-store marker written in `processor_init`/`arm_init` that does not go through `entry_live_write`
-(so a refusal cannot swallow it), or capturing the fault PC/abort path directly. Building that marker is
+**Branch 2 is now CONFIRMED by construction — it is the cause, and it also explains branch 1's silence.**
+The chain, every link read by value:
+
+1. **The payload installs its own table as TTBR0 and enters XNU with it.** `enable_identity_mmu()`
+   (`src/mmu.c:5519`) does `write_ttbcr(0)` (so **all** addresses go through TTBR0), `write_ttbr0(
+   stage90_l1_table)`, `SCTLR.M=1`; it is called at `mmu.c:5610`, i.e. **before** the jump at
+   `xnu_entry_jump.c:270`. The payload never turns the MMU off (`bx r1`).
+2. **That table maps the console.** `mmu.c:5478` `map_section_desc(RAM_CONSOLE_BASE, RAM_CONSOLE_BASE,
+   L1_DESC_SECTION_RAM_CONSOLE)`; the descriptor is `STAGE90_PMAP_DESC_SECTION_SO` (`0x00010c02`, the
+   odd-format section bit set per `stage90.h:4448`) or `NORMAL_NC` — **bits[1:0] = `0b10`, a valid
+   section descriptor**. So the payload's L1 slot for `0xde500000` is a live descriptor.
+3. **D13's fast path keeps that table.** `__start` (`locore.s:52`) reads SCTLR, `beq mmu_initialized`
+   (locore.s:61) is **taken** (M=1) → the boot path's **only** TTBR0 write (locore.s:108, after the
+   branch) is **skipped**; TTBR0 stays the payload's table.
+4. **The console install is refused.** `entry_live_init` (`entry_stubs.c:2357`) calls
+   `entry_live_map(RAM_CONSOLE_BASE, …)` → `entry_section_install` (`:2110`) tests
+   `(before & LIVE_TTE_TYPE_MASK) != 0u` (`:2122`) → the slot is occupied → returns 0 → `installed & 1 == 0`
+   → **`entry_live_refuse(2u)`** (`:2365`) → `g_live_state` stays 0 → **every** record, probe *and* panic,
+   is dropped.
+5. **4570 boots because its `_start` rewrites TTBR0 unconditionally.** `start.s:151-152` writes TTBR0
+   (`BA_TOP_OF_KERNEL_DATA`) on the boot path with no fast-path guard → XNU's own table → the console slot
+   is free → the instrument installs → the trace flows. (This is the real 4570/D13 discriminator; the
+   VBAR write H4 pointed at is written **0** times by 4570 and is not it.)
+
+**This dissolves the verifier's contradiction.** H4 was refuted on the grounds that "the payload's own
+loud vectors would print on a fault, yet the log is silent." But under exactly this scenario the console
+is refused, **and the payload's panic handler writes through the same `entry_write_kv`/`entry_os_console`
+channel** — so a panic is **equally silent**. "A fault would print" is false when the console is off; the
+silence is consistent with *either* a fault *or* a clean run, and this mechanism is common to both.
+
+**The discriminating measurement.** Not "does it crash" but **"is the console refused"** — and the refusal
+is only invisible because its own record goes through the refused channel. The fix that makes it visible
+is a **raw store that bypasses `entry_live_write`**: write a fixed magic to the console RAM (or to a
+spare byte the payload's table doesn't cover, i.e. a VA the payload L1 leaves zero) from
+`entry_live_init`'s refuse path, so a refused install leaves a fingerprint regardless of console state.
+Equivalently — and this is the *candidate fix*, not just a probe — make D13's `__start` **write TTBR0
+before the `beq mmu_initialized`**, so the entry always owns its tables (matching 4570). Both are
 host-side and reversible; the press to observe it is the operator's. **The window remains a separate,
-later question; the D13 `locore.s` fast path is a real structural difference but is no longer held to be
-the cause.**
+later question** — this cause is independent of window size, which is why the 16 MiB and 484 MiB arms
+failed identically (§6c).
 
 ## 7. What it does NOT do
 
