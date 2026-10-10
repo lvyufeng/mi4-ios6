@@ -302,6 +302,18 @@ check:
 # feeds three measured mutations (the window marker dropped, an invented key, no block).
 	@tools/check_runner_window_family.py --selftest >/dev/null
 	@tools/check_runner_window_family.py
+# 972: the asm de-underscore step. `tools/assemble_arm_layer.sh` strips ONE leading underscore off every
+# symbol it assembles for the ELF - correct for Apple's `_foo` -> `foo`, but WRONG for names a C header
+# deliberately defines WITH the underscore (`cpu_data.h:145` `#define disable_preemption
+# _disable_preemption`). On D13 the strip turned the asm-defined `_disable_preemption` into
+# `disable_preemption`, and the C caller reached a stub that the image does not provide (971 press:
+# `stub_hit=_disable_preemption`). The builder now DERIVES a keep-set from `osfmk/arm/*.h` - every name
+# a header aliases to an underscore form - and skips those in the rename loop. `check_deunderscore_guard.sh`
+# re-derives the same set from both trees, asserts the builder's derivation is present, that D13 keeps the
+# C-facing names, and that 4570's set intersects no 4570 asm object (the control). `--selftest` feeds a
+# mutated builder + a stripped D13 object and asserts each is refused. Source half, no compiler, no device.
+	@tools/check_deunderscore_guard.sh --selftest >/dev/null
+	@tools/check_deunderscore_guard.sh
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not

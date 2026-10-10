@@ -13053,3 +13053,48 @@ set=armed-d13-7c230cf9 sha256=d56edc2a8d2170be1106c84cebd90805c823edf740997f1a00
 set=armed-d13-7c230cf9 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-7c230cf9 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968/970h/971-s-6c2b6038-(the-958+971-change-is-kernel-tree-only,-not-an-arm-switch)
 set=armed-d13-7c230cf9 sha256=5c3dc2d227248022461fd123e1838556a8188aa6412727c94279dcf8403c78f7 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+# =================================================================================================
+# 972 - the D13 asm de-underscore step STRIPPED a C-facing underscore name (armed-d13-0184b928).  The
+# 2026-10-10 press of armed-d13-7c230cf9 is the FIRST D13 press to get PAST arm_vm_init. 971's ########
+# console fix WORKS: the capture (971-armed-d13-7c230cf9-20261010-last_kmsg.txt, 4530 lines) carries
+# 'arm_vm_init: switching translation-tables now...' and THEN 'arm_vm_init: setting up segment
+# information...' - keys AFTER the switch, for the first time. The boot then STOPPED DEAD on
+# 'a symbol this image does not provide was called', stub_hit=_disable_preemption, caller=0x8002c140
+# (printf). Device returned clean in 17 s; no brick; 'No errors detected'.
+#
+# THE CAUSE. D13 osfmk/arm/cpu_data.h:145 says `#define disable_preemption  _disable_preemption`, so
+# D13's C COMPILER emits a call to `_disable_preemption` (1 leading underscore). machine_routines_asm.s
+# :171 `EnterARM(_disable_preemption)` expands - via asm_help.h's `_##function` - to the SAME symbol
+# `_disable_preemption`. But tools/assemble_arm_layer.sh's de-underscore step (the ELF flag's own rule,
+# `_x`->`x`) STRIPPED that one underscore, leaving the object defining only `disable_preemption` (0) and
+# ``__disable_preemption``/``___disable_preemption`` - while the C reference kept its 1-underscore name,
+# which no object defined, so it linked against the entry's `entry_stub_hit` stub (0x8049bbe4).
+# The reference repo (HTC-Leo-Revival-Project/xnu, machine_routines_asm.s:170-172) carries the identical
+# three `EnterARM(_*preemption)` lines, so this is a latent D13-lineage trap, not something this project
+# introduced - it merely became REACHABLE once the boot passed arm_vm_init (971).
+#
+# THE FIX (tools/assemble_arm_layer.sh ONLY - a builder edit, no tree change). The de-underscore step
+# now PRESERVES the exact set of underscore names that appear on the right-hand side of a
+# `#define NAME _NAME` in the selected tree's osfmk/arm/*.h - the mechanical definition of 'a C
+# identifier whose spelling already begins with an underscore'. Derived, not hard-coded. On the 4570
+# tree that set is {_COMM_PAGE32_BASE_ADDRESS,_COMM_PAGE64_BASE_ADDRESS} (cpu_data.h's is a FUNCTION
+# macro the anchored pattern does not match), neither of which any 4570 asm OBJECT defines, so 4570's
+# objects are BYTE-IDENTICAL with and without the guard - the guard is INERT on 4570.
+#
+# Verified BY VALUE in the LINKED image: machine_routines_asm.o now defines `_disable_preemption`
+# (1 underscore) at 0x8001ab60 (the real asm), where the 7c230cf9 elf's was the stub at 0x8049bbe4.
+#
+# SCOPE. Not 3 GB (958). Reversible: fastboot boot only, never flash; CARD_COW=1. PRESS IS THE OPERATOR'S.
+# =================================================================================================
+set=armed-d13-0184b928 sha256=0184b92892f5c605ad857d09af1c0385c35e93b7ee72b5c1256fcf2ac66c95a0 bytes=6331476 file=xnu_arm_entry.bin role=THE-ARM:-972-s-de-underscore-keep-set.-The-D13-asm-de-underscore-step-was-stripping-ONE-underscore-from-C-facing-names-(cpu_data.h-145-_-define-disable_preemption-_disable_preemption),-so-the-C-call-to-_disable_preemption-(1-underscore)-resolved-against-the-entry-s-entry_stub_hit-stub.-THE-2026-10-10-PRESS-proved-the-consequence:-printf-s-bl-_disable_preemption-@0x8049bbe4-was-the-FIRST-symbol-D13-s-C-needed-that-the-asm-layer-did-not-provide,-and-the-boot-STOPPED-there-immediately-AFTER-arm_vm_init-s-'setting-up-segment-information...'-line-(capture-971-armed-d13-7c230cf9-20261010,-3989-lines).-FIX-=-tools/assemble_arm_layer.sh-guards-names-derived-from-the-tree-s-own-_-define-X-_X-_-set;-the-suffix-0184b928-is-THIS-member-s-hash
+set=armed-d13-0184b928 sha256=a82068be753b49477002a04678de4667d13afbaca1c4fd6d02337ad17a66195e bytes=7370460 file=xnu_arm_entry.elf role=the-entry-ELF-;-machine_routines_asm.o-now-DEFINES-_disable_preemption-@0x8001ab60-(the-real-asm)-(was-the-stub-@0x8049bbe4)
+set=armed-d13-0184b928 sha256=3ae7e141e2124627adf88bf02a2b8e1b280c61d4a578212205a018ded0b98cec bytes=1911 file=xnu_arm_entry.h role=the-entry-header-;-UNCHANGED-from-armed-d13-7c230cf9
+set=armed-d13-0184b928 sha256=be86b9544d15a32607be22263353ba7151517eb5c98a1427c97b5358d6329ef4 bytes=1409 file=xnu_arm_entry-config.txt role=the-entry-record-;-40-keys,-switch-set-UNCHANGED-(the-fix-is-in-the-asm-LAYER,-not-an-arm-switch)
+set=armed-d13-0184b928 sha256=6d68760890f539d0f694f049138d605910a07936e6f5a52f48a42f51eb1268ea bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest-;-byte-INTERNAL-unchanged-(the-.s-sources-did-not-move;-the-assembled-OBJECTS-did)
+set=armed-d13-0184b928 sha256=963f019d3f9213d02ff35af42236033a9a1feda1c1cd5ece287a100f2ab1c7b1 bytes=6826876 file=stage90.bin role=the-payload-binary-embedding-the-972-entry-image-(the-entry-bin-moved-7c230cf9->0184b928)
+set=armed-d13-0184b928 sha256=981a0f70bb7e57a059184a402242efd9878889c6be64a6c001d4cad1e816d81d bytes=6888948 file=stage90.elf role=the-payload-ELF
+set=armed-d13-0184b928 sha256=781792120f57549a9b88eb3c09d8cafe21e6df41318390c7911c7c74733669d1 bytes=6830080 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-0184b928 sha256=6a4d0c23483dc0b78b57e3795ed7db751042cc4331dae2f891fd9958647ce7c2 bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-THIS-is-what-the-press-sends
+set=armed-d13-0184b928 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-0184b928 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968/970h/971's-6c2b6038-(the-972-change-is-asm-layer-only,-not-an-arm-switch)
+set=armed-d13-0184b928 sha256=fe958c6d9870751e1d9304c2a90316fd355f461ea3e60532ede4948cf214e249 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img

@@ -192,6 +192,37 @@ INCLUDES=(
 # reports how many substitutions it made so a file needing none is used unchanged.
 TRANSLATE=$TOOLS_DIR/translate_arm_asm.py
 
+# **The C-facing underscore names the de-underscore step below must NOT strip.** The rename rule is
+# "the ELF flag's own: `_x` -> `x`", and it is right for a file that writes `_bcopy:` literally under
+# `__NO_UNDERSCORES__`. It is WRONG for a name whose leading underscore is part of the C identifier:
+# D13's `osfmk/arm/cpu_data.h:145` says `#define disable_preemption  _disable_preemption`, so the C
+# compiler emits a call to `_disable_preemption` - and `machine_routines_asm.s:171`'s
+# `EnterARM(_disable_preemption)` expands, through `asm_help.h`'s `_##function`, to the SAME
+# `_disable_preemption` (1 underscore). Stripping it to `disable_preemption` leaves the C reference
+# (1 underscore) to resolve against the entry's `entry_stub_hit` stub - measured on the 2026-10-10
+# press, where `printf`'s `bl 8049bbe4 <_disable_preemption>` branches into the stub the moment the
+# boot first reaches post-`arm_vm_init` console output. The reference repo (HTC-Leo-Revival-Project/
+# xnu, `machine_routines_asm.s:170-172`) carries the identical three `EnterARM(_*preemption)` lines,
+# so this is a latent D13-lineage trap and not something this project introduced - it merely became
+# REACHABLE now that the boot passes `arm_vm_init`.
+#
+# **Derived, not hard-coded.** The keep-set is exactly the underscore names that appear on the
+# right-hand side of a `#define NAME _NAME` in the selected tree's `osfmk/arm/*.h` - the mechanical
+# definition of "a C identifier whose spelling already begins with an underscore". On the 4570 tree
+# that set is EMPTY for preemption (`cpu_data.h:86` is `#define mp_disable_preemption()
+# _disable_preemption()`, a FUNCTION macro this anchored pattern does not match), and its
+# `machine_routines_asm.s` has no `EnterARM(*preemption)`, so 4570's objects are byte-identical with
+# and without this guard. The match is EXACT (not a `_`-prefix glob), so a real Darwin-prefixed
+# symbol like `_bcopy` is still stripped.
+UNDERSCORE_KEEP=""
+if [[ -d $XNU/osfmk/arm ]]; then
+    UNDERSCORE_KEEP=$(grep -rhoE '^#define[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+_[a-zA-Z][A-Za-z0-9_]*[[:space:]]*$' \
+        "$XNU/osfmk/arm/"*.h 2>/dev/null | awk '{print $NF}' | sort -u | tr '\n' ' ')
+fi
+nkeep=0
+for _s in $UNDERSCORE_KEEP; do nkeep=$((nkeep + 1)); done
+[[ $nkeep -gt 0 ]] && echo "  de-underscore keep-set: $nkeep C-facing name(s) preserved ($UNDERSCORE_KEEP)"
+
 # **934: an object in the pool that the *selected manifest* does not name is not an object of this
 # layer, and it must be removed rather than left.** The pool directory is per-tree (`_d13`), so a run
 # against a tree does not mix trees - but a *manifest* change does not remove the previous run's
@@ -317,6 +348,18 @@ while read -r src; do
     args=()
     while IFS= read -r sym; do
         [[ $sym == "_start" ]] && continue
+        # **The de-underscore step must not strip a C-facing underscore name.** `$sym` here is a
+        # 1-underscore symbol the assembler emitted; the rule is to drop that one underscore. But when
+        # the name is one the D13 C compiler ALSO writes with its leading underscore - the
+        # `#define X _X` set derived into `$UNDERSCORE_KEEP` - the underscore is the C identifier's,
+        # not Apple's asm prefix, and stripping it leaves the C reference pointing at the entry's
+        # `entry_stub_hit` stub (measured: `printf` -> `bl _disable_preemption` -> stub). Exact match,
+        # so a genuine `_bcopy` is still stripped.
+        for _k in $UNDERSCORE_KEEP; do
+            if [[ $sym == "$_k" ]]; then
+                continue 2
+            fi
+        done
         args+=(--redefine-sym "$sym=${sym#_}")
     done < <("$NM" "$OUT/$name.o" 2>/dev/null | awk '($1 == "U" && $2 ~ /^_[a-zA-Z]/) || ($2 ~ /^[TDBR]$/ && $3 ~ /^_[a-zA-Z]/) { print ($1 == "U") ? $2 : $3 }' | sort -u)
     if [[ ${#args[@]} -gt 0 ]]; then
