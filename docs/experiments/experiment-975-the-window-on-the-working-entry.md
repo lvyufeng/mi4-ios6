@@ -189,6 +189,15 @@ means EITHER (a) the run faulted before the idle path, OR (b) the ladder reaches
 **buggy**; the two are divided by 974's board-PE console, which now lands in the same RAM console and is
 handed to EP1-IN. A **non-empty** capture proves (b) false and closes the live-read problem outright.
 
+**§6b — ONE PRESS OF THIS ARM ANSWERS FOUR GOAL CLAUSES (from the arm's own record, 2026-10-10).**
+`out/stage90/xnu_arm_entry-config.txt` for `armed-window-1091566c` carries, together:
+`STAGE90_XNU_MEM_TOTAL=1` (958 — 「正确识别 3 GB」), `STAGE90_XNU_CARD_TOTAL=1` (911d — 「16/32 GB」),
+the four `STAGE90_XNU_USB_{PROBE,DEV,ENUM,STREAM}=1` (959–962 — 「可以通过 usb 进行调试」), and
+`STAGE90_XNU_RESIDENT=1` (「保持在 xnu 里」), on the real iOS 7.1.2 HFSX rootfs (`CARD_COW=1`,
+`HDD_WRITE=0`, base never written) at the 484 MiB window. So the single owed press is not one measurement
+— it is the goal's clause-2/3/5a/5b observation AND the window/wall decision at once. Nothing about the
+arm is missing; only the press is.
+
 
 ## 7. Provenance
 
