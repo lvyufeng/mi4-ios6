@@ -153,10 +153,30 @@ held 0 `MI4IOS6` / 0 `xnu_live` lines — it was the stock Android kernel's own 
 log is **gone**: too many boots elapsed for the single-slot ring. The lesson is the carrier and the
 one-boot window, now fixed in the script.
 
-**Next rung (once the log is read):** `xnu_entry_args_memSize=0x1e400000` proves the window rung ran;
-`BSD root:`/launchd-past-`__TEXT` decides the wall; a fault's `far`/`fsr` or the last key before silence
-names a hang. If the log is empty even after recovery, the non-return is *very* early (before the first
-`xnu_live_*` probe) — the 484 MiB `_start` map would be the suspect, i.e. 915-B stands.
+**Next rung (the log is gone; the escape is the ladder, not recovery).** `xnu_entry_args_memSize=0x1e400000`
+would prove the window rung ran; `BSD root:`/launchd-past-`__TEXT` decides the wall; a fault's `far`/`fsr`
+or the last key before silence names a hang. None of that is readable now — 975's console is lost (§6).
+
+**Why this recurs, structurally (read from `build_entry.sh`, 2026-10-10):** a **resident** arm has **no
+ending by construction**. `build_entry.sh:1094-1103` **refuses** `STAGE90_XNU_POST_END_RUN>0` and
+`STAGE90_XNU_POST_END_TICKS>0` whenever `STAGE90_XNU_RESIDENT=1` ("POST_END_TICKS is the deliberate ending
+still in the image, so the run would end at the countdown… Set POST_END_TICKS=0"). So every resident arm —
+which is every arm that reaches the goal's 「保持在 xnu 里」 — ends only on the hardware watchdog, which
+does **not** preserve the ram console record the way a clean partial-boot (epilogue or panic) does. Its log
+therefore survives at most the **one** boot after it, and any boot after that overwrites the single-slot
+record. **975 lost its log this way** (the ~2 MB `/proc/last_kmsg` this session held 0 `MI4IOS6` lines).
+
+**So the escape is not another recovery — it is to stop needing one.** 975's record already carries the
+full USB ladder (`STAGE90_XNU_USB_PROBE/DEV/ENUM/STREAM=1`), which fires from `__wrap_machine_idle` (951):
+if it reaches the idle path, it **streams the console to the host live**, and the host sees it *while* the
+device stays resident — no RAM console, no recovery window. But the ladder (959–962) is **PARKED, never
+pressed** (`experiment-962…:42`), so 975's "no new USB enumeration" cannot be read: it is equally consistent
+with (a) the boot faulting **before** the idle path, or (b) the ladder code running but being buggy.
+
+**⟹ The next rung is the USB ladder itself (959–962), pressed alone.** Validate that the D13 resident path
+streams its console to EP1-IN; once it does, a resident run is observable live and the "non-returning run
+loses its log" problem is closed for good — which is also the goal's 「可以通过 usb 进行调试」. Only after
+that does a 975 re-press carry a readable outcome. **PRESS IS THE OPERATOR'S.**
 
 ## 7. Provenance
 
