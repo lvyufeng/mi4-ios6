@@ -36,9 +36,13 @@
 #                                      descriptors live; the model is wrong one rung out.  Recorded,
 #                                      not papered over.
 #
-# THE ARM is `armed-d13-89bcc6e3` (entry bin 89bcc6e3, payload rebuilt around it; the payload's own
-# switch record 6c2b6038 is UNCHANGED - the 971 change is a kernel-tree edit, so no arm switch moved).
-# Entry image 6331476 bytes; the press sends stage90-qcdt.img 89e86c77... (9351168 bytes).
+# THE ARM is `armed-d13-7c230cf9` (entry bin 7c230cf9, payload rebuilt around it; the payload's own
+# switch record 6c2b6038 is UNCHANGED - the change is a kernel-tree edit, so no arm switch moved).  This
+# arm supersedes armed-d13-89bcc6e3 and ALSO folds in 958: its arm_vm_init calls bcopy (971) AND
+# PE_get_default to read hw.memsize into max_mem (958), so the same press answers the 3 GB question
+# too - 89bcc6e3 recorded MEM_TOTAL=1 but its elf carried neither the call nor the marker (see the
+# record block and docs/experiments/experiment-958-mem-total-inert-until-now.md).
+# Entry image 6331476 bytes; the press sends stage90-qcdt.img d56edc2a... (9351168 bytes).
 # The medium is 965c/968's real iOS 7.1.2 HFSX rootfs over the CARD COW; HDD_WRITE=0, so the BASE IS
 # NEVER WRITTEN - fully reversible, no brick risk (a power cycle reverts every write).  RESIDENT rung
 # (POST_END_TICKS=0): budget for a black screen + a power-cycle capture, not a clean return
@@ -49,7 +53,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-EXPECT_ARM=armed-d13-89bcc6e3
+EXPECT_ARM=armed-d13-7c230cf9
 
 echo "== 1. device present? =="
 adb devices | grep -q 4a2fe00b || { echo "NO DEVICE - hold Power ~10-15s to boot it back, then re-run"; exit 1; }

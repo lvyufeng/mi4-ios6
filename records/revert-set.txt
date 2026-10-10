@@ -13006,3 +13006,50 @@ set=armed-d13-89bcc6e3 sha256=13d83a4da710ca460c13d4c5f9c19502106bccf3a915b3bd80
 set=armed-d13-89bcc6e3 sha256=89e86c7793faca26515df4c0c9b1ee7ca0b129209a8678c8c50ef239a4eded6f bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-THIS-is-what-the-press-sends
 set=armed-d13-89bcc6e3 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-89bcc6e3 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968/970h-s-6c2b6038-(the-971-change-is-a-kernel-tree-edit,-not-an-arm-switch)
+# =================================================================================================
+# 958+971 - the 3 GB REPORT folded into the 971 console arm (armed-d13-7c230cf9).  This supersedes
+# armed-d13-89bcc6e3 as the live arm.  It is NOT a new rung of the boot; it is the SAME two entry
+# changes, but the second one is now actually IN the image.
+#
+# WHY THIS EXISTS - a claim in a record is not a check.  971's park armed-d13-89bcc6e3 RECORDED
+# STAGE90_XNU_MEM_TOTAL=1 in its config, but its LINKED elf carries NO `entry_xnu_mem_total_arm_on`
+# and its arm_vm_init never branches to PE_get_default: the 958 tree edit was NOT compiled into the
+# object that arm shipped.  The 970h arm (299ee994) had the same gap.  So the 958 3 GB-recognition
+# (「正确识别...3GB内存」) has never been in ANY image the device has booted - it was inert on every
+# arm - and the record said otherwise.  That is the mi4-a-claim-in-a-comment-is-not-a-check class.
+# src/entry/build_entry.sh now carries the missing REFUSAL: the MEM_TOTAL marker in the kernel object
+# out/xnu_kernel_obj_d13/osfmk_arm_arm_vm_init.o must AGREE with the record's STAGE90_XNU_MEM_TOTAL,
+# so neither half can lie about the other again.
+#
+# WHAT MOVED.  The kernel object was rebuilt from the STAGED sources with BOTH patches present -
+# tools/stage_d13_vm_init.sh (971: bcopy the boot table into the system table, not bzero a fresh one)
+# AND tools/stage_d13_memory_total.sh (958: read hw.memsize into max_mem alone) - and installed at
+# out/xnu_kernel_obj_d13/osfmk_arm_arm_vm_init.o.  By value in the LINKED image: arm_vm_init
+# @0x8001e928 calls bcopy @0x80015d20 (971) AND PE_get_default @0x80018290 (958), and the elf DEFINES
+# entry_xnu_mem_total_arm_on @0x8001e928 (958's file-scope marker).  The 89bcc6e3 elf called bcopy but
+# had NEITHER the PE_get_default call NOR the marker.
+#
+# ONE PRESS, TWO READINGS, AND THEY ARE INDEPENDENT.  The 958 read runs FIRST: `max_mem = hw.memsize`
+# is set at arm_vm_init + ~0xa0, BEFORE the 971 bcopy at +0xf0 and BEFORE the "switching
+# translation-tables now..." print at arm_vm_init.c:439.  So a clean arm answers BOTH questions in one
+# press - (958) the boot continues past arm_vm_init and reports 3 GB, (971) the console survives the
+# table switch and the post-arm_vm_init keys appear - and a STOP at the switch line still means the
+# 971 console cause was wrong, exactly as armed-d13-89bcc6e3 would have told us.  See
+# docs/experiments/experiment-958-mem-total-inert-until-now.md and experiment-971-*.
+#
+# SCOPE.  Not the pmap.  max_mem is the REPORTED total only; mem_size/sane_size stay the boot bank
+# (0x5e500000) and the managed map stays [0xC0000000, +gMemSize) - so this does NOT by itself make the
+# low bank allocatable (that is 915-B).  Reversible: fastboot boot only, never flash; the card base is
+# never written (CARD_COW=1).  PRESS IS THE OPERATOR'S.
+# =================================================================================================
+set=armed-d13-7c230cf9 sha256=7c230cf9f59037c7f38fba126d06b957b4f00b70e5cb6bfcd320ba469082cbdf bytes=6331476 file=xnu_arm_entry.bin role=THE-ARM:-958-s-3GB-hw.memsize-report-NOW-IN-THE-IMAGE-joined-to-971-s-arm_vm_init-boot-table-copy.-The-two-sources-that-moved-are-external/xnu-hd2-darwin13/xnu/osfmk/arm/arm_vm_init.c-re-applied-by-tools/stage_d13_vm_init.sh-and-tools/stage_d13_memory_total.sh;-the-suffix-7c230cf9-is-THIS-member-s-hash-(the-armed-d13-family-names-from-the-entry-bin)
+set=armed-d13-7c230cf9 sha256=3e633c5a122050534ae77e519a1f92b5f25f61d0f31f193847b5e61ac7b29048 bytes=7370460 file=xnu_arm_entry.elf role=the-entry-ELF-;-arm_vm_init-calls-bcopy-@0x80015d20-(971)-AND-PE_get_default-@0x80018290-(958),-and-DEFINES-entry_xnu_mem_total_arm_on-@0x8001e928
+set=armed-d13-7c230cf9 sha256=81ad25b43c953169a610e388fd5bd1d3f3f7259d66f2f2a5fa3b8a2e8209c512 bytes=1409 file=xnu_arm_entry-config.txt role=the-entry-record-;-40-keys,-identical-to-armed-d13-89bcc6e3-s-EXCEPT-STAGE90_XNU_ENTRY_SHA256-(965/968-s-STAGE90_XNU_MEM_TOTAL=1-is-now-HONEST:-the-elf-carries-the-marker)
+set=armed-d13-7c230cf9 sha256=b8ce6d746ede02915b9d8f51b79741defb91cdb3cf1df8be23f9cc62f4b21bd8 bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest-;-the-arm_vm_init-entry-moved-(the-source-that-changed-is-out/xnu_kernel_obj_d13/osfmk_arm_arm_vm_init.o,-recompiled-with-BOTH-patches-by-tools/build_xnu_arm_kernel.sh)
+set=armed-d13-7c230cf9 sha256=30650ccfe18b29dc852d34405bf962a17f7ae474e280ad7396dd9a201ee1f00b bytes=6826876 file=stage90.bin role=the-payload-binary-embedding-the-entry-image-(the-entry-bin-moved-89bcc6e3->7c230cf9,-so-the-embedded-copy-did-too;-the-payload-s-own-sources-are-unchanged)
+set=armed-d13-7c230cf9 sha256=9b31640cee9b7a7bfdaf27162c567b33ad878ceaaca9d7ae97472916d25f690e bytes=6888948 file=stage90.elf role=the-payload-ELF
+set=armed-d13-7c230cf9 sha256=b36fba9e20c560563169290c3606544f0b129787eb6373c5b9f7b581a7b3e2f9 bytes=6830080 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-7c230cf9 sha256=d56edc2a8d2170be1106c84cebd90805c823edf740997f1a002d7f3d3a62c622 bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-THIS-is-what-the-press-sends
+set=armed-d13-7c230cf9 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-7c230cf9 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968/970h/971-s-6c2b6038-(the-958+971-change-is-kernel-tree-only,-not-an-arm-switch)
+set=armed-d13-7c230cf9 sha256=5c3dc2d227248022461fd123e1838556a8188aa6412727c94279dcf8403c78f7 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img

@@ -28105,6 +28105,44 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         off) say "  xnu_entry_911b: the kernel's arm_vm_init.o and this build agree the ceiling is Apple's 1 GiB clamp (STAGE90_XNU_MEM_SIZE_MAX=$_memsize_req spelled out); no ceiling moved" ;;
         *)   say "  xnu_entry_911b: the kernel's arm_vm_init.o carries NO ceiling marker and this build sets no STAGE90_XNU_MEM_SIZE_MAX - Apple's clamp, the default image (the object is byte-identical to Apple's, 911b's safety argument)" ;;
     esac
+    # **958's memory total - the SAME refusal MEM_SIZE_MAX gets above, and its ABSENCE is a measured
+    # defect, not a style gap.** `tools/patch_d13_memory_total.py` guards a read of `/defaults hw.memsize`
+    # into `max_mem` on `STAGE90_XNU_MEM_TOTAL` and emits `entry_xnu_mem_total_arm_on` ONLY when the define
+    # is present (the marker rides in `osfmk_arm_arm_vm_init.o`, which is IN the link). The record line at
+    # `:38128` writes `${STAGE90_XNU_MEM_TOTAL:-0}` and its comment promises the marker "is the object's own
+    # statement of it" - but until now NOTHING read the marker, so a build could RECORD `MEM_TOTAL=1` over a
+    # kernel object compiled WITHOUT it and the recognition would silently not exist. That is exactly what
+    # happened: the pressed 970h line (`armed-d13-299ee994`) and the 971 arm (`armed-d13-89bcc6e3`) both
+    # carry `STAGE90_XNU_MEM_TOTAL=1` in their records while their linked `arm_vm_init` has no marker and no
+    # `bl PE_get_default` - only the parked 958 arm `armed-d13-ad6b4a68` ever carried it. Without this
+    # refusal the bug is invisible from the record alone; with it the build refuses rather than lie
+    # ([[mi4-a-claim-in-a-comment-is-not-a-check]], the whole reason the MEM_SIZE_MAX sibling exists).
+    _memtotal_req=${STAGE90_XNU_MEM_TOTAL:-0}
+    _memtotal_arm=unset
+    if arm-none-eabi-nm "$ARM_ARM_VM_INIT_OBJ" 2>/dev/null | grep -q 'T entry_xnu_mem_total_arm_on'; then
+        _memtotal_arm=on
+    fi
+    if [[ $_memtotal_req == 1 && $_memtotal_arm != on ]]; then
+        say "REFUSING: this build set STAGE90_XNU_MEM_TOTAL=1 but $ARM_ARM_VM_INIT_OBJ does not define" >&2
+        say "          entry_xnu_mem_total_arm_on, so the image does NOT recognise the device's full RAM" >&2
+        say "          (the record would promise 3 GB recognition the linked image lacks). Rebuild the" >&2
+        say "          kernel object with the current arm's switch set, then re-floor the pool:" >&2
+        say "            STAGE90_XNU_MEM_TOTAL=1 XNU_KERNEL_EXTRA_DEFINES=-DSTAGE90_XNU_MEM_TOTAL=1 \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh" >&2
+        exit 2
+    fi
+    if [[ $_memtotal_req != 1 && $_memtotal_arm == on ]]; then
+        # Reverse: the object recognises the total but this build's switch does not say so - a record that
+        # would name a boot-bank total over an image whose `hw.memsize` reports 3 GB.
+        say "REFUSING: $ARM_ARM_VM_INIT_OBJ carries entry_xnu_mem_total_arm_on but this build's" >&2
+        say "          STAGE90_XNU_MEM_TOTAL is '$_memtotal_req'. The object was built with the define;" >&2
+        say "          rebuild it without it, or set STAGE90_XNU_MEM_TOTAL=1 so the record matches." >&2
+        exit 2
+    fi
+    case $_memtotal_arm in
+        on) say "  xnu_entry_958: the kernel's arm_vm_init.o carries entry_xnu_mem_total_arm_on and this build sets STAGE90_XNU_MEM_TOTAL=1 - the linked image reads /defaults hw.memsize into max_mem, so hw.memsize reports 0xC0000000 (3 GiB) while the linear map stays the boot bank" ;;
+        *)  say "  xnu_entry_958: the kernel's arm_vm_init.o carries NO memory-total marker and this build sets STAGE90_XNU_MEM_TOTAL=0 - hw.memsize reports the boot bank, the default image (no 3 GB recognition)" ;;
+    esac
     # **The DOOR half of 888's check is the NEXT block's business, not this one's** - see the
     # `entry_storage_driver_read` clause the link block carries after `xnu_arm_entry.elf` exists. A
     # check placed HERE would read the PREVIOUS arm's elf (the link below has not run yet), which is

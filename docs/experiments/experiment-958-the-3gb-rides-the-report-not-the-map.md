@@ -117,3 +117,24 @@ beside the two checks that guard the same tree. The switch `STAGE90_XNU_MEM_TOTA
 rc=0); the kernel object compiled switch-on (134/134) and is byte-neutral switch-off. Follows
 [[mi4-957-3gb-measurement-and-region-reader]], [[mi4-956-d13-entry-window-ceiling]],
 [[mi4-915-multibank-region-list-design]]. **Device unmodified.***
+## 7. CORRECTION (2026-10-10): the edit was INERT on every arm until `armed-d13-7c230cf9`
+
+Section 3 measured the *object* correctly — the switch-on object compiles and carries the marker — but
+**no arm that shipped before 2026-10-10 carried that object**. The 970h arm (`armed-d13-299ee994`) and
+the 971 arm (`armed-d13-89bcc6e3`) each RECORDED `STAGE90_XNU_MEM_TOTAL=1` in their config, and each
+shipped an `arm_vm_init` that disassembles to `bzero` only and never branches to `PE_get_default`; the
+971 park's elf **defines no `entry_xnu_mem_total_arm_on`**. The 958 tree edit was not compiled into
+the object those arms linked, so the 3 GB recognition was inert on every press. A record claiming a
+switch over an image that lacks it is `mi4-a-claim-in-a-comment-is-not-a-check`.
+
+**The fix is a build refusal, not a note.** `src/entry/build_entry.sh` now reads the MEM_TOTAL marker
+out of the kernel object it links (`out/xnu_kernel_obj_d13/osfmk_arm_arm_vm_init.o`) with
+`arm-none-eabi-nm` and REFUSES (exit 2) unless it AGREES with the record's `STAGE90_XNU_MEM_TOTAL` —
+so the record can no longer claim a recognition the image does not carry, nor hide one it omits.
+
+**The re-shipped arm is `armed-d13-7c230cf9`** (2026-10-10). Its `arm_vm_init` calls `bcopy` (971) AND
+`PE_get_default` (958) and defines the marker; the 971 arm's elf called `bcopy` but neither 958. One
+press now answers both: the 958 read runs at `arm_vm_init + ~0xa0`, BEFORE the 971 `bcopy` (`+0xf0`)
+and before the `arm_vm_init: switching translation-tables now...` print (`arm_vm_init.c:439`), so a
+clean boot reports 3 GB and continues past the switch, and a stop at the switch line is still the 971
+verdict (the console cause is wrong) rather than a 958 one. Recorded, not papered over.
