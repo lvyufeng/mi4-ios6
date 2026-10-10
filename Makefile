@@ -206,6 +206,17 @@ check:
 # re-derives the property BY POSITION (no `c8,c7,0` between `mmu_reinitialize:` and `mmu_initialized:`,
 # exactly one post-build `c8,c7,0` remains) and refuses drift. Source half, no compiler, no device.
 	@tools/check_d13_boot_path_970h_staged.sh
+# 973: the 914 board platform expert (`src/platform/darwin13/pe_msm8974.c`) must be COMPILED (with
+# `-DBOARD_CONFIG_MSM8974=1`) and LINKED into the entry image - the 914 experiment proved it compiles
+# but left it in a pool no link list read, so `PE_init_platform`'s call to `PE_init_SocSupport` resolved
+# to a generated stub and the 2026-10-10 press of `armed-d13-0184b928` stopped on it
+# (`stub_hit=PE_init_SocSupport_stub`, caller `PE_init_platform+0x2c`). `check_board_pe_wired.sh`
+# re-derives the four wiring links (the compile + its board gate, the variable's pool default, the
+# LINK_OBJS entry - a `require` alone does not link - and the by-value linked-image clause that refuses
+# the generated stub body), and refuses drift. Its `--selftest` mutates each of the five and asserts
+# each is refused. Source half, no compiler, no device.
+	@tools/check_board_pe_wired.sh --selftest >/dev/null
+	@tools/check_board_pe_wired.sh
 # 926: the entry link's object pool must follow the selected tree. `build_entry.sh` read one
 # hard-pinned tree (4570) and one hard-pinned pool, 289 times; the D13 link needs the `_d13` pool.
 # Re-derives the derivation from the tree's own header and refuses a re-pin. Source half, no device.

@@ -13098,3 +13098,56 @@ set=armed-d13-0184b928 sha256=6a4d0c23483dc0b78b57e3795ed7db751042cc4331dae2f891
 set=armed-d13-0184b928 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-0184b928 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968/970h/971's-6c2b6038-(the-972-change-is-asm-layer-only,-not-an-arm-switch)
 set=armed-d13-0184b928 sha256=fe958c6d9870751e1d9304c2a90316fd355f461ea3e60532ede4948cf214e249 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+# =================================================================================================
+# armed-d13-12427611  —  973: the 914 board platform expert (src/platform/darwin13/pe_msm8974.c) is
+# WIRED INTO THE ENTRY LINK.
+#
+# WHY. The 2026-10-10 press of armed-d13-0184b928 (972 CONFIRMED) advanced one rung past
+# `_disable_preemption` and STOPPED on `stub_hit=PE_init_SocSupport_stub`, caller
+# `0x8048bd50` = `PE_init_platform+0x2c` (capture 972-press-armed-d13-0184b928-20261010). The
+# reported stub was the GENERATED one (body `movw/movt r0,#name; b entry_stub_hit`). The REAL body
+# exists — `out/xnu_arm_obj_d13/pe_msm8974.o` (the 914 experiment compiled it and measured 1/1) —
+# but that pool is in NO link list in build_entry.sh, so `PE_init_SocSupport_stub` stayed undefined
+# and the stub generator fabricated the one the run stopped on. This is
+# [[mi4-one-value-two-definitions]] with the value being "the board PE is compiled": compiled is
+# not linked.
+#
+# THE FIX (a build-tool change only; no tree edit). Four links that tools/check_board_pe_wired.sh
+# re-derives from the SOURCES (each, if reverted, re-arms the generating stub SILENTLY):
+#   (a) tools/build_xnu_arm_kernel.sh's platform block COMPILES src/platform/darwin13/pe_msm8974.c
+#       with -DBOARD_CONFIG_MSM8974=1 (the file's own #if gate) into $XNU_PLATFORM_OBJ_OUT
+#       (out/xnu_platform_obj_d13/pe_msm8974.o);
+#   (b) src/entry/build_entry.sh declares STAGE90_PE_MSM8974_OBJ (default
+#       $XNU_PLATFORM_OBJ_OUT/pe_msm8974.o), requires it, freshness-checks it, and NAMES it in
+#       LINK_OBJS — plus a LINKED-IMAGE clause that reads PE_init_SocSupport_stub BY VALUE and
+#       refuses the generated stub (the body that tail-calls entry_stub_hit) and requires
+#       PE_init_SocSupport_msm8974.
+# The check's --selftest mutates each and asserts each is refused; it is wired into `make check`.
+#
+# VERIFIED BY VALUE in the linked image out/stage90/xnu_arm_entry.elf:
+#   PE_init_SocSupport_stub    T 0x801ae3ec   body: bl 8048bcd4 <PE_early_puts>  (the REAL board PE)
+#   PE_init_SocSupport_msm8974 T 0x801ae2f0   msm8974_putc T 0x801ae290
+# 972's fix is also present: _disable_preemption T 0x8001ab60.
+#
+# **The build_entry.sh 973 edits landed at 2026-10-10 13:48, AFTER the 13:34 entry build this arm
+# FIRST parked (c879f31a, from a since-replaced build_entry.sh 8901262e). Rebuilding the entry
+# image from the CURRENT tree (build_entry.sh 826f4982) reproduces 12427611 byte-for-byte (built
+# twice, identical). The arm is 12427611.**
+#
+# SCOPE. Not 3 GB (958); not the USB ladder (959–962). stage90-build-config.txt is BYTE-IDENTICAL
+# to 968/970h/971/972's 6c2b6038 — 973 moves NO arm switch (the board PE is linked, not switched in
+# by a STAGE90_XNU_* key). Medium: 968's real iOS 7.1.2 HFSX rootfs over hfs_rmd0; HDD_WRITE=0, the
+# BASE IS NEVER WRITTEN — fully reversible. fastboot boot only, NEVER flash. PRESS IS THE OPERATOR'S.
+# =================================================================================================
+set=armed-d13-12427611 sha256=1242761157cda2f2801839f3ed387e5059980fd4507c1c88ccf8cdde1bc56434 bytes=6331476 file=xnu_arm_entry.bin role=THE-ARM:-973-links-the-914-board-platform-expert.-The-2026-10-10-press-of-armed-d13-0184b928-(972-CONFIRMED)-advanced-past-_disable_preemption-and-STOPPED-on-stub_hit=PE_init_SocSupport_stub-caller-0x8048bd50=PE_init_platform+0x2c.-The-REAL-body-was-in-out/xnu_arm_obj_d13/pe_msm8974.o-(the-914-experiment-compiled-it)-but-that-pool-is-in-NO-link-list-in-build_entry.sh,-so-the-symbol-stayed-undefined-and-the-stub-generator-fabricated-the-one-the-run-stopped-on.-FIX-=-compile-src/platform/darwin13/pe_msm8974.c-in-the-platform-block-with--DBOARD_CONFIG_MSM8974=1-AND-link-it-in-build_entry.sh;-the-suffix-12427611-is-THIS-member-s-hash
+set=armed-d13-12427611 sha256=d01d201304b8a155ffffab0adf50ef33da80919c47ea8e90ac67616771103a07 bytes=7371000 file=xnu_arm_entry.elf role=the-entry-ELF-;-PE_init_SocSupport_stub-(T-0x801ae3ec)-is-now-the-REAL-body-(bl-PE_early_puts@0x8048bcd4-then-PE_init_SocSupport_msm8974-@0x801ae2f0),-NOT-the-generated-stub-@0x8049bdc4;-972-s-_disable_preemption-T-@0x8001ab60-still-present
+set=armed-d13-12427611 sha256=52a6a91480a3334c62af9e4f92c4e7f84fec0c438022e94194af8e97aaae6413 bytes=1911 file=xnu_arm_entry.h role=the-entry-header
+set=armed-d13-12427611 sha256=ad0dc072cd9611fb8597312192100c28a99c4cfce7f5332a184ed7a700d5c54e bytes=1409 file=xnu_arm_entry-config.txt role=the-entry-record-;-switch-set-UNCHANGED-(the-board-PE-is-LINKED,-not-switched-in-by-a-STAGE90_XNU_*-key)
+set=armed-d13-12427611 sha256=a5433cc0482939557705fc14358045e15374de5a9c1e6828613c11d8955b034f bytes=3149 file=xnu_arm_entry-sources.txt role=the-entry-image-s-source-manifest-;-build_entry.sh-826f4982-(the-file-as-it-stands-after-the-973-edits)
+set=armed-d13-12427611 sha256=471c8dccb04b3f5c0de38067057f20867674eeeeb8050e1fb92aa1f5f747d008 bytes=6826876 file=stage90.bin role=the-payload-binary-embedding-the-973-entry-image
+set=armed-d13-12427611 sha256=97434e5499501b3921316000e4178895885f8cb286661e249aed071e25d51673 bytes=6888948 file=stage90.elf role=the-payload-ELF
+set=armed-d13-12427611 sha256=816fd0799bb4d53077350668aa741f047ff7a05e9f1cde414d6029b18ef121fc bytes=6830080 file=stage90.img role=the-fastboot-boot-image
+set=armed-d13-12427611 sha256=7d12735f0b87bb463d2fa9347982747d3b266d23806f35d42d93b30baa405f23 bytes=9351168 file=stage90-qcdt.img role=the-fastboot-boot-image-with-the-appended-QCDT-THIS-is-what-the-press-sends
+set=armed-d13-12427611 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
+set=armed-d13-12427611 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968/970h/971/972-s-6c2b6038-(973-moves-NO-arm-switch)
+set=armed-d13-12427611 sha256=c93c6a0b34f4646a9b26bddefb1f7f33cae6002bc9c92dd99ab492e241eb7b80 bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img

@@ -1543,6 +1543,18 @@ PL_MESSAGE=$("$TOOLS_DIR/check_platform_lists.py" --file "${PLATFORM_SOURCES[@]}
 [[ ${VERBOSE:-0} -eq 0 ]] || printf '%s\n' "$PL_MESSAGE"
 
 PLATFORM_C_SOURCES=("$REPO_ROOT/src/platform/stage90_platform_config_tables.c")
+# **973: the board platform expert (the 914 PE), compiled HERE so it is in the pipeline.** 914
+# *measured* that `src/platform/darwin13/pe_msm8974.c` compiles 1/1 against Darwin-13 (via
+# `tools/build_xnu_arm_layer.sh`'s `XNU_ARM_EXTRA_DIRS`), but that probe is a standalone tool - it is
+# in no build pipeline - so the object landed in `out/xnu_arm_obj_d13/`, a directory the entry link
+# never reads. The 972 press found the consequence: `PE_init_platform` calls `PE_init_SocSupport`,
+# which the kernel pool's `pexpert_arm_common_pe_socsupport.o` leaves undefined, so the entry build's
+# stub generator fabricated `PE_init_SocSupport_stub` and the boot stopped on it
+# (`stub_hit=PE_init_SocSupport_stub`). This file DEFINES that symbol (`pe_msm8974.c:182`). It is
+# compiled here, with the pexpert component defines (which supply `PEXPERT_KERNEL_PRIVATE`, the gate
+# that makes `<pexpert/protos.h>` - where `gPESocDispatch` lives - reachable) plus the board define
+# the file's own `#if defined(BOARD_CONFIG_MSM8974)` requires.
+PLATFORM_SOC_SOURCES=("$REPO_ROOT/src/platform/darwin13/pe_msm8974.c")
 PL_OUT=$XNU_PLATFORM_OBJ_OUT
 PL_ROOTS=(-I"$XNU/iokit")
 for _c in "${COMPONENT_IMPORT_ORDER[@]}"; do
@@ -1700,6 +1712,24 @@ for _src in "${PLATFORM_C_SOURCES[@]}"; do
     _o="$PL_OUT/$(basename "${_src%.c}").o"
     if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" -c "$_src" -o "$_o" \
            2>"$PL_OUT/$(basename "${_src%.c}").log"; then
+        rm -f "$PL_OUT/$(basename "${_src%.c}").log"
+    else
+        echo "platform: $(basename "$_src") FAILED - $PL_OUT/$(basename "${_src%.c}").log" >&2
+        pl_fail=$((pl_fail + 1))
+    fi
+done
+# 973: the board platform expert. Unlike the C file above it INCLUDES XNU headers
+# (`<pexpert/protos.h>`, `<pexpert/arm/boot.h>`, `<machine/machine_routines.h>`, ...), so it needs the
+# include roots and the pexpert component defines - the shape the BSD-rooted loop below uses, with the
+# component's own defines. `-DBOARD_CONFIG_MSM8974=1` selects the file's `#if` gate; the pexpert
+# defines supply `PEXPERT_KERNEL_PRIVATE`, which is what makes `pexpert.h:43` include
+# `<pexpert/protos.h>` (where `gPESocDispatch` is declared). The Python-heredoc-less form keeps the
+# define list visible; a compile failure is reported with its log, never swallowed.
+for _src in "${PLATFORM_SOC_SOURCES[@]}"; do
+    _o="$PL_OUT/$(basename "${_src%.c}").o"
+    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${CONFIG_DEFINES[@]}" "${DEFINES[@]}" \
+           "${PL_COMP_DEFINES[@]}" "${EXTRA_DEFINES[@]}" "${PL_INCLUDES[@]}" -DBOARD_CONFIG_MSM8974=1 \
+           -c "$_src" -o "$_o" 2>"$PL_OUT/$(basename "${_src%.c}").log"; then
         rm -f "$PL_OUT/$(basename "${_src%.c}").log"
     else
         echo "platform: $(basename "$_src") FAILED - $PL_OUT/$(basename "${_src%.c}").log" >&2
