@@ -105,6 +105,35 @@ v2:
   minus the SMEM-reconciled usable set, `src/entry/entry_smem.c:245-248`). A prerequisite rung (§5 rung 2),
   not a property of the later window.
 
+- **RUNG 2 CARVEOUT RECONCILIATION — COMPUTED 2026-10-10 (open input #2, the iomem half).** From the
+  device's own live `/proc/iomem` (`out/stage90/device-reads/mi4-iomem-and-mem.txt`, read 2026-10-08 over
+  adb, no press), the low bank `[0, 0x60000000)` decomposes as **three allocatable System-RAM spans with
+  two holes**, not one block:
+
+  ```
+  allocatable:  [0x00000000, 0x05A00000)   90 MiB
+                [0x0D200000, 0x0FA00000)   40 MiB
+                [0x0FF00000, 0x60000000)  1281 MiB     SUM = 0x58300000 = 1411 MiB
+  carveouts:    [0x05A00000, 0x0D200000)   120 MiB  (modem/firmware)
+                [0x0FA00000, 0x0FF00000)     5 MiB  (IMEM/other)
+                                           SUM = 125 MiB;  1411 + 125 = 1536 = 0x60000000  OK
+  ```
+
+  These are **exactly** the three spans this section already named - now confirmed by arithmetic, not
+  transcribed. **Consequence for rung 0 / rung 1:** the DT region model's *one* appended span
+  `region2 = [0, 0x60000000)` is **wrong as an allocatable region** - it admits the two holes. The
+  allocator's low-bank input must be the **three sub-intervals above**, so `pmap_mem_regions[]` (rung 0)
+  and the second allocator interval (rung 3) carry sub-intervals, and `pmap_valid_page`'s carveout test
+  (2.2) is a span-set membership, not a single `[carveout_lo, carveout_hi)`.
+
+  **THE ONE REMAINING RECONCILIATION QUESTION (recorded, not papered over).** Android's `iomem` calls
+  `[0x80000000, 0xde700000)` a **single** System-RAM span (1511 MiB), but the device's **SMEM** partition
+  table (`entry_smem.c:245-248`, `type==SYS_MEMORY && size>=256MB`) yields **two** banks summing to
+  `0xC0000000` (3 GiB) - i.e. SMEM splits the high bank around a carveout Android does not name. The two
+  sources **disagree**; **`/proc/iomem` must be trusted as the allocator's truth** (it is the live
+  kernel's own map). The SMEM disagreement is a residual for the 3.3-style open list. It does **not**
+  affect the low-bank reconciliation above (both sources name `[0, 0x60000000)` as the low span).
+
 ### 2.3 The beyond-the-task sites — ONE region table
 
 `pmap.h:296-305` **already declares the canonical table** (never referenced anywhere in `osfmk/arm/`):
