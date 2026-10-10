@@ -37,8 +37,8 @@ import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REGIONS_C = os.path.join(REPO, "src", "xnu_memory_regions.c")
-REGIONS_H = os.path.join(REPO, "src", "xnu_memory_regions.h")
+REGIONS_C = os.path.join(REPO, "src", "regions", "xnu_memory_regions.c")
+REGIONS_H = os.path.join(REPO, "src", "regions", "xnu_memory_regions.h")
 TEST_C = os.path.join(REPO, "tools", "test_memory_regions_walk.c")
 BUILD = os.path.join(REPO, "scripts", "build.sh")
 
@@ -76,7 +76,7 @@ def _compile_and_run():
     cc = os.environ.get("CC", "cc")
     with tempfile.TemporaryDirectory() as td:
         exe = os.path.join(td, "tmr")
-        cmd = [cc, "-I", os.path.join(REPO, "src"), "-DSTAGE90_XNU_REGIONS=1",
+        cmd = [cc, "-I", os.path.join(REPO, "src", "regions"), "-DSTAGE90_XNU_REGIONS=1",
                "-Wall", "-Wextra", "-Werror", "-o", exe, TEST_C, REGIONS_C]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
