@@ -345,6 +345,17 @@ check:
 	@tools/check_d13_regions.py --selftest >/dev/null
 	@tools/check_d13_regions.py
 
+# **915-B rung 0 (host half): the ONE /memory/reg region accessor.** `src/xnu_memory_regions.c` is the
+# single walk of `/memory/reg` (v2 section 2.4/6.8): the boot region is the pair whose base equals the
+# boot base and it MUST be pair 0, so "pair 0 is the boot region" stops being a convention the data can
+# violate. It is PURE (`<stdint.h>` only), so `check_memory_regions_walk.py` compiles it with the HOST
+# compiler and runs it against the exact word arrays the payload emits - no target compiler, no device.
+# It is deliberately NOT in `scripts/build.sh` SOURCES yet: wiring it into the payload is the
+# region-registration rung's job, and while rung 0 is host-only the shipped press arm stays byte-frozen
+# (the check REFUSES the module appearing in build.sh). `--selftest` mutates the gate and the wiring.
+	@tools/check_memory_regions_walk.py --selftest >/dev/null
+	@tools/check_memory_regions_walk.py
+
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not
 # produce byte-identical output (experiment 408 measured that), so `out/stage90/stage90-qcdt.img` and
