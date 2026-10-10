@@ -1,12 +1,52 @@
 # Experiment 970h — the pre-switch TLB flush destroyed the boot table's live identity entry
 
-**Status:** host-side COMPLETE and BUILT. The D13 entry image is `299ee994` (was 970g's `321e3332`),
-the payload is rebuilt around it, and the arm `armed-d13-299ee994` is **PARKED** (verify_press_ready
-5/5, `make check` 0). **NOT PRESSED** — the press is the operator's.
+**Status: ✅ PRESSED 2026-10-10 — CAUSE CONFIRMED. THE D13 ENTRY LINE BOOTED FOR THE FIRST TIME.**
+Arm `armed-d13-299ee994` PRESSED; capture
+`out/stage90/captures/970h-armed-d13-299ee994-20261010-last_kmsg.txt`
+(426,731 B, 3981 lines). The log carries **32 `xnu_live_*` keys and full `arm_vm_init:` console
+output** — the D13 silence is BROKEN. The boot runs `_start` → `arm_init` → `arm_vm_init` and stops
+**dead on a line**, `arm_vm_init: switching translation-tables now...` (the log's last line, 3977) —
+**exactly the 971 frontier**, no abort, no panic. Device returned clean (`4a2fe00b`; `33e80afe`
+absent). See §6b.
 
-Supersedes 970g as the whole cause. Continues `experiment-970-the-window-is-ram-not-just-address.md`
-§6g (970g). 971 (`experiment-971-the-console-dies-at-arm-vm-init.md`) is the **next** rung, staged but
-not built into this arm.
+**History:** was host-side COMPLETE and BUILT (D13 entry image `299ee994`, arm PARKED, 5/5,
+`make check` 0). Supersedes 970g as the whole cause (970g was FALSIFIED — also silent). Continues
+`experiment-970-the-window-is-ram-not-just-address.md` §6g. 971
+(`experiment-971-the-console-dies-at-arm-vm-init.md`) is the next rung and is now the CONFIRMED stop.
+
+---
+
+## 6b. The press — what it read (2026-10-10)
+
+**The prediction held.** §6 said: if the cause is right, `xnu_live_console` appears and the first ~15
+keys (before `arm_vm_init`) appear; keys after `arm_vm_init` are 971. Both halves are exactly what
+the capture shows.
+
+The whole console bring-up chain, by value:
+
+| key | reading | what it fixes |
+|-----|---------|---------------|
+| `xnu_live_console` | `0x00000001` | the entry console came UP — the D13 silence is broken |
+| `xnu_live_l1` | `0x80a00000` | the boot table is **HIGH** (`topOfKernelData`), not the payload's LOW `0x6c4000` |
+| `xnu_live_ttbr0` | `0x80a00018` | TTBR0 = the boot table \| attr — the switch D13's fast path used to skip |
+| `xnu_live_slot_before` | `0x00000000` | the console's L1 slot was **FREE** before the install — 970g's zeroing held |
+| `xnu_live_desc` / `desc2` | `0xde510402` | the console section descriptor installed (S=1, AP=PL1 RW) |
+| `xnu_live_alias_read` | `0x43474244` (`"DBGC"`) | the RAM console reads back through the new table |
+| `xnu_live_sctlr` | `0x00c55879` | the entry's own SCTLR after `_start` |
+
+Then the OS console (`[os-console-459]`) prints `boot_args` (`physBase=virtBase=0x80000000`,
+`topOfKernel=0x80a00000`, `memSize=0x01000000`) and the `arm_vm_init:` sequence — L2 tables for the
+identity map and the kernel-managed map, exception vectors at `0x80001000` — and **stops at
+`arm_vm_init: switching translation-tables now...`**, the last line. That is D13's
+`arm_vm_init.c:352-353` `bzero` of a FRESH `cpu_ttb` (where 4570 `bcopy`s the boot table), which drops
+the console's mapping the instant `set_mmu_ttb(cpu_ttb)` runs — **971**, staged and now the confirmed
+next rung.
+
+**The mechanism, settled.** 970h removed D13 `locore.s:85`'s pre-switch whole-TLB invalidate. With it
+gone, the payload's global identity entry for VA `0x80a00000` (the boot table) survives `_start`'s
+TTBR0 write, exactly as 4570's does — so the zero loop's first store resolves and the whole boot path
+runs. The entry is established by `cache_clean_dcache_range`'s DCCMVAC-by-VA loop (§3); the flush was
+the only thing destroying it.
 
 ---
 
