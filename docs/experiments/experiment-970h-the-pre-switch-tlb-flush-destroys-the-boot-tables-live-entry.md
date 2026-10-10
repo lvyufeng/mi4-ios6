@@ -59,13 +59,45 @@ reset. That is the whole-D13-line silence.
 
 4570's `start.s` `_start` performs **no** TLB maintenance before its TTBR0 write (`start.s:152`); its
 only `c8,c7,0` is at `start.s:337`, in `join_start`, **after** the boot table is built. Its first
-post-switch store — the `invalidate_tte` loop's `str r11, [r5]` to the **same** VA `0x80a00000`
-(`start.s:166-170`) — does not fault, which is only possible if a **live identity entry survived the
+post-switch stores — the `invalidate_tte` loop's `str r11, [r5]` to the **same** VA `0x80a00000`
+(`start.s:166-170`) — do not fault, which is only possible if a **live identity entry survived the
 switch** (ARMv7 does not auto-invalidate the TLB on a TTBR write). 4570's success is therefore
 positive proof that the boot-table write rides a surviving identity entry — exactly the entry D13's
-pre-switch flush removes. The verifier's sharp corroboration: both trees' first post-switch store
-targets the same stale table word, so 4570's success and D13's silence differ by exactly this one
-instruction.
+pre-switch flush removes.
+
+**The control, sharpened — where the entry can come from (settled 2026-10-10).** A mapping is not a
+TLB entry; only an *access* through the VA fills one, and a global entry (nG=0) then survives the
+TTBR0 write (which does not change CONTEXTIDR/ASID). So the question is: through which VA does the
+payload actually access section `0x80a`? Measured against the linked `xnu_arm_entry.elf`:
+
+- The payload data-accesses only sections `0x800`–`0x809`: the image copy, the BSS (`0x8060a000`–
+  `0x8085f1a0`), the boot_args (`0x80861000`) and the device tree (`0x809e0000`). It **never**
+  reads or writes `topOfKernelData` (`0x80a00000`) — grepped, in every `src/*.c`.
+- 4570's first post-switch store is to `ExceptionVectorsTable` (`start.s:115-116`), which in this
+  image is `0x80612440` — **section `0x806`, a section the payload's `memcpy` writes**, so that entry
+  is live from the copy alone.
+- 4570's **second** post-switch store is `invalidate_tte`'s to `0x80a00000` — **section `0x80a`,
+  which the payload never touches.** 4570 boots, so *this* store also resolved, so a live identity
+  entry for `0x80a00000` existed in 4570's handoff. Its **only** possible source is
+  `cache_clean_dcache_range(0x80000000, 0x01000000)` — the DCCMVAC-by-VA loop of step 4, which
+  iterates a line at `0x80a00000`. **So on this SoC a DCCMVAC-by-VA *does* fill the TLB.** This is a
+  deduction by elimination, not a direct measurement: 4570's second store resolved and no other
+  payload operation names that VA. (DCCMVAC-by-VA's TLB effect is implementation-defined, which is
+  why it is stated as "this SoC", and why the next rung — should a press still be silent — is to
+  replace the reliance with an explicit load. See §7.)
+
+That entry — established by the range-clean, global, surviving the TTBR0 write — is what 4570 keeps
+and what D13's `:85` flush destroys. **The verifier's corroboration:** both trees' first post-switch
+store into the boot table targets the same stale word, so 4570's success and D13's silence differ by
+exactly this one instruction.
+
+**A reading that was retracted (recorded, not hidden).** It is tempting to read the 970g capture as
+proof that DCCMVAC does *not* fill the TLB: its log printed the line *after* the range-clean
+(`locore.s` step 4's "image, bss and boot_args written back…"), then went silent at the first
+post-switch store. **That reading is wrong.** 970g still carried the `:85` flush, which invalidates
+the TLB *after* the range-clean and *before* the TTBR0 write, so 970g's silence is fully explained by
+the flush — it says nothing about whether the entry had been established. (Had 970g been the arm that
+*removed* the flush and still gone silent, *that* would have falsified the mechanism; that is 970h.)
 
 ## 4. The fix
 
