@@ -1,6 +1,13 @@
 # Experiment 975 — the 484 MiB window, on the entry line that actually boots
 
-**Status:** ✅ **BUILT, PARKED (`armed-window-1091566c`).** 969 named the wall: the real iOS 7.1.2
+**Status:** 📍 **PRESSED 2026-10-10 — DID NOT RETURN (log not yet recovered).** The press was sent
+(`fastboot boot`, image `1091566c…` unchanged across the send) and the runner's 180 s bounded wait
+expired with **no adb entry and no new USB enumeration** — the same shape as 973. **975 is a resident
+rung** (`POST_END_TICKS=0`), so a non-return is *expected* if the boot reached the idle/resident path;
+**only the RAM console distinguishes residency (`wdt_pets > 0`) from a fault**, and it lives in the top
+of DRAM. Recovery is owed (stock `boot.img` + `cat /proc/last_kmsg`, NOT a cold boot, NOT TWRP) — see §6.
+
+969 named the wall: the real iOS 7.1.2
 `/sbin/launchd` links `libSystem`/`libbsm` out of the **301 MiB** dyld shared cache, while XNU managed
 only the **16 MiB** window — so it concluded iOS could not run without the whole-kernel 915-B pmap port.
 970 designed the one-switch escape (`STAGE90_XNU_ENTRY_WINDOW=0x1e400000`, 484 MiB) and pressed it — but
@@ -98,7 +105,42 @@ ladder (974's record), so the console ring is handed to EP1-IN.
 - **The medium is unchanged** — 968's real iOS 7.1.2 HFSX rootfs over `hfs_rmd0`; `CARD_COW=1`,
   `HDD_WRITE=0`, the base is never written — fully reversible. `fastboot boot` only, never flash.
 
+## 6. THE PRESS (2026-10-10) — 975 DID NOT RETURN
+
+Pressed `armed-window-1091566c` via `scripts/press_975.sh` → gate rc=0 → runner
+`--expect-arm=armed-window-1091566c`. The card head was written to `userdata`
+(`mmcblk0p25`, first 8 MiB read-back `9bcef3ff…` = the built image) and the runner sent
+`fastboot boot` only (image `1091566c…`, unchanged across the send; nothing flashed).
+
+**The device did NOT come back.** The runner's 180 s bounded wait expired with:
+```
+adb:      serial 4a2fe00b not listed
+host log: 38 -> 38 enumeration(s) of SerialNumber: 4a2fe00b
+port 3-10: 38 -> 38 enumeration(s), any id
+```
+`lsusb` then showed no phone at all. **Same shape as 973** — a resident-rung non-return.
+
+**This is NOT yet a verdict.** 975's record carries `POST_END_TICKS=0` (`STAGE90_XNU_RESIDENT=1`), so a
+non-return is the *expected* form if the boot reached the idle/resident path — the goal's 「保持在 xnu
+里」 — not necessarily a hang ([[mi4-911-resident-nonreturn-is-not-a-wedge]]). **The RAM console
+distinguishes them (`wdt_pets > 0` = resident), and it is in the top of DRAM.** 974 makes that console
+observable *if the recovery reads the buffer*.
+
+**Recovery owed (operator, at the device):** Vol-Down+Power → fastboot →
+`fastboot boot xiaomi4-cancro-backup-20260604-112053/boot.img` (the STOCK image, never flashed) →
+`cat /proc/last_kmsg`. This returns the *previous* boot's RAM console = 975's. A cold boot clears it;
+TWRP has no `/proc/last_kmsg` and its own boot takes the slot. The recovery was attempted this session
+but the device never re-enumerated (no fastboot, no adb, no USB), so the log is still owed.
+
+**Next rung (once the log is read):** `xnu_entry_args_memSize=0x1e400000` proves the window rung ran;
+`BSD root:`/launchd-past-`__TEXT` decides the wall; a fault's `far`/`fsr` or the last key before silence
+names a hang. If the log is empty even after recovery, the non-return is *very* early (before the first
+`xnu_live_*` probe) — the 484 MiB `_start` map would be the suspect, i.e. 915-B stands.
+
+## 7. Provenance
+
 *Provenance: 970 (design + §3 ceiling + §6c/§6d), 969 (the 301 MiB measurement), 971/973/974 (the
 working entry line) read this session; the entry image and payload built and verified by value in
-`out/`; `make check` 0 and `verify_press_ready` run this session. Device unmodified. Follows
+`out/`; `make check` 0 and `verify_press_ready` run this session; the press sent 2026-10-10 (device did
+not return; log owed). Device unmodified by the host. Follows
 [[mi4-970-the-window-is-ram]], [[mi4-969-the-16mb-window-is-the-wall]], [[mi4-974-board-pe-console-sink]].*
