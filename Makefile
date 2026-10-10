@@ -325,6 +325,15 @@ check:
 # mutated builder + a stripped D13 object and asserts each is refused. Source half, no compiler, no device.
 	@tools/check_deunderscore_guard.sh --selftest >/dev/null
 	@tools/check_deunderscore_guard.sh
+# 959-962: the HOST half of the USB ladder. `tools/usb_console_read.py` opens EP1-IN of VID:PID
+# `0x18d1:0x0910` and drains the RAM console the ladder streams - the one way to read a *resident* run
+# live (a resident arm has no ending, so it keeps no `/proc/last_kmsg`; [[mi4-975-window-on-the-working-entry]]).
+# Its three constants are a PROTOCOL CONTRACT with `src/entry/entry_usb_enum.h`. `check_usb_host_reader.py`
+# derives `ID_VENDOR`/`ID_PRODUCT`/`DIR_IN|EP_IN` from the device header and refuses a reader that has
+# drifted - otherwise it opens the wrong device/endpoint and goes dark ([[mi4-one-value-two-definitions]]).
+# Source half, no build and no device; `--selftest` mutates each of the three and asserts each is refused.
+	@tools/check_usb_host_reader.py --selftest >/dev/null
+	@tools/check_usb_host_reader.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not
