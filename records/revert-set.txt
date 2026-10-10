@@ -13193,3 +13193,43 @@ set=armed-d13-73475747 sha256=c70b3c75cea456f6d243ea868492cced8da745ed74461f3b26
 set=armed-d13-73475747 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-Mach-O-;-UNCHANGED-from-908-through-all-arms
 set=armed-d13-73475747 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=the-payload-s-own-switch-set-;-BYTE-IDENTICAL-to-968/970h/971/972/973-s-6c2b6038-(974-moves-NO-arm-switch)
 set=armed-d13-73475747 sha256=4b2e3264e86a088cbef1f26d5189094f679ffd0fc2527d50997a94665db11b9b bytes=560 file=SHA256SUMS.txt role=build-manifest-ABSOLUTE-pathed-with-five-members-stage90_fixture.macho-stage90.elf-stage90.bin-stage90.img-stage90-qcdt.img manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+# armed-window-1091566c  —  975: the 484 MiB ENTRY WINDOW on the WORKING entry line (971/973/974), so
+# iOS userspace can map the 301 MiB dyld cache with NO 915-B pmap port.
+#
+# WHY. 969 measured that the real iOS 7.1.2 /sbin/launchd links libSystem/libbsm out of
+# the 301 MiB dyld shared cache, while XNU managed only the 16 MiB window -> iOS could
+# not run without the whole-kernel 915-B port. 970 designed this one-switch rung and
+# pressed it, but ONLY on entry bin 7107b998, which NEVER BOOTED (970 6c: the 484 MiB arm
+# and its 16 MiB control failed IDENTICALLY). So the window was never tested on a WORKING
+# entry. 975 is the missing measurement: the SAME switch on the entry line that boots.
+#
+# THE ARM IS 974 (armed-d13-73475747) with ONE key changed:
+#   STAGE90_XNU_ENTRY_WINDOW  0x01000000 (16 MiB) -> 0x1e400000 (484 MiB)
+# The window reaches XNU ONLY through the payload generated header (build_entry.sh
+# substitutes @ENTRY_SIZE@ into xnu_arm_entry.h, read at xnu_entry_jump.c:150 as
+# `a->memSize = STAGE90_XNU_ENTRY_SIZE`), so the ENTRY BIN IS UNCHANGED (73475747) and the
+# name comes from the qcdt (the armed-window-* family, 970 4).
+#
+# CEILING: build_entry.sh refuses any D13 window >= 0x1e500000 = RAM_CONSOLE_BASE(0xde500000)
+# - MANAGED_BASE(0xC0000000). 0x1e400000 (484 MiB) is the safe max, one 16 MiB step below;
+# the console and the MMIO above it (GIC/USB/WDT/SMCC/GCC/TLMM, SMEM 0xe0000000) stay intact.
+# Free after topOfKernelData 0x80A00000: 0x9E400000-0x80A00000 ~= 470 MiB (>= the 301 MiB cache).
+#
+# VERIFIED BY VALUE in out/stage90/stage90.elf: e3a08579 (`mov r8,#0x1e400000`) occurs once.
+# stage90-build-config.txt is BYTE-IDENTICAL to 968/970h/971/972/973/974 6c2b6038.
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, the base is
+# never written - fully reversible. Resident rung (POST_END_TICKS=0): budget a black screen +
+# power-cycle capture. fastboot boot only, NEVER flash. PRESS IS THE OPERATOR S.
+# =================================================================================================
+set=armed-window-1091566c sha256=73475747722e65dd020c02b3d1cce54d229a0610f22eaa31353c58ec64e64c12 bytes=6331476 file=xnu_arm_entry.bin role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-xnu_arm_entry.bin
+set=armed-window-1091566c sha256=a9cff1858d22b2656e4a4d4576e296e57a76908797a09669a28266a1805ea911 bytes=7370932 file=xnu_arm_entry.elf role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-xnu_arm_entry.elf
+set=armed-window-1091566c sha256=5fa681011bd600a84e340fd2e7d8f657b96a5dc0cc77ee0f5e2f67c52451e8ab bytes=1912 file=xnu_arm_entry.h role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-xnu_arm_entry.h
+set=armed-window-1091566c sha256=72567a2a9e989d1a3899d539ed582be0354a8535ee02c3c330e2b9255a20f574 bytes=1409 file=xnu_arm_entry-config.txt role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-xnu_arm_entry-config.txt
+set=armed-window-1091566c sha256=17ee93913de49c7f83ee4dda4640e7e517e6ee2b1c79a4b2162cd95098bdbab9 bytes=3149 file=xnu_arm_entry-sources.txt role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-xnu_arm_entry-sources.txt
+set=armed-window-1091566c sha256=abc69382bf1677da9fb98eea6ae7ad7b9f803ab02967e74cdbc66e96ab608bee bytes=6826884 file=stage90.bin role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-stage90.bin
+set=armed-window-1091566c sha256=668863fa04b1d73d7f9b309b1982c9d598dbb916387e0f2443bc9d9f233f7cff bytes=6888956 file=stage90.elf role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-stage90.elf
+set=armed-window-1091566c sha256=cfcf326db1a3dadc9a8726a8b68825c63708b22d14294bbd102cb5a758a87db8 bytes=6830080 file=stage90.img role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-stage90.img
+set=armed-window-1091566c sha256=1091566c491055b3bc9170040348ae4db0ce810e60f61b07f877a0e4f82ce583 bytes=9351168 file=stage90-qcdt.img role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-stage90-qcdt.img
+set=armed-window-1091566c sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-stage90_fixture.macho
+set=armed-window-1091566c sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-stage90-build-config.txt
+set=armed-window-1091566c sha256=5be46435ad0b12c0b95466b065c58baafd2a9edd707af8d1b178cb96b03285d4 bytes=560 file=SHA256SUMS.txt role=975-the-484-MiB-entry-window-on-the-working-D13-entry-line;-SHA256SUMS.txt
