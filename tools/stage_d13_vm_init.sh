@@ -21,6 +21,12 @@
 # `_bcopy` where it used to call `_bzero`.
 #
 # Idempotent: a second run re-applies the (idempotent) patch and prints the same summary.
+#
+# PROVEN (host, no device): with this edit applied the whole D13 kernel compiles under
+# `tools/build_xnu_arm_kernel.sh` (609 C + 96 C++, fail 0) into a scratch object root, and the resulting
+# `arm_vm_init.o` references `bcopy` (it referenced only `bzero` before). `bcopy` is already defined in
+# the entry image (`osfmk/arm/bcopy.s`, `T bcopy` at 0x80015d20 in the live ELF), so the call resolves
+# with no new link closure. What remains is the real-pool build, which must wait for 970g's press.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)

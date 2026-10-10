@@ -73,6 +73,17 @@ referenced `bzero`, and the linked entry image's `arm_vm_init` must call the cop
 `set_mmu_ttb`. Scope: **one statement in `osfmk/arm/arm_vm_init.c` alone**; the 4570 tree is untouched
 (its copy is already correct).
 
+**PROVEN BY COMPILATION (host, 2026-10-10).** Ran the tree's own `tools/build_xnu_arm_kernel.sh` with
+the D13 tree and a **scratch** `XNU_KERNEL_OBJ_OUT=/tmp/…` (never the live pool): the **whole D13 kernel
+compiles — 609 C + 96 C++, `fail: 0`** — with the patched `arm_vm_init.c`, and the resulting
+`osfmk_arm_arm_vm_init.o` references **`bcopy`** (plus `bzero`, the L2 clear) where the unpatched live
+object `out/xnu_arm_obj_d13/arm_vm_init.o` references **only `bzero`**. And the link resolves with **no
+new closure**: `bcopy` is already **defined** in the live entry ELF (`out/stage90/xnu_arm_entry.elf`,
+`T bcopy` at `0x80015d20`, from `osfmk/arm/bcopy.s`), and `bcopy_phys` at `0x8001849c`. So the patch
+compiles, emits the call, and links; the only remaining step is the real-pool build (which must wait
+for 970g's press). The live 970g arm (`xnu_arm_entry.bin` `321e3332…`) and the live pool object are
+byte-unchanged by this scratch run.
+
 Press side (operator; the *second* D13 press): keys **after** `arm_vm_init` appear for the first time —
 the SMC/USB/storage probes and, if the boot is clean, the Darwin banner. Contrast the 970g-only press,
 which (if the split is as predicted) goes silent right after the pre-`arm_vm_init` keys.
