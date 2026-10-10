@@ -1,6 +1,10 @@
 # Experiment 972 — the asm de-underscore step strips a C-facing underscore name
 
-**Status:** ✅ **BUILT and PARKED (`armed-d13-0184b928`, entry bin `0184b928`) — NOT PRESSED.**
+**Status:** ✅ **BUILT, PARKED (`armed-d13-0184b928`), AND PRESSED 2026-10-10 — 972 CONFIRMED.**
+The press captured 451354 B / 4532 lines; `stub_hit=_disable_preemption` did **not** recur, and the
+boot advanced one rung to a **new** missing symbol: `stub_hit=PE_init_SocSupport_stub`
+(caller `0x8048bd50` = `PE_init_platform`). Device returned clean, `No errors detected`, no brick.
+Capture `out/stage90/captures/972-press-armed-d13-0184b928-20261010-last_kmsg.txt` sha256 `a02b66cf…`.
 Continues the **971 press (2026-10-10)**, which CONFIRMED 971 (the RAM console survived
 `set_mmu_ttb(cpu_ttb)` — `arm_vm_init: setting up segment information...` now appears) and then
 stopped one rung later on a **missing symbol**:
@@ -104,3 +108,58 @@ reference none of them**, so the keep-set is inert there (the 4570 objects are b
 - **The keep-set is derived, not listed.** A future header that aliases a new underscore name is
   covered automatically; `check_deunderscore_guard.sh` re-derives it from both trees and refuses
   drift (its `--selftest` feeds a mutated builder and a stripped object and asserts each is refused).
+---
+
+## 7. THE PRESS (2026-10-10) — 972 CONFIRMED, and the next rung
+
+Capture `out/stage90/captures/972-press-armed-d13-0184b928-20261010-last_kmsg.txt` (451354 B,
+4532 lines, sha256 `a02b66cf1f87e6e3aca4a8d68db949b1e2bef19b8b91d60ec2c8e4e91dd4985c`). One gate exit 0,
+one runner exit 0; `fastboot boot` only, nothing flashed; the device returned and `adb` lists
+`4a2fe00b` again; `No errors detected`.
+
+- **972 CONFIRMED.** `stub_hit=_disable_preemption` is **absent** — the de-underscore fix is real.
+  971 also holds (line 3978 `arm_vm_init: setting up segment information...` after the switch at 3977).
+- **The next stop is one rung up:** `stub_hit=PE_init_SocSupport_stub`, caller `0x8048bd50` =
+  `PE_init_platform+0x2c` (`bl` at `0x8048bd4c`). `PE_init_platform` ran its body (it wrote its
+  `0x8085f088` flag and `kprintf`'d first), so this is further along the generic PE than any prior run.
+
+### 7.1 The cause of the next rung
+
+The reported `PE_init_SocSupport_stub` is a **generated** stub (`0x8049bdc4`, body =
+`movw r0,#0x16d0; movt r0,#0x8056; b entry_stub_hit`, name string `"PE_init_SocSupport_stub"`).
+The real one is in **`out/xnu_arm_obj_d13/pe_msm8974.o`** (`T PE_init_SocSupport_stub` at `+0x15c`,
+plus `T PE_init_SocSupport_msm8974` and the 12 `msm8974_*` driver functions). But that object is
+**never linked**: `src/entry/build_entry.sh`'s pool glob (the `436` step, `:28695`) iterates only
+`$XNU_KERNEL_OBJ_OUT/*.o` and `$XNU_ASM_OBJ_OUT/*.o` — **`$XNU_ARM_OBJ_OUT` (= `out/xnu_arm_obj_d13`)
+is in no link list at all** (grep: zero references in `build_entry.sh`). So `PE_init_SocSupport_stub`
+is undefined, and the stub generator fabricates the stub the run stops on.
+
+This is the **914 board PE**, which that experiment *measured* (`1 of 1` compiles,
+`nm` emits the two symbols) but never wired into a link — its last line is a host-side provenance
+note. The Mi 4's PE methods (`msm8974_putc`/`getc`/`uart_init`, the QTimer timebase
+`msm8974_timebase_init`/`get_timebase`, the GIC `msm8974_interrupt_init`/`handle_interrupt`) are
+**absent from the final ELF** today (`nm … | grep msm8974_putc` = 0), even though the msm8974
+**I/O Kit classes** (`MSM8974GIC`/`MSM8974Timer`/`MSM8974PlatformExpert`/`MSM8974RootResource`, from
+the `xnu_platform_obj_d13` pool via `STAGE90_PSEUDO_INITS`) **are** present. That single missing
+object is the cause of this stop.
+
+### 7.2 The next rung (NOT built here)
+
+Add `pe_msm8974.o` (only — see below) to the entry link, behind a new switch, so a reverted build
+stops arming it. The obstacles, measured:
+
+- **The arm pool is 16 objects, but only `pe_msm8974.o` contributes net-new symbols.** A per-file
+  `defined - kernel_pool` delta gives `new=0` for all fifteen others (`arm_vm_init`, `cpu`, `pmap`,
+  `machine_routines`, `locks_arm`, … all duplicate the kernel pool byte-for-byte because the kernel
+  pool's glob builds them with the same flags) and `new=14` for `pe_msm8974.o`. Adding the whole pool
+  would be ~551 duplicate definitions; adding the one object adds `PE_init_SocSupport_stub`,
+  `PE_init_SocSupport_msm8974`, and the 12 `msm8974_*` names.
+- **One apparent collision is benign:** `pe_msm8974.o`'s only overlapping defined name is the
+  assembler-local label `.L.str` (local, non-global) — no real symbol clash.
+- **The object must be compiled with `-DBOARD_CONFIG_MSM8974=1`** (the `#if defined(BOARD_CONFIG_MSM8974)`
+  gate) and carries `U gPESocDispatch` + `U PE_early_puts`, both already defined in the kernel pool
+  (`pexpert_arm_common_pe_socsupport.o` / `pe_kprintf.o`).
+
+**Falsification:** if `pe_msm8974.o` is added and the stop moves past `PE_init_SocSupport`, the
+missing-board-PE model is confirmed; if the stop recurs, the symbol was defined elsewhere and the
+model is wrong one rung out — recorded, not papered over.
