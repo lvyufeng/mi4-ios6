@@ -113,3 +113,42 @@ the reproducible arm.
 - **The USB ladder** (959–962) is untouched.
 - 973 is a **link**, not a switch: no `STAGE90_XNU_*` key moved, so the payload record `6c2b6038` is
   unchanged and the arm is named by the entry bin hash.
+---
+
+## 8. THE PRESS (2026-10-10) — 973 DID NOT RETURN
+
+Pressed `armed-d13-12427611` (payload `stage90-qcdt.img 7d12735f…`, the gate's own bytes, unchanged
+across the send) via `scripts/run_and_capture.sh --allow-xnu-entry --expect-arm=armed-d13-12427611`.
+Gate exit 0; the run sent `fastboot boot` only, nothing flashed.
+
+**The device did NOT come back.** The runner's bounded 180 s wait expired with:
+```
+adb:      serial 4a2fe00b not listed
+host log: 34 -> 34 enumeration(s) of SerialNumber: 4a2fe00b
+port 3-10: 34 -> 34 enumeration(s), any id
+```
+`lsusb` then showed no Mi 4 at all (only the host's own hubs/peripherals). No log was captured
+(`/tmp/cancro-last_kmsg.txt` is gone; the previous run's `a02b66cf…` was parked to `.prev.60`).
+
+**This is a BEHAVIOURAL CHANGE, and it is the run's whole result.** 972 (the same arm one rung
+below) returned clean in ~17 s; 973 (the board PE now linked and running) did not return. The
+board PE's body is now reached (`PE_init_platform` → the real `PE_init_SocSupport_msm8974` →
+`msm8974_uart_init` / QTimer timebase / GIC `msm8974_interrupt_init` / `msm8974_putc`), so the stop
+moved from a *missing symbol* (`stub_hit=PE_init_SocSupport_stub`) to a *hang or fault inside the
+Mi 4 PE methods*. Which of the four is not yet known — the log is what would say, and the log is in
+the top of DRAM (lost on a cold power transition).
+
+**The device is dark, not bricked.** It needs an operator power press. Two routes:
+
+1. **Recover the log (preferred).** VolDown+Power → fastboot, then
+   `fastboot boot xiaomi4-cancro-backup-20260604-112053/boot.img` (the STOCK Android image, never
+   flashed), and in the Android shell `cat /proc/last_kmsg`. That returns the *previous* boot's RAM
+   console — 973's. **Do NOT do a normal power-on first** (a cold boot clears the buffer), and do
+   NOT boot TWRP (its kernel has no `/proc/last_kmsg` and its boot takes the slot the log is in).
+2. **Plain recovery.** Hold Power ~10–15 s, release, press Power normally → back to Android. This
+   loses 973's log.
+
+**Next rung (once the log is read).** The board PE's four methods are the suspects; the log's last
+key before silence names which (`msm8974_putc` output, the QTimer read, the GIC init, or a fault's
+`far`/`fsr`). A build that links only *part* of the board PE (e.g. the console method alone) would
+narrow it — but that is the next experiment, not this one.
