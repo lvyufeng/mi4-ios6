@@ -173,7 +173,7 @@ window wider than 16 MiB has never booted on this entry, and the widened arm pro
 Until `press_968.sh` separates the two variables, 969's wall (the window is a prerequisite, met by 915-B)
 stands as the only demonstrated route to running iOS userspace. Nothing was bricked; the device re-enumerated.
 
-## 6c. The control press (2026-10-09) — the window is NOT the cause; entry `7107b998` is broken
+## 6c. The control press (2026-10-09) — the window is NOT the cause; entry `7107b998` never boots (cause unproven, see §6d)
 
 `armed-d13-7107b998` (the 968 arm — the **same entry bin `7107b998`**, same medium, but a **16 MiB**
 window) was then pressed. **It failed identically.** The captured log
@@ -185,8 +185,9 @@ same silence.
 - **Therefore the window is irrelevant.** Both windows fail on entry `7107b998`; the 484 MiB map's
   arithmetic (§3, and the console cap) is not the cause — a fact confirmed independently by a read-only
   analysis that walked `arm_vm_init` end-to-end and found no window-dependent fatality below 1 GiB.
-- **The regression is the entry bin `7107b998` itself**, which is shared by 968 and 970 and was **never
-  pressed before** (both arms are its first press). The last entry known to boot on this device is
+- **The failure travels with the entry bin `7107b998`**, which is shared by 968 and 970 and was **never
+  pressed before** (both arms are its first press). §6d establishes this is **not** a new regression of
+  one 968 switch — no D13 entry has ever booted. The last entry known to boot on this device is
   `cb4e17f1` (2026-10-08, the storage/COW line), a **different bin** (`0x632934` bytes, bss `0x5d350`,
   `topOfKernelData 0x80800000`, `SEAM_POC=1`, `ISTACK_SEPARATE=0`, no USB ladder, `MEM_SIZE_MAX` set).
 - **What moved between `cb4e17f1` and `7107b998`:** the whole D13 tree-pin + USB-ladder + COW series
@@ -198,57 +199,62 @@ same silence.
   the current builder: if it boots, the builder is sound and a 968 switch breaks XNU's early boot; if it
   fails, the builder regressed.
 
-## 6d. The D13 entry has NEVER booted — and the static cause is D13's `__start` fast path
+## 6d. The D13 entry has NEVER booted — cause NOT ESTABLISHED (all six static hypotheses refuted or unproven)
 
-The control press established the window is not the cause (§6c). Tracing that further, with six
-independent read-only investigations each adversarially verified against the real ELFs, converged on a
-sharper fact and a single structural cause.
+The control press established the window is not the cause (§6c). Six independent read-only
+investigations were run against the real ELFs, **each then adversarially re-verified by a second agent
+tasked to refute it.** The honest outcome: **no hypothesis survived as a cause.** The earlier revision of
+this section named D13's `__start` MMU fast path as the "CONFIRMED cause"; that claim was **REFUTED by
+the verifier** and is retracted below. ⚠️ The commit that carried it (`3662bcf`) and the first memory
+draft were **overclaiming** — corrected here.
 
-**Fact: the whole Darwin-13 entry line has never run.** The two D13 presses (968's `armed-d13-7107b998`,
-970's `armed-window-c74bde1d` — the *same* entry bin) both produced zero XNU output. Every capture in the
-tree with real XNU output (`cb4e17f1-20261008`, `908-*`, `909-*`, all `rung*`) is a **4570-tree** entry
-(no `STAGE90_XNU_TREE_D13`). So this is not a regression of one 968 switch — the D13 *entry→kernel* line
-has never booted on hardware.
+**Fact that survives: the whole Darwin-13 entry line has never run.** The two D13 presses (968's
+`armed-d13-7107b998`, 970's `armed-window-c74bde1d` — the *same* entry bin, byte-identical
+`7107b998…`, 6331476 B) both produced zero XNU output. Every capture in the tree with real XNU output
+(`cb4e17f1-20261008`, `908-*`, `909-*`, all `rung*`) is a **4570-tree** entry (no `STAGE90_XNU_TREE_D13`).
+So this is not a regression of one 968 switch — the D13 *entry→kernel* line has never booted on hardware.
 
-**What was ruled out (each verified against the linked image, not a comment):**
+**What was REFUTED (each verified by value against the linked image, not a comment):**
 
 | hypothesis | verdict | evidence |
 |---|---|---|
-| boot_args offsets wrong (entry reads garbage) | **REFUTED** | D13 `assym.s`: VERSION=2, VIRTBASE=4, PHYSBASE=8, MEMSIZE=12, TOP_OF_KERNEL=16 — exactly the struct the payload writes |
-| `__start` maps a broken page table | **REFUTED** | the map loop makes every descriptor VA==PA; PC/intstack/vectors all mapped |
-| a branch to an unresolved (0/GOT/stub) address | **REFUTED** | all 22 `bl` targets in `arm_init` and every `__start` literal resolve to real linked code |
-| the 935–937 entry-source tree-pin regressed the entry | **REFUTED** | the entry functions (`entry_write`/`entry_live_init`/…) are byte-identical between the D13 and 4570 ELFs; only the *kernel* region differs |
-| the empty log means XNU is actually running (wrap never hit) | **NOT-ESTABLISHED** | the first console key would come from `processor_init`'s wrapped `timer_call_setup`, on D13's path before `__wrap_PE_init_platform` — but a refused console install is silent too, so the log cannot distinguish the two |
+| H1 a branch to an unresolved (0/GOT/stub) address | **REFUTED** | every reachable `bl` target and literal in `__start`→`arm_init` resolves to real linked `T` code; the 3 out-of-segment `blx` sit after `bx lr` (unreachable padding); no relocations, no .plt/.got |
+| H2 boot_args offsets wrong (entry reads garbage) | **REFUTED** | D13 read offsets {2,4,8,12,16} == the payload's write offsets; D13 `assym.s`: VERSION=2, VIRTBASE=4, PHYSBASE=8, MEMSIZE=12, TOP_OF_KERNEL=16 |
+| H5 the 935–937 entry-source tree-pin regressed the entry | **REFUTED** | the entry chain `entry_write`→`entry_live_write`→`entry_live_init`→`entry_live_map` is at **identical addresses and byte-identical** in the D13 and 4570 ELFs; symbol-set diff is empty both ways |
+| H6 `__start` maps a broken page table | **REFUTED** | the map loop makes every descriptor VA==PA (`virtBase==physBase==0x80000000`); PC, intstack, vectors all land in index 0x800/0x805, all mapped |
 
-**The one CONFIRMED structural defect — and it is in the D13 tree, not the entry sources.** D13's
-`__start` (`external/xnu-hd2-darwin13/xnu/osfmk/arm/locore.s:52`) opens with an **MMU fast path that the
-4570 `_start` does not have**:
+**What was NOT-ESTABLISHED (the hunt agents called them CONFIRMED; the adversarial verify killed that):**
 
-```
-80000008  mrc  p15,0,r4,c1,c0,0     ; read SCTLR
-80000010  cmp  r4,#1
-80000014  beq  80000100 <mmu_initialized>   ; MMU already on → skip the whole setup
-```
+- **H4 — "D13's `__start` MMU fast path skips the VBAR/vector install → silent fault."** The *premises*
+  reproduce exactly (D13 `beq mmu_initialized` at `80000014`; the image's **only** VBAR `mcr` at
+  `800000fc`, inside `fix_boot_args_hack`, is **after** the branch; 4570 has **0** VBAR writes; the
+  payload enters with SCTLR.M=1 and its **own** VBAR=0x80a0). **But the causal step is contradicted:**
+  if the fast path is taken, the payload's L1 (TTBR0 stays `0x6c4000`) and VBAR `0x80a0` stay active, so
+  the payload's **own** loud handlers (`src/vectors.S` prints "MI4IOS6_STAGE90 exception: …";
+  `xnu_arm_vm_init_high_va_data_abort_handler.c:142` prints "data abort: dfar=…") would fire on any
+  fault — **yet the capture shows zero output after the jump.** And 4570 boots fully while writing VBAR
+  **0** times, so a skipped VBAR write is **not** the discriminator. **REFUTED as the cause.**
+- **H3 — "the empty log ⇒ a fault strictly before `processor_init`."** The measurement distinction
+  reproduces (D13's first would-be console key is `processor_init`'s wrapped `timer_call_setup`), **but
+  the log cannot separate the two cases:** `entry_live_write` calls `entry_live_init`, which has refuse
+  paths (`entry_stubs.c:2305/2328/2348/2365/2371 → entry_live_refuse`, silent); a **refused console
+  install is silent too.** So "XNU faulted early" and "XNU runs but the console was refused" are
+  **indistinguishable by this log.**
 
-The payload jumps with the **MMU on** (`src/mmu.c:5497-5504` enables the identity L1; `xnu_entry_jump.c`
-`bx r1` never turns it off). So D13 takes the branch and **skips everything between `mmu_reinitialize`
-and `mmu_initialized`** — including, at `800000fc`, the **only VBAR write in the whole image**
-(`mcr p15,0,r4,cr12,c0,0`, inside `fix_boot_args_hack_for_bootkit`). The 4570 entry has **zero** `cr12`
-writes and instead *unconditionally* installs its `fleh_*` vectors into a table (observed at
-`_start+0x44`; those are the handlers that would print `exception: data abort`). Because D13 skips its
-vector install, **the first fault after the jump is taken somewhere unmapped with no reporter → silence.**
+**The surviving open question (the real next measurement).** Two mechanisms remain, and the current log
+cannot tell them apart:
+1. **XNU faults early and the payload's vectors did NOT print** (which itself contradicts the "loud
+   handlers" premise — so this branch requires explaining why the payload's VBAR was not active), or
+2. **the payload's identity L1 occupies the console's L1 slot** (`src/mmu.c:5478` maps `0xde500000`;
+   `entry_live_map` finds the slot taken → `entry_live_refuse(2u)` → every record dropped, and the run
+   is simply **unobservable** — not necessarily a crash).
 
-```
-D13 __start (jumps with MMU on → fast path):   [setup SKIPPED] → mmu_initialized → arm_init
-4570 _start (no fast path):                     setup ALWAYS → installs fleh_* vectors → arm_init
-```
-
-**Consequence for the plan.** This is a **D13-tree `locore.s` defect**, not an entry-source or
-builder regression. The minimal fix is to make D13's vector install (and, if the payload's tables are
-not guaranteed, the table build) happen on **both** paths — move the `VBAR` write and the exception-table
-install **before** the `beq mmu_initialized` branch, so the entry always owns its vectors regardless of
-the MMU state it is entered with. That is a D13 `locore.s`/`machine_routines` edit, host-side and
-buildable; the press to confirm it is the operator's. **The window is a separate, later question.**
+The discriminator must be a measurement **not masked by the console install**: e.g. a pre-console
+raw-store marker written in `processor_init`/`arm_init` that does not go through `entry_live_write`
+(so a refusal cannot swallow it), or capturing the fault PC/abort path directly. Building that marker is
+host-side and reversible; the press to observe it is the operator's. **The window remains a separate,
+later question; the D13 `locore.s` fast path is a real structural difference but is no longer held to be
+the cause.**
 
 ## 7. What it does NOT do
 
