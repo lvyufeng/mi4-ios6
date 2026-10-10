@@ -126,6 +126,15 @@ non-return is the *expected* form if the boot reached the idle/resident path —
 distinguishes them (`wdt_pets > 0` = resident), and it is in the top of DRAM.** 974 makes that console
 observable *if the recovery reads the buffer*.
 
+**And the non-return is now *expected by construction*, not merely possible** (973 §8.2, read from the
+source 2026-10-10): `entry_stub_hit` ends in the `noreturn` `entry_epilogue`, which **resets the run on
+purpose** (PS_HOLD/`RESET_REASON_NORMAL` + `wfe` loop, `entry_stubs.c:4275–4282`). 972 returned clean
+precisely *because* it hit a missing symbol (`stub_hit=PE_init_SocSupport_stub` → epilogue → reset).
+973 linked the real board PE, retiring that last generated stub, so the epilogue no longer runs and the
+boot continues into the kernel — where, with the USB ladder off, **nothing enumerates**. So darkness is
+what a boot past the diagnostic endpoint looks like; the log's `wdt_pets` alone divides residency from a
+hang.
+
 **Recovery owed (operator, at the device):** Vol-Down+Power → fastboot →
 `fastboot boot xiaomi4-cancro-backup-20260604-112053/boot.img` (the STOCK image, never flashed) →
 `cat /proc/last_kmsg`. This returns the *previous* boot's RAM console = 975's. A cold boot clears it;

@@ -173,3 +173,35 @@ and the build cannot**:
 the entry image's controller `PE_init_SocSupport_stub` is a plain table-fill with no blocking call
 (read line by line), so a hang would be *after* it, in the generic PE or the boot tail; a residency
 would be the run reaching the idle path. The log (§8 recovery) settles it.
+
+### 8.2 Why 972 returned and 973 did not — the terminal epilogue (read from the source, 2026-10-10)
+
+The behavioral change is not just "the boot ran further." It is a change in *what stops the run*,
+and the source says which. `entry_stub_hit` (`src/entry/entry_stubs.c:8061`) ends at `:8139` with
+
+```c
+entry_epilogue("a symbol this image does not provide was called");
+```
+
+and `entry_epilogue` is `__attribute__((noreturn, noinline))` (`:3565`): after writing the whole
+`MI4IOS6_STAGE90_XNU real XNU entry …` report it **resets the run deliberately** —
+
+```c
+*(volatile uint32_t *)STAGE90_ENTRY_RESET_REASON_ADDR = STAGE90_ENTRY_RESET_REASON_NORMAL;  /* 0x0fa0065c */
+*(volatile uint32_t *)STAGE90_ENTRY_PSHOLD_ADDR      = 0u;                                   /* 0xfc4ab000 */
+for (;;) { asm volatile ("wfe"); }                                                           /* :4275–4282 */
+```
+
+So a boot that hits a missing symbol is *ended on purpose and returns*. That is exactly what 972's
+capture shows: the report ends `stub_hit=PE_init_SocSupport_stub`, and the log's very next line is
+the stock kernel's clean boot — **`No errors detected`** (`out/stage90/captures/972-press-armed-d13-0184b928-20261010-last_kmsg.txt`).
+
+**973 removed that ending.** It linked the real board PE, so `PE_init_SocSupport` no longer reaches
+the generated stub → `entry_stub_hit` never fires → `entry_epilogue` never runs → **nothing resets
+the device and the boot continues into the kernel (the 507 record's "a run with nothing left to stop
+it ends on the hardware watchdog instead of on the epilogue").** A continuing boot produces **no host
+enumeration by construction** when the USB ladder is off — the same space as 911's resident
+non-return ([[mi4-911-resident-nonreturn-is-not-a-wedge]]). So 973/974/975's darkness is the
+*expected* consequence of retiring the last generated stub, **not by itself a regression**; whether
+the continuing boot is resident (the goal's 「保持在 xnu 里」) or blocked is still only the recovered
+log's `wdt_pets` that says — §8.1 stands, and this sharpens *why* the log is owed rather than guessed.
