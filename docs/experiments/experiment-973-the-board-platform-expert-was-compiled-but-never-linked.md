@@ -227,6 +227,13 @@ now *checked*, method by method, in `src/platform/darwin13/pe_msm8974.c` (195 li
   `.bss` tank `g_os_tank[ENTRY_OS_TANK]` (overflow counted in `g_os_tank_dropped`); after, it is bounded
   by `g_os_end` with a one-time `xnu_live_ostext_limited` marker. No unbounded loop, no block.
 
+**And the generic PE cannot fault on a table member we left NULL.** The generic PE is
+`pexpert/arm/common/pe_armsupport.c`; each of its five entries (`pe_arm_init_interrupts`,
+`pe_arm_init_timebase`, `pe_arm_dispatch_interrupt`, `pe_arm_get_timebase`, `pe_arm_set_timer_enabled`)
+**NULL-checks its member and `panic(...)`s** before calling it — and the board PE sets every one of
+those five. `framebuffer_init` has **no caller anywhere in the tree** (grep-verified), so our leaving it
+NULL is inert. So a NULL-call is not the boot-stopper either.
+
 **Consequence.** A non-return is therefore **not** a hang inside the board PE (or inside
 `PE_init_platform`'s call to it) on this image. So the log's `wdt_pets` asks a *narrow* question: the
 boot is either **resident** (past `PE_init_platform` into the scheduler/idle — the goal's 「保持在 xnu
