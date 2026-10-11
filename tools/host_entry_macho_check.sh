@@ -64,9 +64,9 @@ def nm(name):
     sys.exit("host_entry_macho_check: %s is not a symbol in %s" % (name, elf))
 
 sym = {n: nm(n) for n in (
-    "_mh_execute_header", "__entry_text_start", "__entry_text_size", "__entry_data_start",
-    "__entry_data_size", "__entry_data_filesize", "__entry_data_fileoff", "__entry_image_end",
-    "__entry_init_array", "__entry_init_array_size")}
+    "_mh_execute_header", "__entry_text_start", "__entry_text_size", "__entry_text_end",
+    "__entry_data_start", "__entry_data_size", "__entry_data_filesize", "__entry_data_fileoff",
+    "__entry_image_end", "__entry_init_array", "__entry_init_array_size")}
 
 # objcopy -O binary lays the loadable sections out from the lowest address, which is .text at
 # `__entry_text_start` - the first symbol the linker script defines, and the image's own base. It is
@@ -265,6 +265,52 @@ else:
     if sect_segname != "__DATA":
         fail.append("__mod_init_func is in segment %s; the writable constructor table belongs in "
                     "__DATA (it holds relocated absolute addresses)" % repr(sect_segname))
+
+# ------------------------------------------ the seam between __TEXT and __DATA (experiment 979)
+#
+# **The one structural fact this check did not assert, and its absence cost a press.** Every `expect()`
+# above compares the header against the linker's symbols - and because BOTH sides come from entry.ld,
+# they agreed even when the layout was wrong. The 979 panic is what they agreed on: `.text` ended at
+# `__entry_text_end` = 0x805699a0 (`. = ALIGN(32)`, NOT page-aligned) while the linker placed the real
+# `.data` output section on the NEXT page, 0x8056a000 - so `__entry_data_start` (0x805699a0) was NOT
+# the page `.data` really lands on.
+#
+# `pmap_init` (`osfmk/arm/pmap.c:3620`) is the reader that trusts `sectDATAB`: its data-NX loop
+#     for (dva = sdata; dva < edata; dva += PAGE_SIZE) *(pmap_pte(kernel_pmap, dva)) |= L2_NX_BIT;
+# starts at `sdata = __entry_data_start`. With the unaligned seam its FIRST iteration,
+# `pmap_pte(0x805699a0)`, resolved to the LAST TEXT PAGE [0x80569000,0x8056a000) - holding
+# `lock_set_init` - and set `L2_NX_BIT` on it, so the kernel then faulted fetching that function
+# (`Kernel prefetch abort`, pc=lock_set_init+0, fsr=0x0f). A real kernel's `__DATA.vmaddr` is
+# page-aligned, so the loop's first page is the first WRITABLE page and only data is marked NX.
+#
+# So two facts must hold for the seam to be the one pmap_init assumes:
+#   (1) `__TEXT` ends exactly where `__DATA` begins - no gap, no overlap; and
+#   (2) that boundary is PAGE-aligned, so `pmap_pte(sdata)` names the first data page.
+# Neither is a comparison against a second source; both are STRUCTURAL, which is why the symbol-vs-
+# symbol `expect()` calls above cannot catch a violation. This is the refusal that would have stopped
+# 979 at build time ([[mi4-a-claim-in-a-comment-is-not-a-check]]).
+PAGE_SHIFT = 12
+text_start = sym["__entry_text_start"]
+text_size = sym["__entry_text_size"]
+data_start = sym["__entry_data_start"]
+text_end = text_start + text_size
+
+print("  __TEXT end / __DATA start     -> 0x%08x / 0x%08x (seam delta %d)"
+      % (text_end, data_start, data_start - text_end))
+if text_end != data_start:
+    fail.append("the __TEXT/__DATA seam is not contiguous: __TEXT ends at 0x%08x but __DATA starts at "
+                "0x%08x (delta %d). entry.ld must pad the `.text` output section (`ALIGN(0x1000)`) so "
+                "the two are equal - see experiment 979" % (text_end, data_start, data_start - text_end))
+if data_start != sym["__entry_text_end"]:
+    fail.append("__entry_data_start (0x%08x) != __entry_text_end (0x%08x): the linker's own two names "
+                "for the seam disagree - entry.ld is malformed" % (data_start, sym["__entry_text_end"]))
+if data_start & ((1 << PAGE_SHIFT) - 1):
+    fail.append("__DATA vmaddr 0x%08x is NOT %d-byte page-aligned: pmap_init's data-NX loop "
+                "(pmap.c:3620) would start inside a text page and mark it non-executable - this is "
+                "exactly the 979 panic. entry.ld must page-align the `.text` end."
+                % (data_start, 1 << PAGE_SHIFT))
+if sym["__entry_text_end"] & ((1 << PAGE_SHIFT) - 1):
+    fail.append("__entry_text_end 0x%08x is not page-aligned" % sym["__entry_text_end"])
 
 if fail:
     print()
