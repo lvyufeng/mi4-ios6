@@ -13313,3 +13313,43 @@ set=armed-d13-97d6a511 sha256=7ac852edfc165cb033cd935b21ace162deea1781690238f379
 set=armed-d13-97d6a511 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-stage90_fixture.macho
 set=armed-d13-97d6a511 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-stage90-build-config.txt
 set=armed-d13-97d6a511 sha256=96e20bf9d8be2366c0f87373190a3f29b21a93c352c977bb1073788c613ebf0e bytes=560 file=SHA256SUMS.txt role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-SHA256SUMS.txt
+# armed-d13-fa301bd7  —  980: 979 rebuilt so the L2.1 kernel edit and the entry image agree, carrying BOTH
+# the 979 page-alignment fix and the L2.1 timebase publication.
+#
+# WHY. 979 = 977 with the entry.ld PAGE-ALIGNMENT fix. That fix retired the `ipc_bootstrap`
+# panic (pc=lock_set_init+0, fsr=0x0f) experiment-979 recovered: entry `.text` had ended at
+# __entry_text_end = 0x805699a0 (ALIGN(32), NOT page-aligned) while the real `.data` output
+# section sat on the next page 0x8056a000, so pmap_init (osfmk/arm/pmap.c:3620) started its
+# data-NX loop at __entry_data_start = 0x805699a0 and set L2_NX_BIT on the LAST TEXT PAGE
+# [0x80569000,0x8056a000) - holding lock_set_init. entry.ld now pads `.text` to a page.
+#
+# L2.1 (the reason THIS arm exists). rtc_configure was DEFINED in the linked image but had
+# ZERO callers, so gPEClockFrequencyInfo.timebase_frequency_hz and rtclock_sec_divisor stayed
+# 0; rtclock_bus_configure (osfmk/arm/rtclock.c:294/:297) panics on either, at the next
+# reachable stop after ipc_bootstrap (clock_init -> clock_oldinit -> rtclock_init).
+# pe_msm8974.c now sets gPEClockFrequencyInfo.timebase_frequency_hz = 19.2 MHz (0x124f800,
+# offset 0x24) and calls rtc_configure(cntfrq) unconditionally, from ONE value.
+#
+# 979 arm could not simply be pressed: the L2.1 edit makes the source newer than 979 s
+# embedded image, so preflight_boot_check.sh refuses 979 s live bytes as STALE. This arm is
+# 979 s switch set rebuilt so source and image agree. The switch set is 979 s UNCHANGED; only
+# the ENTRY BIN moved (97d6a511 -> fa301bd7).
+#
+# VERIFIED BY VALUE: the linked entry ELF has 3 `bl <rtc_configure>` sites (979 had 0);
+# tools/check_rtc_published.sh passes here and FAILs on 979 s image; check_machine_init_body.sh
+# ok; make check 0. Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1,
+# HDD_WRITE=0, the base is never written - fully reversible. fastboot boot only, NEVER flash.
+# PRESS IS THE OPERATOR S.
+# =================================================================================================
+set=armed-d13-fa301bd7 sha256=fa301bd751967a999f7992cc7b1d9742fec6e94cf0dc1dbb5a5915abc11d00c5 bytes=6331476 file=xnu_arm_entry.bin role=980-979-rebuilt-with-the-L2.1-timebase-publication-the-entry-image-agrees-with-the-source;-xnu_arm_entry.bin
+set=armed-d13-fa301bd7 sha256=933632436cac9ddbca5c473b1259cc72af052b40022ddf0b9426517953626b31 bytes=7371080 file=xnu_arm_entry.elf role=980-979-rebuilt-with-the-L2.1-timebase-publication-the-entry-image-agrees-with-the-source;-xnu_arm_entry.elf
+set=armed-d13-fa301bd7 sha256=b40bbd57e5377dc305c0e20d45b33a62a5e9c8d0386cc1e313f85a44d273fe37 bytes=1912 file=xnu_arm_entry.h role=980-979-rebuilt-with-the-L2.1-timebase-publication-the-entry-image-agrees-with-the-source;-xnu_arm_entry.h
+set=armed-d13-fa301bd7 sha256=8a4fe4f111633c8fbf9d6a67cfd3a6168a089e82288d4a890813c73d73a5bc2e bytes=1409 file=xnu_arm_entry-config.txt role=980-979-rebuilt-with-the-L2.1-timebase-publication-the-entry-image-agrees-with-the-source;-xnu_arm_entry-config.txt
+set=armed-d13-fa301bd7 sha256=6e2753de4d1463c747e63411f7ba23c2c7bb7bd07e09fc90d175fbcdb822e04f bytes=3149 file=xnu_arm_entry-sources.txt role=980-979-rebuilt-with-the-L2.1-timebase-publication-the-entry-image-agrees-with-the-source;-xnu_arm_entry-sources.txt
+set=armed-d13-fa301bd7 sha256=ebe441fa0329d75fc71f348beda0727e9363790211e1ae0426bca1a6d0e2bfb9 bytes=6826884 file=stage90.bin role=980-979-rebuilt-with-the-L2.1-timebase-publication-the-entry-image-agrees-with-the-source;-stage90.bin
+set=armed-d13-fa301bd7 sha256=0b3e8132b0b4984a5fef53738b991730898c0abf7fb9e42c3390d1cda71b8411 bytes=6888956 file=stage90.elf role=980-979-rebuilt-with-the-L2.1-timebase-publication-the-entry-image-agrees-with-the-source;-stage90.elf
+set=armed-d13-fa301bd7 sha256=2aeca0a53d2c7e526abe307024840e5773095e6d64fb0c9e79a19d7e380c4019 bytes=6830080 file=stage90.img role=980-979-rebuilt-with-the-L2.1-timebase-publication-the-entry-image-agrees-with-the-source;-stage90.img
+set=armed-d13-fa301bd7 sha256=c0e99bcd282c2d0b74443a6c841a8c606d645e680818ed0afded6f897d0e6e3d bytes=9351168 file=stage90-qcdt.img role=980-979-rebuilt-with-the-L2.1-timebase-publication-the-entry-image-agrees-with-the-source;-stage90-qcdt.img
+set=armed-d13-fa301bd7 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=980-979-rebuilt-with-the-L2.1-timebase-publication-the-entry-image-agrees-with-the-source;-stage90_fixture.macho
+set=armed-d13-fa301bd7 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=980-979-rebuilt-with-the-L2.1-timebase-publication-the-entry-image-agrees-with-the-source;-stage90-build-config.txt
+set=armed-d13-fa301bd7 sha256=3562e9be91c846e52853bde4c51207cc124e6ef0088f65ef24a08ee17f7ae039 bytes=560 file=SHA256SUMS.txt role=980-979-rebuilt-with-the-L2.1-timebase-publication-the-entry-image-agrees-with-the-source;-SHA256SUMS.txt
