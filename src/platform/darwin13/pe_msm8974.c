@@ -65,6 +65,14 @@
  * [[mi4-one-value-two-definitions]] */
 extern void entry_os_console_char(int ch, uint32_t which);
 
+/* **rtc_configure** is the one symbol the generic ARM RTC layer exports for the board PE to call
+ * (`osfmk/arm/rtclock.c:281`); it stores its argument into `rtclock_sec_divisor`, which
+ * `rtclock_bus_configure` (`:287`) then panics on if it is still 0. No XNU header declares it - every
+ * peer board file declares it locally, exactly here: pe_apq8060.c:86, pe_omap3530.c:65,
+ * pe_bcm2835.c:55, pe_imx53.c:51. So this file mirrors that idiom rather than inventing a header edit.
+ * [[mi4-one-value-two-definitions]] */
+extern void rtc_configure(uint64_t hz);
+
 static volatile unsigned long long msm8974_cntfrq = MSM8974_CNTFRQ_HZ;
 
 static inline unsigned long long
@@ -139,11 +147,21 @@ msm8974_timebase_init(void)
 {
 	/*
 	 * Read the frequency; do NOT block on an interrupt or a device. If the entry image left a sane
-	 * CNTFRQ, keep it; otherwise publish our measured 19.2 MHz so the tick scale is never zero.
+	 * CNTFRQ, keep it; otherwise fall back to our measured 19.2 MHz so the tick scale is never
+	 * zero. The value is then PUBLISHED, not kept local: `rtclock_init` -> `rtclock_bus_configure`
+	 * (`osfmk/arm/rtclock.c:317,293-297`) reads `gPEClockFrequencyInfo.timebase_frequency_hz` and
+	 * panics if it is 0. Before this change the frequency lived only in the file-local
+	 * `msm8974_cntfrq`, and `rtc_configure` - defined in the image at 0x8001b5e0 - had NO caller, so
+	 * `rtclock_sec_divisor` stayed 0 and the second panic fired too. Both are set here, from ONE
+	 * value, so the tick that `msm8974_get_timebase` divides by and the tick the RTC scales by can
+	 * never disagree. [[mi4-one-value-two-definitions]]
 	 */
 	unsigned int frq;
 	__asm__ __volatile__("mrc p15, 0, %0, c14, c0, 0" : "=r"(frq));
 	msm8974_cntfrq = (frq != 0) ? (unsigned long long)frq : MSM8974_CNTFRQ_HZ;
+
+	gPEClockFrequencyInfo.timebase_frequency_hz = (unsigned long)msm8974_cntfrq;
+	rtc_configure((uint64_t)msm8974_cntfrq);   /* UNCONDITIONAL: rtclock_sec_divisor must never be 0 */
 }
 
 uint64_t
