@@ -124,7 +124,7 @@ def selftest():
     # MUTATION B: a truncated SEC_CNT (the low 24 bits -- a byte-offset/truncation
     # bug in SEC_CNT assembly) must read as the WRONG size, i.e. it is not the
     # 32 GB class the true doubled value is.
-    truncated = SEC_CNT_16GB & 0xFFFFFF     # 0x00d5a000 = 13,996,032 sectors
+    truncated = SEC_CNT_16GB & 0xFFFFFF     # 0x00d5a000 = 14,000,128 sectors
     ok_b, msg_b = check(truncated, CLASS_32)
     print(("  PASS  " if not ok_b else "  FAIL  ") +
           "truncated SEC_CNT is rejected as 32 GB: " + msg_b)
