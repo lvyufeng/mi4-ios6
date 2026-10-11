@@ -222,6 +222,42 @@ if [[ ${STAGE90_XNU_MEM_TOTAL:-0} -eq 1 ]]; then
     fi
 fi
 
+# **915-B rungs 3a-5: the region-list switch must reach the KERNEL corpus, not just the payload.**
+# `scripts/build.sh:182-187` defines `STAGE90_XNU_REGIONS` for the PAYLOAD and records it, but every
+# reader of the switch is in the KERNEL corpus - `osfmk/arm/pmap.c` and `osfmk/arm/arm_vm_init.c` -
+# which this script compiles. Until this line those files' `#if STAGE90_XNU_REGIONS` were fed an
+# UNDEFINED name, i.e. evaluated as 0: the whole port was dead on arrival no matter what the payload
+# emitted. This is the kernel half of that single value; the payload half is `build.sh`.
+#
+# It is threaded UNCONDITIONALLY with a `:-0` default, and always passes the macro (never leaves it
+# undefined), so `#if STAGE90_XNU_REGIONS` reads a defined `0` when the arm is off - not the
+# undefined-name spelling of off ([[mi4-off-option-two-spellings]]). At 0 every reader's `#if` is
+# false, so the D13 object is byte-for-byte the tree's and the arms the ladder has already run do not
+# move. Unlike MEM_TOTAL there is no 4570 refusal: the switch is symmetric - build_entry.sh refuses
+# 4570 only for the D13-only switches, and `src/regions/` (915-B rung 0) is host-side.
+#
+# The value is checked BEFORE it is used: `[[ x -eq 1 ]]` on a non-numeric value is a false, so
+# `STAGE90_XNU_REGIONS=2` would otherwise silently become `=0` - the placement is the check
+# ([[mi4-a-claim-in-a-comment-is-not-a-check]]). The accepted set matches `scripts/build.sh:183-186`
+# so the payload and the kernel cannot disagree on the spelling of the switch.
+case "${STAGE90_XNU_REGIONS:-0}" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_REGIONS='${STAGE90_XNU_REGIONS}' is neither 0 nor 1" >&2; exit 1 ;;
+esac
+[[ ${STAGE90_XNU_REGIONS:-0} -eq 1 ]] \
+    && COMP_DEFINES_EXTRA+=(-DSTAGE90_XNU_REGIONS=1) \
+    || COMP_DEFINES_EXTRA+=(-DSTAGE90_XNU_REGIONS=0)
+# Self-check: this script has no `--dry-run`/`-n` mode (the only `--` switches are --limit/--dir/
+# --blockers/--platform-only), so there is no seam that prints the define list. The assertion below
+# is the seam that can run: the append above must have landed in the array this loop compiles with.
+# It is not paranoia - an always-defined macro is the entire off-path argument, and a future edit that
+# moved the append behind a branch would otherwise re-create exactly the undefined-name defect this
+# line exists to fix, silently.
+case " ${COMP_DEFINES_EXTRA[*]} " in
+    *" -DSTAGE90_XNU_REGIONS="*) ;;
+    *) echo "REFUSING: -DSTAGE90_XNU_REGIONS did not enter COMP_DEFINES_EXTRA" >&2; exit 3 ;;
+esac
+
 # The EABI runtime, which is not in the manifest and is not Apple's. `armv7-unknown-netbsd-eabi`
 # (and `armv7-none-eabi` before it) lowers an aggregate copy to `__aeabi_memcpy4`, where a Darwin
 # target lowers it to `memcpy` - so the ELF path needs four symbols Apple's tree never mentions.
