@@ -167,7 +167,21 @@ msm8974_timebase_init(void)
 uint64_t
 msm8974_get_timebase(void)
 {
-	return (uint64_t)((msm8974_read_cntvct() * 1000000000ULL) / msm8974_cntfrq);
+	/*
+	 * TICKS, not nanoseconds. The generic RTC layer divides by the frequency itself:
+	 *   osfmk/arm/rtclock.c:82-93  rtclock_timer_scale_convert():
+	 *       nsecs = pe_arm_get_timebase(NULL);        // :85 - THIS call
+	 *       ticks = (nsecs * NSEC_PER_SEC / tscFreq); // :91 - the ns conversion
+	 * tscFreq == gPEClockFrequencyInfo.timebase_frequency_hz (rtclock.c:299,302), which
+	 * timebase_init publishes as 19 200 000 below. So get_timebase must hand back RAW
+	 * CNTVCT ticks, like the apq8060 peer - NOT a pre-scaled ns value. Before this,
+	 * this function ALSO multiplied by NSEC_PER_SEC / 19.2e6, so mach_absolute_time
+	 * came out 52.0833x too large (NSEC_PER_SEC / 19200000), and every scheduler/idle
+	 * deadline derived from it was pushed past the SoC watchdog's 25 s reset - the 980
+	 * run idled and was reset without the idle wake ever firing.
+	 * [[mi4-one-value-two-definitions]].
+	 */
+	return (uint64_t)msm8974_read_cntvct();
 }
 
 static uint64_t

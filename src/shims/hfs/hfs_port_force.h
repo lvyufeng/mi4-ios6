@@ -60,12 +60,21 @@
 #define VFC_VFSDIRLINKS 0x800
 
 /* 4570's kmem_alloc takes the owning memory tag; 2050's took three arguments.  One line here instead
- * of seven call sites.  VM_KERN_MEMORY_FILE is 4570's own answer for a filesystem's buffer. */
+ * of seven call sites.  VM_KERN_MEMORY_FILE is 4570's own answer for a filesystem's buffer.
+ *
+ * **Only where the TREE wants a tag.** The redirect is for a 4-argument `kmem_alloc(map, addr, size,
+ * tag)` (4570's `vm_kern.h`). The Darwin-13 tree's is 3-argument and has no `vm_tag_t` at all, so
+ * rewriting it here turns the tree's OWN declaration (`osfmk/vm/vm_kern.h:103`, read through
+ * `vnode_internal.h`) into `kmem_alloc(map, addr, size, tag)` - "expected parameter declarator". The
+ * build defines `STAGE90_HFS_KMEM_TAG` iff the tree has `vm_tag_t`, so this is a 4570-only line and
+ * the D13 port compiles the HFS calls against the tree's own 3-argument prototype. */
+#ifdef STAGE90_HFS_KMEM_TAG
 #define kmem_alloc(map, addr, size) kmem_alloc((map), (addr), (size), VM_KERN_MEMORY_FILE)
 
 /* Its kobject sibling, dropped in the same 4570 restructuring (vm_kern.h:160 vs :240): the JOURNAL
  * calls it four times (vfs_journal.c:1120, 1708, 1878, 2061).  Same one-line shape. */
 #define kmem_alloc_kobject(map, addr, size) kmem_alloc_kobject((map), (addr), (size), VM_KERN_MEMORY_FILE)
+#endif /* STAGE90_HFS_KMEM_TAG */
 
 /* 4570's bsd/sys/cprotect.h dropped `cp_wrap_func_t` and `cp_register_wraps` (it restructured the
  * cprotect API).  This was a `void *` placeholder while the port compiled only at CONFIG_PROTECT=0;
@@ -184,6 +193,16 @@ typedef struct cp_wrap_func *cp_wrap_func_t;
  * expanded the zone path before this edit existed is recompiled by the same build. */
 
 #include <sys/malloc.h>
+/* The `kmem_alloc` macro above passes `VM_KERN_MEMORY_FILE` as the tag. On 4570 that name reached
+ * the HFS files transitively through the cprotect bridge (`hfs_cprotect_port.h`), but on D13 the
+ * bridge is dropped (that tree's `cprotect.h` still defines the structs - see build_xnu_arm_kernel.sh),
+ * and D13's OWN `osfmk/mach/vm_statistics.h` does not define it either - only the generated EXPORT
+ * copy (`out/xnu_exports/osfmk/mach/vm_statistics.h:569`) does, and a plain `<mach/vm_statistics.h>`
+ * resolves to the tree's. So name it here, guarded, so a real definition (and its value) always wins.
+ * 20 is 4570's value AND the export copy's own, so the two never disagree. */
+#ifndef VM_KERN_MEMORY_FILE
+#define VM_KERN_MEMORY_FILE 20
+#endif
 #undef  MALLOC_ZONE
 #undef  FREE_ZONE
 #define MALLOC_ZONE(space, cast, size, type, flags)  ((space) = (cast)__MALLOC((size), (type), (flags), NULL))

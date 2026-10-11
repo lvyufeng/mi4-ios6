@@ -37,6 +37,14 @@
 #include <sys/mount_internal.h>
 #include <vm/vm_kern.h>
 
+/* The `ubc_create_upl` shim below passes a memory tag to `ubc_create_upl_kernel`. On 4570 that name
+ * reached this file transitively; the Darwin-13 tree's OWN `mach/vm_statistics.h` does not define it
+ * (only the generated EXPORT copy does), so name it here, guarded, so a real definition always wins.
+ * 20 is 4570's value and the export copy's own, so the two never disagree. [[mi4-one-value-two-definitions]] */
+#ifndef VM_KERN_MEMORY_FILE
+#define VM_KERN_MEMORY_FILE 20
+#endif
+
 /* -------------------------------------------------------------------------------------------- renames */
 
 const char *vnode_name(vnode_t vp) { return vnode_getname(vp); }

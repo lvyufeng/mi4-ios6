@@ -41,13 +41,25 @@ refuse() { printf 'check_hfs_staged: %s\n' "$*" >&2; fail=1; }
 
 # --- 0. the second force header is force-included, and after the first ------------------------------
 # The cprotect port header (877) renames `cp_is_valid_class` and defines structs that read
-# `cp_wrap_func_t` and `aes_encrypt_ctx`; it MUST be -included second, after `hfs_port_force.h` and
-# after `sys/cprotect.h` (which it pulls).  If the build ever includes it alone, or first, the build
-# stops loudly - but this same check is the cheap statement of the order, in the one place a reader
-# looks for "what does the HFS port add".
+# `cp_wrap_func_t` and `aes_encrypt_ctx`; it MUST be -included after `hfs_port_force.h`. If the build
+# ever includes it alone, or first, the build stops loudly - but this same check is the cheap statement
+# of the order, in the one place a reader looks for "what does the HFS port add".
+#
+# **The CP include is TREE-CONDITIONAL (2026-10-11).** 4570 made `struct cprotect` opaque, so 878's
+# bridge `hfs_cprotect_port.h` must supply it and is force-included second. The Darwin-13 (hd2) tree
+# still DEFINES `struct cprotect` in `bsd/sys/cprotect.h`, so force-including the bridge there
+# redefines it and breaks all 36 `bsd/hfs` objects plus `vfs_journal`. The build now gates the include
+# on `grep -q '^struct cprotect' "$XNU/bsd/sys/cprotect.h"` - the tree judges itself. The order
+# invariant is unchanged: `$HFS_FORCE` is added first (unconditionally), and the CP include, when it
+# fires, is the NEXT `BSD_FORCE+=`. So this check asserts both still appear, `$HFS_FORCE` before
+# `$HFS_FORCE_CP`, rather than the old one-line literal.
 BUILD=$REPO_ROOT/tools/build_xnu_arm_kernel.sh
-grep -q -- '-include "\$HFS_FORCE" -include "\$HFS_FORCE_CP"' "$BUILD" \
-    || refuse "$BUILD no longer force-includes \$HFS_FORCE_CP second (877's cprotect port header)"
+_f=$(grep -n -- 'BSD_FORCE+=(-include "$HFS_FORCE")' "$BUILD" | head -1 | cut -d: -f1)
+_c=$(grep -n -- 'BSD_FORCE+=(-include "$HFS_FORCE_CP")' "$BUILD" | head -1 | cut -d: -f1)
+[[ -n $_f ]] || refuse "$BUILD no longer force-includes \$HFS_FORCE (hfs_port_force.h)"
+[[ -n $_c ]] || refuse "$BUILD no longer force-includes \$HFS_FORCE_CP (877's cprotect port header)"
+[[ -n $_f && -n $_c && $_f -lt $_c ]] \
+    || refuse "$BUILD force-includes \$HFS_FORCE_CP before \$HFS_FORCE (the order 877 requires)"
 
 # --- 1. the tracked shims define exactly the ten symbols 871 named ---------------------------------
 # A count, and the names, because "the ten are written" is the claim 871 makes and a file that grew a

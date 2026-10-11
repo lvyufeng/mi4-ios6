@@ -719,6 +719,14 @@ DEFINES=(
 # this configuration's pool, like `STAGE90_HFS_ROOT` above.
 [[ ${HFS_PORT:-0} -eq 1 && ${STAGE90_XNU_HFS_ROOT_RW:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_HFS_ROOT_RW=1)
 
+# **The port's `kmem_alloc` tag redirect, only where the tree wants one.** `hfs_port_force.h` rewrites
+# `kmem_alloc(map, addr, size)` to the 4-argument form 4570 introduced (`..., VM_KERN_MEMORY_FILE`).
+# The Darwin-13 tree's `osfmk/vm/vm_kern.h` still has the 3-argument prototype and no `vm_tag_t`, so
+# that rewrite collides with the tree's OWN declaration. Define the guard iff the tree has `vm_tag_t`,
+# so D13 compiles the HFS calls against the tree's real prototype. Same authoring rule as the cprotect
+# bridge gate in the force-include block above: judge the tree by its own header.
+[[ ${HFS_PORT:-0} -eq 1 ]] && grep -q 'vm_tag_t' "$XNU/osfmk/vm/vm_kern.h" && DEFINES+=(-DSTAGE90_HFS_KMEM_TAG=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.  (`$GENERATED` is
@@ -1248,7 +1256,17 @@ while read -r src; do
     # `-include` rather than a flag because the additions are macros a 2050 source reads without
     # declaring (see the header's own comment): nothing in the port may be edited to add an #include.
     if [[ $HFS_PORT -eq 1 && ( ${src#"$XNU"/} == bsd/hfs/* || ${src#"$XNU"/} == bsd/vfs/vfs_journal.c ) ]]; then
-        BSD_FORCE+=(-include "$HFS_FORCE" -include "$HFS_FORCE_CP")
+        BSD_FORCE+=(-include "$HFS_FORCE")
+        # **The cprotect bridge is for a tree that made `struct cprotect` OPAQUE.** 4570 deleted
+        # those structs (`bsd/sys/cprotect.h` is only `typedef struct cprotect *cprotect_t`, :99) and
+        # turned the layer into an opaque kext API, so 878's bridge `hfs_cprotect_port.h` restores
+        # them for the HFS files alone. The Darwin-13 (hd2) tree did NOT do that: its
+        # `bsd/sys/cprotect.h` still DEFINES `struct cprotect` (:102) and the rest (:112/:117/:129/
+        # :138/:153), layout-identical to the bridge's 2050 copies, and it carries the constants and
+        # the two prototypes too. Force-including the bridge there is what redefines them, and that
+        # is the collision that stopped all 36 `bsd/hfs` objects plus `vfs_journal` on D13. Gate on
+        # the DEFINITION, not on the tree name, so a future tree is judged by its own header.
+        grep -q '^struct cprotect' "$XNU/bsd/sys/cprotect.h" || BSD_FORCE+=(-include "$HFS_FORCE_CP")
     fi
 
     # `bsd/dev/unix_startup.c` includes `<netinet/tcp_var.h>`, which includes `<netinet/in_pcb.h>`,
@@ -1688,7 +1706,20 @@ PLATFORM_BSD_SOURCES=("$REPO_ROOT/src/supply/stage90_pthread_functions.c"
 # And the HFS+ port's ten shims, only when the port is on (`$HFS_PORT`, above): with it off nothing in
 # the manifest references them, so compiling the object would add ten definitions no link needs - and
 # `build_entry.sh`'s `require` for it would then be owed an object the pool mode never builds.
-[[ $HFS_PORT -eq 1 ]] && PLATFORM_BSD_SOURCES+=("$REPO_ROOT/src/supply/stage90_hfs_shims.c")
+#
+# **But ONLY on a tree that actually LACKS those ten symbols.** `stage90_hfs_shims.c` is a 4570-port
+# artifact: it supplies `vnode_name`, `is_suser`, `ubc_create_upl`, `proc_tbe`, `vfs_markdependency`,
+# `proc_apply_thread_selfdiskacc`, `fslog_fs_corrupt`, and the three `IOBSD*` helpers because 4570
+# dropped or renamed them. The Darwin-13 (hd2) tree DEFINES all ten itself - `vnode_name`
+# (bsd/vfs/kpi_vfs.c:2061), `is_suser` (bsd/kern/kern_prot.c), `ubc_create_upl` (bsd/kern/ubc_subr.c),
+# `proc_tbe` (bsd/kern/kern_proc.c), `vfs_markdependency` (bsd/vfs/kpi_vfs.c), `fslog_fs_corrupt`
+# (bsd/vfs/vfs_fslog.c:344), `IOBSD*` (iokit/bsddev/IOKitBSDInit.cpp), and `proc_apply_thread_selfdiskacc`
+# (osfmk/kern/task_policy.c) - so compiling the shim object there is not an addition but TEN duplicate
+# definitions, and the link dies with `multiple definition of 'vnode_name'` from the HFS pool's own file
+# resolving to the pool, then colliding with the shim. Gate on the tree DEFINING the file's first shim
+# (`bsd/vfs/vfs_fslog.c`, which 4570 does not carry at all), so the tree judges itself.
+[[ $HFS_PORT -eq 1 && ! -f "$XNU/bsd/vfs/vfs_fslog.c" ]] &&
+    PLATFORM_BSD_SOURCES+=("$REPO_ROOT/src/supply/stage90_hfs_shims.c")
 PL_BSD_ROOTS=(-I"$XNU/bsd")
 for _c in "${COMPONENT_LIST[@]}"; do
     [[ $_c == bsd ]] && continue
@@ -1706,6 +1737,26 @@ for _inc in "${INCLUDES[@]}"; do
 done
 # shellcheck disable=SC2207
 PL_BSD_COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" bsd) )
+# **The BSD-rooted platform sources take the BSD component's CONFIG slice, not the global one.**
+# `stage90_hfs_shims.c` and `stage90_root_media.c` include BSD's private headers (`sys/ubc_internal.h`
+# reads `MAX_CLUSTERS` -> `CONFIG_MAX_CLUSTERS`), so they must see the same CONFIG slice the pool's
+# *bsd* files are compiled with: the `bsd/conf/MASTER` expansion, which on Darwin-13 is a per-component
+# directory and supplies `CONFIG_MAX_CLUSTERS=4` (`bsd/conf/MASTER:321`). The global `${CONFIG_DEFINES[@]}`
+# is a DIFFERENT set: it is expanded with `XNU_TREE` set, so `make_defines.sh $CONFIG` resolves to the
+# *bsd* MASTER only in the 4570 layout (one `config/MASTER`, where `component_conf_dir` returns empty
+# and the two slices coincide). On the Darwin-13 tree the global expansion yields 41 defines and NO
+# `CONFIG_MAX_CLUSTERS`, so the shim failed to compile while every pool bsd object - compiled with the
+# per-component slice at the pool loop - was fine. This is the same per-component split the pool already
+# makes (see the `CONFIG_COMP_DEFINES` block); here it is made once for the block, keyed off the tree's
+# own `component_conf_dir` so 4570 is unchanged (`component_conf_dir` returns empty -> the global set).
+PL_BSD_CONFIG_DEFINES=("${CONFIG_DEFINES[@]}")
+_bsd_ccd=$(component_conf_dir bsd)
+if [[ -n $_bsd_ccd ]]; then
+    PL_BSD_CONFIG_DEFINES=()
+    while IFS= read -r _d; do
+        [[ -n $_d ]] && PL_BSD_CONFIG_DEFINES+=("$_d")
+    done < <(XNU_MASTER_DIR=$_bsd_ccd "$TOOLS_DIR/xnu_config/make_defines.sh" "$CONFIG" 2>/dev/null)
+fi
 mkdir -p "$PL_OUT"
 pl_fail=0
 
@@ -1784,7 +1835,7 @@ for _src in "${PLATFORM_BSD_SOURCES[@]}"; do
     _bsd_defs=("${PL_BSD_COMP_DEFINES[@]}")
     [[ ${_src##*/} == stage90_root_media.c ]] &&
         _bsd_defs+=(-DSTAGE90_ROOT_MEDIA_SIZE_SYM=g_stage90_ramdisk_end)
-    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${CONFIG_DEFINES[@]}" "${DEFINES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${PL_BSD_CONFIG_DEFINES[@]}" "${DEFINES[@]}" \
            "${_bsd_defs[@]}" "${EXTRA_DEFINES[@]}" "${PL_BSD_INCLUDES[@]}" \
            -c "$_src" -o "$_o" 2>"$PL_OUT/$(basename "${_src%.c}").log"; then
         rm -f "$PL_OUT/$(basename "${_src%.c}").log"
