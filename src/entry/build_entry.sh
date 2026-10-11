@@ -24563,8 +24563,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #                            - ALL real, and each of those was scanned in turn: no stub anywhere
     #     coalition_create_internal   9 calls, all real
     #
-    # So `coalitions_init` completes and `task_init` - now real, because this object defines it -
-    # begins. Its calls in address order, with statuses taken from the *stub list*:
+    # So `task_init` - now real, because this object defines it - begins. Its calls in address order,
+    # with statuses taken from the *stub list*:
     #
     #     1 lck_grp_attr_setdefault  real      2 lck_grp_init  real       3 lck_attr_setdefault  real
     #     4 lck_mtx_init  real                 5 lck_mtx_init  real       6 zinit  real
@@ -24735,14 +24735,23 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #                                  nanoseconds_to_absolutetime, timer_call_setup - ALL real
     #     clock_config                 after ntp_init, one tail call: nanoseconds_to_absolutetime,
     #                                  real -> completes
-    #     machine_init                 `is_clock_configured = TRUE; if (debug_enabled) pmap_map_globals();`
-    #                                  and `debug_enabled` is 0 - see below -> returns
+    #     machine_init                 D13 body is `debug_log_init(); clock_config();` (model_dep.c:141-142);
+    #                                  the old `is_clock_configured`/`pmap_map_globals` body is i386's and
+    #                                  is not in this tree -> returns
     #     clock_init                   `b clock_oldinit`, real since 285; clock_oldinit references
     #                                  only `clock_count` and `clock_list` and makes no calls at all
     #                                  -> completes
     #     ledger_init                  5 instructions, tail call `b lck_grp_init`; lck_grp_init calls
     #                                  __bzero, strlcpy and lck_mtx_lock, all real -> completes
-    #     coalitions_init              ***STUB***  <- the stop
+    #     coalitions_init              was the ***STUB*** this step stopped on in 286; `coalition.c`
+    #                                  landed in 287, so it is real and no longer the frontier
+    #
+    # **The frontier has moved past this block since.** With `coalitions_init` real, the boot's next
+    # stop is the clock ladder - `clock_init -> clock_oldinit -> rtclock_init` - reached through the
+    # `clock_ops` table: `clock_oldconfig`/`clock_oldinit` call `cl_ops->c_config`/`cl_ops->c_init`
+    # **indirectly** (`sysclk_ops = { rtclock_config, rtclock_init, ... }`, clock_oldops.c:144-145),
+    # so no static `bl rtclock_*` exists in the image to grep for. `tools/check_machine_init_body.sh`
+    # asserts this ladder against the D13 body - a comment is not a check.
     #
     # **`debug_enabled` is the hinge of the whole prediction**, so it is measured rather than
     # assumed. It is `SECURITY_READ_ONLY_SPECIAL_SECTION(volatile uint32_t, "__TEXT,__const")
@@ -24790,6 +24799,17 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `pmap_map_globals`; that `clock_init`'s tail call into `clock_oldinit` returns; and that
     # `ledger_init`'s tail call into `lck_grp_init` returns. Seven functions, four of them named in
     # advance as things that would *not* stop the run, and the stop came exactly one call later.
+    #
+    # **Where the frontier is now (this comment was stale).** `coalition.c` has since landed, so
+    # `coalitions_init` is real and the 286 stop above is history. The actual next ladder the boot
+    # climbs is the clock one: `clock_init` -> `clock_oldinit` -> `rtclock_init`, arriving from
+    # `machine_init` -> `clock_config` -> `clock_oldconfig`, and `rtclock_init` is the frontier - it
+    # takes the `cpu_number() == master_cpu` branch, calls `pe_arm_init_timebase` and
+    # `rtclock_bus_configure` (which `panic`s if `gPEClockFrequencyInfo.timebase_frequency_hz` is 0,
+    # rtclock.c:294), then `clock_timebase_init`. The prose above that put the stop at
+    # `coalitions_init` is kept only as the 286 record; the ladder here is the live one, and
+    # `tools/check_machine_init_body.sh` checks it against the tree rather than trusting this text.
+    #
     BSD_KERN_KERN_NTPTIME_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_NTPTIME_OBJ:-$XNU_KERNEL_OBJ_OUT/bsd_kern_kern_ntptime.o}
     # 285: `ntp_init`, and a step that is predicted to overshoot the symbol it links
     #
