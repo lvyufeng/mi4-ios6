@@ -108,9 +108,56 @@ bin moved `73475747 → d693864f` (the pet is now linked), so the arm names from
 **live** (the ladder's index-17 enumeration on `USBMODE=2`), not **recoverable** once it ends. A
 recoverable resident log needs the stream (959–962) or a channel that survives a reset.
 
+## 5. THE PRESS (2026-10-11) — 977 DID NOT RETURN; the fix did NOT save the run
+
+Pressed `armed-d13-d693864f` (entry bin `d693864f`, record `6c2b6038`) via
+`run_and_capture.sh --allow-xnu-entry --expect-arm=armed-d13-d693864f`; gate rc=0; the runner sent
+`fastboot boot` only, bytes unchanged across the send (`47fb6590…`). **This was the first press of a
+resident D13 arm that carries the pet.**
+
+**Result — the SAME shape as 975, not the fix's shape:**
+```
+RUN_RC=2 (payload ran, device did NOT come back)
+adb:      serial 4a2fe00b not listed
+host log: 14 -> 14 enumeration(s) of SerialNumber: 4a2fe00b
+port 3-10: 14 -> 14 enumeration(s), any id
+USB capture: EMPTY - 18d1:0910 appeared 0 times; the reader waited the full window and saw nothing
+```
+`lsusb` then showed **no phone at all**; a power press is required.
+
+**The pet WAS linked and DOES reach the watchdog page — measured by the runner's own net clause:**
+`exempt code (entry_wdt_pet) … 4 page reach(es)` over `[0xf9010000, 0xf901ffff]`. So `entry_wdt_pet`
+is in the image and its `movt rD, #0xf901` pool word covers the WDT page — the 977 fix is present
+exactly as §4 describes. **It still did not keep the run alive.**
+
+**What this falsifies.** §2's chain concluded the empty capture + non-return were caused by the SoC
+watchdog resetting a pet-less resident boot *before* the USB ladder reached `__wrap_machine_idle`.
+That is now **not the whole story**: with the pet linked and reaching the WD page, the run is *still*
+dark with **no USB enumeration and no return**. So either (a) the pet is called too late or in a path
+the D13 resident boot never reaches (the ladder and the pet share `__wrap_machine_idle`, so if that
+wrapper never runs, neither does the pet — and the USB stream is empty for the same reason), or
+(b) the run faults/loops *before* `__wrap_machine_idle` at all (past 973, into the kernel), where the
+pet never fires and the ladder never arms. **The decisive reading is the RAM console**, which this
+reset did not leave (no return → likely lost, per the runner's own note). **A recovery is owed** (see
+§6).
+
+**Honest status:** 977's fix is *necessary-but-not-sufficient* is **unproven**; what is proven is
+that it is **not sufficient** on its own to make the resident D13 line live. The 975 window question
+(§"484 MiB ≥ the 301 MiB dyld cache") remains **untested on a live entry**, unchanged.
+
+## 6. The owed recovery (NOT a press)
+
+`scripts/recover_last_kmsg.sh` — bring the phone back with a **plain reboot of the installed ROM**
+(`adb reboot`), then read `/proc/last_kmsg` = the *previous* boot's RAM console, **before booting
+anything else** (a second boot overwrites the single slot). It answers: `xnu_live_wdt_pets` (was the
+run resident at all?), `xnu_entry_args_memSize` (did the 484 MiB window run?), and the USB-ladder
+`xnu_live_usb_*` keys (did the ladder arm?). **The recovery is the operator's** — the device is dark
+and needs a power press first.
+
 *Provenance: `src/entry/entry_trace.c` (`:2113-2169`, `:2241`, `:2251`, `:2380`, `:2701-2866`, `:3030`,
 `:3475`), `src/entry/build_entry.sh:1094-1130`, `src/stage90_main.c:1247`, `src/hw_watchdog.c:184-233`,
 `src/stage90.h:4110`, `tools/test_resident_guard.py:62-71` read by value this session; the built
 `out/stage90/xnu_arm_entry.elf` disassembled with `arm-none-eabi-objdump`; the reference tree
-`external/xnu-hd2-darwin13/xnu` searched for a watchdog driver. Follows
+`external/xnu-hd2-darwin13/xnu` searched for a watchdog driver. **§5 pressed 2026-10-11** — captures
+`out/stage90/captures/rung977-press-armed-d13-d693864f-…-press.log`, `…-usb-reader.log`. Follows
 [[mi4-975-window-on-the-working-entry]], [[mi4-goal-is-press-gated]], [[mi4-xnu-reboot-path-cannot-reset]].*
