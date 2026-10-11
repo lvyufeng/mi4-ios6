@@ -149,6 +149,45 @@ exposing the log). **No press is currently pending.** The next step is host-side
 1–3 from `src/entry/build_entry.sh`'s section sizing, `entry.ld`, the generated Mach-O, and the tree's
 `arm_vm_init.c` `l2_map_linear_range`. **PRESS IS THE OPERATOR'S** when the fix is built and parked.
 
+## 7. The bounded follow-up (host-side, this session) — and what it leaves open
+
+Reading the console sequence and the PTE by value narrows the fault but does **not** yet name its
+writer. What was established this session:
+
+- **The panic is inside `ipc_bootstrap`, before `pmap_init`'s text-write-protect prints.** The console
+  shows `mig_table_max_displ = 7` (`ipc_kobject.c:262`, called from `mig_init()` inside `ipc_bootstrap`)
+  and then panics; it shows **no** `Kernel text %x-%x to be write-protected` line. `kernel_bootstrap`'s
+  order is `vm_mem_bootstrap → vm_mem_init → sched_init → wait_queue_bootstrap → ipc_bootstrap → …`, so
+  the fault is at `ipc_bootstrap`, before `pmap_init`.
+- **The entry's identity map covers the faulting page and is executable.** `sectionOffset` is `0x0` at
+  run time (the log prints `section offset is 0x0`), so `l2_map_linear_range(identityCachePA,
+  gPhysBase - 0, gPhysBase + gMemSize)` maps `[0x80000000, 0x9e400000)` — page `0x80569000` is entry
+  0x569 of the identity L2 table, well within the 123904 entries the arm allocates. That PTE is
+  `pa | L2_SMALL_PAGE | L2_ACCESS_PRW | (TEXCB<<2)` = **`XN (bit0) = 0`, i.e. executable**.
+- **Therefore the fault is NOT the entry's own identity mapping.** A `fsr=0x0f` (permission fault,
+  page) on **fetch** means the effective PTE for `0x80569000` had **`XN` set (or was a section / a
+  stale TLB entry)** — it does *not* follow from `l2_map_linear_range`'s own PTE, and it does *not*
+  follow from `pmap_init`'s `L2_ACCESS_APX` write-protect (APX is bit 9; it makes the page R-X, still
+  executable).
+
+**What is still open (the next experiment's job, host-side):** *which* write makes the effective
+permission on that page non-executable. The candidates, each checkable without a press:
+
+1. the page is reached by a **1 MB section** descriptor somewhere (an L1_TYPE_SECT with `XN`) rather
+   than the L2 page the entry built;
+2. a **writer sets `L2_NX_BIT`** on it — the `vm_fault(EXEC)` path (`trap.c:380`) would then fail and
+   panic exactly as seen; `pmap_eligible_for_execute()` is **declared but has no definition** in this
+   tree (`pmap.h:271` vs no `*.c`), so `vm_fault.c:3942` links against a stub — worth confirming the
+   fault path's behaviour when the page *is* present but XN;
+3. a **stale TLB entry** survives a PTE rewrite (the text-protect loop and `pmap_enter` must flush).
+
+The cleanest disambiguator is to **re-install experiment 242's prefetch instrument** — `entry_vectors.s`
+and `entry_trace.c:5513` record that the prefetch vector slot was **handed to Apple's
+`locore_fleh_prefabt`** (476), so this D13 line carries **no entry-side prefetch capture**. Restoring a
+read-only `fleh_prefabt` that logs `IFSR`/`IFAR`/the word at the pc would name the writer on the next
+press. This is a build change, so it waits on the arm/build being settled — **no new press is owed
+before it**.
+
 *Provenance: recovery capture
 `out/stage90/captures/recovered-armed-d13-d693864f-20261011-042933-last_kmsg.txt` (the runner's own
 `--summarise` output contradicts itself under tool-render corruption and is NOT relied on here; every
