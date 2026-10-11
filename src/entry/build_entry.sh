@@ -37631,6 +37631,30 @@ verify_root_device() {
 }
 verify_root_device
 
+# --------------------------------------------- the __TEXT/__DATA seam (experiment 979)
+#
+# **A structural refusal, not a comparison, and it is here because the comparison above missed this.**
+# `tools/host_entry_macho_check.sh`'s every `expect()` compares a Mach-O segment field against the
+# linker's own symbol - and both come from entry.ld, so they AGREED even when the seam was wrong.
+# 979 is what they agreed on: `.text` ended at `__entry_text_end` = 0x805699a0 (`. = ALIGN(32)`, not
+# page-aligned) while the linker put the real `.data` output section on the NEXT page, 0x8056a000.
+# `pmap_init` (`osfmk/arm/pmap.c:3620`) starts its data-NX loop at `sdata = __entry_data_start`; with
+# the unaligned seam its FIRST `pmap_pte(0x805699a0)` resolved to the LAST TEXT PAGE (holding
+# `lock_set_init`) and set `L2_NX_BIT` on it -> `Kernel prefetch abort` at `lock_set_init+0`. The fix
+# is the page pad in entry.ld; the refusal is the `host_entry_macho_check.sh` block that asserts
+# (1) `__TEXT` ends exactly where `__DATA` begins and (2) that boundary is page-aligned. Run it in the
+# build so a reintroduced unaligned seam stops the build rather than a press
+# ([[mi4-a-claim-in-a-comment-is-not-a-check]]).
+if [[ -f $OUT/xnu_arm_entry.elf ]]; then
+    if ! "$REPO_ROOT/tools/host_entry_macho_check.sh" "$OUT/xnu_arm_entry.elf" >/dev/null 2>&1; then
+        say "  (the seam check's own reason:)"
+        "$REPO_ROOT/tools/host_entry_macho_check.sh" "$OUT/xnu_arm_entry.elf" 2>&1 | grep -E 'seam|page-align|__entry_text_end|__entry_data_start' | head -6 >&2 || true
+        layout_fail "the __TEXT/__DATA seam is not contiguous-and-page-aligned: pmap_init's data-NX loop would start at __entry_data_start and mark a text page non-executable (experiment 979)"
+    fi
+    say "  xnu_entry_979: the __TEXT/__DATA seam is contiguous and page-aligned - __entry_text_start + __entry_text_size == __entry_data_start, and pmap_init's data-NX loop (pmap.c:3620) starts on the first WRITABLE page, not the last text page"
+fi
+
+
 # The generated header. **The heredoc is quoted, and that is the fix for a defect 459's own build
 # printed and did not stop on**: the body names symbols in backticks in its comments, and with an
 # unquoted heredoc every one of them is a command substitution - the word `verify_root_device` in
