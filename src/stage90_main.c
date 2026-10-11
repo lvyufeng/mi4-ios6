@@ -46,21 +46,36 @@ static void build_chosen_random_seed(uint8_t *out, uint32_t len)
 
 static void build_stage90_apple_dt(struct apple_dt_builder *b)
 {
-    /* 915-B rung 1 (STAGE90_XNU_REGIONS=1): append the low bank [0, 0x60000000) as reg[2]/[3],
-     * leaving the boot pair at index 0/1. Deliberately INERT: every reader of /memory/reg
-     * (pe_state.c:38-39, pexpert.c:68, xnu_pe_init_platform_false.c:423-425) reads pair 0 alone and
-     * compares it to the boot region, so an extra pair below the boot pair changes no reader's
-     * reading. It only puts the region list into the DT where a later rung (region registration,
-     * arm_vm_init.c) can read it. `#if` not `#ifdef`: the switch is always defined 0 or 1 (an
-     * undefined-name would be a different spelling of off - [[mi4-off-option-two-spellings]]). */
+    /* 915-B rung 2 (STAGE90_XNU_REGIONS=1): the boot pair at reg[0]/[1] (UNCHANGED - the four
+     * /memory/reg readers read pair 0 alone), then the low bank [0x00000000, 0x60000000) CARVED into
+     * the three spans the PMAP actually owns. Rung 1 appended the WHOLE low bank, which admits the
+     * two carveout holes; rung 2 appends only the spans, so the allocator cannot hand out carveout.
+     * The spans are the live device's own /proc/iomem `System RAM` lines below the boot bank, read BY
+     * VALUE from out/stage90/device-reads/mi4-iomem-and-mem.txt (lines 4-6; size = end - start + 1):
+     *
+     *     00000000-059fffff : System RAM   -> {0x00000000, 0x05a00000}
+     *     0d200000-0f9fffff : System RAM   -> {0x0d200000, 0x02800000}
+     *     0ff00000-5fffffff : System RAM   -> {0x0ff00000, 0x50100000}
+     *
+     * The two holes 0x05a00000-0x0d1fffff and 0x0fa00000-0x0fefffff are the carveouts. Still a pure
+     * DT edit: every reader reads pair 0 alone, so an appended region changes no reader's reading.
+     * `#if` not `#ifdef`: the switch is always defined 0 or 1 (an undefined name would be a different
+     * spelling of off - [[mi4-off-option-two-spellings]]). */
 #if STAGE90_XNU_REGIONS
     static const uint32_t memory_reg[] = {
-        RAM_PHYS_BASE, RAM_BOOT_BANK_SIZE, 0x00000000u, 0x60000000u,
+        RAM_PHYS_BASE, RAM_BOOT_BANK_SIZE,
+        0x00000000u, 0x05a00000u,
+        0x0d200000u, 0x02800000u,
+        0x0ff00000u, 0x50100000u,
     };
+    _Static_assert(sizeof(memory_reg) / sizeof(memory_reg[0]) == 8,
+                   "915-B rung 2: /memory/reg is the boot pair + the low bank's three spans");
 #else
     static const uint32_t memory_reg[] = {
         RAM_PHYS_BASE, RAM_BOOT_BANK_SIZE,
     };
+    _Static_assert(sizeof(memory_reg) / sizeof(memory_reg[0]) == 2,
+                   "off: /memory/reg is the boot pair alone");
 #endif
     static const uint32_t gic_reg[] = {
         0xf9000000u, 0x00001000u,

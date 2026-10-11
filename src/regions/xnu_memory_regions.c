@@ -42,7 +42,9 @@
  *   - the FIRST pair's base is not `boot_base` (the boot region MUST be pair 0 - v2 section 2.4;
  *     a low-bank-first list is refused, not silently mis-read as the boot region, the exact defect
  *     the accessor exists to kill);
- *   - a later pair has size 0 (an empty region is a malformed list).
+ *   - a pair has size 0 (an empty region is a malformed list - the boot pair included, 915-B
+ *     rung 2);
+ *   - two pairs OVERLAP (the region list double-counts memory; 915-B rung 2).
  * A `regions == NULL` call is a pure COUNT (the caller may size its array first); the refusals still
  * apply, and 0 is still the refusal signal.
  */
@@ -62,8 +64,20 @@ xnu_memory_regions_walk(const uint32_t *reg_words, uint32_t word_count, uint32_t
 	for (uint32_t i = 0u; i < pairs; i++) {
 		uint32_t base = reg_words[i * 2u];
 		uint32_t size = reg_words[i * 2u + 1u];
-		if (i != 0u && size == 0u) {
-			return 0u;      /* an empty non-boot region is malformed */
+		if (size == 0u) {
+			return 0u;      /* an empty region is malformed - the boot pair included (915-B rung 2) */
+		}
+		/* Pairwise DISJOINT (915-B rung 2).  A low span (a carveout sub-interval) must not
+		 * overlap a region already accepted - neither the boot region nor an earlier span.
+		 * Two entries over the same physical address would let the allocator hand the same
+		 * page out twice, so an overlap is refused rather than summed
+		 * ([[mi4-one-value-two-definitions]]). */
+		for (uint32_t j = 0u; j < i; j++) {
+			uint32_t bbase = reg_words[j * 2u];
+			uint32_t bsize = reg_words[j * 2u + 1u];
+			if (base < bbase + bsize && bbase < base + size) {
+				return 0u;
+			}
 		}
 		if (regions != 0 && i < max_regions) {
 			regions[i].base = base;
