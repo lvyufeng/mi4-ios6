@@ -85,6 +85,16 @@ extern void entry_os_console_char(int ch, uint32_t which);
  * [[mi4-one-value-two-definitions]] */
 extern void rtc_configure(uint64_t hz);
 
+/* **entry_irq_gic_map** is the entry image's own GIC-window setter (`src/entry/entry_irq.c`, declared
+ * `src/entry/entry_gic.h:320`). The four accessors in that file add a base the image starts with at
+ * zero - the raw `0xf9000000`/`0xf9002000` window, valid while `physBase == virtBase`. Once XNU owns
+ * the page tables that window is gone, and the timer driver's `start()` (`src/platform/MSM8974Timer.cpp`,
+ * an XNU object) reaches `entry_irq_enable_line` and faults reading `GICD_ISENABLER0` at `0xf9000104`
+ * (982's press). So this file, which already `ml_io_map`s the CPU interface for its own handler, ALSO
+ * maps the distributor and hands the image both VAs - ONE fix for the ONE window, not a second copy.
+ * [[mi4-one-value-two-definitions]] */
+extern void entry_irq_gic_map(uint32_t dist_va, uint32_t cpu_va);
+
 /* **rtclock_intr** is the generic ARM RTC layer's interrupt entry (`osfmk/arm/rtclock.c:175`), which
  * runs the clock's own `etimer_intr`. It is what ADVANCES THE KERNEL TICK, and the interrupt that
  * delivers it is the timer PPI below - so a handler that acknowledges and EOI's that line WITHOUT
@@ -124,9 +134,16 @@ static volatile unsigned int *g_msm8974_gicc;
 static void
 msm8974_gic_map(void)
 {
+	volatile unsigned int *dist;
 	if (g_msm8974_gicc != 0)
 		return;
+	/* The distributor (for the timer driver's `entry_irq_enable_line`) and the CPU interface (for
+	 * this file's handler). Both `ml_io_map`ed; both VAs handed to the entry image's accessors so
+	 * there is ONE window and not two opinions about it. 982: before this, only the CPU interface
+	 * was mapped and the distributor was read raw, which is the fault the press measured. */
+	dist = (volatile unsigned int *)ml_io_map(MSM8974_GICD_BASE, MSM8974_PAGE_BYTES);
 	g_msm8974_gicc = (volatile unsigned int *)ml_io_map(MSM8974_GICC_BASE, MSM8974_PAGE_BYTES);
+	entry_irq_gic_map((uint32_t)(uintptr_t)dist, (uint32_t)(uintptr_t)g_msm8974_gicc);
 }
 
 static inline unsigned long long

@@ -13458,3 +13458,40 @@ set=armed-d13-8cfb7ca8 sha256=f41f2fff9be2fa51e1985fc8c36d482b67be5636618822e41b
 set=armed-d13-8cfb7ca8 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-stage90_fixture.macho
 set=armed-d13-8cfb7ca8 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-stage90-build-config.txt
 set=armed-d13-8cfb7ca8 sha256=9cd756826a25ac048c76323c4c5e9e72948f1ab724b5bbd795a38ff704953670 bytes=560 file=SHA256SUMS.txt role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-SHA256SUMS.txt
+# armed-d13-887d60ea  —  983: 982 rebuilt with the GIC-WINDOW fix. 982 fixed the CPU interface
+# (the PE handler ml_io_map-d GICC) and ran past 981 to bsd_init; then faulted on the
+# OTHER half - the distributor, read raw by entry_irq_enable_line from the timer driver.
+#
+# THE FAULT (982 press): xnu_live_sleh_seq=1 type=4 fsr=5 far=0xf9000104 pc=0x8000c874
+# lr=0x801ac87c -> pc = entry_irq_enable_line+0x54, lr = MSM8974Timer::start. The driver s
+# arming call (MSM8974Timer.cpp:1831, intid 40) reads GICD_ISENABLER0 through gicd_read,
+# whose base was the RAW 0xf9000000. XNU maps only [physBase,+gMemSize) and the managed
+# window, so the entry 0xf9000000 boot-L1 section is dropped - the 981 class, one register
+# over ([[mi4-one-value-two-definitions]]).
+#
+# THE FIX: the four accessors in entry_irq.c add ONE base each - g_irq_gic_dist_va /
+# g_irq_gic_cpu_va - zero while physBase == virtBase (every pre-XNU caller unchanged), set
+# to ml_io_map(phys) minus PHYS by the new entry_irq_gic_map, which the board PE
+# (pe_msm8974.c msm8974_gic_map) calls once the kernel owns the tables. The PE now maps
+# BOTH windows (the distributor it did not map before) and hands the image the two VAs.
+#
+# VERIFIED BY VALUE: gicd_read loads g_irq_gic_dist_va (ldr r3,[r3,#0x18]; add
+# r3,#0xf9000000), NOT a bare 0xf9000000; entry_irq_gic_map @0x8000cef8; the two VAs in .bss.
+#
+# Switch set is 982-s UNCHANGED; the ENTRY BIN moved (8cfb7ca8 -> 887d60ea). VERIFIED:
+# the four build checkers pass, make check 0. Medium: 968 real iOS 7.1.2 HFSX rootfs over
+# hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never written - fully reversible. fastboot boot
+# only, NEVER flash.
+# =================================================================================================
+set=armed-d13-887d60ea sha256=887d60eaaa5f23fa18e49fa0b6828465c75ac443728d2c65862aec4e8a92a699 bytes=6335572 file=xnu_arm_entry.bin role=983-gic-window-both-dist-and-cpu-mapped;-xnu_arm_entry.bin
+set=armed-d13-887d60ea sha256=611f3b9e1e0828e27cf87eb73ef8e6595e65b11837b4708b602ff13a0db56bbc bytes=7375348 file=xnu_arm_entry.elf role=983-gic-window-both-dist-and-cpu-mapped;-xnu_arm_entry.elf
+set=armed-d13-887d60ea sha256=ee2fd6e88bea08e32f303ca84e115262da5fdd2aa28ec5c5e1032a37526fb022 bytes=1912 file=xnu_arm_entry.h role=983-gic-window-both-dist-and-cpu-mapped;-xnu_arm_entry.h
+set=armed-d13-887d60ea sha256=17225e415cd682e96c71b3f39e6c5a1bd874cf721742704a12ad20143076c7c8 bytes=1409 file=xnu_arm_entry-config.txt role=983-gic-window-both-dist-and-cpu-mapped;-xnu_arm_entry-config.txt
+set=armed-d13-887d60ea sha256=7feb5de86838cd0ad9b8ced6f17b3660192cfbe41589c8db539e095d64fbf250 bytes=3149 file=xnu_arm_entry-sources.txt role=983-gic-window-both-dist-and-cpu-mapped;-xnu_arm_entry-sources.txt
+set=armed-d13-887d60ea sha256=28cd4265e54ff71a49dd82a5e5c138092d3d27ea1a2c14dfa5c8f7dc42046f6c bytes=6830980 file=stage90.bin role=983-gic-window-both-dist-and-cpu-mapped;-stage90.bin
+set=armed-d13-887d60ea sha256=7be7ba062c62e3a6b1d3d81b5758091f593b4c8bb161b320a014027cd2227af0 bytes=6893052 file=stage90.elf role=983-gic-window-both-dist-and-cpu-mapped;-stage90.elf
+set=armed-d13-887d60ea sha256=4e0ff11a22210c3d3f1af70f94f6f30dcc9c6b202bb30c3aac47c3c767623ece bytes=6834176 file=stage90.img role=983-gic-window-both-dist-and-cpu-mapped;-stage90.img
+set=armed-d13-887d60ea sha256=04f41f9983421408b77f75c6baee0d6943921cbf02e6d1d7958ceea522e32f38 bytes=9355264 file=stage90-qcdt.img role=983-gic-window-both-dist-and-cpu-mapped;-stage90-qcdt.img
+set=armed-d13-887d60ea sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=983-gic-window-both-dist-and-cpu-mapped;-stage90_fixture.macho
+set=armed-d13-887d60ea sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=983-gic-window-both-dist-and-cpu-mapped;-stage90-build-config.txt
+set=armed-d13-887d60ea sha256=4989daeadd0c63db2146e2fb056511b6b715c9e6707d12ef0f25ea566d7d7684 bytes=560 file=SHA256SUMS.txt role=983-gic-window-both-dist-and-cpu-mapped;-SHA256SUMS.txt

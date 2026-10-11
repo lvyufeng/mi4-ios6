@@ -312,4 +312,11 @@ uint32_t entry_irq_unregister_client(uint32_t intid);
  */
 uint32_t entry_irq_enable_line(uint32_t intid, uint32_t target);
 
+/* 982: re-point the `entry_irq.c` GIC accessors at `ml_io_map` kernel VAs. Called by the board
+ * platform expert once XNU owns the page tables and the entry image's raw 0xf9000000 window is
+ * gone; the two arguments are the distributor's and the CPU interface's mapped VAs. A zero VA
+ * leaves that window on its raw constant, so a partial call is a valid state and a pre-XNU caller
+ * is bit-for-bit unaffected. */
+void entry_irq_gic_map(uint32_t dist_va, uint32_t cpu_va);
+
 #endif /* STAGE90_ENTRY_GIC_H */

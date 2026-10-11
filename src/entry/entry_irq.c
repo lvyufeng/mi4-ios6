@@ -96,33 +96,33 @@ extern void ml_install_interrupt_handler(void *nub, int source, void *target,
 /* --------------------------------------------------------------------------------------------- */
 
 /*
- * Read with `volatile` and write followed by `dsb sy`, because a peripheral register write that is
- * still in the write buffer when the next instruction reads the same block is a read of the old
- * value. The handler below reads `GICC_IAR` and the distributor's pending register, and
- * `gicd_write(ISENABLER0, ...)` followed by anything at all is exactly the sequence where an
- * unbarriered write would turn a reading into a claim. These four are the *only* place in the image
- * the GIC is addressed, which is the property `tools/check_irq_routing.py` asserts by reading
- * `entry_gic.c` for a second copy of the arithmetic.
+ * Read with `volatile`, write followed by `dsb sy`: a peripheral write still in the write buffer
+ * when the next read hits the block is a read of the old value. These four are the *only* place the
+ * GIC is addressed, through the two bases below (982) - the raw constant while `physBase ==
+ * virtBase`, or `ml_io_map`'s VA once XNU owns the tables. A second copy is the defect removed.
  */
+uint32_t g_irq_gic_dist_va;
+uint32_t g_irq_gic_cpu_va;
+
 uint32_t gicd_read(uint32_t off)
 {
-    return *(volatile uint32_t *)(uintptr_t)(STAGE90_GIC_DIST_BASE + off);
+    return *(volatile uint32_t *)(uintptr_t)(STAGE90_GIC_DIST_BASE + g_irq_gic_dist_va + off);
 }
 
 void gicd_write(uint32_t off, uint32_t value)
 {
-    *(volatile uint32_t *)(uintptr_t)(STAGE90_GIC_DIST_BASE + off) = value;
+    *(volatile uint32_t *)(uintptr_t)(STAGE90_GIC_DIST_BASE + g_irq_gic_dist_va + off) = value;
     __asm__ volatile ("dsb sy" ::: "memory");
 }
 
 uint32_t gicc_read(uint32_t off)
 {
-    return *(volatile uint32_t *)(uintptr_t)(STAGE90_GIC_CPU_BASE + off);
+    return *(volatile uint32_t *)(uintptr_t)(STAGE90_GIC_CPU_BASE + g_irq_gic_cpu_va + off);
 }
 
 void gicc_write(uint32_t off, uint32_t value)
 {
-    *(volatile uint32_t *)(uintptr_t)(STAGE90_GIC_CPU_BASE + off) = value;
+    *(volatile uint32_t *)(uintptr_t)(STAGE90_GIC_CPU_BASE + g_irq_gic_cpu_va + off) = value;
     __asm__ volatile ("dsb sy" ::: "memory");
 }
 
@@ -718,4 +718,29 @@ uint32_t entry_irq_arm(void)
     IRQ_LIVE("xnu_live_irq_cpu_pmr", gicc_read(STAGE90_GICC_PMR));
 
     return g_irq_enabled_line;
+}
+
+/* --------------------------------------------------------------------------------------------- */
+/* 982: the GIC window, re-pointed at a mapped VA once XNU owns the page tables                    */
+/* --------------------------------------------------------------------------------------------- */
+
+/*
+ * Called by the board platform expert (`src/platform/darwin13/pe_msm8974.c`,
+ * `PE_init_SocSupport_msm8974`) once the kernel owns the page tables and the entry image's raw
+ * 0xf9000000 window is gone (982). The two `ml_io_map` calls are two independent VA allocations,
+ * so this stores each as the signed offset the accessors add to that window's own physical
+ * constant: `dist_va - STAGE90_GIC_DIST_BASE` and `cpu_va - STAGE90_GIC_CPU_BASE`. The constants
+ * stay the machine's physical addresses (`tools/check_gic_routing.py` checks them); only what the
+ * accessors add on top changes. A zero VA leaves that window on its raw constant, so a partial
+ * call is a valid state and a pre-XNU caller is bit-for-bit unaffected.
+ */
+void
+entry_irq_gic_map(uint32_t dist_va, uint32_t cpu_va)
+{
+    /* Two independent `ml_io_map` allocations, so two independent offsets. A zero VA leaves that
+     * window's raw constant in place, so a partially successful call is still a valid state. */
+    if (dist_va != 0u)
+        g_irq_gic_dist_va = dist_va - STAGE90_GIC_DIST_BASE;
+    if (cpu_va != 0u)
+        g_irq_gic_cpu_va  = cpu_va  - STAGE90_GIC_CPU_BASE;
 }
