@@ -533,6 +533,48 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 _entry_tree_d13=$(awk -F= '$1 == "STAGE90_XNU_TREE_D13" { print $2 }' "$ENTRY_CFG")
 [[ -n $_entry_tree_d13 ]] || _entry_tree_d13=0
 #
+# **The kernel objects this entry image LINKS are built from the XNU tree, and NO OTHER clause in
+# this gate looks at that tree (experiment 980).** The freshness sweep above is rooted at `src/`
+# (maxdepth 1) and the entry-source manifest covers `src/entry/` by content; `build_entry.sh` merely
+# LINKS the prebuilt `out/xnu_kernel_obj_d13/*.o` and never recompiles the tree. So an edit to
+# `osfmk/arm/pmap.c` (or `arm_vm_init.c`) that is not rebuilt leaves a stale `.o` the image links,
+# while the recorded hash, the manifest, SHA256SUMS.txt and the revert-set record ALL AGREE with each
+# other and this gate prints its PASS - the exact blind direction the sweep's own comment (233-238) is
+# about, reached through the kernel pool instead of `src/`.
+#
+# The reading is a CONTENT hash, written by `tools/build_xnu_arm_kernel.sh` (via
+# `tools/gen_kernel_source_manifest.py`) over the very source list its compile loop reads, and
+# re-hashed here. **An mtime test would refuse a correct arm**: the HFS sources are staged into the
+# tree and marked, and a re-provision resets an unchanged file's mtime - measured this session on
+# `armed-d13-fa301bd7`, whose `bsd/hfs/hfs_vfsops.c` is newer than its `.o` while both the object and
+# the image carry the staged patch.
+#
+# **A record that does not exist is the historical case, and it is REPORTED, not refused.** The
+# press-ready arm `armed-d13-fa301bd7` PREDATES this record (its kernel pool is from 2026-10-10, the
+# arm from 2026-10-11); refusing on a missing record would block the press this gate exists to
+# clear - without evidence the record's absence is stale-kernel, only "predates the record". Every
+# future kernel build writes one, and then a drift is a refusal.
+if [[ $_entry_tree_d13 -eq 1 ]]; then
+  # The record path is the producer's, derived the same way (the tree suffix comes from the tree's
+  # own discriminator, `tools/xnu_tree_roots.sh:38`): `_d13` iff the legacy private header exists.
+  _ksr_suffix=""
+  [[ -f $REPO_ROOT/external/xnu-hd2-darwin13/xnu/osfmk/sys/types.h ]] && _ksr_suffix=_d13
+  KERNEL_SRC_RECORD=$REPO_ROOT/out/xnu_kernel_src${_ksr_suffix}.sha256
+  if [[ -f $KERNEL_SRC_RECORD ]]; then
+    _ksm=$("$REPO_ROOT/tools/gen_kernel_source_manifest.py" --verify "$KERNEL_SRC_RECORD" 2>&1) && _ksm_rc=0 || _ksm_rc=$?
+    if [[ $_ksm_rc -ne 0 ]]; then
+      echo "kernel source newer than the pool it was compiled into:"
+      printf '%s\n' "$_ksm" | sed 's/^/  /'
+      fail "a source this image's kernel objects were built from has CHANGED (or gone) since the pool was compiled, so the linked objects may not be the tree's - rebuild the kernel pool (tools/build_xnu_arm_kernel.sh, which rewrites $KERNEL_SRC_RECORD) and then src/entry/build_entry.sh under this arm. Nothing is rebuilt by this refusal"
+    fi
+    echo "the kernel sources match the pool they were compiled into ($KERNEL_SRC_RECORD)"
+  else
+    echo "NOTE: no kernel-source content record at $KERNEL_SRC_RECORD - this arm's pool predates"
+    echo "      the record (980), so its objects-vs-tree freshness is NOT checked here. The next"
+    echo "      tools/build_xnu_arm_kernel.sh writes one and this gate then refuses on drift."
+  fi
+fi
+#
 # **Every key by name, because the ten that *are* the variant are not named like the artifact.** The
 # four keys that identify the record (SHA256, BYTES, TRACE, REAL_ARM_INIT) all begin `STAGE90_XNU_ENTRY_`
 # or `STAGE90_ENTRY_`, and the ten that say *which arm this is* - SLOT_NULL, EXIT_POC_FLUSH,

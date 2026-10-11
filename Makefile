@@ -345,6 +345,18 @@ check:
 	@tools/check_d13_regions.py --selftest >/dev/null
 	@tools/check_d13_regions.py
 
+# **980: the press gate's staleness HOLE over the XNU kernel tree, and the content record that closes
+# it.** `preflight_boot_check.sh` decides staleness by MTIMES over `src/` alone, and `build_entry.sh`
+# merely LINKS the prebuilt `out/xnu_kernel_obj_d13/*.o` - so an unrebuilt `osfmk/arm/pmap.c` edit is
+# invisible to the gate (its recorded hash, manifest, SHA256SUMS and revert-set all agree with each
+# other). `tools/build_xnu_arm_kernel.sh` now writes a CONTENT hash of every source its compile loop
+# reads (`out/xnu_kernel_src_d13.sha256`), and the gate re-hashes the same paths and refuses on drift.
+# `gen_kernel_source_manifest.py --selftest` proves the record bites (content drift and a missing
+# source refuse; an mtime-only change does not, which is why the reading is content and not mtime - the
+# staged `hfs_vfsops.c` is newer than its `.o` on a correct arm). Host-only: no compiler, no device.
+	@tools/gen_kernel_source_manifest.py --selftest >/dev/null
+	@tools/check_kernel_source_record_wired.sh
+
 # **915-B rung 0 (host half): the ONE /memory/reg region accessor.** `src/xnu_memory_regions.c` is the
 # single walk of `/memory/reg` (v2 section 2.4/6.8): the boot region is the pair whose base equals the
 # boot base and it MUST be pair 0, so "pair 0 is the boot region" stops being a convention the data can

@@ -1870,6 +1870,40 @@ echo "  EABI runtime:         ${#RUNTIME_SOURCES[@]} file(s) -> $RT_OUT (not in 
 echo "  platform expert:      ${#PLATFORM_SOURCES[@]} C++ and ${#PLATFORM_C_SOURCES[@]} C file(s) -> $PL_OUT (not in the manifest)"
 echo "  tables this image supplies: ${#PLATFORM_BSD_SOURCES[@]} C file(s) -> $PL_OUT (not in the manifest)"
 
+# ---- the kernel-source CONTENT record (experiment 980) --------------------------------------------
+#
+# **The pool's own sources are hashed here, at the moment they are compiled, because nothing else
+# looks at them.** `preflight_boot_check.sh` decides staleness by MTIMES over `src/`, and
+# `src/entry/build_entry.sh` merely LINKS `$OUT/osfmk_arm_pmap.o` (and `..._arm_vm_init.o`, ...) - so
+# an edit to `osfmk/arm/pmap.c` that is not rebuilt leaves a stale object that the gate cannot see.
+# This writes the CONTENT hash of every source in `$MANIFEST` (the list the loop above compiled from,
+# `tools/xnu_tree_roots.sh:67`) to one record the gate re-checks by re-hashing the same paths.
+#
+# **CONTENT, not mtime**: the HFS sources are STAGED into the tree by `tools/stage_hfs.sh` and marked
+# (`hfs_vfsops.c` carries 905 B2's guarded `vfs_clearflags`), and a re-provision or checkout resets an
+# unchanged file's mtime - an mtime test would refuse a correct tree (measured: `hfs_vfsops.c` is
+# newer than its `.o` while the pool object and the image both carry the staged patch).
+#
+# A `--limit`/`--dir` run compiles only part of the pool, so its record would be a lie about the rest;
+# write none, and say so.
+KERNEL_SRC_RECORD=$REPO_ROOT/out/xnu_kernel_src$XNU_OBJ_SUFFIX.sha256
+if [[ $ONLY_PLATFORM -eq 1 ]]; then
+    # `--platform-only` compiles no pool object and its `$MANIFEST` is the emptied platform-only list
+    # (line 313), so a record here would hash the WRONG sources - a lie about the pool. Write none.
+    echo "  kernel source record: NOT written (--platform-only builds no pool objects)"
+elif [[ $LIMIT -eq 0 && $ONLY_DIR == "" ]]; then
+    KSM_OUT=$("$TOOLS_DIR/gen_kernel_source_manifest.py" "$MANIFEST" --write "$KERNEL_SRC_RECORD" 2>&1) || {
+        echo "REFUSING: the kernel-source content record could not be written - see above" >&2
+        echo "$KSM_OUT" >&2
+        exit 5
+    }
+    echo "  kernel source record: $KERNEL_SRC_RECORD"
+    echo "$KSM_OUT" | sed 's/^/  /'
+else
+    echo "  kernel source record: NOT written (a partial build - --limit/--dir - is not the whole pool,"
+    echo "                        so its record would misrepresent the objects the entry image links)"
+fi
+
 # 472: and the one measured consequence of `-USECURE_KERNEL`, checked over the object rather than
 # over the flag list. `kern_cs.c:82-84` is `#if SECURE_KERNEL` / `const int cs_enforcement_enable = 1;`
 # and `:94` is `SECURE_READ_ONLY_LATE(int) cs_enforcement_enable = DEFAULT_CS_ENFORCEMENT_ENABLE;`
