@@ -13275,3 +13275,41 @@ set=armed-d13-d693864f sha256=47fb659006467aaf76ccfd9eda1beeaf387d427532769a6976
 set=armed-d13-d693864f sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-stage90_fixture.macho
 set=armed-d13-d693864f sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-stage90-build-config.txt
 set=armed-d13-d693864f sha256=de2b27b56fe7d891b359c6470660a27ae1d787719b857270bbfa0de8261577e8 bytes=560 file=SHA256SUMS.txt role=977-the-975-window-arm-with-the-D13-residence-watchdog-pet-linked;-SHA256SUMS.txt
+# armed-d13-97d6a511  —  979: 977 with the entry.ld PAGE-ALIGNMENT fix that stops pmap_init NX-ing the last
+# text page (the `ipc_bootstrap` panic experiment-979 recovered).
+#
+# WHY. The 977 press (armed-d13-d693864f) was recovered by recover_last_kmsg.sh and is a real
+# XNU boot: it passed arm_vm_init, pmap_bootstrap, vm_page_bootstrap, printed Darwin Kernel
+# Version, then PANICKED `Kernel prefetch abort` at pc=lock_set_init+0 (lr=ipc_bootstrap+0x194,
+# fsr=0x0f). ROOT CAUSE: the entry `.text` ended at __entry_text_end = 0x805699a0 (ALIGN(32),
+# NOT page-aligned) while the linker put the real `.data` output section on the next page
+# 0x8056a000. pmap_init (`osfmk/arm/pmap.c:3620`) runs a data-NX loop from sdata = __entry_data_start
+# = 0x805699a0; its first iteration pmap_pte(0x805699a0) resolved to the LAST TEXT PAGE
+# [0x80569000,0x8056a000) -- holding lock_set_init -- and set L2_NX_BIT on it, making it
+# non-executable. pmap_asid_configure (also in pmap_init) still printed its line, so the loop
+# is on the path. A real kernel __DATA.vmaddr is page-aligned, so this never happens there.
+#
+# THE FIX (src/entry/entry.ld). Pad `.text` to a page (STAGE90_ENTRY_ALIGN 0x1000, was ALIGN(32))
+# so __entry_text_end == __entry_data_start == 0x8056a000 = the real .data page. pad is INSIDE
+# the .text section so __TEXT covers it and no uncovered gap is left between the segments.
+#
+# THE ARM = 977 with the one entry.ld change. Every switch is 977 s. The ENTRY BIN MOVED
+# (d693864f -> 97d6a511).
+#
+# VERIFIED BY VALUE: nm __entry_text_end == __entry_data_start == 0x8056a000, __TEXT vmsize
+# 0x56a000 (was 0x5699a0); host_entry_macho_check OK; make check 0. Medium: 968 real iOS 7.1.2
+# HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, the base is never written - fully
+# reversible. fastboot boot only, NEVER flash. PRESS IS THE OPERATOR S.
+# =================================================================================================
+set=armed-d13-97d6a511 sha256=97d6a51114e9ac30150fbcda9b8834a06ec71ad0683f1117b911a876c4ba83c3 bytes=6331476 file=xnu_arm_entry.bin role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-xnu_arm_entry.bin
+set=armed-d13-97d6a511 sha256=2e63af2990bcf8ae98c67c4635b5f98ff28c465d7a233d0b40d3749cc09c48d5 bytes=7371080 file=xnu_arm_entry.elf role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-xnu_arm_entry.elf
+set=armed-d13-97d6a511 sha256=b40bbd57e5377dc305c0e20d45b33a62a5e9c8d0386cc1e313f85a44d273fe37 bytes=1912 file=xnu_arm_entry.h role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-xnu_arm_entry.h
+set=armed-d13-97d6a511 sha256=e6e7af79c1bb42eb1faed5a66f1b5d27dbe36929b720aeaaa3bede4f3ab468b4 bytes=1409 file=xnu_arm_entry-config.txt role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-xnu_arm_entry-config.txt
+set=armed-d13-97d6a511 sha256=856c3c02bf82adf1ebcf0d15b8bd37d594dbebe0aa4a675ac189f844383954cb bytes=3149 file=xnu_arm_entry-sources.txt role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-xnu_arm_entry-sources.txt
+set=armed-d13-97d6a511 sha256=863140dc8acc046e944723ee4c34758781d0e591ff49233d057720c71f275c98 bytes=6826884 file=stage90.bin role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-stage90.bin
+set=armed-d13-97d6a511 sha256=434e863a5173b1008af61badefd1193998362daa15bae54416028139f4f8bab3 bytes=6888956 file=stage90.elf role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-stage90.elf
+set=armed-d13-97d6a511 sha256=dd5303f4a2e780a0fe8a67ed9d8136d0ce05834a08190eedc522d6f5fe1db176 bytes=6830080 file=stage90.img role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-stage90.img
+set=armed-d13-97d6a511 sha256=7ac852edfc165cb033cd935b21ace162deea1781690238f379d14808a4c9eb9b bytes=9351168 file=stage90-qcdt.img role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-stage90-qcdt.img
+set=armed-d13-97d6a511 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-stage90_fixture.macho
+set=armed-d13-97d6a511 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-stage90-build-config.txt
+set=armed-d13-97d6a511 sha256=96e20bf9d8be2366c0f87373190a3f29b21a93c352c977bb1073788c613ebf0e bytes=560 file=SHA256SUMS.txt role=979-the-977-arm-with-the-entry-ld-page-alignment-fix;-SHA256SUMS.txt

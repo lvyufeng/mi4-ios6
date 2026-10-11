@@ -67,6 +67,34 @@ SECTIONS
         *("__TEXT,*")
         *(.ARM.exidx)
         . = ALIGN(32);
+        /*
+         * **979: pad `.text` to a page so `__TEXT` ends where `__DATA` begins.**
+         *
+         * This was `ALIGN(32)` alone, which left `__entry_text_end`/`__entry_data_start` at 0x805699a0
+         * -- 0x660 bytes into the last text page [0x80569000, 0x8056a000) -- while the linker placed the
+         * `.data` output section (4 KB-aligned: `objdump -h` shows `.data` Algn `2**12`) on the NEXT
+         * page, 0x8056a000. The two numbers disagreed by that 0x660, and `pmap_init` is what reads the
+         * wrong one:
+         *
+         *     vm_offset_t sdata = sectDATAB;               // = __entry_data_start = 0x805699a0
+         *     for (dva = sdata; dva < edata; dva += PAGE_SIZE)
+         *         *(pmap_pte(kernel_pmap, dva)) |= L2_NX_BIT;   // osfmk/arm/pmap.c:3620
+         *
+         * A real kernel's `__DATA.vmaddr` is page-aligned, so `pmap_pte(sdata)` names the first WRITABLE
+         * page and the loop marks only data non-executable. Here the first iteration, `pmap_pte(0x805699a0)`,
+         * resolved to page 0x80569000 -- the LAST TEXT PAGE, which holds `lock_set_init` -- and set
+         * `L2_NX_BIT` on it. The kernel then took a **prefetch (permission) abort** fetching `lock_set_init`'s
+         * first instruction, called from `ipc_bootstrap` (experiment 979: pc=0x80569938, lr=0x80565834,
+         * far=0x80569938, fsr=0x0f). `pmap_asid_configure()` (also in `pmap_init`, `:3665`) still printed
+         * `[ASID configuration start]`, so the loop is on the path, not skipped.
+         *
+         * ALIGN(0x1000) makes `__entry_text_end == __entry_data_start == 0x8056a000` -- contiguous, and the
+         * real `.data` page. `__DATA.vmaddr` is now correct; the NX loop marks only data; and `vm_kernel_etext`
+         * grows by the 0x660 pad, which `pmap_init`'s TEXT loop merely write-protects (adds `L2_ACCESS_APX`,
+         * R-X, still executable). The pad is INSIDE the `.text` section so `__TEXT` covers it and no
+         * uncovered gap is left between the two segments.
+         */
+        . = ALIGN(0x1000);
     }
     __entry_text_end = .;
     __entry_text_size = __entry_text_end - __entry_text_start;
