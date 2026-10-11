@@ -44,6 +44,18 @@
 #define MSM8974_GIC_SPURIOUS  0x3ffu
 #define MSM8974_GICC_IAR      0x00cu
 #define MSM8974_GICC_EOIR     0x010u
+/* The virtual-timer PPI. **Cited, not guessed**: our own entry image measured that the kernel's
+ * countdown asserts this intid (`src/entry/entry_gic.h:135` `STAGE90_GIC_TIMER_INTID 20`; 482's
+ * probe measured the countdown raising INTID 20), and `src/entry/entry_irq.c` services exactly this
+ * line. The mandated reference (`HTC-Leo-Revival-Project/xnu` `pe_msm8974.c`) names its SoC's own
+ * `INT_QTMR_FRM_0_PHYSICAL_TIMER_EXP`; this is the same role, this board's measured number.
+ * [[mi4-one-value-two-definitions]] */
+#define MSM8974_GIC_TIMER_INTID 20u
+
+/* One ARM small page, `mach/arm/vm_param.h:21` `ARM_PGBYTES 4096`. Spelled here rather than by
+ * including that header into a board file: it is the size `ml_io_map` rounds up, and the two GIC CPU
+ * registers below (0x00c, 0x010) both live in the first page of the 0xf9002000 window. */
+#define MSM8974_PAGE_BYTES    0x1000u
 
 /* CNTVCT/CNTFRQ are CP15 c14; the read is always legal, unlike a device load. The frequency is the
  * one our own src/timebase.c measured on cancro; a wrong value here would scale every XNU tick, so
@@ -73,7 +85,49 @@ extern void entry_os_console_char(int ch, uint32_t which);
  * [[mi4-one-value-two-definitions]] */
 extern void rtc_configure(uint64_t hz);
 
+/* **rtclock_intr** is the generic ARM RTC layer's interrupt entry (`osfmk/arm/rtclock.c:175`), which
+ * runs the clock's own `etimer_intr`. It is what ADVANCES THE KERNEL TICK, and the interrupt that
+ * delivers it is the timer PPI below - so a handler that acknowledges and EOI's that line WITHOUT
+ * calling this one acknowledges a tick it never services, and the countdown is never re-armed: the
+ * clock stops and every deadline derived from it never fires. The 906/904 peers all declare it
+ * locally exactly here and call it on their timer intid - pe_apq8060.c:85,246, pe_omap3530.c:64,266,
+ * pe_imx53.c:50,213 - and so does the mandated reference (`HTC-Leo-Revival-Project/xnu`
+ * `pe_msm8974.c`, `rtclock_intr((arm_saved_state_t *) context)` in its timer branch). No XNU header
+ * declares it, so this file mirrors that idiom. Before 982 this function had NO caller in our image:
+ * the countdown line was enabled but nothing ran the tick. [[mi4-one-value-two-definitions]] */
+extern void rtclock_intr(arm_saved_state_t *regs);
+
 static volatile unsigned long long msm8974_cntfrq = MSM8974_CNTFRQ_HZ;
+
+/* **The GIC CPU interface, reached through a MAPPED kernel VA, not its physical address.** This is
+ * 982's fix and the whole of it. `ml_io_map` returns a `kernel_map` VA whose page tables XNU keeps
+ * across `arm_vm_init`; the physical `0xf9002000` is *not* translated by XNU's pmap, which maps only
+ * `[physBase, physBase+gMemSize)` (identity) and the managed window - `arm_vm_init.c:388-401` copies
+ * the boot L1 and then overwrites exactly those two ranges, so the 0xf9000000 device section the
+ * entry image installed does not survive into the table the MMU walks after `set_mmu_ttb`.
+ *
+ * Measured, 981's press: the first interrupt XNU dispatched reached `msm8974_handle_interrupt`, whose
+ * `ldr r1, [r0]` at `0x801ae3ac` read `r0 = 0xf900200c` and took a **section translation fault**
+ * (`sleh_abort`, `fsr=0x00000005`, `far=0xf900200c`) in interrupt context. Every peer board maps its
+ * controller first and reads the VA - `pe_apq8060.c:128-129,236` (`ml_io_map(MSM_GIC_CPU_BASE)` then
+ * `HwReg(gTouchpadqGICCPUBase + GIC_CPU_INTACK)`), and the mandated reference
+ * `HTC-Leo-Revival-Project/xnu`'s `pe_msm8974.c` (`msm8974_mapping_init`, `readl(gMsmQGICCPUBase +
+ * GIC_CPU_INTACK)`). This file reads raw physical only because the entry image used to leave the
+ * section mapped; it does not, once XNU owns the tables.
+ * [[mi4-one-value-two-definitions]] */
+static volatile unsigned int *g_msm8974_gicc;
+
+/* Map the GIC CPU interface into the kernel's own tables, once. Called from
+ * `PE_init_SocSupport_msm8974` before any interrupt can be taken, so `g_msm8974_gicc` is non-NULL for
+ * the handler below. `ml_io_map` (`osfmk/arm/machine_routines.c:97`) rounds the size up to a page and
+ * maps it `VM_WIMG_IO`; both `GICC_IAR` (0x00c) and `GICC_EOIR` (0x010) live in that first page. */
+static void
+msm8974_gic_map(void)
+{
+	if (g_msm8974_gicc != 0)
+		return;
+	g_msm8974_gicc = (volatile unsigned int *)ml_io_map(MSM8974_GICC_BASE, MSM8974_PAGE_BYTES);
+}
 
 static inline unsigned long long
 msm8974_read_cntvct(void)
@@ -128,15 +182,45 @@ msm8974_interrupt_init(void)
 static void
 msm8974_handle_interrupt(void *context)
 {
-	volatile unsigned int *gicc_iar  = (volatile unsigned int *)(MSM8974_GICC_BASE + MSM8974_GICC_IAR);
-	volatile unsigned int *gicc_eoir = (volatile unsigned int *)(MSM8974_GICC_BASE + MSM8974_GICC_EOIR);
+	volatile unsigned int *gicc_iar;
+	volatile unsigned int *gicc_eoir;
 	unsigned int id;
 
-	(void)context;
-	id = *gicc_iar & 0x3ffu;
-	if (id != MSM8974_GIC_SPURIOUS) {
-		*gicc_eoir = id;    /* a read of IAR acknowledged; only a real id is EOI'd */
+	if (g_msm8974_gicc == 0) {
+		/* No mapping: reading the physical address here is the 981 fault, so do nothing rather
+		 * than fault in interrupt context. The line cannot have been enabled before the map
+		 * (see `msm8974_gic_map`'s caller), so this is unreachable in a correct boot; it is the
+		 * honest guard for the one path that would otherwise repeat the abort. */
+		return;
 	}
+	gicc_iar  = g_msm8974_gicc + (MSM8974_GICC_IAR  / sizeof(unsigned int));
+	gicc_eoir = g_msm8974_gicc + (MSM8974_GICC_EOIR / sizeof(unsigned int));
+
+	/* A read of IAR *acknowledges* (`src/entry/entry_gic.h:81`); the id is the low 10 bits. */
+	id = *gicc_iar & 0x3ffu;
+	if (id == MSM8974_GIC_SPURIOUS) {
+		/* The architecture says a spurious read acknowledges nothing, so it is NOT EOI'd: writing
+		 * EOIR with 0x3ff would acknowledge an interrupt that does not exist. */
+		return;
+	}
+
+	if (id == MSM8974_GIC_TIMER_INTID) {
+		/* **The tick.** EOI *first*, then service - the ordering `src/entry/entry_irq.c:58` chose
+		 * and the reason is its own: `rtclock_intr` re-arms the countdown (through
+		 * `setPop`->`ml_set_decrementer`), so EOI'ing before that work means a second expiry during
+		 * it is a line already back in the distributor's hands, not one the CPU interface still
+		 * believes is active. `rtclock_intr` runs `etimer_intr` and is what advances
+		 * `mach_absolute_time`; without this call the countdown would never re-arm. */
+		*gicc_eoir = id;
+		msm8974_barrier();
+		rtclock_intr((arm_saved_state_t *)context);
+		return;
+	}
+
+	/* Any other line: acknowledged and EOI'd, but not serviced here - this board PE wires no
+	 * driver dispatch (that is `irq_iokit_dispatch`, reached once a driver registers). EOI'ing is
+	 * still the correct minimum: a line left un-EOI'd would re-enter forever. */
+	*gicc_eoir = id;
 	msm8974_barrier();
 }
 
@@ -213,6 +297,15 @@ PE_init_SocSupport_msm8974(void)
 
 	gPESocDispatch.timer_value      = msm8974_timer_value;
 	gPESocDispatch.timer_enabled    = msm8974_timer_enabled;
+
+	/* **982: map the GIC CPU interface before any interrupt can be dispatched.** This runs at
+	 * `PE_init_SocSupport` (`pexpert/arm/common/pe_init.c:146`), which precedes
+	 * `pe_arm_init_interrupts` (`:182`) - the call that would enable a line and make
+	 * `msm8974_handle_interrupt` reachable - so the handler's mapped base is set by the time it
+	 * matters. Doing it here rather than in `msm8974_interrupt_init` is deliberate: the interrupt
+	 * init is empty *on purpose* (it must not reconfigure a GIC the entry image owns), and this is
+	 * plumbing for THIS file's own reads, not a device init. */
+	msm8974_gic_map();
 
 	/* framebuffer_init is left NULL on purpose: no display rung is claimed here. */
 	msm8974_timebase_init();

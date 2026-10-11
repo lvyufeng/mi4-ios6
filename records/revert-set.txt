@@ -13371,6 +13371,24 @@ set=armed-d13-fa301bd7 sha256=3562e9be91c846e52853bde4c51207cc124e6ef0088f65ef24
 # reversible. fastboot boot only, NEVER flash.
 # =================================================================================================
 
+# the source. Two kernel fixes 980 predates: the get_timebase ns-vs-ticks double conversion
+# (EDIT A) and the bsd_init markers (EDIT B).
+#
+# EDIT A (pe_msm8974.c msm8974_get_timebase). It returned NANOSECONDS, but rtclock_timer_scale_convert
+# (osfmk/arm/rtclock.c:82-93) converts again: `ticks = get_timebase() * NSEC_PER_SEC / tscFreq`. So
+# mach_absolute_time was 52.0833x too large and every scheduler/idle deadline derived from it was
+# pushed past the SoC watchdog ~25 s reset - the reason 980 idled and was reset with no idle wake
+# (980 capture: last live record xnu_live_idle_seq=1, no xnu_live_wdt_*). Now returns RAW CNTVCT
+# ticks, like the apq8060 peer; ELF shows `mrrc p15,0,r0,r1,c14; bx lr`.
+#
+# EDIT B (bsd_init.c:405). bsd_init_kprintf was a no-op; now kprintf("bsd_init: " x), lighting ~48
+# markers through bsd_init so the next stop is legible. 58 bsd_init: strings in the ELF.
+#
+# VALUE: get_timebase is `mrrc ... c14; bx lr`; 58 bsd_init markers; make check 0. Medium: 968
+# real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never written - fully
+# reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+
 # armed-d13-7fbd7009  —  981: 980 rebuilt on the fixed kernel sources, so the embedded entry image agrees with
 # the source. Two kernel fixes 980 predates: the get_timebase ns-vs-ticks double conversion
 # (EDIT A) and the bsd_init markers (EDIT B).
@@ -13395,10 +13413,48 @@ set=armed-d13-7fbd7009 sha256=1e58ad62eeb32ac7448d555e6c1b929f8df834655f44270aa6
 set=armed-d13-7fbd7009 sha256=ee2fd6e88bea08e32f303ca84e115262da5fdd2aa28ec5c5e1032a37526fb022 bytes=1912 file=xnu_arm_entry.h role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-xnu_arm_entry.h
 set=armed-d13-7fbd7009 sha256=6143e86d82340a821dee27ca605383fb7193303785b866b89bf021ce322b5002 bytes=1409 file=xnu_arm_entry-config.txt role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-xnu_arm_entry-config.txt
 set=armed-d13-7fbd7009 sha256=108391710537a5dbcd7ef6e20a7d2228b6bfe68183d6e23108f0530bb767b8a4 bytes=3149 file=xnu_arm_entry-sources.txt role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-xnu_arm_entry-sources.txt
-set=armed-d13-7fbd7009 sha256=75b3cb7d6ce0adfdeae9fc8120416dda1cc53512ce4f831a315cb7e71bfe470f bytes=6830924 file=stage90.bin role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-stage90.bin
-set=armed-d13-7fbd7009 sha256=1238656a67f198233076a9dc6fe82b0bd51b595118ebe381b4213d38bf2d3eba bytes=6892996 file=stage90.elf role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-stage90.elf
-set=armed-d13-7fbd7009 sha256=8f533890c6435f4b12c153aaa6ab340bc7e3bb6365c3336b1f206ed3041e5686 bytes=6834176 file=stage90.img role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-stage90.img
-set=armed-d13-7fbd7009 sha256=5a9b3d64e446e3f3c2f93f329d2a18081d8c46076aaa7c83041205717dfd1706 bytes=9355264 file=stage90-qcdt.img role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-stage90-qcdt.img
+set=armed-d13-7fbd7009 sha256=368c7ed5ad6d4733dd18a1b5b41486e48828a746c3d8c022bf4f4700723b07e9 bytes=6830980 file=stage90.bin role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-stage90.bin
+set=armed-d13-7fbd7009 sha256=51a518b81e628b071eadd5d6fcacbfb5be782d45dbd123924785b09d0371eacf bytes=6893052 file=stage90.elf role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-stage90.elf
+set=armed-d13-7fbd7009 sha256=e91a4b7f4e312d4bc4ae93cf7279bbd02cb570e158a53f472013730f9fcf8ab2 bytes=6834176 file=stage90.img role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-stage90.img
+set=armed-d13-7fbd7009 sha256=fca9ba1e07b1eed50a5a86463702ec23d79233548cbc280ef5943a8b6bc0892c bytes=9355264 file=stage90-qcdt.img role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-stage90-qcdt.img
 set=armed-d13-7fbd7009 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-stage90_fixture.macho
-set=armed-d13-7fbd7009 sha256=c0fb2eba0292eb7e318ac058d9444a1053fdf8c10dfa92c2c2ca3e1a25948c5a bytes=683 file=stage90-build-config.txt role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-stage90-build-config.txt
-set=armed-d13-7fbd7009 sha256=18697551510f8d975e832767f10967d90eefb4cd1b723ac6f708502ce5846bb1 bytes=560 file=SHA256SUMS.txt role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-SHA256SUMS.txt
+set=armed-d13-7fbd7009 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-stage90-build-config.txt
+set=armed-d13-7fbd7009 sha256=33183c44b004a349aecc3c7f31808bc21435279ff5f26b4102d3cf7770589ab5 bytes=560 file=SHA256SUMS.txt role=981-980-switch-set-on-fixed-kernel-get_timebase-raw-ticks-and-bsd_init-markers;-SHA256SUMS.txt
+# armed-d13-8cfb7ca8  —  982: 981 rebuilt on the kernel sources with the GIC interrupt fix. Two kernel
+# fixes 981 predates: the GIC CPU interface is read through an ml_io_map VA, not the raw
+# physical (EDIT A); the same handler services the timer PPI via rtclock_intr (EDIT B).
+#
+# EDIT A (pe_msm8974.c msm8974_gic_map + msm8974_handle_interrupt). 981 took a section
+# translation fault in interrupt context: sleh_abort, r0=0xf900200c pc=0x801ae3ac fsr=0x5
+# far=0xf900200c. The faulting ldr read the RAW PHYSICAL GICC_IAR; XNU pmap does not translate
+# 0xf9002000 (arm_vm_init copies the boot L1 then overwrites only [physBase,physBase+gMemSize)
+# and the managed window, so the entry 0xf9000000 device section does not survive set_mmu_ttb).
+# The fix ml_io_maps GICC (PE_init_SocSupport_msm8974) and reads IAR/EOIR through the VA, with a
+# NULL-guard returning rather than repeating the abort. Peers (pe_apq8060.c:128-129) and the
+# reference (HTC-Leo-Revival-Project/xnu pe_msm8974.c) map-then-read; ours read physical.
+#
+# EDIT B (pe_msm8974.c same handler, timer line). The handler is the live post-XNU dispatcher
+# (EDIT A s fault proves it), so it must also service the timer PPI INTID 20 (entry_gic.h) by
+# calling rtclock_intr(context) after EOI, as every peer (pe_apq8060.c:246) and the reference
+# do. Before 982 rtclock_intr had NO caller: ack+EOI alone never re-arms the countdown.
+#
+# VERIFIED BY VALUE in the linked ELF: msm8974_handle_interrupt loads the g_msm8974_gicc global
+# (movw/movt r1,#0x8084bc24; ldr r1,[r1]; cmp; beq; ldr r2,[r1,#12]; ...cmp r2,#20;
+# b <rtclock_intr>), NOT movt r0,#0xf900; PE_init_SocSupport_msm8974 has bl <ml_io_map>.
+#
+# Switch set is 981 s UNCHANGED; the ENTRY BIN moved (7fbd7009 -> 8cfb7ca8). VERIFIED: preflight
+# ok, make check 0. Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1,
+# HDD_WRITE=0, base never written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-8cfb7ca8 sha256=8cfb7ca8aaeed7e705529e9db1ff22eb287d84498507d86c9e705d662b0aed99 bytes=6335572 file=xnu_arm_entry.bin role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-xnu_arm_entry.bin
+set=armed-d13-8cfb7ca8 sha256=fb4dc06b39066d6381381bece51e9967e2288cb00e74aadc2b52d8184383bf30 bytes=7375232 file=xnu_arm_entry.elf role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-xnu_arm_entry.elf
+set=armed-d13-8cfb7ca8 sha256=ee2fd6e88bea08e32f303ca84e115262da5fdd2aa28ec5c5e1032a37526fb022 bytes=1912 file=xnu_arm_entry.h role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-xnu_arm_entry.h
+set=armed-d13-8cfb7ca8 sha256=594d0a9f3587acd7bd8ab07a3db3398a1a49fb637e63b4fa4fb63f3a54de0aee bytes=1409 file=xnu_arm_entry-config.txt role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-xnu_arm_entry-config.txt
+set=armed-d13-8cfb7ca8 sha256=9aeb72ac95010c57fb6825742168aa64904bb99f59902fa5ed61e101af8ec9f4 bytes=3149 file=xnu_arm_entry-sources.txt role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-xnu_arm_entry-sources.txt
+set=armed-d13-8cfb7ca8 sha256=d9d87266acd845e487e99f9b74d89fb90d659033c1534bc477182600e2b49112 bytes=6830980 file=stage90.bin role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-stage90.bin
+set=armed-d13-8cfb7ca8 sha256=15e0238b5a7c98684db4da0301a0a668372b8a766b069fbd88a87c605870a2dd bytes=6893052 file=stage90.elf role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-stage90.elf
+set=armed-d13-8cfb7ca8 sha256=e2795ee97550fe4a00e3f9df14b0520895cbb809c6d8c874528a3cb425f7b568 bytes=6834176 file=stage90.img role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-stage90.img
+set=armed-d13-8cfb7ca8 sha256=f41f2fff9be2fa51e1985fc8c36d482b67be5636618822e41bedcb38e9548b6e bytes=9355264 file=stage90-qcdt.img role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-stage90-qcdt.img
+set=armed-d13-8cfb7ca8 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-stage90_fixture.macho
+set=armed-d13-8cfb7ca8 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-stage90-build-config.txt
+set=armed-d13-8cfb7ca8 sha256=9cd756826a25ac048c76323c4c5e9e72948f1ab724b5bbd795a38ff704953670 bytes=560 file=SHA256SUMS.txt role=982-981-rebuilt-with-gic-interrupt-fix-map-and-timer;-SHA256SUMS.txt
