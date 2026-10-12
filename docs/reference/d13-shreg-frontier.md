@@ -402,7 +402,7 @@ falsification retired: the define reached the compiled object, and the checker's
 the pressed elf.
 
 **Failure signature: (a), the pre-registered ALTERNATIVE inner return — kr=1, not kr=3.** `map_file
-kr=1` (KERN_INVALID_ADDRESS) folds at `vm_unix.c:1443-1459` (the `case KERN_INVALID_ADDRESS: error
+kr=1` (KERN_INVALID_ADDRESS) folds at `vm_unix.c:1447-1463` (the `case KERN_INVALID_ADDRESS: error
 = EFAULT;` at `:1448-1449`) to EFAULT(14) → `map_slide ret=14`. By
 value, the firing site is **`vm_map.c:1846`** in `vm_map_enter`'s **FIXED** path:
 `start = m[0].va − sr_base = 0x2cd9c000 − 0x30000000 = 0xFCD9C000`, `size = 0x0c266000`; with
@@ -410,7 +410,7 @@ value, the firing site is **`vm_map.c:1846`** in `vm_map_enter`'s **FIXED** path
 `0x09002000` and the guard `(start < effective_min_offset) || (end > effective_max_offset) ||
 (start >= end)` (`:1843-1845`) trips on `start >= end`. **Correction to §8 item 2's forecast:** the
 primed `kr=3`/KERN_NO_SPACE at `vm_map.c:1797` is the ANYWHERE loop's range-fit; this call passes
-`VM_FLAGS_FIXED | VM_FLAGS_ALREADY` (`vm_shared_region.c:1116-1127`), so the FIXED-path guard fires
+`VM_FLAGS_FIXED | VM_FLAGS_ALREADY` (`vm_shared_region.c:1119-1130`), so the FIXED-path guard fires
 first — with `VM_FLAGS_FIXED` the `:1797` ANYWHERE return was structurally unreachable, and the
 folded errno is EFAULT, not ENOMEM. It is the *sole* stopper: the FIXED-path prologue passed
 (`initial_size 0x0c266000 ≠ 0`, `:2344-2345`; named-entry `0 + 0x0c266000 < 0x10000000`,
