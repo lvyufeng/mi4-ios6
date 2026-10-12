@@ -734,7 +734,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_ENTRY_WINDOW
                 STAGE90_XNU_TREE_D13
                 STAGE90_XNU_KEXTB_LOGIN
-                STAGE90_XNU_SP_ALIGN)
+                STAGE90_XNU_SP_ALIGN
+                STAGE90_XNU_VMHINT_GUARD)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this
@@ -961,6 +962,24 @@ do
   # record this build made carries a non-empty value and the branch above does not fire for it.
   if [[ -z $_v && $_k == STAGE90_XNU_SP_ALIGN ]]; then
     printf '  %s=(absent, and a record that does not name the SP-alignment switch is one built before 990 - the tree handed C 4-mod-8 stacks, the only value a pre-990 build could have written)\n' "$_k"
+    continue
+  fi
+  # **991's switch, the same one-way rule as 911b/911c/912/954/958/988/990, and for the same reason.**
+  # Every arm parked before 991 was built with the memq_hint guard not in the tree at all, so its
+  # record has no `STAGE90_XNU_VMHINT_GUARD` line; an absent key is not a missing value but the value -
+  # the switch was off, because it did not exist, so `vm_page_lookup` dispatched a clobbered
+  # `object->memq_hint` (0x1) straight into `ldrd r0,[r5,#24]` - exactly the fault 990's press stopped
+  # on (pc=0x80020838, object = 0xc0005b48, lr = vm_map_pmap_enter, far = 0x19). Demanding the key
+  # would make every existing park unpressable (882's own defect, twelve times repaired now), and the
+  # ladder still owes those presses. Unlike HFS_ROOT_MEDIA / ROOT_FROM_CARD / HDD_WRITE / CARD_COW
+  # there is no entry-ELF marker to ground this on: the switch is a POOL switch (`vm_resident.c`), and
+  # a new unconditional `_off` marker would move the parked arms' image hashes with no `--gc-sections`
+  # in the link (965c's reason). A post-991 record can never reach this branch: `build_entry.sh`'s 678
+  # two-way check refuses a record whose arm-key list omits the key, and the writer emits the line
+  # unconditionally (0 or 1), so a record this build made carries a non-empty value and the branch
+  # above does not fire for it.
+  if [[ -z $_v && $_k == STAGE90_XNU_VMHINT_GUARD ]]; then
+    printf '  %s=(absent, and a record that does not name the memq_hint guard is one built before 991 - vm_page_lookup dispatched the clobbered hint, the only value a pre-991 build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \

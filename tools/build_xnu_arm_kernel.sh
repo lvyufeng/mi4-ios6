@@ -771,6 +771,14 @@ DEFINES=(
 # ASSEMBLY-layer file - its `-D` rides `tools/assemble_arm_layer.sh`'s ASFLAGS instead.
 [[ ${STAGE90_XNU_SP_ALIGN:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_SP_ALIGN=1)
 
+# 991's memq_hint guard (`osfmk/vm/vm_resident.c`: `vm_page_lookup` treats `((vm_offset_t)mem <
+# 0x80000000u || (mem & 3u))` as no hint for that call - a local shadow, the field is never written -
+# after a bounded kprintf beginning `VMHINT991:`). 990's press died INSIDE that function (`ldrd
+# r0,[r5,#24]` at pc=0x80020838, r5 = object->memq_hint = 0x1, object = 0xc0005b48, lr =
+# vm_map_pmap_enter). `vm_resident.c` is a kernel-pool file, so the switch goes to the SAME array as
+# the kext guard and the alignment switch, not to `EXTRA_DEFINES` (`tools/stage_d13_vmhint_guard.sh`).
+[[ ${STAGE90_XNU_VMHINT_GUARD:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_VMHINT_GUARD=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.  (`$GENERATED` is

@@ -13790,3 +13790,54 @@ set=armed-d13-0d531453 sha256=146c2f25b19f30de2bd725c2c20bcd891c02e6e80ac8e67657
 set=armed-d13-0d531453 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=990-d13-stack-alignment-at-the-two-measured-gates;-stage90_fixture.macho
 set=armed-d13-0d531453 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=990-d13-stack-alignment-at-the-two-measured-gates;-stage90-build-config.txt
 set=armed-d13-0d531453 sha256=48c0cf353b9145354a5c5af8b89e434af557b87114230efb732192f0dd10779c bytes=560 file=SHA256SUMS.txt role=990-d13-stack-alignment-at-the-two-measured-gates;-SHA256SUMS.txt
+# armed-d13-13355bf0  -  991: VM_PAGE_LOOKUP TREATS AN IMPLAUSIBLE MEMQ_HINT AS ABSENT, FOR THAT CALL ONLY.
+# Switch set is 990-s + STAGE90_XNU_VMHINT_GUARD=1; the ENTRY BIN moved (0d531453 -> 13355bf0) and ONE tree
+# object moves: the pool-s osfmk_vm_vm_resident.o - this rung has NO assembly-layer and NO pcb.c
+# change (a fresh checkout needs ALL THREE tools/stage_d13_kextb_login.sh, tools/stage_d13_sp_align.sh
+# and tools/stage_d13_vmhint_guard.sh).
+#
+# 990 (pressed 2026-10-12, arm armed-d13-0d531453, commit ce0195e, evidence /tmp/cancro-last_kmsg.txt)
+# is a READ-CONFIRMED SUCCESS in the pre-registered sense: the SP-alignment fix HELD (sp = 0xcfdbba88,
+# 8-aligned; 989-s vld1.32 {d18} alignment fault did NOT recur), and the boot ran the WHOLE mount +
+# bsd_init and reached the pid-1 launchd exec: attempting to start init of /sbin/launchd -> NEW first
+# abort INSIDE vm_page_lookup: pc = 0x80020838, instruction ldrd r0,[r5,#24], r5 = object->memq_hint
+# = 0x1, object = r0 = r4 = 0xc0005b48, lr = 0x8003d8ec = vm_map_pmap_enter-s vm_page_lookup call
+# (offset 0), far = 0x19 (= 1 + 24), fsr = 1 (alignment fault). Then 214x recursive abort at
+# pc=0x8046a464 (Debugger trap) and a watchdog reset ~46 s later; the USB console capture was EMPTY
+# and the log came from /proc/last_kmsg.
+#
+# ROOT CAUSE (991), read BY VALUE: memq_hint sits at vm_object+0x20 (ldr r5,[r0,#32]), and NO
+# legitimate writer of memq_hint can produce 0x1 - vm_object_template copies in NULL via
+# _vm_object_allocate, VM_PAGE_INSERT/VM_PAGE_REMOVE write a valid page or NULL, and vm_page_lookup-s
+# own hint paths write a real page. So either the field was clobbered after allocation, or object is
+# not a vm_object at all (it sits ~11 MB below every other heap pointer in the log, consistent with
+# an early zalloc allocation).
+#
+# 991: tools/stage_d13_vmhint_guard.sh (gated #if STAGE90_XNU_VMHINT_GUARD, original text in the #else -
+# switch-OFF byte-identical) makes vm_page_lookup treat a hint with (vm_offset_t)mem < 0x80000000u OR
+# (mem & 3u) as absent FOR THAT CALL ONLY (local shadow; the field is never written), after a bounded
+# (max 8) kprintf beginning VMHINT991: that records obj/mem/lr and the object-s words
+# w00/w04/w18/w1c/w24. tools/check_vmhint_guard.py walks the LINKED elf and REFUSES the 990 image.
+#
+# READ: the log carries VMHINT991: lines (at most 8) naming the object-s words and lr, and the boot
+# moves PAST the exec wall. If w00 (memq.next) equals obj and the other words look like a live
+# vm_object, the next rung hunts the clobberer; if the words are nonsense, the object identity chain
+# (ubc_getobject -> moc_object) is the bug and lr names the path.
+# FALSIFICATION: the SAME fault recurs (ldrd r0,[r5,#24] at pc=0x80020838 with r5=1) => the guard did
+# not reach the pool (the 991 clause should have refused such an image) or an object-s hint was
+# plausible-range-but-bad (the guard models only <0x80000000 | &3).
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-13355bf0 sha256=13355bf0726adff0bfd79c9c01bd6a753afb9a87b1559c8ab06f102c4556ffb6 bytes=6335572 file=xnu_arm_entry.bin role=991-vm-page-lookup-memq-hint-guard;-xnu_arm_entry.bin
+set=armed-d13-13355bf0 sha256=53ed569595be8b9d197fccdde0b630bceeb08c41abc80018f5b5da0447ae1460 bytes=7375824 file=xnu_arm_entry.elf role=991-vm-page-lookup-memq-hint-guard;-xnu_arm_entry.elf
+set=armed-d13-13355bf0 sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=991-vm-page-lookup-memq-hint-guard;-xnu_arm_entry.h
+set=armed-d13-13355bf0 sha256=cdc901c415ce52653a0a1aa2668862d847dc7c73fec8516e7ccc3e57ba2917ef bytes=1485 file=xnu_arm_entry-config.txt role=991-vm-page-lookup-memq-hint-guard;-xnu_arm_entry-config.txt
+set=armed-d13-13355bf0 sha256=cb22362519121b52d98f4df58026c7cf543eeb078a5c07b72ba66b64db23d204 bytes=3149 file=xnu_arm_entry-sources.txt role=991-vm-page-lookup-memq-hint-guard;-xnu_arm_entry-sources.txt
+set=armed-d13-13355bf0 sha256=a97ed970fe031c4c64caa415d15d36defbdd2265727d2b95c4e5317458bf94e4 bytes=6830980 file=stage90.bin role=991-vm-page-lookup-memq-hint-guard;-stage90.bin
+set=armed-d13-13355bf0 sha256=4aaeed2184fc54e7a496b61c6338a65d300bf4dc9040cec18db2c67da6740f96 bytes=6893052 file=stage90.elf role=991-vm-page-lookup-memq-hint-guard;-stage90.elf
+set=armed-d13-13355bf0 sha256=cad3ffda370d9c1e4c6030b98927e61a82db51d38a6d21e0c9c2e588066a34d2 bytes=6834176 file=stage90.img role=991-vm-page-lookup-memq-hint-guard;-stage90.img
+set=armed-d13-13355bf0 sha256=68a068e2793b59c378dbd005e82edfae10e04fc83edfab4ab68f2c45e72f1119 bytes=9355264 file=stage90-qcdt.img role=991-vm-page-lookup-memq-hint-guard;-stage90-qcdt.img
+set=armed-d13-13355bf0 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=991-vm-page-lookup-memq-hint-guard;-stage90_fixture.macho
+set=armed-d13-13355bf0 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=991-vm-page-lookup-memq-hint-guard;-stage90-build-config.txt
+set=armed-d13-13355bf0 sha256=e474373b9dbc6e20c7dfd5dca25ede2de6fadad288d39f071f2ae054dd6222e6 bytes=560 file=SHA256SUMS.txt role=991-vm-page-lookup-memq-hint-guard;-SHA256SUMS.txt

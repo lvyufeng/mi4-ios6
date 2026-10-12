@@ -1076,6 +1076,23 @@ case "$SP_ALIGN" in
     *) echo "REFUSING: STAGE90_XNU_SP_ALIGN='$SP_ALIGN' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **991: the pool's memq_hint guard, recorded the same way and for the same reason.** With
+# `STAGE90_XNU_VMHINT_GUARD=1`, `osfmk/vm/vm_resident.c`'s `vm_page_lookup` treats an implausible
+# `object->memq_hint` (`(vm_offset_t)mem < 0x80000000u` or `mem & 3u` - not a kernel address, or not
+# even word-aligned) as absent FOR THAT CALL ONLY - a local shadow; the field is never written -
+# after a bounded kprintf beginning `VMHINT991:` that records the object's words and the caller at
+# the moment of the reading. 990's press ran the whole mount + bsd_init + the pid-1 launchd exec and
+# died INSIDE this very function: pc=0x80020838 `ldrd r0,[r5,#24]`, r5 = object->memq_hint = 0x1,
+# object = 0xc0005b48, lr = vm_map_pmap_enter's call at offset 0. The edit is compiled by
+# `tools/build_xnu_arm_kernel.sh` (DEFINES, from the same-named environment variable), so the two
+# spellings must carry the SAME value (`mi4-one-value-two-definitions`), and the by-value clause at
+# the 991 site below refuses a linked image whose vm_page_lookup does not carry the guard.
+VMHINT_GUARD=${STAGE90_XNU_VMHINT_GUARD:-0}
+case "$VMHINT_GUARD" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_VMHINT_GUARD='$VMHINT_GUARD' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **911c: the RAM bank layout, measured from the Qualcomm SMEM RAM-partition table.** The goal's newest
 # clause is that XNU recognize the Mi 4's 3 GB of RAM, and the 911c design established that the repo
 # holds NO low-bank base or size anywhere - every "low bank" is an inference from "3 GB minus 1.5 GB".
@@ -1390,6 +1407,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_ENTRY_WINDOW
                 STAGE90_XNU_KEXTB_LOGIN
                 STAGE90_XNU_SP_ALIGN
+                STAGE90_XNU_VMHINT_GUARD
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1535,6 +1553,12 @@ do
         # assignment far above this loop, so the record, the pool's `DEFINES` and the asm layer's
         # `ASFLAGS` cannot be built from two spellings of this switch ([[mi4-one-value-two-definitions]]).
         STAGE90_XNU_SP_ALIGN)         _v=$SP_ALIGN ;;
+        # 991: whether the tree's memq_hint guard (`tools/stage_d13_vmhint_guard.sh`) was compiled
+        # into this image's pool. Read from `$VMHINT_GUARD`, validated 0/1 at its own assignment far
+        # above this loop, so the record and the pool's `DEFINES` cannot be built from two spellings
+        # of this switch (`mi4-one-value-two-definitions`). The 991 clause at the link site below
+        # refuses a link whose vm_page_lookup does not carry the guard.
+        STAGE90_XNU_VMHINT_GUARD)     _v=$VMHINT_GUARD ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -30404,6 +30428,30 @@ verify_trace_symbols() {
         fi
         say "  xnu_entry_990: the linked image hands C 8-byte-aligned stacks at both measured gates - every ast_taken call site's cumulative sp delta is 0 mod 8 (astloop carries its sub/add #4), machine_stack_attach and machine_stack_handoff carry the compiled & ~7u (bic rN,rN,#7), and Call_continuation still takes sp from TH_PCB_ISS - $sp_out"
     fi
+    # **991: an implausible `vm_object.memq_hint` must be neutralized inside `vm_page_lookup`.**
+    # 990's press (arm armed-d13-0d531453, commit ce0195e, evidence /tmp/cancro-last_kmsg.txt) HELD
+    # 990's own fix (sp = 0xcfdbba88, 8-aligned; no vld1.32 recurrence) and ran the whole mount +
+    # bsd_init + the pid-1 launchd exec, then took a NEW first abort INSIDE vm_page_lookup:
+    # pc=0x80020838 `ldrd r0,[r5,#24]`, r5 = object->memq_hint = 0x1, object = 0xc0005b48, lr =
+    # vm_map_pmap_enter's call at offset 0, far = 0x19, fsr = 1 (an alignment fault on `mem->offset`,
+    # 24 bytes into the address 0x1). No legitimate writer of memq_hint can produce 0x1 (the
+    # template's NULL copies in via _vm_object_allocate; VM_PAGE_INSERT and VM_PAGE_REMOVE write a
+    # real page or NULL; this file's hint paths write the page they return) - so the field was
+    # clobbered after allocation, or `object` is not a vm_object. The fix is
+    # `tools/stage_d13_vmhint_guard.sh` + STAGE90_XNU_VMHINT_GUARD=1: the hint is treated as absent
+    # for THAT call only (local shadow; the field is never written) after a bounded kprintf beginning
+    # `VMHINT991:`. The property is read BY VALUE off THIS linked image by
+    # `tools/check_vmhint_guard.py` (the VMHINT991 string referenced from vm_page_lookup's own body,
+    # the `& 3u` test, a kprintf call, and the memq_hint load at +0x20); the checker REFUSES the 990
+    # image, so a build whose switch never reached the pool cannot pass. Gated on the switch: with
+    # VMHINT_GUARD=0 the tree's original text is compiled on purpose and there is nothing to assert.
+    if [[ $VMHINT_GUARD -eq 1 ]]; then
+        if ! vh_out=$(python3 "$REPO_ROOT/tools/check_vmhint_guard.py" "$OUT/xnu_arm_entry.elf" 2>&1); then
+            printf '%s\n' "$vh_out" >&2
+            layout_fail "the linked image does not carry the memq_hint guard even though STAGE90_XNU_VMHINT_GUARD=1 was requested: vm_page_lookup has no VMHINT991-referencing guard body (the pool was built without -DSTAGE90_XNU_VMHINT_GUARD=1 - run tools/stage_d13_vmhint_guard.sh and rebuild the pool with the switch exported - or vm_page_lookup no longer reads memq_hint at +0x20). 990 died exactly there (vm_page_lookup pc=0x80020838 ldrd r0,[r5,#24], r5 = memq_hint = 0x1, object = 0xc0005b48, lr = vm_map_pmap_enter)"
+        fi
+        say "  xnu_entry_991: the linked image treats an implausible memq_hint as absent inside vm_page_lookup (the VMHINT991 report is referenced from the lookup's own body) - $vh_out"
+    fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
     # `ast_taken_user`**: its arm return path (`cswitch.s:144` `thread_exception_return`) delivers by
@@ -38402,6 +38450,10 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # DEFINES and the asm layer's ASFLAGS both take this value, and the by-value clause at the 990 site
     # above refuses a linked image that did not get it).
     echo "STAGE90_XNU_SP_ALIGN=${STAGE90_XNU_SP_ALIGN:-0}"
+    # 991's switch, read the same way and for the same reason (one value, two definitions: the pool's
+    # DEFINES takes this value, and the by-value clause at the 991 site above refuses a linked image
+    # that did not get it).
+    echo "STAGE90_XNU_VMHINT_GUARD=${STAGE90_XNU_VMHINT_GUARD:-0}"
     # 535's switch, and the only one whose *link* the build changes (see its own block above): the
     # record is what makes "this image has the seam hook" a thing the gate can read rather than a
     # thing a reader assumes from the hash.
