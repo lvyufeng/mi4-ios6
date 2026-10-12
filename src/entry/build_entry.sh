@@ -30230,6 +30230,141 @@ verify_trace_symbols() {
             layout_fail "removeKextBootstrap in this image still calls kmem_alloc - the __LINKEDIT-copy path (OSKext.cpp:861-950) is that function's only caller, so its presence means the teardown block was compiled in and the switch did not reach the pool compile (STAGE90_XNU_KEXTB_LOGIN=1 not in the pool's DEFINES, or the pool was not rebuilt after tools/stage_d13_kextb_login.sh)"
         say "  xnu_entry_988: removeKextBootstrap no longer dereferences an absent __LINKEDIT - no 'ldr rN,[rM,#28]' segment dereference and no kmem_alloc in the function, so the statement after bsd_init: done (startup.c:408) cannot prefetch-abort as 987's run did"
     fi
+    # **989: the census' recorded address must be identity-checked before it is walked.** 988's press
+    # (`armed-d13-707801c4`) took the abort past `removeKextBootstrap` and into the device-tree census'
+    # recorded block: `pc=0x800c41c0 = ~OSMetaClass()+0x1c`, `lr=0x8049e1c0` (the return of
+    # `bl getChildSetReference` at `0x8049e1bc` in `entry_probe_dt_children`), `far=0x00010005`. The
+    # address `IODeviceTreeAlloc` returned (`xnu_live_dtalloc_ret`) was an `IOService` when the class read
+    # saw it (`cls_vptr=0x804c6714`) and had been freed and reused by the census, so walking it through
+    # `[+12]` and the vtable dispatched on garbage. The fix moves the recorded address' two walks and its
+    # class read behind a **first-word identity check**: read `[recorded]`, require it to equal the word
+    # the object carried while it was alive (`g_dtplane_root_vptr`, measured in `entry_note_dtplane`), and
+    # read nothing else when it does not.
+    #
+    # This asserts the property BY VALUE, from the linked disassembly, not from the source: the check
+    # must be **in its own function** (the gated half is `entry_dt_recorded_walk`; if it inlined back into
+    # the probe the counting below would have nothing to separate), the probe must walk the recorded
+    # address **zero** times itself (its two `getChildSetReference` calls are the tree root's), the helper
+    # must carry the gated pair, it must compare against the **measured** word `g_dtplane_root_vptr` (its
+    # address materialized in a literal-pool load; a constant here would be a second definition of one
+    # fact and would go stale with the vtable), the record-time read must exist (a register-indirect load
+    # in `entry_note_dtplane`), and the helper must **publish the reading before it walks**
+    # (`entry_note_dtref` is its first call). D13-only: 4570's recorded address is reused too, but its
+    # recipient's walk is benign (486's doc comment in `entry_stubs.c`).
+    if [[ $D13_TRACE -eq 1 ]]; then
+        gcr_name='_ZNK15IORegistryEntry20getChildSetReferenceEPK15IORegistryPlane'
+        gcr_dump=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf")
+        grep -q "<entry_probe_dt_children>:" <<< "$gcr_dump" ||
+            layout_fail "entry_probe_dt_children is not in the linked image's disassembly, so 989's clause has no function to read the recorded-block guard out of - the census runs from __wrap_vm_pageout and the boot stops inside it (988's abort), so an image without the probe is the wrong image"
+        # **The helper's label is `entry_dt_recorded_walk`, and gcc may suffix it.** `noinline` forbids
+        # inlining the body, but it does not forbid interprocedural constant propagation: with `plane` the
+        # only caller's constant, gcc emits the body once under a `.constprop.N` clone. That is the same
+        # function, and the clause below reads it as one - so the label is matched with an optional suffix
+        # rather than pinned to the bare name, which would refuse a correct build (the first cut of this
+        # clause did exactly that). What is NOT optional is that the function exists at all: a body folded
+        # back into the probe would leave the probe walking the recorded address again, which is the
+        # property the two counting refusals below are about.
+        gcr_walk_label=$(printf '%s\n' "$gcr_dump" |
+            sed -n 's/^[0-9a-f]* <\(entry_dt_recorded_walk[^>]*\)>:.*/\1/p' | head -1)
+        [[ -n $gcr_walk_label ]] ||
+            layout_fail "entry_dt_recorded_walk is not a function in this image - the gated half of the census' recorded block was inlined back into entry_probe_dt_children, so there is no separate function the build can verify the guard in and the recorded address is walked unconditionally again (the abort 988's press took at 0x800c41c0). Keep the __attribute__((noinline)) on entry_dt_recorded_walk in entry_trace.c"
+        # Bodies run from the symbol label to the next symbol label; both bounds are objdump's own labels.
+        gcr_probe_body=$(printf '%s\n' "$gcr_dump" |
+            awk '/<entry_probe_dt_children>:/ { f = 1; next } f && /^[0-9a-f]+ </ { f = 0 } f { print }')
+        gcr_walk_body=$(printf '%s\n' "$gcr_dump" |
+            awk -v lab="$gcr_walk_label" 'index($0, "<" lab ">:") { f = 1; next } f && /^[0-9a-f]+ </ { f = 0 } f { print }')
+        gcr_probe_refs=$(printf '%s\n' "$gcr_probe_body" | grep -c "<$gcr_name>")
+        [[ $gcr_probe_refs -eq 2 ]] ||
+            layout_fail "entry_probe_dt_children calls getChildSetReference $gcr_probe_refs times and not 2: the tree root's child-count and child-set are the only walks left in the probe, so a third (or a fourth) means the recorded address is being walked in the probe itself, unguarded - 988's abort (pc=0x800c41c0, lr=0x8049e1c0 = the return of the getChildSetReference at 0x8049e1bc). Move that walk into $gcr_walk_label behind the vptr check"
+        gcr_walk_refs=$(printf '%s\n' "$gcr_walk_body" | grep -c "<$gcr_name>")
+        [[ $gcr_walk_refs -eq 2 ]] ||
+            layout_fail "$gcr_walk_label calls getChildSetReference $gcr_walk_refs times and not 2: the guarded half is the recorded address' child-count and child-set, one call each - a different count means the walks were not the ones this clause is about"
+        # The identity the helper compares against is the recorded address' FIRST WORD AS MEASURED, taken
+        # in `entry_note_dtplane` while the object was alive (`g_dtplane_root_vptr`), not a constant. Two
+        # things must therefore hold in the linked code: the record-time read is present, and the guard's
+        # comparison is against that global rather than against a literal. The image materializes the
+        # global's address in one of the two forms ARM non-PIC code uses - a literal-pool word under an
+        # `ldr rN,[pc,#N]`, or a `movw`/`movt` pair. 989's own iterations built BOTH (the first cut of
+        # the guard compared a constant, compiled to a pool word; the measured form compiles to
+        # movw/movt), so the clause below verifies the NUMBER the address resolves to, not the form.
+        gcr_vptr_sym=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "g_dtplane_root_vptr" { print $1 }')
+        [[ -n $gcr_vptr_sym ]] ||
+            layout_fail "g_dtplane_root_vptr is not in this image, so the recorded-block guard has no measured identity to compare against - it is written by entry_note_dtplane (entry_stubs.c) at the one moment IODeviceTreeAlloc's object is alive, and the guard reads it; a link without the global is the wrong image"
+        # (1) The record-time read exists: `entry_note_dtplane` dereferences the live `root` and stores it.
+        # The load is **predicated** (`ldrne r3,[r5]` for the nonzero-root arm of `(root != 0) ? *root : 0`),
+        # so the mnemonic is matched by prefix, not by exact `ldr` - the same suffix trap that made the
+        # first cut of this clause refuse a correct literal-pool load.
+        gcr_note_body=$(printf '%s\n' "$gcr_dump" |
+            awk '/<entry_note_dtplane>:/ { f = 1; next } f && /^[0-9a-f]+ </ { f = 0 } f { print }')
+        printf '%s\n' "$gcr_note_body" | awk '$3 ~ /^ldr/ && $5 ~ /^\[r[0-9]+\]$/ { f = 1 } END { exit f ? 0 : 1 }' ||
+            layout_fail "entry_note_dtplane has no register-indirect load in its body, so it does not read the live root's first word - the guard's identity (g_dtplane_root_vptr) would then be written from something other than the object IODeviceTreeAlloc returned, and the comparison would be against the wrong fact"
+        # (2) The guard's comparison is against the global, via its address materialized in the body.
+        gcr_want_addr=$(( 0x$gcr_vptr_sym ))
+        # Resolve the helper's reference to g_dtplane_root_vptr BY VALUE, accepting either form:
+        #  * `movw rD, #lo` (+ `movt rD, #hi`) - the measured-word form this build emits;
+        #  * `ldr rD, [pc, #N]` whose pool word IS the address - the constant form the first cut emitted.
+        # Both are "the address of the global"; what the clause must refuse is a body that never
+        # materializes it at all (then the comparison is against a constant or nothing).
+        # Pair each `movw rD, #lo` with the first later `movt rD, #hi`: a reassigning `movw` on the same
+        # register clears the pending pair (awk `have[r] = 1` then overwrite), and an unmatched `movw`
+        # prints nothing - so only complete, non-interleaved pairs become candidates.
+        gcr_pairs=$(printf '%s\n' "$gcr_walk_body" | awk '
+            $3 == "movw" { r = $4; sub(/,/, "", r); v = $5; sub(/^#/, "", v); lo[r] = v; have[r] = 1; next }
+            $3 == "movt" { r = $4; sub(/,/, "", r); v = $5; sub(/^#/, "", v)
+                           if (have[r]) { print r, lo[r], v; have[r] = 0 }
+                           next }')
+        gcr_addr_ok=0
+        gcr_addr_how="none"
+        while read -r gcr_rd gcr_lo gcr_hi; do
+            [[ -n $gcr_lo && -n $gcr_hi ]] || continue
+            gcr_addr_val=$(( (gcr_hi << 16) + gcr_lo ))
+            if [[ $gcr_addr_val -eq $gcr_want_addr ]]; then
+                gcr_addr_ok=1; gcr_addr_how="movw/movt $gcr_rd -> 0x$(printf %08x "$gcr_addr_val")"
+                break
+            fi
+        done <<< "$gcr_pairs"
+        if [[ $gcr_addr_ok -eq 0 ]]; then
+            gcr_ldr_pool=$(printf '%s\n' "$gcr_walk_body" | awk '
+                $3 == "ldr" && $5 == "[pc," && $6 ~ /^#[0-9]+\]$/ {
+                  n=$6; sub(/^#/,"",n); sub(/\]$/,"",n)
+                  a=strtonum("0x" substr($1,1,length($1)-1))
+                  if (a+8+n > 0x80000000 && a+8+n < 0x81000000) print a+8+n
+                }' | head -1)
+            if [[ -n $gcr_ldr_pool ]]; then
+                gcr_text=$(arm-none-eabi-objdump -s -j .text "$OUT/xnu_arm_entry.elf")
+                gcr_word() {  # $1 = a VA in this image (decimal) -> the 4 bytes there as 0xXXXXXXXX
+                    printf '%s\n' "$gcr_text" |
+                        awk -v t="$1" '
+                          /^ [0-9a-f]+ /{
+                            base=strtonum("0x"$1);
+                            if (t>=base && t<base+16){
+                              idx=int((t-base)/4); w=$(idx+2);
+                              print "0x" substr(w,7,2) substr(w,5,2) substr(w,3,2) substr(w,1,2);
+                            }
+                          }'
+                }
+                gcr_poolword=$(gcr_word "$gcr_ldr_pool")
+                if [[ $gcr_poolword == "0x$(printf %08x "$gcr_want_addr")" ]]; then
+                    gcr_addr_ok=1; gcr_addr_how="literal-pool 0x$(printf %x "$gcr_ldr_pool") -> $gcr_poolword"
+                fi
+            fi
+        fi
+        [[ $gcr_addr_ok -eq 1 ]] ||
+            layout_fail "entry_dt_recorded_walk does not materialize the address of g_dtplane_root_vptr (0x$gcr_vptr_sym) in either form (a movw/movt pair or a literal-pool word): the guard's identity comparison is against something other than the measured word, so a freed address could still be walked"
+        printf '%s\n' "$gcr_walk_body" | awk '$3 ~ /^cmp/ { f = 1 } END { exit f ? 0 : 1 }' ||
+            layout_fail "entry_dt_recorded_walk loads g_dtplane_root_vptr but has no comparison in its body: the load is a value, not a check, and the recorded address would be walked unconditionally again (988's abort)"
+        gcr_how="the measured first word g_dtplane_root_vptr (0x$gcr_vptr_sym, materialized as $gcr_addr_how, = 0x804c6714 on the 988 build)"
+        # The reading is published before the walk: `entry_note_dtref` is the helper's first call, and
+        # the two `getChildSetReference` calls come after it. A guard that walked first and published the
+        # word afterwards would still have walked the freed address - 988's abort, with the log unable to
+        # say so.
+        gcr_pubfirst=$(printf '%s\n' "$gcr_walk_body" |
+            awk '{ if ($3 == "bl" || $3 == "blx") { if (n == 0) first = $5; n++ } }
+                 END { print first }')
+        [[ $gcr_pubfirst == "<entry_note_dtref>" ]] ||
+            layout_fail "entry_dt_recorded_walk's first call is [$gcr_pubfirst] and not <entry_note_dtref>: the guard must PUBLISH the recorded address' first word, the word it had while alive, and whether they match, BEFORE it walks anything, so a run that stops in the walk still says which address it was about and whether the guard passed. Publish first, walk second"
+        say "  xnu_entry_989: the census' recorded address is identity-checked before it is walked - entry_probe_dt_children walks only the tree root (2 getChildSetReference calls), entry_dt_recorded_walk carries the recorded address' pair behind a comparison against $gcr_how, and it publishes the reading first, so a freed address is named and not dispatched through"
+    fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
     # `ast_taken_user`**: its arm return path (`cswitch.s:144` `thread_exception_return`) delivers by
@@ -30803,8 +30938,15 @@ verify_trace_symbols() {
     # It must not be wrapped. A `--wrap=CleanPoC_Dcache` would put this file's own function between the
     # wrapper and the loop, and then "the cache was written back before the window opened" would be a
     # statement about a function this project wrote rather than about the kernel's.
-    arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | grep -q '__wrap_CleanPoC_Dcache' &&
+    # (This clause reads nm into a HERE-STRING rather than piping it into `grep -q`: the linked ELF's
+    # symbol table is >64 KB, `grep -q` exits at the first match and closes the pipe, nm then dies on
+    # SIGPIPE with rc=141 and, under `set -o pipefail`, the `&&` short-circuits and the clause can NEVER
+    # fire - a silent clause. 988's review found this one linked-image instance of that class; the
+    # pool-object instances above are under 64 KB and unaffected.)
+    nm_elf=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf")
+    if grep -q '__wrap_CleanPoC_Dcache' <<< "$nm_elf"; then
         layout_fail "the image defines __wrap_CleanPoC_Dcache: 516's write-back has to be the kernel's own CleanPoC_Dcache, and a wrapper there would make the step's product a call into this repository"
+    fi
     # **The distinction the step is *for*, counted where it is visible: two loops against one.** Both
     # routines are the same way/set loop; the PoC form runs it a second time with the L2's geometry
     # (`clean_l2dcacheline`/`clean_l2dcacheway`, caches_asm.s:130-158). A build in which that second

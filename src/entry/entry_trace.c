@@ -4680,6 +4680,12 @@ static unsigned int entry_xnu_child_count(const void *self, const void *plane)
     const void *set = entry_xnu_child_set(self, plane);
     return (set != 0) ? entry_xnu_array_count(set) : 0u;
 }
+/* 989: the recorded address' identity is the FIRST WORD taken while the object was alive, in
+ * `entry_note_dtplane` (`entry_stubs.c`), not a constant spelled here. `_ZTV9IOService + 8` is what that
+ * word was on 988's build (`cls_vptr=0x804c6714`), but a constant would be a second definition of one
+ * fact and would go stale the moment the vtable moved; the measured word cannot. It is declared here for
+ * the guard below, which compares the recorded address' *current* first word against it. */
+extern uint32_t g_dtplane_root_vptr;
 #else
 extern unsigned int entry_xnu_child_count(const void *self, const void *plane)
     __asm__("_ZNK15IORegistryEntry13getChildCountEPK15IORegistryPlane");
@@ -5833,6 +5839,10 @@ extern void entry_note_dtclass(uint32_t obj, uint32_t class0, uint32_t class1, u
                                uint32_t set);
 extern void entry_note_dtrec(uint32_t obj, uint32_t class0, uint32_t class1, uint32_t kids,
                              uint32_t set);
+/* 989: the recorded block's guard reading - the address, its first word *now*, the word it had while
+ * alive, and whether they match - published before any walk on that address. Defined beside
+ * `entry_note_dtrec` in `entry_stubs.c`. */
+extern void entry_note_dtref(uint32_t obj, uint32_t found, uint32_t want, uint32_t ok);
 extern uint32_t g_dtplane_root;
 extern void entry_note_dtchildcls(uint32_t seq, uint32_t class0, uint32_t class1);
 /* `entry_xnu_registry_root`, `entry_xnu_child_entry`, `entry_xnu_child_set` and `entry_xnu_child_count`
@@ -5857,6 +5867,53 @@ extern uint32_t entry_xnu_entry_state(const void *self)
  * (`IOService.cpp:663-666`), so publishing the pair with a `same` flag is what keeps the two readings
  * from being two readings of two different things.
  */
+/*
+ * 989: the walk on the recorded address, gated on the address still being the object it was.
+ *
+ * **988's press stopped here, and the stop is why the guard exists.** The recorded block below used to
+ * call `entry_xnu_child_count(recorded, plane)` and `entry_xnu_child_set(recorded, plane)` directly -
+ * two `getChildSetReference` calls and, through the count, an `OSArray::getCount` - and the boot's first
+ * abort was inside the first of them: `pc=0x800c41c0 = ~OSMetaClass()+0x1c` with `lr=0x8049e1c0` (the
+ * return of `bl getChildSetReference` at `0x8049e1bc`), `far=0x00010005`, `fsr=5`. The address
+ * `IODeviceTreeAlloc` returned held an `IOService` when the class read saw it (`cls_vptr=0x804c6714`) and
+ * something else by the census, because the tree root's own reference is dropped and the block reused
+ * (486's doc comment in `entry_stubs.c`). So the walk now runs only when the first word is still the word
+ * that object carried while it was alive; otherwise nothing beyond that one word is read.
+ *
+ * The identity is **measured, not spelled**: `want` is `g_dtplane_root_vptr`, taken in
+ * `entry_note_dtplane` at the one moment the object is live, so the guard compares against the same
+ * reading the class record took. A constant (`_ZTV9IOService + 8`) would be a second definition of that
+ * fact and would silently refuse the object the moment the vtable moved
+ * ([[mi4-one-value-two-definitions]]); the global cannot.
+ *
+ * `noinline` is load-bearing, not decoration. If the guard inlined back into `entry_probe_dt_children`
+ * the linked image would still carry four `getChildSetReference` references in that one function, and the
+ * build's refusal below - which counts them, and reads the identity comparison's code before the walks' -
+ * would have nothing to read. Keeping the gated half in its own function is what makes the guard a
+ * property of the linked code the clause can verify by value rather than a claim in this comment
+ * ([[mi4-a-claim-in-comment-is-not-a-check]]).
+ *
+ * The return is `ok`: 1 when the walks ran, 0 when they were refused, so the caller can record which it
+ * was. `*kids` and `*set` are written only under the guard; a refused address leaves them at the zeros
+ * the caller set, which is the honest reading of "the object is gone" rather than a walk of it.
+ */
+__attribute__((noinline))
+static unsigned int entry_dt_recorded_walk(const void *recorded, const void *plane, unsigned int *kids,
+                                           void **set)
+{
+    const uint32_t found = *(const volatile uint32_t *)recorded;
+    const uint32_t want = g_dtplane_root_vptr;
+    const unsigned int ok = (want != 0u && found == want) ? 1u : 0u;
+
+    entry_note_dtref((uint32_t)(uintptr_t)recorded, found, want, ok);
+    if (ok == 0u)
+        return 0u;
+
+    *kids = entry_xnu_child_count(recorded, plane);
+    *set = entry_xnu_child_set(recorded, plane);
+    return 1u;
+}
+
 void *entry_probe_dt_children(void)
 {
     const void *plane = gIODTPlane;
@@ -5898,12 +5955,16 @@ void *entry_probe_dt_children(void)
 
     if (recorded != 0) {
         uint32_t rclass0 = 0u, rclass1 = 0u;
-        unsigned int rkids = entry_xnu_child_count(recorded, plane);
-        void *rset = entry_xnu_child_set(recorded, plane);
+        unsigned int rkids = 0u;
+        void *rset = 0;
+        unsigned int rsame;
 
-        entry_class_words(STAGE90_CLS_RECORDED, recorded, &rclass0, &rclass1);
-        entry_note_dtrec((uint32_t)(uintptr_t)recorded, rclass0, rclass1, (uint32_t)rkids,
-                         (uint32_t)(uintptr_t)rset);
+        rsame = entry_dt_recorded_walk(recorded, plane, &rkids, &rset);
+        if (rsame != 0u) {
+            entry_class_words(STAGE90_CLS_RECORDED, recorded, &rclass0, &rclass1);
+            entry_note_dtrec((uint32_t)(uintptr_t)recorded, rclass0, rclass1, (uint32_t)rkids,
+                             (uint32_t)(uintptr_t)rset);
+        }
     }
 
     /*

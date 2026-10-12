@@ -13676,15 +13676,63 @@ set=armed-d13-2df6333a sha256=e0a7666d368fdce113c62a5593e770984f1dd296ab3f0423d3
 # Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
 # written - fully reversible. fastboot boot only, NEVER flash.
 # =================================================================================================
-set=armed-d13-707801c4 sha256=707801c460049cf87bb6b7251d1c85c3574fcb99fb45e014a8ffe262732e4b56 bytes=6335572 file=xnu_arm_entry.bin role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry.bin
-set=armed-d13-707801c4 sha256=7193f69955268f07399be63c33b48b47e4181fa0714978693f70f7af667101fc bytes=7375508 file=xnu_arm_entry.elf role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry.elf
-set=armed-d13-707801c4 sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry.h
-set=armed-d13-707801c4 sha256=a90f8b6bb23e36879fb950d8d1ce916deb13339f151a8e3bdb877e2423379b51 bytes=1435 file=xnu_arm_entry-config.txt role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry-config.txt
-set=armed-d13-707801c4 sha256=4cd03fa9d4a826cea9ac40d1cf143b58c6b7b6435fb64ce86364bfb5b5901e12 bytes=3149 file=xnu_arm_entry-sources.txt role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry-sources.txt
-set=armed-d13-707801c4 sha256=8b0942052c3bd109e7dea6c2ac3ba073388b601977eecd91f26780302ef04cfd bytes=6830980 file=stage90.bin role=988-d13-kextb-linkedit-teardown-out;-stage90.bin
-set=armed-d13-707801c4 sha256=1777c602bf5ceec95709a7dd2e4f47f3c676b71626b375aacaa8a40f0d8dc753 bytes=6893052 file=stage90.elf role=988-d13-kextb-linkedit-teardown-out;-stage90.elf
-set=armed-d13-707801c4 sha256=ffdf85ddefd18b7adf6f034a40ed7603c6dade6fd01b083f0bc4f192d6fdff23 bytes=6834176 file=stage90.img role=988-d13-kextb-linkedit-teardown-out;-stage90.img
-set=armed-d13-707801c4 sha256=7e838e9cca8d536ebc8d8c4b7cf82e546d74ebffa8be5109384d61f7608e9a8b bytes=9355264 file=stage90-qcdt.img role=988-d13-kextb-linkedit-teardown-out;-stage90-qcdt.img
-set=armed-d13-707801c4 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=988-d13-kextb-linkedit-teardown-out;-stage90_fixture.macho
-set=armed-d13-707801c4 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=988-d13-kextb-linkedit-teardown-out;-stage90-build-config.txt
-set=armed-d13-707801c4 sha256=8cc9a32b6e01a1424f8af1928974def299bf4ae1f1678dca18977b138d2f656b bytes=560 file=SHA256SUMS.txt role=988-d13-kextb-linkedit-teardown-out;-SHA256SUMS.txt
+set=armed-d13-707801c4-spent sha256=707801c460049cf87bb6b7251d1c85c3574fcb99fb45e014a8ffe262732e4b56 bytes=6335572 file=xnu_arm_entry.bin role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry.bin
+set=armed-d13-707801c4-spent sha256=7193f69955268f07399be63c33b48b47e4181fa0714978693f70f7af667101fc bytes=7375508 file=xnu_arm_entry.elf role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry.elf
+set=armed-d13-707801c4-spent sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry.h
+set=armed-d13-707801c4-spent sha256=a90f8b6bb23e36879fb950d8d1ce916deb13339f151a8e3bdb877e2423379b51 bytes=1435 file=xnu_arm_entry-config.txt role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry-config.txt
+set=armed-d13-707801c4-spent sha256=4cd03fa9d4a826cea9ac40d1cf143b58c6b7b6435fb64ce86364bfb5b5901e12 bytes=3149 file=xnu_arm_entry-sources.txt role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry-sources.txt
+set=armed-d13-707801c4-spent sha256=8b0942052c3bd109e7dea6c2ac3ba073388b601977eecd91f26780302ef04cfd bytes=6830980 file=stage90.bin role=988-d13-kextb-linkedit-teardown-out;-stage90.bin
+set=armed-d13-707801c4-spent sha256=1777c602bf5ceec95709a7dd2e4f47f3c676b71626b375aacaa8a40f0d8dc753 bytes=6893052 file=stage90.elf role=988-d13-kextb-linkedit-teardown-out;-stage90.elf
+set=armed-d13-707801c4-spent sha256=ffdf85ddefd18b7adf6f034a40ed7603c6dade6fd01b083f0bc4f192d6fdff23 bytes=6834176 file=stage90.img role=988-d13-kextb-linkedit-teardown-out;-stage90.img
+set=armed-d13-707801c4-spent sha256=7e838e9cca8d536ebc8d8c4b7cf82e546d74ebffa8be5109384d61f7608e9a8b bytes=9355264 file=stage90-qcdt.img role=988-d13-kextb-linkedit-teardown-out;-stage90-qcdt.img
+set=armed-d13-707801c4-spent sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=988-d13-kextb-linkedit-teardown-out;-stage90_fixture.macho
+set=armed-d13-707801c4-spent sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=988-d13-kextb-linkedit-teardown-out;-stage90-build-config.txt
+set=armed-d13-707801c4-spent sha256=8cc9a32b6e01a1424f8af1928974def299bf4ae1f1678dca18977b138d2f656b bytes=560 file=SHA256SUMS.txt role=988-d13-kextb-linkedit-teardown-out;-SHA256SUMS.txt
+# armed-d13-2e0eebf5  -  989: 988 + THE CENSUS- RECORDED ADDRESS IDENTITY-CHECKED BEFORE IT IS WALKED.
+# Switch set is 988-s UNCHANGED (no new switch, no ENTRY_ARM_KEY added: 989 is entry-side); the
+# ENTRY BIN moved (707801c4 -> 2e0eebf5) and the D13 pool is rebuilt unchanged (only a fresh checkout
+# needs 988-s tools/stage_d13_kextb_login.sh, re-staged here).
+#
+# 988 (pressed 2026-10-12, arm armed-d13-707801c4, commit ed5c3ca, evidence /tmp/press988.log) is a
+# DECISIVE SUCCESS in the pre-registered sense - the abort MOVED. The KEXTB_LOGIN guard took: no
+# second fault at 0x800b2c90 (removeKextBootstrap no longer tears down an absent __LINKEDIT). The
+# NEW first abort is at the device-tree census- recorded block: fsr=5, far=0x00010005,
+# pc=0x800c41c0 = ~OSMetaClass()+0x1c, lr=0x8049e1c0 = the return of `bl getChildSetReference` at
+# 0x8049e1bc inside entry_probe_dt_children, which runs from __wrap_vm_pageout (kernel_bootstrap-s
+# LAST statement).
+#
+# ROOT CAUSE (989): the recorded address (461-s g_dtplane_root = xnu_live_dtalloc_ret = 0xc0b7bd80,
+# the object IODeviceTreeAlloc returned) WAS an IOService while alive (xnu_live_cls_vptr=0x804c6714
+# = _ZTV9IOService+8) and has been FREED AND REUSED by the census (486-s doc comment:
+# IORegistryEntry::init-s parent loop drops the tree root-s last reference). Its [+12] is 0x10001,
+# so getChildSetReference-s registry-table load dispatched through slot 36 of 0x10001 and tail-called
+# into ~OSMetaClass, which dereferenced [+4] of 0x10001 and faulted at far=0x10005. On 4570 the
+# recipient was an IORootParent and its walk was benign; on D13 it is not.
+#
+# 989: entry_trace.c gains entry_dt_recorded_walk (noinline): it reads [recorded] ONCE, publishes it
+# (entry_note_dtref -> xnu_live_dtref_obj/found/want/ok), and walks the recorded address only when
+# [recorded] equals the word the object carried while alive (g_dtplane_root_vptr, MEASURED in
+# entry_note_dtplane - not a vtable constant; it moved 0x804c6714 -> 0x804c67f4 between 988 and 989).
+# build_entry.sh gains a by-value clause that REFUSES an image whose helper does not materialize the
+# global-s address (either form: movw/movt or a literal-pool word) or whose probe still walks the
+# recorded address.
+#
+# READ: past the census- recorded block (vm_pageout returns) into load_init_program / the pid-1 exec
+# path => the reused recorded address was 988-s frontier. FALSIFICATION: the same abort recurs
+# (pc=0x800c41c0-class with far=0x10005) => the guard did not take, or it passed and the address was
+# reused by an object with the SAME first word (the residual the doc comment names).
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-2e0eebf5 sha256=2e0eebf5a8bef01f87033a775ddae45c191703b16f936e1a9b599041f8aa6e10 bytes=6335572 file=xnu_arm_entry.bin role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry.bin
+set=armed-d13-2e0eebf5 sha256=1b650cf5aa8fe256bfcda68a081ed3ff8105327680669b8f6883f3a2525cc413 bytes=7375772 file=xnu_arm_entry.elf role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry.elf
+set=armed-d13-2e0eebf5 sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry.h
+set=armed-d13-2e0eebf5 sha256=24c8dd64f8466ebb6f534605920f0ca37c4feb3607213fe9f42978d6c5ddc0ff bytes=1435 file=xnu_arm_entry-config.txt role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry-config.txt
+set=armed-d13-2e0eebf5 sha256=24ebc83785c952ee044c248cefafa58198360c83b1d7f8ea56b06c9852294221 bytes=3149 file=xnu_arm_entry-sources.txt role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry-sources.txt
+set=armed-d13-2e0eebf5 sha256=860dc00584ee495175cb4c804193b3a70f8daed48826257f93e5f7a4515e34b7 bytes=6830980 file=stage90.bin role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90.bin
+set=armed-d13-2e0eebf5 sha256=bb3302cecaf8f07143810965d6f6981f382afc197ee70294451d2371e3bacdcc bytes=6893052 file=stage90.elf role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90.elf
+set=armed-d13-2e0eebf5 sha256=98a516930813a436e1bf7e83d99c306a5713dfa7f0fe44f06ab50678c49dc4cb bytes=6834176 file=stage90.img role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90.img
+set=armed-d13-2e0eebf5 sha256=a2e1bdf18a624dc84ccda629be1faae75b311332ca271d2b21eb0c34771a51a0 bytes=9355264 file=stage90-qcdt.img role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90-qcdt.img
+set=armed-d13-2e0eebf5 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90_fixture.macho
+set=armed-d13-2e0eebf5 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90-build-config.txt
+set=armed-d13-2e0eebf5 sha256=f537469098e2044633d84b74a159e743bba18ef60ee0f4cc1904f34caad9571a bytes=560 file=SHA256SUMS.txt role=989-d13-dt-census-recorded-address-identity-guard-out;-SHA256SUMS.txt

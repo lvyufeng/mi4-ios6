@@ -1048,6 +1048,12 @@ uint32_t g_dtplane_dt_top;
 uint32_t g_dtplane_root;
 uint32_t g_dtplane_map_ret;
 uint32_t g_dtplane_count;
+/* 989: the recorded address' FIRST WORD, read once while the object is alive. This is the identity the
+ * census' guard compares against, measured rather than spelled: at `IODeviceTreeAlloc` the address holds
+ * an `IOService` (`cls_vptr` 0x804c6714), and by the census it has been freed and reused (486's doc
+ * comment). A constant (`_ZTV9IOService + 8`) would be a second definition of the same fact; this word is
+ * the same reading the class record took, so a divergence between them is itself a finding. */
+uint32_t g_dtplane_root_vptr;
 uint32_t g_dtpath_count;
 uint32_t g_dtpath_caller;
 uint32_t g_dtpath_w0;
@@ -1331,6 +1337,17 @@ uint32_t g_dtrec_class0;
 uint32_t g_dtrec_class1;
 uint32_t g_dtrec_kids;
 uint32_t g_dtrec_set;
+/* 989: the recorded block's guard reading. `found` is the recorded address' first word *now*, `want` is
+ * the first word it had while it was alive (`g_dtplane_root_vptr`, taken in `entry_note_dtplane`), and
+ * `ok` is whether they match - the three numbers that say whether the walks below ran on the object
+ * `IODeviceTreeAlloc` returned or on whoever holds that address now. `ok=1` with `dtrec_kids=0` is then a
+ * real zero; `ok=0` with `dtrec_calls` unchanged is a refusal, not a zero. `want=0` with `found!=0` is a
+ * third state: the record-time read never happened. */
+uint32_t g_dtref_calls;
+uint32_t g_dtref_obj;
+uint32_t g_dtref_found;
+uint32_t g_dtref_want;
+uint32_t g_dtref_ok;
 
 /*
  * 487's two groups, and they are the ones that turn "the driver layer" from a phrase into a count.
@@ -3082,6 +3099,7 @@ __attribute__((noinline)) static void entry_write_461_kv(void)
     entry_write_kv("xnu_entry_dtplane", g_dtplane);
     entry_write_kv("xnu_entry_dtplane_dt_top", g_dtplane_dt_top);
     entry_write_kv("xnu_entry_dtplane_root", g_dtplane_root);
+    entry_write_kv("xnu_entry_dtplane_root_vptr", g_dtplane_root_vptr);
     entry_write_kv("xnu_entry_dtplane_map", g_dtplane_map_ret);
     entry_write_kv("xnu_entry_dtplane_count", g_dtplane_count);
     entry_write_kv("xnu_entry_dtpath_count", g_dtpath_count);
@@ -3279,6 +3297,14 @@ __attribute__((noinline)) static void entry_write_485_kv(void)
     entry_write_kv("xnu_entry_dtrec_class1", g_dtrec_class1);
     entry_write_kv("xnu_entry_dtrec_kids", g_dtrec_kids);
     entry_write_kv("xnu_entry_dtrec_set", g_dtrec_set);
+    /* 989: the guard's three numbers, beside the six they gate - so a record cut off after `ok` still
+     * says what the recorded address' first word was, which is the reading that decides whether the six
+     * walks above are about the object `IODeviceTreeAlloc` returned or about whoever holds the address. */
+    entry_write_kv("xnu_entry_dtref_obj", g_dtref_obj);
+    entry_write_kv("xnu_entry_dtref_found", g_dtref_found);
+    entry_write_kv("xnu_entry_dtref_want", g_dtref_want);
+    entry_write_kv("xnu_entry_dtref_ok", g_dtref_ok);
+    entry_write_kv("xnu_entry_dtref_calls", g_dtref_calls);
     entry_write_kv("xnu_entry_dtc_calls", g_dtc_calls);
     entry_write_kv("xnu_entry_dtrec_calls", g_dtrec_calls);
     /*
@@ -7286,8 +7312,14 @@ void entry_note_dtplane(uint32_t plane, uint32_t dt_top, uint32_t root, uint32_t
     g_dtplane_root = root;
     g_dtplane_map_ret = map_ret;
     g_dtplane_count++;
+    /* 989: the one safe moment to take the recorded address' first word - `root` is the live object the
+     * `IODeviceTreeAlloc` wrapper is returning, before anything can drop the last reference to it. The
+     * read is guarded by a nonzero `root` so a NULL record stores 0 (which the census reads as "never
+     * measured", a state of its own) rather than faulting. */
+    g_dtplane_root_vptr = (root != 0u) ? *(const volatile uint32_t *)(uintptr_t)root : 0u;
     entry_live_write("xnu_live_dtplane", plane);
     entry_live_write("xnu_live_dtplane_root", root);
+    entry_live_write("xnu_live_dtplane_root_vptr", g_dtplane_root_vptr);
     entry_live_write("xnu_live_dtplane_map", map_ret);
 }
 
@@ -7501,6 +7533,52 @@ void entry_note_dtrec(uint32_t obj, uint32_t class0, uint32_t class1, uint32_t k
     entry_live_write("xnu_live_dtrec_class1", class1);
     entry_live_write("xnu_live_dtrec_kids", kids);
     entry_live_write("xnu_live_dtrec_set", set);
+}
+
+/*
+ * 989: the recorded address' identity, published before any walk on it.
+ *
+ * **988's press is why this function exists.** `entry_probe_dt_children`'s recorded block read
+ * `recorded` (461's `g_dtplane_root`, the address `IODeviceTreeAlloc` returned) with the same calls it
+ * uses on the tree root - child set, child count, class - and the boot took a data abort inside the
+ * *first* of them: `pc=0x800c41c0 = ~OSMetaClass()+0x1c` with `lr=0x8049e1c0`, the return of
+ * `bl getChildSetReference` at `0x8049e1bc`, `far=0x00010005`, `fsr=5`. `xnu_live_cls_site=1` says what
+ * the address held at `IODeviceTreeAlloc` time - an `IOService` (`cls_vptr=0x804c6714`, `cls_meta=0x80640868`)
+ * - and the 486 doc comment above says the block is *reused by design*: the tree root's own reference is
+ * dropped (`IORegistryEntry::init`'s parent loop) and the address is handed to the next allocation. On
+ * 4570 the object that received it was an `IORootParent`, whose walk was benign. On D13 it was something
+ * whose `[+12]` is `0x10001`, so `getChildSetReference`'s registry-table load dispatched through slot 36
+ * of `0x10001` and ended in a destructor.
+ *
+ * So the walk gets a **precondition it publishes and checks before it reads anything else**: the address
+ * is still the object `IODeviceTreeAlloc` returned iff its first word equals the word that object carried
+ * while it was alive - `want`, taken in `entry_note_dtplane` from the live object itself, so the guard
+ * compares against a *measurement* and not against a constant that could go stale with the vtable. When
+ * they match, the walks run and `ok` is 1; when they do not, only the first word is read - never a second
+ * dereference, because a freed address' first word may itself be a pointer that faults - `ok` is 0, and
+ * the six `dtrec_*` readings stay at their zeroed values, which is the honest record of "the object is
+ * gone", not a fabricated walk. The same rule 486's run B taught for the class read ("a number the
+ * instrument cannot use is published, not dereferenced") applied one step earlier: here the *address* is
+ * the number.
+ *
+ * The keys are separate from `xnu_live_dtrec_*` so the gate that pins the 486 record's shape (five
+ * parameters, six keys) is untouched, and so `dtrec_calls` staying at 0 while `dtref_ok` is 0 reads as
+ * *refused* rather than as a walk that found nothing. The residual this guard does not close: a freed
+ * block reused by an object with the *same* first word passes - it is crash-safety, not a proof of
+ * identity, and the step's doc says so rather than implying more.
+ */
+void entry_note_dtref(uint32_t obj, uint32_t found, uint32_t want, uint32_t ok)
+{
+    g_dtref_calls++;
+    g_dtref_obj = obj;
+    g_dtref_found = found;
+    g_dtref_want = want;
+    g_dtref_ok = ok;
+    entry_live_write("xnu_live_dtref_calls", g_dtref_calls);
+    entry_live_write("xnu_live_dtref_obj", obj);
+    entry_live_write("xnu_live_dtref_found", found);
+    entry_live_write("xnu_live_dtref_want", want);
+    entry_live_write("xnu_live_dtref_ok", ok);
 }
 
 /*
