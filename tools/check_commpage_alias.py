@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assert BY VALUE that the linked image carries the iOS 7 commpage alias at 0xFFFF4000 (992).
+"""Assert BY VALUE that the linked image carries the iOS 7 commpage alias at 0xFFFF4000 (992+993).
 
 Reads the section table (`arm-none-eabi-objdump -h`) and the disassembly (`-d`) of a linked image
 (default `out/stage90/xnu_arm_entry.elf`) and checks the code the 992 switch compiles in - from the
@@ -37,10 +37,26 @@ Checks:
   5. image-wide, at least TWO bodies materialize 0xFFFF4000 - `pmap_create_sharedpage` and the pte
      attribute path (`leo_pte_build` / the template sites), so the constant is not only the map
      request but also the permission grant.
+  6. (993) `arm_vm_init` carries the zeroing of the stolen high-vector L2 table: its body loads
+     `IOS7LAB vecl2:`'s report string AND calls bzero/memset with L2_SIZE (0x400) in r1 OR r2 (the
+     size is the 2nd argument of bzero, the 3rd of memset - the check accepts either spelling).
+     WHY this is a check and not a comment: 992's press died exactly because that table was raw DRAM
+     and its slot 0xf4 (VA 0xFFFF4000) was the first such slot ever entered - pmap_enter_options read
+     a leftover 0xFFD5A0xx as an "old mapping" and indexed pv_head_table 523,610 entries deep (it
+     holds 123,904), a kernel data abort at VA 0xc1233b14, pc 0x80028b90.  The bzero is the fix.
+  7. (993) `pmap_create_sharedpage` carries the slot probe: its body loads `IOS7LAB commpage alias:
+     L2 slot pre` AND `... stale slot cleared` (the fail-soft clear that turns a missed zero into a
+     reading instead of a second panic), and the `pre` report is materialized BEFORE the body's last
+     pmap_enter call (the alias enter).  A missing probe must stop the build, not the press.  The
+     `bl pmap_pte` count is NOT a signal: measured against the 992 image, the body carries zero of
+     them (the `lab_pte` read-back is dead once the asserts compile out, and the inlined
+     `pmap_extract` walks the pte inline), so it is printed as info, never checked.
 
 Rehearsal: against the 991 image (pre-fix) it must FAIL check 1 - there is no `IOS7LAB` string
 anywhere, because all six board gates are closed; against an image whose gates were opened but whose
-marker line still reads kprintf it must FAIL check 1 alone.  Exit 0 iff all pass.
+marker line still reads kprintf it must FAIL check 1 alone; against the 992 image (alias staged, no
+zeroing, no probe) it must FAIL checks 1 (the vecl2 + slot-pre strings are absent), 6 and 7.  Exit 0
+iff all pass.
 """
 import os
 import re
@@ -49,10 +65,17 @@ import sys
 
 OBJDUMP = "arm-none-eabi-objdump"
 TARGET = "pmap_create_sharedpage"
+VECL2_STRING = b"IOS7LAB vecl2: %u nonzero slot(s) in the stolen high-vector L2 table before zeroing"
+SLOT_PRE_STRING = b"IOS7LAB commpage alias: L2 slot pre = 0x%08x"
+SLOT_CLEARED_STRING = b"IOS7LAB commpage alias: stale slot cleared (was 0x%08x)"
 STRINGS = (b"IOS7LAB commpage alias 0xffff4000: same page, user read-only, XN",
-           b"IOS7LAB commpage cpus:")
+           b"IOS7LAB commpage cpus:",
+           VECL2_STRING,
+           SLOT_PRE_STRING)
 ALIAS_VA = 0xFFFF4000
 COMMPAGE_VA = 0x40000000
+L2_SIZE = 0x400          # pmap.h:196 - one 256-entry L2 table page
+ZERO_CALLEES = ("bzero", "memset")
 
 _LABEL = re.compile(r"^\s*([0-9a-f]+) <([^>]+)>:$")
 _INSN = re.compile(r"^\s*([0-9a-f]+):\s+[0-9a-f ]+\t([a-z0-9.]+)\s*(.*)$")
@@ -244,6 +267,60 @@ def aliased_into_second_arg(body, value):
     return None
 
 
+def value_live_in_reg_at_call(body, value, regs, callees):
+    """VA of the first call to one of `callees` that RECEIVES `value` in one of `regs`, or None.
+
+    The generalized register walk behind checks 6-7 (the same discipline as
+    `aliased_into_second_arg`, which stays because check 4's wording is bound to r1/pmap_enter):
+    arm when the value COMPLETES into one of `regs` (a movw/movt pair on the same register, a single
+    `mov`/`movw`), disarm that register on any later instruction that writes it, and disarm all of
+    them on any call other than the accepted callees (AAPCS lets a call clobber r0-r3).  If a call to
+    an accepted callee happens while a register is armed, the value is still its argument there.
+    `callees` are matched as prefixes, so ("bzero", "memset") also accepts `_bzero` / `memset_s`.
+    """
+    state = {r: (False, None) for r in regs}
+    for va, mn, ops in body:
+        text = f"{mn} {ops}".strip()
+        if mn in ("bl", "blx"):
+            tail = ops.split("<", 1)[-1]
+            # `_bzero` in C is emitted as `<bzero>` in this image (measured), but accept the
+            # underscored spelling too - a name variant is not a reason to miss the call
+            names = tail if tail.startswith(tuple(callees)) else tail.lstrip("_")
+            if any(state[r][0] for r in regs) and names.startswith(tuple(callees)):
+                return va
+            for r in regs:
+                state[r] = (False, None)
+            continue
+        m = _MOVT.match(text)
+        if m:
+            r = m.group(1)
+            if r in state:
+                _armed, lo = state[r]
+                hi = parse_imm(ops)
+                state[r] = (lo is not None and hi is not None and (hi << 16) | lo == value, None)
+            continue
+        m = _MOVW.match(text)
+        if m:
+            r = m.group(1)
+            if r in state:
+                lo = parse_imm(ops)
+                # a lone movw COMPLETES any value <= 0xFFFF (it zero-extends); for a wider value it
+                # is only the low half, pending a movt (`movw r1, #4096` is the measured shape of
+                # pmap_grab_page's bzero size in this image)
+                state[r] = (lo == value, lo if value > 0xFFFF else None)
+            continue
+        m = _MOV.match(text)
+        if m:
+            r = m.group(1)
+            if r in state:
+                state[r] = (parse_imm(ops) == value, None)
+            continue
+        m = _WRITES.match(text)
+        if m and m.group(1) in state:
+            state[m.group(1)] = (False, None)
+    return None
+
+
 def main() -> int:
     path = sys.argv[1] if len(sys.argv) > 1 else "out/stage90/xnu_arm_entry.elf"
     print(f"check_commpage_alias: {path}")
@@ -332,6 +409,69 @@ def main() -> int:
             print(f"  ok   0x{ALIAS_VA:x} in <{name}>: {desc}")
         if len(sites) > 4:
             print(f"       ... and {len(sites) - 4} more")
+
+    # ---- 6. arm_vm_init zeroes the stolen high-vector L2 table (993's root fix)
+    vm_body = funcs.get("arm_vm_init")
+    vecl2 = find_string(path, secs, VECL2_STRING)
+    if vm_body is None:
+        print("  FAIL arm_vm_init is not in the image - wrong image, or the symbol disappeared")
+        ok = False
+    elif vecl2 is None:
+        print(f"  FAIL `{VECL2_STRING.decode()[:48]}`... is not in the image - the 993 zeroing of "
+              f"the stolen high-vector L2 table is not compiled in (992's press died exactly there: "
+              f"slot 0xf4 held raw DRAM, pmap_enter_options walked pv_head_table 523,610 entries "
+              f"deep and aborted at VA 0xc1233b14)")
+        ok = False
+    else:
+        m_str = materializes_value(vm_body, vecl2[0], read_u32)
+        zero = value_live_in_reg_at_call(vm_body, L2_SIZE, ("r1", "r2"), ZERO_CALLEES)
+        if m_str is None:
+            print(f"  FAIL arm_vm_init never loads the vecl2 report string at {vecl2[0]:#010x} - the "
+                  f"string exists but the block that prints it is not in this body")
+            ok = False
+        else:
+            print(f"  ok   arm_vm_init loads the vecl2 report string ({m_str[1]})")
+        if zero is None:
+            print(f"  FAIL arm_vm_init calls no bzero/memset with L2_SIZE (0x{L2_SIZE:x}) in r1/r2 - "
+                  f"the stolen table is left raw DRAM and the first pmap_enter into any of its other "
+                  f"255 slots repeats 992's abort")
+            ok = False
+        else:
+            print(f"  ok   arm_vm_init zeroes the stolen table: bzero/memset(..., 0x{L2_SIZE:x}) "
+                  f"at {zero:#010x}")
+
+    # ---- 7. the alias block probes (and fail-soft clears) slot 0xf4 first (993)
+    if body:
+        pre = find_string(path, secs, SLOT_PRE_STRING)
+        cleared = find_string(path, secs, SLOT_CLEARED_STRING)
+        if pre is None or cleared is None:
+            print(f"  FAIL the 993 slot probe's report strings are missing from the image "
+                  f"({'pre ' if pre is None else ''}{'cleared ' if cleared is None else ''}absent) - "
+                  f"a 992-shaped alias block: it enters slot 0xf4 blind")
+            ok = False
+        else:
+            m_pre = materializes_value(body, pre[0], read_u32)
+            m_cleared = materializes_value(body, cleared[0], read_u32)
+            ptes = calls_to(body, "pmap_pte")
+            if m_pre is None or m_cleared is None:
+                print(f"  FAIL {TARGET} never loads the probe's report string(s) - the strings exist "
+                      f"but the probe is not in this body")
+                ok = False
+            else:
+                print(f"  ok   {TARGET} loads the probe reports ({m_pre[1]}; {m_cleared[1]})")
+                enters = calls_to(body, "pmap_enter")
+                if not enters or m_pre[0] >= enters[-1]:
+                    print(f"  FAIL {TARGET}: the probe's report is not materialized before the last "
+                          f"pmap_enter call - the slot must be measured BEFORE the alias enter")
+                    ok = False
+                else:
+                    print(f"  ok   {TARGET}: the probe's report loads at {m_pre[0]:#010x}, before "
+                          f"the last pmap_enter call at {enters[-1]:#010x} - the slot is measured "
+                          f"first")
+                print(f"       (info: {len(ptes)} `bl pmap_pte` in the body - the compiler inlines "
+                      f"pmap_pte at these callsites (the 992 body has 0 while its inlined "
+                      f"pmap_extract walks the pte inline), so the string binding, not this count, "
+                      f"is the check)")
 
     print(f"check_commpage_alias: {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1

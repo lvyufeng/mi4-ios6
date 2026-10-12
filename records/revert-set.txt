@@ -13905,3 +13905,60 @@ set=armed-d13-fce6e8dd sha256=6c54f3c455afc6d80f5da9dc9d6521dbf1a25669014830afbb
 set=armed-d13-fce6e8dd sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=992-commpage-alias-0xffff4000;-stage90_fixture.macho
 set=armed-d13-fce6e8dd sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=992-commpage-alias-0xffff4000;-stage90-build-config.txt
 set=armed-d13-fce6e8dd sha256=b0859a8418120cb3f08785b0f98e54cb0eb975005d731d2f334dd8af9960ae91 bytes=560 file=SHA256SUMS.txt role=992-commpage-alias-0xffff4000;-SHA256SUMS.txt
+# armed-d13-1d5cf20e  -  993: THE STOLEN HIGH-VECTOR L2 TABLE IS ZEROED BEFORE THE ALIAS ENTER (992-s REGRESSION FIXED).
+# Switch set is 992-s, VERBATIM (no new config key); the ENTRY BIN moved (fce6e8dd -> 1d5cf20e) and TWO tree
+# SOURCE files move: osfmk/arm/arm_vm_init.c (NEW in this rung: the zeroing) and osfmk/arm/pmap.c
+# (the slot probe + pre/post reports); osfmk/arm/commpage/commpage.c is 992-s, unchanged - this rung
+# has NO assembly-layer, NO pcb.c and NO vm_resident.c change (a fresh checkout needs ALL FOUR
+# tools/stage_d13_kextb_login.sh, tools/stage_d13_sp_align.sh, tools/stage_d13_vmhint_guard.sh and
+# tools/stage_d13_commpage_alias.sh - the last now stages the vector-table zeroing too).
+#
+# 992 (pressed 2026-10-12, arm armed-d13-fce6e8dd, commit d5facfc, evidence /tmp/cancro-last_kmsg.txt)
+# REGRESSED: 992 and 991-s logs are identical through line 4043, then 992 panics at 4044, inside
+# vm_commpage_init -> pmap_create_sharedpage: panic(cpu 0 caller 0x8046b6b0): Kernel data abort.
+# (faulting address: 0xc1233b14); r4=0xc0837000 r6=0x80000000 r7=0xffff4000 r9=0x80b813d0
+# r10=0x003fffcc r11=0x000ffd5a pc=0x80028b90 lr=0x80049abc fsr=0x7 (translation fault, page, READ).
+#
+# ROOT CAUSE, read BY VALUE: pc=0x80028b90 is `ldr r0, [r0, #12]` in pmap_enter_options+0x29c - the
+# pv_h->pmap load before panic("pmap_enter_options: null pv_list"); fp = old_pte>>12 = r11 =
+# 0x000FFD5A (leftover PA 0xFFD5A000); pai = 0xFFD5A - 0x80000 = 0x7FD5A (523,610); pv_h = r4 +
+# pai*20 = 0xC1233B08; [pv_h+12] = 0xC1233B14 = the fault address exactly. pv_head_table holds only
+# 123,904 entries - the walk left it. WHY: arm_vm_init steals vecpt_start = first_avail as the
+# high-vector L2 table and writes ONLY slot 0xF0 (VECTORS_BASE 0xFFFF0000); topOfKernel 0x80a00000
+# => vecpt_start = 0x80B81000, and r9 = 0x80b813d0 = vecpt_start + 0xF4*4 = exactly
+# pmap_pte(kernel_pmap, 0xFFFF4000): the alias enter was the FIRST EVER enter into that slot; its 255
+# neighbours were raw DRAM. Every other table in the boot path is zeroed (l2_cache_to_range
+# zero=TRUE - arm_vm_init.c:250-s own "used by the bootloader" comment - and pmap_grab_page :2769);
+# the stolen vector page was the sole exception.
+#
+# 993: tools/stage_d13_commpage_alias.sh now also stages (a) in arm_vm_init.c, after va_vecpt is
+# computed: count+print the stolen table-s nonzero slots, bzero the whole L2_SIZE page, count+print
+# again (IOS7LAB vecl2: markers); (b) in pmap.c-s alias block: print slot 0xf4 BEFORE the enter
+# (L2 slot pre), fail-soft clear it if nonzero (stale slot cleared), print L2 slot post after.
+# tools/check_commpage_alias.py checks 6-7 assert both in the LINKED elf and REFUSE a 992-shaped
+# image (rehearsed against the frozen 992 elf: exit 1, exactly checks 1/6/7 fail).
+#
+# READ: IOS7LAB vecl2: N nonzero slot(s) ... before zeroing (small N; slot 0xf4-s 0xFFD5A0xx
+# neighbourhood among the printed lines), then 0 nonzero slot(s) after zeroing; then
+# IOS7LAB commpage alias: L2 slot pre = 0x00000000 (the arm_vm_init zero ran AND reached this pmap),
+# the 992 markers IOS7LAB commpage alias 0xffff4000: same page, user read-only, XN and
+# IOS7LAB commpage cpus: ...; then bsd_init -> launchd; the 231x 0xffff4090 Translation fault burst
+# MUST NOT recur.
+# FALSIFICATION: the same 231x 0xffff4090 burst recurs (the alias sits in a pmap the user context
+# does not consult - 994 = the user-pmap/context side), or a NEW kernel abort/panic appears (its pc
+# names the next wall).
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never written -
+# fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-1d5cf20e sha256=1d5cf20ed66f139810eef014ed3fc4276d39cd8dc6b4d62293ab51b1350c04fd bytes=6335572 file=xnu_arm_entry.bin role=993-vecl2-zeroing-and-slot-probe;-xnu_arm_entry.bin
+set=armed-d13-1d5cf20e sha256=28e7579bba5adb04bc9096eda30ff67462de9aa2b95c8e122de59e3b7a469b1a bytes=7375824 file=xnu_arm_entry.elf role=993-vecl2-zeroing-and-slot-probe;-xnu_arm_entry.elf
+set=armed-d13-1d5cf20e sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=993-vecl2-zeroing-and-slot-probe;-xnu_arm_entry.h
+set=armed-d13-1d5cf20e sha256=f2ce48abf1b43cfbb7650d34e5f426318eecc9cf6da4bd34cb4a0b9d9d508bf4 bytes=1514 file=xnu_arm_entry-config.txt role=993-vecl2-zeroing-and-slot-probe;-xnu_arm_entry-config.txt
+set=armed-d13-1d5cf20e sha256=c8a0819ce7eec3984b6317ba28d58e6ae9c82d9406a0856663dab5c9ef9cca74 bytes=3149 file=xnu_arm_entry-sources.txt role=993-vecl2-zeroing-and-slot-probe;-xnu_arm_entry-sources.txt
+set=armed-d13-1d5cf20e sha256=d94019a9e5087eb61a79c0fb3afcebed441df4226ccafe02fbc7c9f23c72a42d bytes=6830980 file=stage90.bin role=993-vecl2-zeroing-and-slot-probe;-stage90.bin
+set=armed-d13-1d5cf20e sha256=e8430cba9bd4afd04d0aaac0efb83f9150374c3a36b4ba552de8067ac753757f bytes=6893052 file=stage90.elf role=993-vecl2-zeroing-and-slot-probe;-stage90.elf
+set=armed-d13-1d5cf20e sha256=87d5421d884321727f218ea36a69d1de78e0df3307078ac8c3a42276accae8b3 bytes=6834176 file=stage90.img role=993-vecl2-zeroing-and-slot-probe;-stage90.img
+set=armed-d13-1d5cf20e sha256=4dc8e3a980fab5336b0249fa75e18470a56a04f0b55bc47973289b98a2360f96 bytes=9355264 file=stage90-qcdt.img role=993-vecl2-zeroing-and-slot-probe;-stage90-qcdt.img
+set=armed-d13-1d5cf20e sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=993-vecl2-zeroing-and-slot-probe;-stage90_fixture.macho
+set=armed-d13-1d5cf20e sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=993-vecl2-zeroing-and-slot-probe;-stage90-build-config.txt
+set=armed-d13-1d5cf20e sha256=4cadf650564d13b9aa085b7866c643f3c4ab3d248b31f0831ddadd7f09d02102 bytes=560 file=SHA256SUMS.txt role=993-vecl2-zeroing-and-slot-probe;-SHA256SUMS.txt

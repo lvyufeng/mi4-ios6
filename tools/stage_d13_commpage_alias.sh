@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stage 992's iOS 7 commpage alias into the D13 tree (experiment 992).
+# Stage 992+993's iOS 7 commpage alias into the D13 tree (experiments 992-993).
 #
 # `external/` is a re-provisionable, gitignored checkout, so every edit this makes to it must be a
 # script a re-checkout can re-apply, not a hand edit it would lose (`stage_d13_board.sh`'s rule). This
@@ -45,7 +45,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$HERE/.." && pwd)
 XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-hd2-darwin13/xnu}
 
-for f in osfmk/arm/pmap.c osfmk/arm/commpage/commpage.c; do
+for f in osfmk/arm/pmap.c osfmk/arm/commpage/commpage.c osfmk/arm/arm_vm_init.c; do
     [[ -f $XNU/$f ]] || {
         echo "stage_d13_commpage_alias: no $f in $XNU (D13 tree not provisioned?)" >&2; exit 2; }
 done
@@ -53,4 +53,4 @@ done
 python3 "$HERE/patch_d13_commpage_alias.py" "$XNU"
 
 echo "stage_d13_commpage_alias: done (XNU=$XNU)"
-echo "stage_d13_commpage_alias: NOW RE-RUN tools/build_xnu_arm_kernel.sh (XNU_KERNEL_EXTRA_DEFINES=-DSTAGE90_XNU_COMMPAGE_ALIAS=1 + the same env var, for the pool's osfmk_arm_pmap.o + osfmk_arm_commpage_commpage.o)"
+echo "stage_d13_commpage_alias: NOW RE-RUN tools/build_xnu_arm_kernel.sh (XNU_KERNEL_EXTRA_DEFINES=-DSTAGE90_XNU_COMMPAGE_ALIAS=1 + the same env var, for the pool's osfmk_arm_pmap.o + osfmk_arm_commpage_commpage.o + osfmk_arm_arm_vm_init.o)"
