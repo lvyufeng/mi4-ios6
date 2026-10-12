@@ -443,3 +443,61 @@ build: **998 = G1 under `STAGE90_XNU_SHREG_GEOM`**, the draft-v2 shape with cons
 above plus the hard `status.c` stack half; with it `map_file` should return 0 for all four mappings
 and the slide stage runs for the first time (then dyld's halt, if any, moves past the shared cache
 — item 4's `mapping_to_slide` question is now expected to be exercised with m[1]).
+
+---
+
+## §10 — 998 press result: G1 CONFIRMED (`map_file kr=0`); the halt chain is GONE
+
+**Press** 2026-10-12, arm `armed-d13-dee822b0`, runner exit 0 (the SoC reset below brought the
+device back, so the "resident rung does not return" path never fired). Capture
+`out/stage90/captures/cancro-last_kmsg-998-armed-d13-dee822b0.txt` (sha256
+`0c558c533353c9abb3ebd6111773208253c47ab3acef993c12cdf7b09d8acec2`, 20,507 lines); press log
+`out/stage90/captures/press-998-20261012-232731.log`. USB console capture: empty.
+
+**Pre-registration verdict (the frozen block in `scripts/press_998.sh:39`; deviations reported, not
+reinterpreted).**
+- POINT 1 ✓ the geom printf appears EXACTLY once (`:4098`): `IOS7LAB shared region
+  0x2c000000..0x40000000; stack below 0x2be00000` (the `vm_shared_region.c:635` printf, first
+  reached at launchd's exec).
+- POINT 2 ✓ the four `IOS7LAB cache mapping` lines stay (`:4105-4108`) and **`IOS7SHREG map_file
+  kr=0` for the first time in this series** (`:4109`). `map_slide` runs the success form (`:4104`:
+  `slide=0x1a86000 slide_start=0x3dc32000 size=0x00089000`); 997's trailing `map_slide ret=14` and
+  the §8 item 4 hook (`slide_info initialization failed with kr=`) are absent.
+- (d) **not a new failure name — NO halt at all**: every marker of the 997 chain is gone from the
+  text block — `libbsm` 0 lines, `IOS7WITNESS` 0, `undefined instruction` 0, `dyld>` 0. The console
+  text ENDS at `map_file kr=0`.
+- Guards held: `check_np ret=12` (`:4103`), `VMHINT991` 2× (`:4096-4097`); the stack falsifier
+  (`Process 1 exec failed`) is absent. **Reported deviation:** the pre-registration's
+  `IOS7LAB vm_allocate64 flags=1 result=0` line is ABSENT — 997 places it (`:4110`) after the
+  failure's retire and before the fatal instruction, i.e. it is a failure-path artifact (the
+  message-buffer alloc), not a boot invariant. Recorded as a deviation; not reinterpreted.
+
+**The two walls that bound this reading.**
+1. **The live-record channel capped at 16384 in the dyld era.** `xnu_live_capped=0x00004000`
+   (`:20502`); the exec pair is live-record ~15295 (`:19374-19377`). What stays visible
+   (`:19378-20501`) is the common prefix: 8 `sleh` user-fault events (thread `0xc0bfa000`) + storage
+   reads + the late slot/rootmedia cluster. **997's record tail is name-for-name and LBA-for-LBA
+   identical (last `drv_lba=0x00422963`)** — the kr=1-vs-kr=0 divergence never reaches the record
+   channel; it lives only in the text block.
+2. **The SoC watchdog.** The payload arms it before the jump (25 s / 3 s); its only feed is the
+   resident pet on the idle-exit path (`entry_trace.c:3030`, `entry_wdt_pet` — the same site as the
+   USB ladder). **0 `xnu_live_wdt_*`, 0 `xnu_live_usb_*`, 0 `xnu_live_pcx` records ⇒ the handed-off
+   kernel NEVER idled ⇒ never fed ⇒ the SoC reset it ~28 s after the jump** — silent, no panic.
+   (908's kernel idled 60931 times; this boot's dyld path never reaches idle.) The runner's canned
+   wdt line ("no `xnu_live_wdt` map ⇒ RESIDENT off or predates 909") misreads a RESIDENT=1 image:
+   absence here means the pet never RAN.
+
+**New instrument defect (measured).** The `xnu_live_exec_done_*` records are absent while the SAME
+wrapper's printf printed (`:4100` `mini4: the OS's own init load returned ... (caller 0x80036100)`);
+in the pinned source the record call (`entry_trace.c:3776`) precedes the printf (`:3784`), and the
+pressed `entry_trace.c` sha `0cd3f105…` == the pinned `xnu_arm_entry-sources.txt` entry. ⇒ the load
+DID return; the three done-records were lost in the channel (candidate: the silent `g_live_state !=
+1` refusal during the exec window — `g_live_refusals` is only published in the pre-jump report). The
+runner's "the load did not return / look for the panic" verdict is contradicted by the wrapper's own
+console line.
+
+**Rung order, updated.** §8 items 1–3 DONE (997 = G3, 998 = G1; the geometry no longer blocks).
+Next rung's givens: (a) raise `ENTRY_LIVE_CAP` past the dyld era (the capture is ~1.07 MB of 2 MiB
+minus the 128 KB os-block ⇒ ~24576-28672 fits) and/or gate the w0..w127 read dumps that dominate the
+channel; (b) decide the watchdog policy — the pet fires only on idle, so a boot that never idles
+ends at the SoC's ~28 s whatever else it does; (c) fix the exec_done record loss (build side).
