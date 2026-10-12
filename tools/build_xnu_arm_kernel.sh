@@ -847,6 +847,20 @@ DEFINES=(
 # OFF compiles vm_unix.c's original bytes).
 [[ ${STAGE90_XNU_SHREG_WIRE:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_SHREG_WIRE=1)
 
+# 998's shared-region GEOMETRY + process stack top, ONE switch (G1): `osfmk/vm/vm_shared_region.c`'s
+# own iOS 7 block (base 0x2C000000 / size 0x14000000, behind `#if IOS7_COMPAT_PLATFORM` + the runtime
+# selector) and `osfmk/arm/status.c`'s stack half (ios7lab_user_stack() -> 0x2BE00000, so
+# create_unix_stack's FIXED target clears the new window - audit section 2: without it EVERY process's
+# stack relays out). 997's press MEASURED the geometry wall by value (the four `IOS7LAB cache mapping`
+# lines print with already-slid addresses, then `map_file kr=1` + `map_slide ret=14`: the default
+# 0x30000000/0x10000000 window cannot hold dyld's slid shared cache). Both files are kernel-pool files,
+# so the switch goes to the SAME array as the wire / probe / witness switches, not to `EXTRA_DEFINES` -
+# and the linked image only LINKS `out/xnu_kernel_obj_d13/osfmk_vm_vm_shared_region.o` +
+# `osfmk_arm_status.o`, so without this `-D` the linked geometry is silently the default one
+# (`tools/stage_d13_shreg_geom.sh` stages the three tree files; the 1:1 gate spelling is
+# `defined()`-first, so switch OFF compiles each file's original bytes with no line moved).
+[[ ${STAGE90_XNU_SHREG_GEOM:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_SHREG_GEOM=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.  (`$GENERATED` is

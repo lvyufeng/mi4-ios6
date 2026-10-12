@@ -1221,6 +1221,43 @@ case "$SHREG_WIRE" in
     *) echo "REFUSING: STAGE90_XNU_SHREG_WIRE='$SHREG_WIRE' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **998: the shared-region GEOMETRY and the process stack top, ONE switch (G1).** 997's press (arm
+# armed-d13-518b6a94, commit 9e6307a, log
+# out/stage90/captures/cancro-last_kmsg-997-armed-d13-518b6a94.txt:4096-4110) MEASURED that the 32 B
+# wire's mappings now arrive and the failure moved to the WINDOW: four `IOS7LAB cache mapping` lines
+# print with ALREADY SLID addresses (m0 va=0x2cd9c000 = 0x2C000000 + slide 0xd9c000; m1 carries
+# VM_PROT_SLIDE, init=0x23), then `map_file kr=1` (KERN_INVALID_ADDRESS) + `map_slide ret=14` - the
+# tree's default 0x30000000/0x10000000 window cannot hold dyld's slid shared cache. With
+# `STAGE90_XNU_SHREG_GEOM=1` the tree's OWN iOS 7 geometry block compiles in
+# (`osfmk/vm/vm_shared_region.c:626-635`, two gates deep today: `#if IOS7_COMPAT_PLATFORM` is 0 on
+# CANCRO and the runtime selector returns 0): base_address 0x2C000000U, size 0x14000000U, and its
+# `IOS7LAB shared region 0x2c000000..0x40000000; stack below 0x2be00000` printf (the audit
+# docs/reference/d13-shreg-g1-audit.md is the by-value record of the block and its blast radius). The
+# **stack half is a HARD requirement of the SAME rung** (`osfmk/arm/status.c:62-73`): the new window
+# covers the default USRSTACK 0x2FE00000, so `create_unix_stack`'s FIXED allocation at
+# trunc(user_stack - MAXSSIZ) would land inside the reserved window for EVERY process (audit §2); the
+# same switch moves the stack top to 0x2BE00000, so the target 0x2BD00000 falls below the window.
+# The fix is `tools/stage_d13_shreg_geom.sh` (the vmabi-recon lane's `tools/patch_d13_shreg_geom.py`):
+# FOUR 1:1 line substitutions (both `#if IOS7_COMPAT_PLATFORM` lines gain the 994 spelling
+# `|| (defined(STAGE90_XNU_SHREG_GEOM) && STAGE90_XNU_SHREG_GEOM)`; both `ios7_compat_vmabi_enabled()`
+# selector lines become `ios7_shreg_geom_enabled()`) plus `ios7_shreg_geom_enabled()` beside
+# `ios7_traps_enabled()` in `osfmk/arm/ios7_compat.h` - and NOT an inline `#if` wrap, because this
+# tree's `panic` embeds `__FILE__:__LINE__` (`osfmk/kern/debug.h:264`): v1's wrap moved three panic
+# strings (measured in the G1 audit's rehearsal), while a 1:1 substitution moves no .c line at all.
+# The MACRO itself is NOT touched (13 files reference `IOS7_COMPAT_PLATFORM`; the 994 "do not widen the
+# macro" lesson). All three files are POOL files, so the switch is compiled by
+# `tools/build_xnu_arm_kernel.sh` (DEFINES, from the same-named environment variable - the two
+# spellings must carry the SAME value, `mi4-one-value-two-definitions`) and the linked image only LINKS
+# `out/xnu_kernel_obj_d13/osfmk_vm_vm_shared_region.o` + `osfmk_arm_status.o`. The by-value clauses at
+# the 998 link site below refuse a link whose tree is not in the staged shape
+# (`tools/check_d13_shreg_geom.py --expect staged`) or whose image carries neither the geometry printf
+# literal nor the 0x2BE00000 stack top.
+SHREG_GEOM=${STAGE90_XNU_SHREG_GEOM:-0}
+case "$SHREG_GEOM" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_SHREG_GEOM='$SHREG_GEOM' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **911c: the RAM bank layout, measured from the Qualcomm SMEM RAM-partition table.** The goal's newest
 # clause is that XNU recognize the Mi 4's 3 GB of RAM, and the 911c design established that the repo
 # holds NO low-bank base or size anywhere - every "low bank" is an inference from "3 GB minus 1.5 GB".
@@ -1541,6 +1578,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_DYLD_WITNESS
                 STAGE90_XNU_SHREG_PROBE
                 STAGE90_XNU_SHREG_WIRE
+                STAGE90_XNU_SHREG_GEOM
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1731,6 +1769,17 @@ do
         # `shared_region_copyin_mappings`, the 20 B pair gone, 294's copyout at 8 bytes) and refuses a
         # link whose wire is still the tree's 20 B one.
         STAGE90_XNU_SHREG_WIRE)       _v=$SHREG_WIRE ;;
+        # 998: whether the tree's iOS 7 shared-region GEOMETRY and process stack top
+        # (`tools/stage_d13_shreg_geom.sh`) were compiled into this image's pool. Read from
+        # `$SHREG_GEOM`, validated 0/1 at its own assignment far above this loop, so the record and
+        # the pool's `DEFINES` cannot be built from two spellings of this switch
+        # (`mi4-one-value-two-definitions`). `vm_shared_region.c` and `status.c` are POOL files: the
+        # linked image only LINKS `out/xnu_kernel_obj_d13/osfmk_vm_vm_shared_region.o` +
+        # `osfmk_arm_status.o`, which is why the 998 clause at the link site below reads the linked
+        # image's own `IOS7LAB shared region` literal and the 0x2BE00000 stack top out of
+        # `thread_userstack`/`thread_userstackdefault` and refuses a link whose geometry/stack are
+        # still the tree's defaults (0x30000000/0x10000000, USRSTACK 0x2FE00000).
+        STAGE90_XNU_SHREG_GEOM)       _v=$SHREG_GEOM ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -30850,6 +30899,59 @@ verify_trace_symbols() {
         fi
         say "  xnu_entry_997: the linked image carries the 32 B shared-region wire dyld builds (count*32 in shared_region_copyin_mappings, the 20 B pair gone, 294's copyout at 8 bytes) - $sw_out"
     fi
+    # STAGE90_XNU_SHREG_GEOM=1: 997's press (arm armed-d13-518b6a94, commit 9e6307a, log
+    # out/stage90/captures/cancro-last_kmsg-997-armed-d13-518b6a94.txt:4096-4110) MEASURED the geometry
+    # wall: the four `IOS7LAB cache mapping` lines print (the 32 B wire is open) with ALREADY SLID
+    # addresses (m0 va=0x2cd9c000 = 0x2C000000 + 0xd9c000; m1 carries VM_PROT_SLIDE, init=0x23), then
+    # `map_file kr=1` (KERN_INVALID_ADDRESS) + `map_slide ret=14` - the tree's default
+    # 0x30000000/0x10000000 window cannot hold dyld's slid shared cache. The fix is
+    # `tools/stage_d13_shreg_geom.sh` + STAGE90_XNU_SHREG_GEOM=1: the tree's OWN geometry block
+    # (`osfmk/vm/vm_shared_region.c:626-635`, base 0x2C000000 / size 0x14000000 and its
+    # `IOS7LAB shared region 0x2c000000..0x40000000; stack below 0x2be00000` printf) AND the stack half
+    # (`osfmk/arm/status.c`: ios7lab_user_stack() -> 0x2BE00000, so create_unix_stack's FIXED target
+    # 0x2BD00000 falls BELOW the new window; without it every process's stack relays out - audit §2)
+    # compile in under ONE switch. THREE clauses, because both halves and the tree state must hold for
+    # THIS link:
+    #   (a) SOURCE side, by value: `tools/check_d13_shreg_geom.py --tree <tree> --expect staged` - all
+    #       three files in the patcher's staged shape, the ABI constants intact in BOTH states, no v1
+    #       wrap (the checker's own per-file `state [counts]` lines are the evidence).
+    #   (b) the geometry's printf literal is in the linked image - it sits INSIDE the opened gate, so
+    #       it is present iff the switch reached `osfmk_vm_vm_shared_region.o` (the OFF image measured
+    #       0 copies; 981: build_entry only LINKS the pool).
+    #   (c) the stack half: in BOTH `thread_userstack` and `thread_userstackdefault` - the two
+    #       functions `LAB_USER_STACK` feeds - the materialized stack top is 0x2be0 and the tree's
+    #       default 0x2fe0 is GONE (the audit's own measured key: OFF `thread_userstackdefault`
+    #       0x8008fac4 is `movw r0, #0` / `movt r0, #0x2fe0`).
+    # Gated on the switch: with SHREG_GEOM=0 the tree's original text is compiled on purpose and there
+    # is nothing here to assert.
+    if [[ $SHREG_GEOM -eq 1 ]]; then
+        gg_rc=0
+        gg_out=$(python3 "$REPO_ROOT/tools/check_d13_shreg_geom.py" --tree "$XNU_TREE" --expect staged 2>&1) || gg_rc=$?
+        if [[ $gg_rc -ne 0 ]]; then
+            printf '%s\n' "$gg_out" >&2
+            say "REFUSING: STAGE90_XNU_SHREG_GEOM=1 but the D13 tree is not in the G1 staged shape -" >&2
+            say "          the per-file lines above say which of osfmk/vm/vm_shared_region.c," >&2
+            say "          osfmk/arm/status.c, osfmk/arm/ios7_compat.h is not all-staged. Stage the" >&2
+            say "          three files with the ONE driver before linking:" >&2
+            say "            tools/stage_d13_shreg_geom.sh" >&2
+            layout_fail "STAGE90_XNU_SHREG_GEOM=1 did not reach the tree: the vmabi-recon lane's check_d13_shreg_geom.py (:106) refused the staged-state assertion - each of the three files must be ALL pre-image or ALL staged (a mix is a partial or foreign edit), the geometry constants (base_address = 0x2C000000U;, size = 0x14000000U;, the IOS7LAB printf, status.c's 0x2BE00000U and USRSTACK 0x2FE00000) must be intact, and no .c file may carry v1's inline \`#if\` wrap (the measured panic-string line shift)"
+        fi
+        gl_lit="IOS7LAB shared region 0x2c000000..0x40000000; stack below 0x2be00000"
+        gl_text=$(arm-none-eabi-strings "$OUT/xnu_arm_entry.elf")
+        [[ $gl_text == *"$gl_lit"* ]] ||
+            layout_fail "STAGE90_XNU_SHREG_GEOM=1 but the linked image carries no iOS 7 shared-region geometry - the \"$gl_lit\" literal sits INSIDE the opened #if gate in osfmk/vm/vm_shared_region.c:626-635, so its absence means the switch never reached the POOL: vm_shared_region.c is compiled by tools/build_xnu_arm_kernel.sh and build_entry.sh only LINKS out/xnu_kernel_obj_d13/osfmk_vm_vm_shared_region.o. Stage the tree (tools/stage_d13_shreg_geom.sh) and rebuild the pool with XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_SHREG_GEOM=1' (plus the SAME-named env var), then relink - a stale object links the default 0x30000000/0x10000000 window and 997 measured what that does (map_file kr=1 + map_slide ret=14)"
+        for gfn in thread_userstack thread_userstackdefault; do
+            gfa=$(sym_addr "$gfn") || layout_fail "$gfn is not in the linked image - 998's stack clause reads the stack top out of it (the two functions LAB_USER_STACK feeds in osfmk/arm/status.c), so without it the 0x2BE00000 half has no site to check"
+            gfnx=$(sym_next "$gfa") || true
+            [[ -n $gfnx ]] || layout_fail "no symbol follows $gfn in the image, so its instruction range cannot be read"
+            gfdis=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$gfa" --stop-address="$gfnx")
+            grep -q '; 0x2be0' <<<"$gfdis" ||
+                layout_fail "$gfn ($gfa..$gfnx) materializes no 0x2BE00000 stack top - the stack half of G1 did not reach osfmk_arm_status.o: status.c is a POOL file and a stale object expands LAB_USER_STACK to USRSTACK. Stage the tree (tools/stage_d13_shreg_geom.sh) and rebuild the pool with XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_SHREG_GEOM=1' (plus the SAME-named env var), then relink"
+            grep -q '; 0x2fe0' <<<"$gfdis" &&
+                layout_fail "$gfn ($gfa..$gfnx) still materializes the tree's default 0x2FE00000 stack top - osfmk_arm_status.o is the pre-998 object (LAB_USER_STACK still expands to USRSTACK directly), so create_unix_stack's FIXED allocation at trunc(0x2FE00000 - MAXSSIZ) would land INSIDE the new 0x2C000000..0x40000000 window for every process (audit section 2): the geometry half is on and the stack half is not, which is exactly the split the one switch exists to prevent"
+        done
+        say "  xnu_entry_998: the linked image carries the iOS 7 shared-region geometry (the IOS7LAB shared region literal is in, and the source side is all-staged) and the 0x2BE00000 stack top in both thread_userstack and thread_userstackdefault (the 0x2FE00000 default gone) - $gg_out"
+    fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
     # `ast_taken_user`**: its arm return path (`cswitch.s:144` `thread_exception_return`) delivers by
@@ -38874,6 +38976,11 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # DEFINES takes this value, and the by-value clause at the 997 site above refuses a linked image
     # that did not get it; this echo line is what the record self-check at the end of this file reads).
     echo "STAGE90_XNU_SHREG_WIRE=${STAGE90_XNU_SHREG_WIRE:-0}"
+    # 998's switch, read the same way and for the same reason (one value, two definitions: the pool's
+    # DEFINES takes this value, and the by-value clauses at the 998 site above refuse a linked image
+    # that did not get it - the geometry printf literal absent or the 0x2FE00000 stack top still
+    # materialized; this echo line is what the record self-check at the end of this file reads).
+    echo "STAGE90_XNU_SHREG_GEOM=${STAGE90_XNU_SHREG_GEOM:-0}"
     # 535's switch, and the only one whose *link* the build changes (see its own block above): the
     # record is what makes "this image has the seam hook" a thing the gate can read rather than a
     # thing a reader assumes from the hash.

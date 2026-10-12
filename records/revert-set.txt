@@ -14182,3 +14182,56 @@ set=armed-d13-518b6a94 sha256=617a064d6b4a54e4a0455ab54a87b74a090fac72be99850044
 set=armed-d13-518b6a94 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=997-shreg-wire;-stage90_fixture.macho
 set=armed-d13-518b6a94 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=997-shreg-wire;-stage90-build-config.txt
 set=armed-d13-518b6a94 sha256=984ea31e7a50c64e70d1619820adf10ba1f1937545de86c1693f3ae89fc98325 bytes=560 file=SHA256SUMS.txt role=997-shreg-wire;-SHA256SUMS.txt
+# armed-d13-dee822b0  -  998: THE iOS 7 SHARED-REGION GEOMETRY + STACK TOP (G1) ARE OPENED - THE TREE-S OWN 0x2C000000/0x14000000 WINDOW AND THE 0x2BE00000 STACK COMPILE IN.
+# Switch set is 997-s VERBATIM (STAGE90_XNU_DYLD_WITNESS, STAGE90_XNU_SHREG_PROBE and
+# STAGE90_XNU_SHREG_WIRE all stay 1) + STAGE90_XNU_SHREG_GEOM=1; the ENTRY BIN moved (518b6a94 -> dee822b0)
+# and THREE tree SOURCE files move in THIS rung (all POOL files, NO assembly change):
+# osfmk/vm/vm_shared_region.c (f91c3460... -> 482b4288..., the geometry block at :626-635: both
+# `#if IOS7_COMPAT_PLATFORM`-gated lines gain the 994 spelling + the helper, so base_address
+# 0x2C000000U / size 0x14000000U and the `IOS7LAB shared region ...` printf compile in),
+# osfmk/arm/status.c (d8f41a7b... -> da944439..., the STACK HALF: LAB_USER_STACK ->
+# ios7lab_user_stack() -> 0x2BE00000 instead of USRSTACK 0x2FE00000 - without it the new window
+# covers the stack and EVERY process-s FIXED stack allocation relays out) and
+# osfmk/arm/ios7_compat.h (079c7a17... -> 58cc2823..., ios7_shreg_geom_enabled() beside
+# ios7_traps_enabled()). The substitute is 1:1 in every .c (NO inline #if wrap: this tree-s
+# panic embeds __FILE__:__LINE__, so a line-shifting wrap moves panic strings - measured in
+# the G1 audit rehearsal). The MACRO itself is NOT touched - the 994 "do not widen the macro"
+# lesson; 998 does NOT touch the assembly layer, NO trap.c change, NO pmap.c/commpage.c/
+# arm_vm_init.c change, NO pcb.c, NO vm_resident.c, NO vm_unix.c change). A fresh checkout needs
+# ALL NINE tools/stage_d13_*.sh drivers (988/990/991/992+993/994/995+996/996/997/998).
+#
+# 997 (pressed 2026-10-12, arm armed-d13-518b6a94, commit 9e6307a, evidence
+# out/stage90/captures/cancro-last_kmsg-997-armed-d13-518b6a94.txt:4096-4110) MEASURED the G1
+# fix-s target by value: 4x `IOS7LAB cache mapping` with ALREADY SLID addresses (m0 va=0x2cd9c000
+# = 0x2C000000 + slide 0xd9c000; m1 carries VM_PROT_SLIDE, init=0x23), then map_file kr=1
+# (KERN_INVALID_ADDRESS) + map_slide ret=14 - the default 0x30000000/0x10000000 window cannot
+# hold dyld-s slid shared cache. Regression guards green: VMHINT991 2x, IOS7LAB vm_allocate64
+# flags=1 result=0, check_np ret=12.
+#
+# THE 998 PRESS- PRE-REGISTRATION (frozen once embedded; deviations reported, not reinterpreted)
+# is written by the TEAM-LEAD into scripts/press_998.sh (the build side is the plumbing this rung
+# parks; the pre-registration block follows the 997 pattern: switch set, the point, the failure
+# signature(s), falsification, regression guards). Expected reading per the lead: map_file kr=0
+# and the slide stage proceeding (then dyld halts move past the shared cache).
+#
+# tools/check_d13_shreg_geom.py --tree <root> --expect staged asserts the three staged source files
+# (constants intact in BOTH states, no v1 inline-#if wrap); build_entry.sh-s 998 link clause ALSO
+# reads the linked image-s own `IOS7LAB shared region` literal and the 0x2BE00000 stack top out of
+# thread_userstack/thread_userstackdefault (the 0x2FE00000 default gone; the FROZEN 997 elf is the
+# negative control - literal count 0 there).
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-dee822b0 sha256=dee822b0ca58afa181f2d5b88a83ddcbd13758712c5bef66da28c908fee2a0b4 bytes=6339668 file=xnu_arm_entry.bin role=998-shreg-geom;-xnu_arm_entry.bin
+set=armed-d13-dee822b0 sha256=ee1f43988b6eac8297acd6113653aef16ecc6a3b72779f118c9e5a5fb73baa31 bytes=7380384 file=xnu_arm_entry.elf role=998-shreg-geom;-xnu_arm_entry.elf
+set=armed-d13-dee822b0 sha256=40a9dc325334d4ff70aa2cfc9b7f0877fd3b888ecd65b762b13f4e7a13376e04 bytes=1912 file=xnu_arm_entry.h role=998-shreg-geom;-xnu_arm_entry.h
+set=armed-d13-dee822b0 sha256=d43d4c822995a7275e9d482fc5ed6d2c7e4d9d93f5022943e3cd08af3de3d91a bytes=1642 file=xnu_arm_entry-config.txt role=998-shreg-geom;-xnu_arm_entry-config.txt
+set=armed-d13-dee822b0 sha256=3154d6c8783a502d201abf83d3df4a027b18e3e14ff4852838fb06b3da742de0 bytes=3149 file=xnu_arm_entry-sources.txt role=998-shreg-geom;-xnu_arm_entry-sources.txt
+set=armed-d13-dee822b0 sha256=6a4d2822a788fc09ff71ac510d9a752fdf841e473d411dbb2cc120082446966c bytes=6835076 file=stage90.bin role=998-shreg-geom;-stage90.bin
+set=armed-d13-dee822b0 sha256=d324819c24acb5b5e83388ebed469ea8ba473fa137edd46719a0fd1628f9cd04 bytes=6897148 file=stage90.elf role=998-shreg-geom;-stage90.elf
+set=armed-d13-dee822b0 sha256=8d265bd4955d056e3020105944f78cc4b5dc744b793290acdf0b0d59128a29dd bytes=6838272 file=stage90.img role=998-shreg-geom;-stage90.img
+set=armed-d13-dee822b0 sha256=a14555f839821659772d7a2c9a9a40faffa92c647020b00137516f778f227819 bytes=9359360 file=stage90-qcdt.img role=998-shreg-geom;-stage90-qcdt.img
+set=armed-d13-dee822b0 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=998-shreg-geom;-stage90_fixture.macho
+set=armed-d13-dee822b0 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=998-shreg-geom;-stage90-build-config.txt
+set=armed-d13-dee822b0 sha256=2ec93dcccf8a132163bb336bb86f7d3e4657c3ac7719856be39373a334436b2b bytes=560 file=SHA256SUMS.txt role=998-shreg-geom;-SHA256SUMS.txt
