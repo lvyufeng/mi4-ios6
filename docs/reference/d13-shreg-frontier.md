@@ -208,6 +208,11 @@ size check** (`vm_map.c:2380-2381`: `0x0DF46000 + 0x022ED000 = 0x10233000 > mem_
 earlier "mapping[2] would not fit either" — audit §5c1). Under G1 (entry size `0x14000000`) both fit.
 So even with the wire fixed, **G1 must open** (base `0x2C000000`, size `0x14000000`, the
 `IOS7_COMPAT_PLATFORM` create override) for the cache to land where dyld expects it.
+**Correction (997, §9 — measured; the four mapped spans there are `0x2cd9c000..0x3d148000`):** on
+the live call the block is the **FIXED** path's guard (`vm_map.c:1843-1846`: `start = va − sr_base`
+= `0xFCD9C000`; `end = start + size` wraps in 32-bit; `start >= end`) returning `kr=1`
+KERN_INVALID_ADDRESS → EFAULT 14 — not this paragraph's ANYWHERE-loop KERN_NO_SPACE at `:1797`.
+Geometry conclusion unchanged; only the line and the kr differ.
 
 ## 6b. The slide is fixup-only — the geometry tension, resolved by value
 
@@ -231,10 +236,11 @@ is 315,952,666 B = `0x12D50D1A`; unslid from `0x2C000000` it ends `0x3ED50D1A` (
   `.end = start + size` at `:1508-1509`) — not virtual addresses.
 
 The tension dissolves rather than forcing a re-model: the slid values are page **content**, and the
-mapping addresses are whatever dyld sends. If the four `va` fields (997) are unslid, the layout
-`[0x2C000000, 0x3ED50D1A)` plus the slide-info at `[0x3F9BD000, 0x3FA46000)` fits the 320 MiB window
-exactly; if they are slid, the 32 B branch's own bound (`address+size > 0x40000000` → EINVAL) fires
-first — a distinguishable signature with no `map_file` line.
+mapping addresses are whatever dyld sends. **Resolved by 997 (§9, measured):** the four `va` fields
+ARE slid (m[0].va `0x2cd9c000` = the unslid base `0x2C000000` + that run's `slide=0xd9c000`
+exactly), and the 32 B branch's bound does **not** fire — every slid span still ends below
+`0x40000000` (m[3] ends `0x3d148000`); the wall is the 32-bit wrap of the *relative* target in
+`vm_map`'s FIXED path (`vm_map.c:1846`), not an out-of-window address.
 
 **`mapping_to_slide`, the §5 wire**: selected by `mappings[i].sfm_init_prot & VM_PROT_SLIDE`
 (`vm_shared_region.c:1061`), **first match wins** (`found_mapping_to_slide`, `:1082`; later matches
@@ -330,8 +336,9 @@ set `r0`, so that companion word reads back the faulting address; it must not be
    object `3fa5c230…` (27,964 B; OFF `3d660224…` 27,628 B) is byte-equal to the pool object
    `out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o` as buildplumb rebuilt it (22:04) — the build's own
    receipt.
-3. **G1 (geometry + stack) after G3** — DRAFTED (tools exist, nothing staged or authorised; the
-   window constants stay the tree's own and are frozen only after 997's `va` readings). With G3 alone
+3. **G1 (geometry + stack) after G3** — DRAFTED (tools exist); **998 = GO, §9** — constants frozen by
+   the 997 `va` readings, switch name `STAGE90_XNU_SHREG_GEOM` carried into the 998 wiring
+   (buildplumb's lane). With G3 alone
    mapping[0] no longer dies at `initial_size == 0` but dies region-relative at `target_address =
    sfm_address - sr_base_address` (§6). G1 opens the create override **already in the tree** at
    `vm_shared_region.c:626-639` (`base 0x2C000000`, `size 0x14000000`) **together with its stack half**
@@ -385,13 +392,18 @@ IOS7SHREG map_slide  ret=14
 ```
 
 **The four `va` lines are the point: the 32 B wire PARSES.** §8 item 2's fallback "no `map_file`
-line" did not happen — the branch read all four records correctly (the ends chain exactly:
-`2cd9c000+0c266000=39004000`, `+01ce0000=3ace4000`, `+022ed000=3cfd1000`, `+00177000=3d148000`;
-offsets contiguous from 0, the last ending `0x12d51000`). Zero-lines falsification retired: the
-define reached the compiled object, and the checker's ON clauses hold on the pressed elf.
+line" did not happen — the branch read all four records correctly: m0 ends `39002000` (a measured
+`0x2000` VA gap before m1's `39004000`), then `+01ce0000=3ace4000`, `+022ed000=3cfd1000`,
+`+00177000=3d148000` are exact; file offsets run `0, 0c266000, 0df46000`, jump `0x29A7000` to
+`12bda000`, the last ending `0x12d51000`. *(Both gaps measured 2026-10-12 by the shreg-g1 lane's
+by-value pass and re-derived here; an earlier version of this paragraph over-claimed perfect
+contiguity. Neither gap changes any conclusion — the guard is per-mapping.)* Zero-lines
+falsification retired: the define reached the compiled object, and the checker's ON clauses hold on
+the pressed elf.
 
 **Failure signature: (a), the pre-registered ALTERNATIVE inner return — kr=1, not kr=3.** `map_file
-kr=1` (KERN_INVALID_ADDRESS) folds at `vm_unix.c:1443-1459` to EFAULT(14) → `map_slide ret=14`. By
+kr=1` (KERN_INVALID_ADDRESS) folds at `vm_unix.c:1443-1459` (the `case KERN_INVALID_ADDRESS: error
+= EFAULT;` at `:1448-1449`) to EFAULT(14) → `map_slide ret=14`. By
 value, the firing site is **`vm_map.c:1846`** in `vm_map_enter`'s **FIXED** path:
 `start = m[0].va − sr_base = 0x2cd9c000 − 0x30000000 = 0xFCD9C000`, `size = 0x0c266000`; with
 `vm_map_offset_t` = `uint32_t` (`osfmk/mach/arm/vm_types.h:111-113`), `end = start + size` wraps to
@@ -399,11 +411,16 @@ value, the firing site is **`vm_map.c:1846`** in `vm_map_enter`'s **FIXED** path
 (start >= end)` (`:1843-1845`) trips on `start >= end`. **Correction to §8 item 2's forecast:** the
 primed `kr=3`/KERN_NO_SPACE at `vm_map.c:1797` is the ANYWHERE loop's range-fit; this call passes
 `VM_FLAGS_FIXED | VM_FLAGS_ALREADY` (`vm_shared_region.c:1116-1127`), so the FIXED-path guard fires
-first. Same conclusion — geometry blocks — different line; recorded, not reinterpreted.
+first — with `VM_FLAGS_FIXED` the `:1797` ANYWHERE return was structurally unreachable, and the
+folded errno is EFAULT, not ENOMEM. It is the *sole* stopper: the FIXED-path prologue passed
+(`initial_size 0x0c266000 ≠ 0`, `:2344-2345`; named-entry `0 + 0x0c266000 < 0x10000000`,
+`:2380-2381`). Same conclusion — geometry blocks — different line; recorded, not reinterpreted.
 
 **What the `va` fields answer (the §6b discriminator — addresses ARE SLID).** m[0].va
 `0x2cd9c000` = `0x2C000000` (unslid base) + THIS run's `slide=0xd9c000` **exactly**; 996's
-`0x3811000` was a different per-run draw. So dyld passes **already-slid** addresses; the kernel's
+`0x3811000` was a different per-run draw. *(This `slide` is the CACHE slide — the value `map_slide`
+received; the PROCESS slide this run is a different draw: pc `0x2bed30c4` = `_dyld_fatal_error`
+`0x2be010c4` + `0xD2000`. Do not conflate the two.)* So dyld passes **already-slid** addresses; the kernel's
 only relative arithmetic is `sfm_address − sr_base_address` (`vm_shared_region.c:1088-1089`), and
 the slide stage is fixup-only — §6b resolved by measurement. **G1's constants are now frozen per §8
 item 3's rule:** all four slid spans lie inside `[0x2C000000, 0x40000000)` (m[0] starts
@@ -411,8 +428,9 @@ item 3's rule:** all four slid spans lie inside `[0x2C000000, 0x40000000)` (m[0]
 m[0] `0xd9c000`..`0xd002000` and m[3] ending `0x11148000` — every mapping fits the `0x14000000`
 window. **VM_PROT_SLIDE (0x20) appears — on m[1]** (`init=max=0x23`), not the last mapping: the
 `mapping_to_slide` is the `0x01ce0000` piece at `va=0x39004000`, answering §5's open question.
-`slide_start=0x3cf48000` + `size=0x89000` = `0x3cfd1000` = **m[3].va exactly**, the window lying
-inside m[2]'s span — a dyldtrace datum, recorded here.
+`slide_start=0x3cf48000` + `size=0x89000` = `0x3cfd1000` = **m[3].va exactly** — it is the exact
+TAIL of m[2] in both spaces (VA `0x3ace4000+0x2264000`, file `0x0df46000+0x2264000 = 0x101aa000`,
+ending `0x10233000 = m[2].offset+m[2].size`) — a dyldtrace datum, recorded here.
 
 **Everything else held.** `check_np ret=12` (§3's first-call reading, constant). Regression guards:
 `VMHINT991` 2× at exec (`:4096-4097`), `IOS7LAB vm_allocate64 flags=1 result=0` (`:4110`). The halt
