@@ -52,6 +52,35 @@
  * [[mi4-one-value-two-definitions]] */
 #define MSM8974_GIC_TIMER_INTID 20u
 
+/* **985: the distributor's per-line enable for the timer PPI, and the CPU the byte targets.** PPI 20
+ * lives in word 0 (`intid/32 == 0`), bit 20. `GICD_ISENABLER0` is the same offset the entry image
+ * writes for the frame SPI (`src/entry/entry_gic.h:34`); it is one register, so it is one number.
+ * The target byte is `1u` = CPU 0 - the same target the frame driver uses
+ * (`src/platform/MSM8974Timer.cpp:456` `MSM8974_TIMER_LINE_TARGET 1u`) and the same value 983's press
+ * measured already set for the timer line (`_line_target_before = 0x01010101`). For a PPI the target
+ * is banked per-CPU and 0 means "this CPU", so writing 1 is also correct and explicit. */
+#define MSM8974_GICD_ISENABLER0   0x100u
+#define MSM8974_GIC_TIMER_TARGET  1u
+
+/* **985: the D13 clock tick, which nothing armed before this step.** The root cause of 984's park is
+ * that the whole D13 boot has NO timer interrupt: `CONFIG_TICKLESS` is defined nowhere, so
+ * `osfmk/arm/rtclock.c`'s `setPop` never calls `pe_arm_set_timer_enabled` (its arm/disarm blocks are
+ * all inside `#if CONFIG_TICKLESS`), and this file's `msm8974_timer_enabled` was an empty stub to
+ * begin with. The countdown is therefore never programmed, PPI 20 (which the entry image MEASURED the
+ * CNTV raising, `src/entry/entry_gic.h:135`) never fires, `rtclock_intr` -> `etimer_intr` never runs,
+ * and the kernel's `etimer` list is never serviced - so every deadline sleep, including
+ * `IOService::waitForService`'s 2 s timeout for "IORTC", parks forever (984). The fix is to give the
+ * board a real periodic tick: arm CNTV, enable PPI 20, and re-arm after each `rtclock_intr`.
+ *
+ * **The period is derived from the ONE frequency definition, never a literal.** `timebase_init`
+ * publishes `gPEClockFrequencyInfo.timebase_frequency_hz` from CNTFRQ (or `MSM8974_CNTFRQ_HZ`), and
+ * `msm8974_get_timebase` hands back RAW CNTVCT ticks in the same unit, so ticking every
+ * `frequency/1000` CNTV ticks is exactly 1 ms of the kernel's own timebase. A literal 19200 would be a
+ * second definition of 19.2 MHz ([[mi4-one-value-two-definitions]]). 1 ms is the granularity XNU's
+ * 4570 boards ran at and is far under any deadline the abandoned wake needs (`NSEC_PER_USEC` is the
+ * layer's minimum), while leaving ample headroom for the SoC watchdog. */
+#define MSM8974_TICK_HZ_DIV   1000u
+
 /* One ARM small page, `mach/arm/vm_param.h:21` `ARM_PGBYTES 4096`. Spelled here rather than by
  * including that header into a board file: it is the size `ml_io_map` rounds up, and the two GIC CPU
  * registers below (0x00c, 0x010) both live in the first page of the 0xf9002000 window. */
@@ -107,7 +136,101 @@ extern void entry_irq_gic_map(uint32_t dist_va, uint32_t cpu_va);
  * the countdown line was enabled but nothing ran the tick. [[mi4-one-value-two-definitions]] */
 extern void rtclock_intr(arm_saved_state_t *regs);
 
+/* **985: the live channel, and the reason this file publishes at all.** `entry_live_write` is the
+ * entry image's own record sink (`src/entry/entry_stubs.c`), declared locally here exactly as the
+ * three sibling platform sources do (`MSM8974GIC.cpp:120`, `MSM8974RootResource.cpp:88`,
+ * `MSM8974PlatformExpert.cpp:78`). The tick this step adds has two halves that can each be silent -
+ * the arming and the delivery - so each half gets keys that are published as ZERO before the work and
+ * overwritten as it succeeds, which makes "the tick never armed" and "it armed but never fired" two
+ * different lines rather than one silence ([[mi4-silence-is-a-reading-only-if-success-is-silent]]). */
+extern void entry_live_write(const char *key, uint32_t value);
+
 static volatile unsigned long long msm8974_cntfrq = MSM8974_CNTFRQ_HZ;
+
+/* ---- the D13 clock tick (985) ---- */
+
+/* How many CNTV ticks one period is, from the ONE frequency definition. `timebase_init` sets
+ * `gPEClockFrequencyInfo.timebase_frequency_hz` before `clock_timebase_init` runs, so this reads the
+ * same number `msm8974_get_timebase` hands back and `rtclock_bus_configure` divides by - never a
+ * literal ([[mi4-one-value-two-definitions]]). Falls back to CNTFRQ, then to the measured constant, so
+ * the divisor is never 0 and the tick can never be a zero-period (which would be "always expired"). */
+static unsigned int
+msm8974_tick_ticks(void)
+{
+    unsigned int hz = (unsigned int)gPEClockFrequencyInfo.timebase_frequency_hz;
+    unsigned int ticks;
+    if (hz == 0u)
+        hz = (unsigned int)msm8974_cntfrq;
+    if (hz == 0u)
+        hz = (unsigned int)MSM8974_CNTFRQ_HZ;
+    ticks = hz / MSM8974_TICK_HZ_DIV;
+    return (ticks != 0u) ? ticks : 1u;
+}
+
+/* The period actually in force, published so a reader can see the number the whole tick is scaled by
+ * without recomputing it from the frequency. Set once, at the first arming. */
+static unsigned int g_msm8974_tick_ticks;
+
+/* Every timer-PPI delivery, counted. Its powers of two are published from the handler, so "the tick
+ * armed but never fired" (this stays 0) and "the tick is running" (it climbs) are different lines -
+ * the reading 984 could not make, because the line it would have come from did not exist. */
+static unsigned int g_msm8974_tick_count;
+
+/* Arm the countdown: `CNTV_TVAL` = one period, `CNTV_CTL` = ENABLE|unmask. The order is the entry
+ * image's own (`src/entry/entry_timebase.c:293,370`): program the value, then unmask - so the shortest
+ * window between "this deadline is armed" and "it can fire" is the distance between two stores. The
+ * read-back is the return: 1 only if the value landed, because a write to a device with no clock
+ * behind it can vanish, and "the driver asked" and "the countdown is running" are different findings. */
+static int
+msm8974_tick_arm(void)
+{
+    unsigned int ticks = msm8974_tick_ticks();
+    unsigned int back;
+
+    if (g_msm8974_tick_ticks == 0u) {
+        g_msm8974_tick_ticks = ticks;
+        entry_live_write("xnu_live_tick_ticks", ticks);
+        entry_live_write("xnu_live_tick_hz", (uint32_t)gPEClockFrequencyInfo.timebase_frequency_hz);
+    }
+
+    __asm__ __volatile__("mcr p15, 0, %0, c14, c3, 0" :: "r"(ticks));   /* CNTV_TVAL */
+    __asm__ __volatile__("mcr p15, 0, %0, c14, c3, 1" :: "r"(1u));      /* CNTV_CTL: ENABLE */
+    __asm__ __volatile__("mrc p15, 0, %0, c14, c3, 1" : "=r"(back));    /* read back CTL */
+    return (back & 1u) ? 1 : 0;
+}
+
+/* Enable PPI 20 at the distributor - one bit in ONE register. The work is the entry image's own
+ * `entry_irq_enable_line` (`src/entry/entry_irq.c:349`, declared `src/entry/entry_gic.h`): it writes
+ * the pending clear, the target byte, the group made 0, and the enable bit - each read back - through
+ * the gicd accessors that carry 983's mapped VA, so the distributor is reached through the SAME one
+ * window the timer driver's SPI uses and a raw `0xf9000000` (the 982 fault) is nowhere in this file.
+ * A line in the wrong group is enabled, pending and never delivered (`entry_irq.c:319-322`), which is
+ * why the group is written and not assumed. The value this enables the payload's own timer self-test
+ * already measured present on this machine, so it is an idempotent re-assertion, not a new
+ * configuration. The return is the read-back enable bit: 0 means the distributor did not take the
+ * write and the tick will not be delivered. */
+extern uint32_t entry_irq_enable_line(uint32_t intid, uint32_t target);
+
+static void
+msm8974_tick_enable_line(void)
+{
+    uint32_t rc = entry_irq_enable_line(MSM8974_GIC_TIMER_INTID, MSM8974_GIC_TIMER_TARGET);
+    entry_live_write("xnu_live_tick_line_rc", rc);
+}
+
+/* The whole tick, in the order that keeps the two halves distinguishable: enable the line FIRST (a
+ * countdown that expires before its line is enabled asserts into a distributor that drops it), then
+ * arm the countdown. Both returns are published, so the log separates "the line would not take" from
+ * "the countdown did not arm" - two different next steps. */
+static void
+msm8974_tick_start(void)
+{
+    unsigned int rc;
+    entry_live_write("xnu_live_tick_arm_calls", 1u);
+    msm8974_tick_enable_line();
+    rc = (unsigned int)msm8974_tick_arm();
+    entry_live_write("xnu_live_tick_arm_rc", rc);
+}
 
 /* **The GIC CPU interface, reached through a MAPPED kernel VA, not its physical address.** This is
  * 982's fix and the whole of it. `ml_io_map` returns a `kernel_map` VA whose page tables XNU keeps
@@ -222,15 +345,30 @@ msm8974_handle_interrupt(void *context)
 	}
 
 	if (id == MSM8974_GIC_TIMER_INTID) {
-		/* **The tick.** EOI *first*, then service - the ordering `src/entry/entry_irq.c:58` chose
-		 * and the reason is its own: `rtclock_intr` re-arms the countdown (through
-		 * `setPop`->`ml_set_decrementer`), so EOI'ing before that work means a second expiry during
-		 * it is a line already back in the distributor's hands, not one the CPU interface still
-		 * believes is active. `rtclock_intr` runs `etimer_intr` and is what advances
-		 * `mach_absolute_time`; without this call the countdown would never re-arm. */
+		/* **The tick.** EOI *first*, then service - the ordering `src/entry/entry_irq.c:58` chose:
+		 * EOI'ing before the work means a second expiry during it is a line already back in the
+		 * distributor's hands, not one the CPU interface still believes is active. `rtclock_intr`
+		 * runs `etimer_intr`, which services the kernel's deadline list and is what advances
+		 * `mach_absolute_time` - the thing every `wait_timer`/`timer_call` in the system is waiting
+		 * on, and the thing 984's park proved absent. */
 		*gicc_eoir = id;
 		msm8974_barrier();
 		rtclock_intr((arm_saved_state_t *)context);
+
+		/* **985: re-arm the hardware, because on this build nothing else does.** The comment above
+		 * used to say `rtclock_intr`'s `setPop` re-arms the countdown - true only when
+		 * `CONFIG_TICKLESS` is defined, and it is defined NOWHERE in this tree, so `setPop`'s
+		 * `pe_arm_set_timer_enabled` blocks are compiled out and this is the ONLY place the periodic
+		 * tick can be reset. Arming here, after the service work, also means a re-assert that
+		 * arrives during `etimer_intr` is already back in the distributor's hands rather than a
+		 * deadline re-programmed underneath the handler. Each tick is counted and published on its
+		 * powers of two, so the log distinguishes "the line fired once and stopped" from "the tick
+		 * is running" without a per-tick record filling the channel. */
+		++g_msm8974_tick_count;
+		if ((g_msm8974_tick_count & (g_msm8974_tick_count - 1u)) == 0u) {
+			entry_live_write("xnu_live_tick_irq", g_msm8974_tick_count);
+		}
+		msm8974_tick_arm();
 		return;
 	}
 
@@ -294,7 +432,20 @@ msm8974_timer_value(void)
 static void
 msm8974_timer_enabled(int enable)
 {
-	(void)enable;
+	/* **985: the timer-enable hook, made real.** This was an empty stub, which was honest while
+	 * nothing called it - `pe_arm_set_timer_enabled` is invoked only from `setPop`'s
+	 * `#if CONFIG_TICKLESS` blocks, and `CONFIG_TICKLESS` is defined nowhere in this tree, so on D13
+	 * the whole tickless rearm is compiled out and this hook is dormant. It is implemented now (arm on
+	 * enable, disarm on disable) so that the ONE definition of "start/stop the board's countdown"
+	 * lives here rather than being written a second time at the boot-time call site below - and so
+	 * that if a future build turns tickless on, the kernel's own rearm reaches real hardware instead
+	 * of a no-op. The boot-time arming (see `PE_init_SocSupport_msm8974`) is what makes the tick run
+	 * on THIS build. [[mi4-one-value-two-definitions]] */
+	if (enable) {
+		msm8974_tick_start();
+	} else {
+		__asm__ __volatile__("mcr p15, 0, %0, c14, c3, 1" :: "r"(0u));  /* CNTV_CTL: disable */
+	}
 }
 
 /* ---- the table, and the single symbol the generic PE calls ---- */
@@ -326,6 +477,20 @@ PE_init_SocSupport_msm8974(void)
 
 	/* framebuffer_init is left NULL on purpose: no display rung is claimed here. */
 	msm8974_timebase_init();
+
+	/* **985: start the board's tick, here, once.** This is the ONE site that arms the countdown,
+	 * because the generic ARM layer does not: `setPop`'s rearm is inside `#if CONFIG_TICKLESS`
+	 * (`osfmk/arm/rtclock.c:129-144`), and `CONFIG_TICKLESS` is defined nowhere in this tree, so on
+	 * D13 nothing in the kernel ever programs `CNTV`. Without it the timer PPI never fires,
+	 * `rtclock_intr` -> `etimer_intr` never runs, and every deadline sleep (`thread->wait_timer`,
+	 * `timer_call`) parks forever - 984's `waitForService("IORTC")` hang. Arming here is a claim about
+	 * ORDER, and it is safe at this point by two reads: `PE_init_SocSupport` is reached through
+	 * `PE_init_platform(TRUE)` at `osfmk/arm/arm_init.c:178`, which is *after* `cpu_init()`
+	 * (`arm_init.c:130`) has run `timer_call_initialize_queue(&cdp->rt_timer.queue)` - so the queue
+	 * `etimer_intr` walks is initialized - and after `arm_vm_init`, so the GIC VA this file maps just
+	 * above is the one the MMU will walk. `msm8974_timer_enabled` keeps the SAME one definition for a
+	 * future tickless build; this call is what makes it run on THIS build. [[mi4-one-value-two-definitions]] */
+	msm8974_tick_start();
 }
 
 void

@@ -13530,3 +13530,42 @@ set=armed-d13-6435778a sha256=a0dbf8e2c6eec640591f05415e02c505da83dd7c6d7131737a
 set=armed-d13-6435778a sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=984-iortc-wait-and-calendar-live-instrumentation;-stage90_fixture.macho
 set=armed-d13-6435778a sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=984-iortc-wait-and-calendar-live-instrumentation;-stage90-build-config.txt
 set=armed-d13-6435778a sha256=7815010cfb499125759e63267caa7c228faf8cc2befbe96b0946657fee7da168 bytes=560 file=SHA256SUMS.txt role=984-iortc-wait-and-calendar-live-instrumentation;-SHA256SUMS.txt
+# armed-d13-c36a3e06  -  985: 984 + the BOARD TICK FIX (start the D13 clock).
+# Switch set is 984-s UNCHANGED; the ENTRY BIN moved (6435778a -> c36a3e06).
+#
+# 984 (pressed 2026-10-12, commit 6d2ccdf) instrumented IOKitInitializeTime; the reading was
+# decisive: xnu_live_iokitinit_enter present, _exit/cal_enter ABSENT, and the publisher DID
+# arrive (xnu_live_pub2_key = the "IORTC" string at record 4524, AFTER the park at 4222). The
+# boot thread parks inside waitForService(IORTC, 2s) and the wait never returns. Deeper:
+# xnu_live_timerdrv_isr_calls=0, no xnu_live_dec_* keys, xnu_live_tmr_enter_seq capped at 64 -
+# XNU-s timer interrupt subsystem is NON-FUNCTIONAL on D13.
+#
+# ROOT CAUSE: the D13 boot has no timer interrupt of any kind. CONFIG_TICKLESS is defined
+# nowhere, so setPop-s arming (osfmk/arm/rtclock.c:118-144) is compiled out; msm8974_timer_enabled
+# was an empty stub; nothing programs CNTV, PPI 20 never fires, rtclock_intr -> etimer_intr never
+# runs, and every deadline sleep (thread->wait_timer, timer_call) is starved.
+#
+# 985 ADDS a fixed-period (1 kHz) CNTV tick. msm8974_tick_start() runs from the END of
+# PE_init_SocSupport_msm8974, which is reached via PE_init_platform(TRUE) at arm_init.c:178 -
+# AFTER cpu_init() (:130, the rt_timer.queue) and after arm_vm_init. PPI 20 enabled through
+# entry_irq_enable_line; msm8974_handle_interrupt-s intid-20 branch re-arms after rtclock_intr.
+# PERIOD from gPEClockFrequencyInfo.timebase_frequency_hz (19.2 MHz), never a literal.
+#
+# VERIFIED BY VALUE: PE_init_SocSupport_msm8974 tail-branches (b 290) into msm8974_tick_start,
+# whose body is bl entry_irq_enable_line(20,1) then `mcr 15,0,r4,cr14,cr3,{0}` (CNTV_TVAL =
+# 19200 = 19.2 MHz/1000) and `mcr 15,0,r0,cr14,cr3,{1}` (CNTV_CTL ENABLE), read back into the key.
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-c36a3e06 sha256=c36a3e06d17132c3cfd640ee416bb924a06a5836fce919d0cab97aa1d0da0e1a bytes=6335572 file=xnu_arm_entry.bin role=985-d13-clock-tick-arm;-xnu_arm_entry.bin
+set=armed-d13-c36a3e06 sha256=3a5f6315aee592479135831d1871a1bb45cacff82334fda45358432527841051 bytes=7375528 file=xnu_arm_entry.elf role=985-d13-clock-tick-arm;-xnu_arm_entry.elf
+set=armed-d13-c36a3e06 sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=985-d13-clock-tick-arm;-xnu_arm_entry.h
+set=armed-d13-c36a3e06 sha256=9696d684d91ffe8e4dafff4a76c601988f1b55c0fd902fc06d3416f14b87f967 bytes=1409 file=xnu_arm_entry-config.txt role=985-d13-clock-tick-arm;-xnu_arm_entry-config.txt
+set=armed-d13-c36a3e06 sha256=26587b3099b36e91a3434a3fdc5ac4680ae0b853f9afb54c7a6f2bfed944cc09 bytes=3149 file=xnu_arm_entry-sources.txt role=985-d13-clock-tick-arm;-xnu_arm_entry-sources.txt
+set=armed-d13-c36a3e06 sha256=27589caccc02f1949c0d95e4c06f10c7088cb1f6be880d6d33064a5f537686c6 bytes=6830980 file=stage90.bin role=985-d13-clock-tick-arm;-stage90.bin
+set=armed-d13-c36a3e06 sha256=7807d6d95228afc52aa181abacde4ec88e7a7200bffe550342d052578624f525 bytes=6893052 file=stage90.elf role=985-d13-clock-tick-arm;-stage90.elf
+set=armed-d13-c36a3e06 sha256=d9ef4f22ecdff0e56bd0e7de5c0cf297d023baaa4904b5303c44f20889eb16bd bytes=6834176 file=stage90.img role=985-d13-clock-tick-arm;-stage90.img
+set=armed-d13-c36a3e06 sha256=4d8444d7eea2c73ab953d7543a808cc1e39e280a07e7e67241374d11c6dca3ae bytes=9355264 file=stage90-qcdt.img role=985-d13-clock-tick-arm;-stage90-qcdt.img
+set=armed-d13-c36a3e06 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=985-d13-clock-tick-arm;-stage90_fixture.macho
+set=armed-d13-c36a3e06 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=985-d13-clock-tick-arm;-stage90-build-config.txt
+set=armed-d13-c36a3e06 sha256=bd6ee00c9f8129f21f08f3c22282b75aae47a5c903268a509a23c25d51850420 bytes=560 file=SHA256SUMS.txt role=985-d13-clock-tick-arm;-SHA256SUMS.txt
