@@ -628,3 +628,195 @@ synthetic probe linked from the rev-3 block passes 33/33 with `#100`/`#80` mater
 (`add r0, r0, #100` @ `0x80000670`, `#80` @ `0x80000658`). The pre-rebuild
 `out/stage90/xnu_arm_entry.elf` (`7cd89e81…`, still rev 2) FAILs ON on exactly the ten rev-3
 checks — the clean stale signal; the frozen 994 control still PASSes OFF and FAILs ON.
+
+### 9.6 Tasks A–D, by value (dyldtrace lane, 2026-10-12, post-995; §9.6.A revised post-996 — the setErrorStrings dispatch is INDIRECT)
+
+Read-only disassembly of the pinned `/tmp/dyld_ios7`; whole-file Thumb BL/BLX census (2,237 call sites) and
+a `movw`/`movt`/`add pc` resolver over the annotated dump (`/tmp/d996_*.txt`). **Segment map first, because it
+bites:** `__TEXT` vmaddr `0x2be00000` fileoff `0` filesize `0x21000`; `__DATA` vmaddr `0x2be21000` fileoff
+`0x21000` **filesize `0x1000` only**; `__LINKEDIT` fileoff `0x22000`. So `VA = 0x2be00000 + file_offset`
+holds **only below `0x2be22000`**; `0x2be22000..0x2be4a000` is zero-fill, and every aii / cache-global field
+starts **0** at load. (Reading those words at their "file offset" returns `__LINKEDIT` symbol-table bytes —
+a mistake this lane caught itself making.) 【测】
+
+**(A) aii `+0x40..+0x4C` and `+0x64`: writers found by value — one indirect dispatch; `+0x64` has none.**
+
+| field | writer (by value) | reachable? |
+|---|---|---|
+| `+0x20` errorMessage · `+0x24` terminationFlags | `setAlImageInfosHalt` `0x2be08d04` (doc §1/§9.2) | yes — sole caller `dyld::halt` `0x2be01efc` |
+| `+0x40` errorKind | `setErrorStrings` `0x2be05d66`: `strd r4,r5,[r1,#64]` (`r4` = arg0) | **yes — indirect; measured 1** |
+| `+0x44` clientPath | same `strd` (`r5` = arg1) | yes — measured `/sbin/launchd` |
+| `+0x48` targetPath | `0x2be05d6c`: `str r2,[r1,#72]` | yes — measured ≠ 0 (faulting ptr) |
+| `+0x4C` errorSymbol | `0x2be05d70`: `str r3,[r0,#76]` (`r0` reloaded = aii at `0x5d6e`) | yes — measured 0 (= the `NULL` arg) |
+| `+0x50` sharedCacheSlide | `0x2be050cc` (region accepted) · `0x2be054fc` (post-map success) | yes — **the probe's best word** |
+| `+0x54..+0x63` sharedCacheUUID | `0x2be050ec` · `0x2be05512` (`vst1.8 {d16-d17}`) | yes, when the header's `mappingOffset ≥ 0x68` |
+| `+0x64` (v0x0E: `reserved[0]`, not a named field — see below) | **no writer anywhere in the image** | — |
+
+**`setErrorStrings` `0x2be05d50` IS reached — through the `LinkContext` hook table.** The direct-branch
+census's 0 is correct and irrelevant: the only in-file occurrence of the address outside the code is a
+symbol-table word in `__LINKEDIT` (`0x2be241d8`), because dyld dispatches every context hook INDIRECTLY.
+`dyld::setContext` materializes the Thumb address `0x2be05d51` at `0x2be04d78` (`add r5,pc`) and stores it
+to `gLinkContext` (`0x2be2195c`, symbol `_ZN4dyld12gLinkContextE`) `+0x44`: `str.w r5,[r9,#68]` @`0x2be04d80`.
+The context-hook slots carry 32 `ldr rX,[…,#68|#72]; blx rX` call sites in the image (21 on `+0x44`, 11 on
+`+0x48`) — e.g. `0x2be0a2e6/0x2be0a300`, `0x2be0a30c/0x2be0a324`, `0x2be0cf4a/0x2be0cf56` — and the
+`const LinkContext&` in every `ImageLoader::…` symbol is that same struct. ⇒ **the 996 press's four values ARE this dispatch**: `+0x40 = 1`,
+`+0x44 = "/sbin/launchd"`, `+0x48 ≠ 0`, `+0x4C = 0` are exactly the four arguments of the call at
+`ImageLoader::recursiveLoadLibraries+0x60c` (`0x2be0a300`: `movs r0,#1` @`0x2be0a2fc`, `movs r3,#0`
+@`0x2be0a2fe`; `r6 = [LinkContext+0x44]` @`0x2be0a2e6`; `r1 = [this+4]` (client), `r2 = *[r7,#-156]`
+(target) @`0x2be0a2e8..f2`). Two of the 21 `+0x44` sites instead ZERO all four fields — `ImageLoader::link`
+@`0x2be09a96` and `0x2be09bdc` (`r0..r3 = 0` = `dyld_error_kind_none`, i.e. state clears) — so the last
+writer on the failing run is the `+0x60c` call. The earlier prediction "`errKind=` / `client=` / `target=`
+will read `0` / `<null>` on every path, including a successful boot" is **RETIRED by measurement**. 【测】
+
+**Which arm, and what the numbers are called.** The same catch block (`__cxa_begin_catch` `0x2be14950`
+@`0x2be0a2a2`, `mov r4,r0`; required-guard `ldrb;cbz 0x2be0a362` @`0x2be0a2a8`) classifies the caught
+message: `strstr(msg,"Incompatible")` (`0x2be1e0c5`, args @`0x2be0a2b2..bc`) ≠ 0 ⇒ arm `0x2be0a304` ⇒ kind
+**3**; else `strstr(msg,"architecture")` (`0x2be1e0d2`, @`0x2be0a2cc..da`) ≠ 0 ⇒ arm `0x2be0a328` ⇒ kind
+**2**; else fall-through `0x2be0a2f6` ⇒ kind **1**. The 995 message ("Reason: image not found") contains
+neither needle ⇒ kind 1 — what was measured. `ImageLoaderMachO::throwSymbolNotFound` (`0x2be0cf3c`) is the
+kind-**4** side (`movs r0,#4` @`0x2be0cf4a-56`), formatting
+`"Symbol not found: %s\n  Referenced from: %s\n  Expected in: %s\n"` (`0x2be1ea98`, `add pc` @`0x2be0cf64`).
+Apple's header for the identical struct era, dyld-353.2.3 `include/mach-o/dyld_images.h` (its version
+comments are exactly the v11–v14 field list this pin's layout obeys to the byte, see the `+0x64` note
+below), names them `dyld_error_kind_none=0, dylib_missing=1, dylib_wrong_arch=2, dylib_version=3,
+symbol_missing=4` — measured 1/2/3/4, zero mismatches. ⇒ 996's `errKind=1` =
+**`dyld_error_kind_dylib_missing`**. 【测】+【引】
+
+**#4 closes: the write happens, and the string is the one in the message.** The joint tail
+`0x2be0a334..5e` calls `dyld::throwf` (`0x2be01640`) with r0 =
+`"Library not loaded: %s\n  Referenced from: %s\n  Reason: %s"` (`0x2be1e0df`, `add pc` @`0x2be0a35c`),
+r1 = `*[r7,#-156] → [#0]` (@`0x2be0a33a`), r2 = this-image path (`[r7,#-184]`: `[#8] ?: [#4]`), r3 = the
+caught message (`r4` via `[r7,#-220]`, §9.6.D). The setErrorStrings arms load their target from the SAME
+local: `ldr.w r2,[r7,#-156]; ldr r2,[r2]` @`0x2be0a2ee/f2`. ⇒ the image-not-found path **does** write
+`errorTargetDylibPath`, from the very string that then fills the message's first `%s`. The witness's
+`target copyinstr=996748` = `0xF358C` is the **faulting user address**, not a reading — `copyinstr`'s fault
+stub returns the faulting user VA and does not set EFAULT (`bcopyinout.s:1014-1018`) — and at that same
+witness moment the malloc'd message copy read fine (995's 103 bytes carry `/usr/lib/libbsm.0.dylib`). ⇒ the
+stored pointer's page was unmapped by witness time (a transient heap buffer); it was written, not stale. 【测】+【推】
+
+`+0x64` likewise has no writer: the **only** non-stack `[rX,#0x64]` store in the image is `dyld::setContext`
+`0x2be04dbc` `str.w lr,[r0,#100]!`, and that `r0 = r9 = gLinkContext`, not the aii. ⇒ **996's `cacheBase=`
+read at `A+0x64` is vacuous (prints 0 always)** — replace it with `A+0x50` (slide-free; written by dyld
+**only once the cache is mapped**, see B — `0 == never mapped`) plus `A+0x54` (UUID), and optionally
+`[0x2be2301C]` (cache-global `base`, needs `slide = A − 0x2be21c8c`; nonzero means *a region existed*). 【测】
+
+**And the `+0x64` NAME is retired with it: a v0x0E aii has no `sharedCacheBaseAddress`.** Apple's field
+history (same dyld-353.2.3 header) lists, after `errorSymbol`, in order: `sharedCacheSlide` (v12, iOS 4.3)
+→ `sharedCacheUUID[16]` (v13, iOS 7.0) → **`reserved[16]`** (v14, iOS 7.0). The offsets obey it bit for
+bit: v11 = `0x40..0x4C` (measured above), v12 = `0x50` (measured: `0x2be050cc` · `0x2be054fc`),
+v13 = `0x54..0x63`, v14 = `0x64..0xA3` — and `__DATA,__all_image_info` is exactly `0xa4` = `0x64 + 16×4`
+bytes (`_dyld_all_image_infos` = `0x2be21c8c`, section size 0xa4; the pin's own `dyldVersion` string at
+`aii+0x1C` = `0x2be1df23` reads `"324.1"`). The pin's file leaves `+0x64 = 0`. ⇒ the 996 `cacheBase` word
+read `reserved[0]`; the name `sharedCacheBaseAddress` came from LATER dylds, which turned that reserved slot
+into a real field. Keep the recommended replacement reads. 【测】+【引】
+
+**(B) `mapSharedCache` `0x2be04fa0` — the complete exit catalog; none of them throws.**
+
+Call targets over `0x2be04fa0..0x2be0596e`, all 17, contain **no `___cxa_throw`, no `dyld::throwf`, no
+`dyld::halt`** — every failure is log-and-continue and the caller just sees "no cache". 【测】
+
+- **Mode gate in the check wrapper `0x2be05774`:** `ctx = 0x2BE2195C`; `ldr r0,[ctx+0x8C]; cmp #0;
+  itt ne {movne r0,#−1; popne}`; only when `[ctx+0x8C] == 0` does `mov.w r0,#294 ; blx _syscall`
+  (`0x2be05792`) run. Non-zero ⇒ **no syscall 294 at all** and return −1 (feeds the fd path). Writers of
+  `[ctx+0x8C]`: the env parser `0x2be0253c`(=1) / `0x2be0254e`(=2) / `0x2be02560`(=0) / `0x2be0256a`(=3),
+  plus the map wrapper's own `0x58a0`(=2) / `0x5960`(=1). XNU's init does not set `DYLD_SHARED_REGION`, so a
+  plain boot runs at 0 and the syscall **is** issued. `0` from the kernel = "a region exists" → region path;
+  non-zero → `openSharedCacheFile` (`bl 0x2be02e24` @`0x4fe8`). 【测】
+- **fd == −1** (`cmp r5,#−1` @`0x4fee`) ⇒ verbose-gated log
+  `'dyld: shared cached file cannot be opened\n'` (`0x2be1d0f1`, len 42) @`0x5012` → `0x5522`. 【测】
+- Region path `0x5018`: `r5 = 0x2be23010`; **`str base,[r5,#12]` @`0x5032` sets `[0x2be2301C] = the kernel
+  region base` before the magic check**; `strcmp(base, 'dyld_v1   armv7' 0x2be1cf46)` @`0x5034`; mismatch ⇒
+  **`[0x2be2301C] := 0` @`0x5044`** + verbose-gated log
+  `'dyld: existing shared cached in memory is not compatible\n'` (`0x2be1cf56`, 57) @`0x5058` → `0x5754`.
+  (By-value oddity: the *non-verbose* mismatch branch `cbz r0,0x50a8` @`0x504c` rejoins the header parse with
+  `r4 = 0`, i.e. would `ldr r0,[r4,#16]` @`0x50a8` from address `0x10` — a latent fault that Apple never hits
+  because a kernel region always carries the magic if it exists at all.) 【测】
+- Header accepted (`0x50a8`, both routes): `[r4+0x10] < 0x48` ⇒ `0x552e`; if the 64-bit `[r4+0x40]` (slide
+  info) ≠ 0 ⇒ `slide = r4 − mappings[0].address`, stored at cache-global `+0x20` @`0x50c6` and
+  **aii+0x50 @`0x50cc`**; `mappingOffset ≥ 0x68` ⇒ UUID copied from region`+0x58` to **aii+0x54** @`0x50ec. 【测】
+- fd route `0x505e`: `_read(fd, buf, 0x2000)` @`0x5068`; short read ⇒ verbose-gated
+  `'dyld: shared cached file cannot be read\n'` (`0x2be1d0c8`, 40) @`0x5110`; bad magic ⇒ verbose-gated
+  `'dyld: shared cached file is invalid\n'` (`0x2be1d0a3`, 36) @`0x5110` → `_close` `0x551c`; then
+  `_fstat` @`0x513a` (**failure is silent**), the 32-byte mapping entries are validated — a mapping outside
+  the file ⇒ **unconditional** log `'dyld: shared cached file is corrupt: %sdyld_shared_cache_armv7\n'`
+  (`0x2be1cf90`; the `%s` is the 38-byte dir `'/System/Library/Caches/com.apple.dyld/'` from
+  `[0x2be21af0] = 0x2be1d7b7`, and the file name is inside the same literal) @`0x5206`, bad flag set, loop
+  continues; missing full coverage ⇒ **unconditional** `'…missing read-only mapping: %sdyld_shared_cache_armv7\n'`
+  (`0x2be1d023`, 81) @`0x5314` or `'…missing read/write mapping: %sdyld_shared_cache_armv7\n'`
+  (`0x2be1cfd0`, 82) @`0x5330` → `0x5516` (**nothing stored**). 【测】
+- Map step: `bl 0x2be0579c` @`0x54b2`; **non-zero ⇒ verbose-gated log
+  `'dyld: shared cached file could not be mapped\n'` (`0x2be1d075`, 45) @`0x54d6`, nothing stored**;
+  zero ⇒ the fd route's only stores: cache-global`+0xC` = `mappings[0].address` @`0x54f6` (write **2** of
+  the 0x32/0x44 question), **aii+0x50 = slide @`0x54fc`**, aii+0x54 UUID @`0x5512`. Every exit then passes
+  `0x5522` (`[0x2be2301C]==0 ⇒ return NULL`) — so `[0x2be2301C]` is set exactly when a cache region exists. 【测】
+- Map wrapper `0x2be0579c`, three paths: (a) `r3 != −1` ⇒ `_fcntl(fd, 61 /*F_ADDFILESIGS*/, &{off,size of
+  mappings[r3]})` @`0x57ca`; on −1 + verbose, `'dyld: code signature registration for shared cache failed
+  with errno=%d\n'` (`0x2be1d297`, 72) @`0x57f4`; (b) **`[ctx+0x8C] == 0` (default) ⇒
+  `mov.w r0,#438 ; blx _syscall` @`0x58d6/0x58da`** = `shared_region_map_and_slide_np(fd, count, mappings,
+  slide, flags, addr, size)`, its return value passed back untouched, `[ctx+0x8C]` left 0; (c) non-zero ⇒
+  dyld maps the cache itself: `vm_deallocate(0x2C000000, 0x14000000)` @`0x5826`, `strb #1,[aii+0x10]`
+  @`0x5842`, `mmap` per mapping @`0x5878`, any mismatch ⇒ deallocate again + **`[ctx+0x8C] := 2` @`0x58a0`**
+  + verbose-gated `'dyld: shared cached region cannot be mapped at address %p with size 0x%08lX\n'`
+  (`0x2be1d2e0`, 76) @`0x58be` + return −1; all mapped ⇒ slide fixups (128×32-byte loop @`0x5908`) then
+  **`[ctx+0x8C] := 1` @`0x5960`, return 0**. 【测】
+
+**⇒ what the 995 run's silence means.** With the verbose flag `[gLinkContext+0x9B] == 0` (gates read at
+`0x4ffe/0x5048/0x50fc/0x5092/0x54c6`), every exit is silent except the two unconditional
+"corrupt"/"missing mapping" logs — which cannot fire without the fd route having opened a file. The 995 log
+has **no dyld I/O line at all**, so `mapSharedCache` returned NULL leaving the aii untouched. The routes
+consistent with the capture: `check_np != 0` (no kernel region) → open fails or read/magic/fstat/map fails,
+all silent → NULL. The `check_np == 0` route is excluded by outcome (a magic-matching region would have made
+libbsm reachable; a mismatching one would have crashed on the `0x504c` oddity, not produced this clean
+`throwf`). The `[ctx+0x8C] != 0` route would look identical, but nothing writes that word on a stock boot. 【推】
+
+**(C) The message closes exactly: L = 102, `Reason` = the static 15-byte `image not found`.**
+
+- Parsed from the card image (`/tmp/c_launchd.txt`): launchd's load commands list
+  **`LC_LOAD_DYLIB /usr/lib/libbsm.0.dylib` first**, then `/usr/lib/libSystem.B.dylib` — both cache-resident
+  (§10.7). The first dependency pid 1 resolves is the first one a cache-less dyld cannot satisfy. 【测】
+- 995's `copyinstr len=103` counts the terminating NUL (§9.4's "one character short") ⇒ **strlen = 102**.
+  `'Library not loaded: %s\n  Referenced from: %s\n  Reason: %s'` (`0x2be1e0df`, 57) with 23 + 13 + **15** =
+  102 exactly. A `'no suitable image found.  Did find:'` `Reason` (35) forces ≥ 122; the heap sibling throw
+  at `0x2be02cb6` builds a `\n\t`-path list and cannot fit either. ⇒ **S = `'image not found'`
+  (`0x2be1cc9d`, 15), thrown by `dyld::load` at `0x2be02d24`** (`add pc` → `0x2BE21000` = the `const char*`
+  typeinfo slot; `r2 = 0x2be1cc9d`; SjLj selector 3), reached **because `byte[LoadContext+5] == 0`**
+  (`ldrb;cmp;beq 0x2be02d00` @`0x2be02cc0`; the non-zero side unwinds and returns NULL without throwing). 【测】
+- The rewrap then fired from `recursiveLoadLibraries+0x66a` `0x2be0a35e` — **§10.5's "EXCLUDED" verdict is
+  falsified by measurement**: its gate byte `*[r7,#-164]` (`ldrb;cmp;beq 0x2be0a362` @`0x2be0a29e`) was
+  **non-zero** in 995. The allocation arithmetic also closes: `r8 = obj − 0x20 = block + 0x30`, and
+  `block − r5 = align4(102+1) = 0x68` ⇒ `r8 − r5 = 0x68 + 0x30 = 0x98` — exactly the measured
+  `0x2bef4428 − 0x2bef4390`. 【测】
+
+**(D) `0x2be14950 = ___cxa_begin_catch`** — the annotated dump's label sits immediately above it
+(`__cxa_begin_catch: 2be14950 push {r4,r5,r6,r7,lr}`). Its return is used **directly as the `Reason`
+string**: `bl ___cxa_begin_catch; mov r4,r0` @`0x2be0a2a2` in the rewrap pad, `r4` → the third `%s`. 【测】
+
+Two citation repairs for §9.4/§9.5: the mode-word base is **`0x2BE2195C` = gLinkContext** (the "`0x2be1195C`"
+in §9.4 is a typo; `add r0,pc` @`0x2be05804` resolves to `0x2BE2195C`), and the `+0x64` "uncorroborated
+offset" line is now moot twice over — no writer exists, and v0x0E has no such field (`+0x64` = `reserved[0]`,
+§9.6.A second block) — so the offset question is retired rather than open.
+
+**Provenance, for the record (ASK 2).** The kernel's own dylinker path is a FILE load, with no shared-cache
+participation: `load_machfile`'s `needs_dynlinker` gate (`mach_loader.c:756-764`) → `load_dylinker`
+(`:1324+`) opens the name taken from the main executable's `LC_LOAD_DYLINKER` via `get_macho_vnode()`, and
+`kern_exec.c:987` publishes the witness anchor from `load_result.all_image_info_addr` — which
+`note_all_image_info_section` (`mach_loader.c:249-269`, called for `MH_DYLINKER` only, `:1044-1048`) computed
+as section addr + slide. Neither file references `shared_region`/`shared_cache`. ⇒ the running dyld IS the
+file at `/usr/lib/dyld` = the pin (byte-identical over the pin's 196,576 bytes; the card's file carries 32
+more trailing bytes). The `src/entry/build_entry.sh` note "dyld ran from the mapped shared cache" describes
+the design (the file ≡ the cache's dyld) but not the mechanism — that other-lane comment is flagged for a
+wording fix, not edited here. 【测】+【引】
+
+### 9.7 997 closure — the census verdict, Q1–Q4, and dyld's own draw budget (dyldtrace lane, 2026-10-12, post-997)
+
+**(E1) Store-pattern census: exactly ONE aii-relative store group exists — `setErrorStrings`; no inlined copy, and none is needed.** Whole-image census over `/tmp/dyld_full.asm`: 1,146 stores at immediate offsets {64,68,72,76} (every decoded `str*`/`strd` form, any base, whole-file) + 944 `stm*`/`vst*` multi-register stores. The groups covering three or more of the four offsets, exhaustively: `0x2be04d7a/80/84/88` base `r9` = **gLinkContext itself** (the `setContext` hook-table writes — this is where `+0x44 = setErrorStrings|1` is stored, §9.6.A); `0x2be05d66` `strd r4,r5,[r1,#64]` · `0x2be05d6c` `str r2,[r1,#72]` · `0x2be05d70` `str r3,[r0,#76]` — **the only aii-relative group** (base = the double-deref of literal slot `0x2be21008` = `&gProcessInfo` → aii `0x2be21c8c`); `0x2be07b14/1a` and `0x2be07ed0/ed4/ed8` base `r5` (`_dlopen`/`_dlopen_preflight` locals); `0x2be25430/3c/48/54` (`__LINKEDIT` bytes misdecoded as code). No multi-register store touches the aii offsets. ⇒ the ultimatum's two horns reconcile on the third path: the out-of-line `setErrorStrings` `0x2be05d50` ran, reached through the indirect `gLinkContext+0x44` dispatch (Thumb `0x2be05d51` = `setErrorStrings|1`; materialized `0x2be04d78`, stored `0x2be04d80`; 21 dispatch sites), and its four arguments ARE 996's measured `+0x40 = 1`, `+0x44 = "/sbin/launchd"`, `+0x48 ≠ 0`, `+0x4C = 0`. Neither an inlined copy nor a leftover contradiction remains. 【测】
+
+**(E2) Q1 — count = the cache FILE header's `mappingCount`; the array is a runtime stack copy of the header's mapping table.** `mapSharedCache` `0x2be04fa0` reads the header into `frame+0x114` (`_read(fd, .., 0x2000)` @`0x2be05068`, == 0x2000 checked), then `ldrd sl,fp,[r4,#184]` @`0x2be05116` = header `+0x10` `mappingOffset` / `+0x14` `mappingCount`; the array is **`sp − (count+1)×32`**, stored to `[r6+0x18]` @`0x2be05122/26`. No static table exists (and the by-value copy rules one out: entries are copied field-by-field, 32 B each, from `header+mappingOffset` @`0x2be0517e..0x2be051ac`). Count provenance by value: `[r4+0xBC]` (header+0x14) → `[r6+0x10]` @`0x2be0512e/32` → `r5` @`0x2be052e8` → `[r6+0x20]` @`0x2be05388` → syscall `r1` @`0x2be054ae`; the add-loop guard and the draw's scan read the same word. Per-entry indices: `[r6+0x24]` = the last entry with `init_prot == 1` (`0x2be05212-18`); `[r6+0x28]` = the last with `(init_prot & 3) == 3` (`0x2be05220-2c`). ⇒ **the 4th entry (m3) is NOT the slide-info mapping**: m3 is the last `init==1` entry (`[r6+0x24]`, fed into `slide_start` below), while `[r6+0x28]` — the entry whose max_prot and init_prot get `VM_PROT_SLIDE` OR'd in @`0x2be05488/0x2be0549a` — is m1, the only `(init&3)==3` entry (measured `0x23`). The `(count+1)`-th slot is the synthetic code-signature segment: address = cache end VA (last entry's addr+size), size = page-rounded (`st_size − codeSignatureOffset`, the `_fstat` buffer's `st_size` at `[r6+0xD8]`), file offset = `codeSignatureOffset`, prot 1/1 — built @`0x2be05284..0x2be052d2`; its index ( = count) is the wrapper's `r3`, or −1 when the cache has no signature region (`0x2be05278`), in which case the wrapper's `cmp r3,#-1` @`0x2be057ac` skips `F_ADDFILESIGS`. The `fcntl` payload takes that entry's `+0x10`/`+0x08` (file offset, size) @`0x2be057be/c4`. 【测】
+
+**(E3) Q2 — the slide is dyld's own draw, and the mapping array IS rewritten to slid addresses before the syscall.** The 438 wrapper's only caller is `0x2be054b2`; args: fd = `[r6+0x14]`, count = `[r6+0x20]`, array = `[r6+0x18]`, index = `[r6+0x1C]`, stack slide/slide_start/slide_size @`0x2be054a2-b0`. The draw @`0x2be05416..0x2be05446`: a 32-bit value from the static-state generator `0x2be15f48` (`r1` is zeroed after the call @`0x2be05430`, so only `r0` is used), reduced mod `(0x40000000 − max_end)` by the 64-bit helper `0x2be1868c` (the same helper serves /10 decimal conversion @`0x2be18fba`/`0x2be19444`; the measured magnitudes 0xd9c000 / 0x3811000 force the remainder-in-`r0` reading over any quotient reading), then rounded up to 4 KiB (`addw #0xfff` @`0x2be0543a`, `bfc #0,#12` @`0x2be05446`). `max_end` comes from the 64-bit min/end scan over the array's address fields @`0x2be05374..0x2be053fc` — and that scan runs on **unslid, base-based** addresses: 997 fixes it by value, `m0.va − slide = 0x2cd9c000 − 0xd9c000 = 0x2C000000` exactly (the copy @`0x2be05184..` is verbatim from the header; the add loop below is the only intervening writer). Then the loop @`0x2be05450..0x2be05466` (`ldmia {r3,r5}; adds r3,r3,r4; adc r5,r5,r0; stmia`, stride 32) adds the drawn slide to **every** entry's 64-bit address field, immediately before `bl 0x2be0579c`. ⇒ **the va fields handed to syscall 438 are already slid** across all entries, so the kernel may only translate (`target = va − sr_base`) and must not re-add the slide — the shreg-g1 (a)/(b) split is a dyld-side invariant, not an inference. The same `r4` is the syscall's `slide` argument (it can only drive the fixups inside the `VM_PROT_SLIDE` segment) and, on success only, `aii+0x50` (`0x2be054fc`). `slide_start` = `[r6+0x14C] + mappings[[r6+0x24]].address − mappings[[r6+0x24]].file_offset` @`0x2be05494..0x2be054a0`, i.e. **slid m3.va − slide_size**, verified on both runs: 996 `0x3fa46000 − 0x89000 = 0x3f9bd000` ✓; 997 `0x3cfd1000 − 0x89000 = 0x3cf48000` ✓ (with `[r6+0x14C] = m3.file_offset − slide_size = 0x12B51000`). 【测】+【推】
+
+**The draw budget, and why 998's `kr=0` is draw-independent.** `0x40000000 − max_end = 0x40000000 − 0x3C3AC000 = 0x3C54000`, and `0x14000000 − span = 0x14000000 − 0x103AC000 = 0x3C54000` — **identical**. G1's window size equals dyld's draw budget plus the cache, so every slide the generator can emit keeps the slid cache inside `[0x2C000000, 0x40000000)`: `target_max = slide + span ≤ 0x14000000` (equality only at the supremum of the draw — still a legal window end). Both measured draws satisfy it (997 `0x11148000`; 996 `0x3811000 + span = 0x13BBD000`). ⇒ under G1 no draw reproduces 997's `kr=1`, and 996's larger draw would also have fit. (This identity belongs to the G1 audit / `docs/reference/d13-shreg-frontier.md`, other lane — recorded here only.) 【测】+【推】
+
+**(E4) Q3 — withdrawn as an offset.** 996 `0xF34CC` vs 997 `0xD356C` for the same string ⇒ per-run; it is the `copyinstr` faulting-address echo (§9.6.A #4), not a cache-file offset for libbsm.
+
+**(E5) Q4 — no `+0x50` writer precedes a successful map.** Writers: `0x2be050cc` (region path — requires a magic-matching region already resident; stores `r2 = r4 − [r4+r0]`, the resident-bias value, @`0x2be050c4/c6/cc`) and `0x2be054fc` (fd path success branch: `cmp r0,#0; beq 0x2be054dc`, stores the drawn slide). A failed kernel map reaches neither ⇒ `+0x50 == 0` is a sound "never mapped" witness; under 998 a nonzero `+0x50` printing the drawn slide (the same value the `IOS7SHREG` line prints) is a positive first. 【测】

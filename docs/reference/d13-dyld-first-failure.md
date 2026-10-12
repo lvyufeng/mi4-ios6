@@ -389,6 +389,12 @@ Evidence for `gLibSystemHelpers == NULL` at the moment of the fatal `throwf` **[
   → **`weakBind`** (`0x2be09b52`) → notify(40) → **`recursiveGetDOFSections`** (`0x2be09b8a`) →
   **`recursiveApplyInterposing`** (`0x2be09bc8`) → return to `_main` → `setNeverUnloadRecursive` →
   the inserted-library `link` loop (`0x2be04a08`) → `applyInterposing` → `weakBind` → `initializeMainExecutable`.
+* **2026-10-12 (dyldtrace) correction to the list above:** the leading `setErrorStrings` is the state-CLEAR
+  call inside `link` itself — the `+0x44` hook (`LinkContext+0x44` = `0x2be05d51`, materialized @`0x2be04d78`)
+  invoked with `r0..r3 = 0` @`0x2be09a96` (and again @`0x2be09bdc`). The ERROR-populating dispatch is
+  `ImageLoader::recursiveLoadLibraries+0x60c` (`0x2be0a300`, kind 1 = `dyld_error_kind_dylib_missing`), a
+  callee of the `0x2be09aaa` `bl`. The direct-branch census cannot see either (indirect `blx`);
+  see `d13-dyld-halt-message-recovery.md` §9.6.A (revised same day).
 
 ### 7.2 Is the shared cache mapped before the first plausible `throwf`?
 
@@ -521,7 +527,7 @@ measured encodings】.
 | `r3` | `0x2bed9c8c` | `0x2be21c8c` | `[r2]` = the `__all_image_info` struct; the kernel prints the **same** address (`dyld_all_image_info_addr:`) two lines below 【测】 |
 | `r5` | `0x2bedc390` | `0x2be24390` | **the message** (halt's `mov r5,r0`, preserved over the `dyld::log` call) = pool + 0x11E0 【测】 |
 | `r6` | `2` | | the `_main` catch pad's clause selector — loaded `ldr r6,[sp,#16]` at `0x2be04ba4`, compared to `movs r4,#2` ⇒ the `catch (const char*)` fatal branch 【测, §5】 |
-| `r8` | `0x2bedc428` | `0x2be24428` | the **exception object**, pool + 0x1278 (§10.3) 【测】 |
+| `r8` | `0x2bedc428` | `0x2be24428` | the **exception object**, pool + 0x1278 (§10.3) 【测】 · **superseded 2026-10-12: `r8 = obj − 0x20` (see §10.4a)** |
 | `r9`/`r10`/`r11`/`r12`/`sp`/`r7` | stack values | | frames (`0x2fd47xxx`) 【测】 |
 
 ### 10.3 `r8` is the exception object — the chain, by value
@@ -541,6 +547,9 @@ measured encodings】.
   (**pool + 0x71C0**) + 0x50 — the *same* `+0x50` relation in a run whose message was static 【测】.
 * `__cxa_allocate_exception` @ `0x2be14584` calls `do_malloc(size+80)` (`add.w r0,r4,#80` @ `0x2be145d0`)
   and returns **`block + 80`** (`0x2be145f0`) 【测】 ⇒ `r8 = block_cxa + 0x50`.
+* **Superseded in part — see §10.4a.** The unwinder receives `obj − 0x20`, not `obj` (the `mov r0,r6`
+  @ `0x2be14920` passes the address `___cxa_throw` wrote just below the object, `0x2be14902`), and 995's
+  measurement closes only under `r8 = obj − 0x20 = block_cxa + 0x30`.
 
 ### 10.4 ⇒ the message length is 68..71 bytes (this is the new discriminator)
 
@@ -558,6 +567,29 @@ measured encodings】.
   size `align4(L+1)` and is immediately followed by the 0x54-byte exception block 【推 for the
   direct throws; the `_free`-no-op assumption is §10.9.2】.
 * Invariant for the 995 witness (it prints `len=`): **(r8 − 0x50) − r5 == align4(len + 1)**.
+
+### 10.4a Correction, measured by 995 + the dyldtrace lane (supersedes §10.2's `r8` row, §10.3's last two bullets and §10.4's window)
+
+* **`r8 = obj − 0x20`, not `obj`.** `___cxa_throw` runs `mov r0,r6` @ `0x2be14920` with `r6` = the address
+  `0x2be14902`'s writeback left (the two words the throw plants just below the object: `0x432B2B00` at
+  `obj−0x20`, `0x434C4E47` at `obj−0x1C`) 【测】, and `__Unwind_SjLj_RaiseException`'s `mov r8,r0`
+  (`0x2be1c526`) carries **that** value through the unwind. Hence `r8 = (block_cxa + 0x50) − 0x20 =
+  block_cxa + 0x30`. The 995 dump agrees from the other side: the witness' interior read at `r8` is `len=0`,
+  i.e. **the byte at `r8` is `0x00` — the low byte of `0x432B2B00`** 【测】.
+* Hence the **corrected invariant** for `strdup`-built messages: **(r8 − r5) − 0x30 == align4(L + 1)**
+  (not `(r8 − 0x50) − r5`). 995: `0x2be24428 − 0x2be24390 = 0x98` ⇒ `align4(L+1) = 0x68` ⇒ **L ∈ [100, 103]** 【测】.
+  (993's static-message run re-reads as `obj = pool + 0x7230`, `block = pool + 0x71E0`; the old line treated
+  `r8` itself as `obj`.)
+* **L = 102 exactly, and the message is the libbsm one.** `copyinstr`'s `len=103` counts the terminating NUL
+  (the sibling doc's §9.4): 20 + 23 + 1 + 19 + 13 + 1 + 10 + **15** = 102 for
+  `Library not loaded: /usr/lib/libbsm.0.dylib\n  Referenced from: /sbin/launchd\n  Reason: image not found`.
+  The `Reason` is the **static 15-byte** literal `0x2be1cc9d`, thrown at `dyld::load` `0x2be02d24`
+  (the `byte[LoadContext+5] == 0` side of `0x2be02cc0`; the heap `Did find:` form @ `0x2be02cb6` cannot fit
+  the length). `/tmp/c_launchd.txt`: `/usr/lib/libbsm.0.dylib` is launchd's **first** `LC_LOAD_DYLIB` 【测】.
+* **§10.5's row 1 verdict is reversed: `recursiveLoadLibraries+0x66a` (`0x2be0a35e`) is the producer**, and
+  its gate byte `*[r7,#-164]` (`ldrb;cmp;beq 0x2be0a362` @ `0x2be0a29e`) was **non-zero** in 995 【测】.
+* Task D: `0x2be14950 = ___cxa_begin_catch` (label by value), whose return `r4` is the caught inner `char*`
+  used as the third `%s` (`bl ___cxa_begin_catch; mov r4,r0` @ `0x2be0a2a2`) — §10.6's argument table holds 【测】.
 
 ### 10.5 Which `throw` sites can produce it — the 44-site census and the re-windowed ranking
 
@@ -577,7 +609,7 @@ what selects among them.
 
 | site | message | required args for L∈[68,71] | verdict |
 |---|---|---|---|
-| `recursiveLoadLibraries+0x66a` `0x2be0a35e` | `Library not loaded: %s\n  Referenced from: %s\n  Reason: %s` (`0x2be1e0df`, len 57) | **three args summing 17..20** | **EXCLUDED** — needed lib alone is ≥ 24 (`/usr/lib/libbsm.0.dylib`), + `/sbin/launchd` 13 ⇒ ≥ 38 【测+推】 |
+| `recursiveLoadLibraries+0x66a` `0x2be0a35e` | `Library not loaded: %s\n  Referenced from: %s\n  Reason: %s` (`0x2be1e0df`, len 57) | *old window*: three args summing 17..20 | **FALSIFIED by 995 — this is the producer (§10.4a)**: the window was wrong, not the site; 23 + 13 + 15 = 51 and L = 102 【测】 |
 | `throwSymbolNotFound+0x2c` | `Symbol not found: %s\n  Referenced from: %s\n  Expected in: %s` | three args 14..17 | EXCLUDED (paths alone ≥ 26) |
 | `mapSegments+0x1fe` | `mmap() error %d at address=0x%08lX, size=0x%08lX segment=%s in Segment::map() mapping %s` | base 73 > 71 | **EXCLUDED by arithmetic alone** |
 | `sniffLoadCommands+0x150` / `parseLoadCmds+0x362` / `mapSegments+0x1d0` | `load command #%d length (%u)…` (81) / `…built for OS version %u.%u…` (83) / `truncated mach-o error…` (72) | base > 71 | EXCLUDED by arithmetic |
@@ -596,7 +628,7 @@ i.e. after 991's measured entry into `ImageLoader::link`, and before the `r1 = 1
 
 | # | site | message | required argument | why it ranks here |
 |---|---|---|---|---|
-| **1** | `ImageLoaderMachO::sniffLoadCommands+0x1f4` | `malformed mach-o image: segment %s does not span all load commands` (`0x2be1e447`, len 66) | **segment name of 4..7 chars** — `__TEXT`/`__DATA` (6) gives exactly L = 70 | the only in-window message whose argument is *natural* at that length, and it fires exactly when a **mapped** image's header/segment geometry is inconsistent — i.e. a shared-cache mapping/offset defect. No auxiliary assumption (no unmeasured flag, no file fallback). The ctor path runs it for cache images too 【测 literal + 推 identity】 |
+| **1** | `ImageLoaderMachO::sniffLoadCommands+0x1f4` | `malformed mach-o image: segment %s does not span all load commands` (`0x2be1e447`, len 66) | **segment name of 4..7 chars** — `__TEXT`/`__DATA` (6) gives exactly L = 70 | the only in-window message whose argument is *natural* at that length, and it fires exactly when a **mapped** image's header/segment geometry is inconsistent — i.e. a shared-cache mapping/offset defect. No auxiliary assumption (no unmeasured flag, no file fallback). The ctor path runs it for cache images too 【测 literal + 推 identity】 — **superseded: §10.4a (995) settled the message: `Library not loaded: … Reason: image not found`, L = 102** |
 | 2 | `dyld::load` `0x2be02cb6` (direct heap throw; buffer built by `bl __Znam` @ `0x2be02c32`, loop appends `"\n\t"+path` @ `0x2be02c70`/`0x2be02c80`) | `no suitable image found.  Did find:` (`0x2be1ccad`, 35) + `\n\t<path>` per tried path | **one path of 31..34 chars** (or two summing 29..32) — the cache has such paths (`/usr/lib/system/libsystem_m.dylib` 33, `libsystem_asl` 33, `libsystem_info` 34, `libMobileGestalt.dylib` 31 …) | the classic "cache lookup missed, file fallback found nothing" message. Two caveats: its branch is gated by a byte at `[LoadContext+5]` (`ldrb r0,[r0,#5]; cmp r0,#0` @ `0x2be02cc0`, the 0-byte side throws the **15-char** `image not found` @ `0x2be1cc9d` — itself excluded by length), and inside `recursiveLoadLibraries` it would be **rewrapped** unless the catch's gate byte is 0 (§10.6) |
 | 3 | `dyld::isCompatibleMachO+0xa2` | `incompatible cpu-subtype: 0x%08X in %s` (`0x2be1cc76`) | **path 28..31** | reachable **only** via `loadPhase6` (`bl` @ `0x2be02fe4`; the other caller `0x2be04812` is `_main`, already passed) ⇒ it implies a **file** was instantiated — i.e. both a cache miss *and* a loose file that parsed far enough to have a header |
 | 4 | `sniffLoadCommands+0x25a` | `malformed mach-o image: more than 255 segments in %s` (`0x2be1e5ee`) | path 18..21 | same family as #1 (geometry misread), needs a short-path image |
