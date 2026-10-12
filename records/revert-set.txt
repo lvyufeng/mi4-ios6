@@ -14083,3 +14083,56 @@ set=armed-d13-4efcabae sha256=2921833bd62a30c296b81b7e840021ea729ea5f3a5a4050cc7
 set=armed-d13-4efcabae sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=995-dyld-halt-message-witness;-stage90_fixture.macho
 set=armed-d13-4efcabae sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=995-dyld-halt-message-witness;-stage90-build-config.txt
 set=armed-d13-4efcabae sha256=8a43216c20a59e57469ded3587c5fe3056c63a7b89e741d18a4602fe65dfdf12 bytes=560 file=SHA256SUMS.txt role=995-dyld-halt-message-witness;-SHA256SUMS.txt
+# armed-d13-cea0c1c2  -  996: THE 294/438 SHARED-REGION PROBE + THE DYLD WITNESS REV-3 ARE WIRED IN.
+# Switch set is 995-s VERBATIM (STAGE90_XNU_DYLD_WITNESS stays 1) + STAGE90_XNU_SHREG_PROBE=1; the
+# ENTRY BIN moved (4efcabae -> cea0c1c2) and TWO tree SOURCE files move in THIS rung:
+# osfmk/arm/trap.c (the witness REV-3: the ios7wit_lines chunker save/restore fix + six
+# IOS7WIT_AI_* reads of the SAME dyld_all_image_infos struct - A+0x40 errKind, +0x44/0x48/0x4c
+# char* fields, +0x50 slide, +0x64 sharedCacheBaseAddress) and bsd/vm/vm_unix.c (bounded,
+# fail-soft IOS7SHREG printfs at the entry and every return of shared_region_check_np (294) and
+# shared_region_map_and_slide_np (438), plus the kr immediately after vm_shared_region_map_file
+# inside _shared_region_map). BOTH are POOL files; 996 does NOT touch the assembly layer
+# (osfmk/arm/traps_lo.s is 994-s, unchanged; pmap.c/commpage.c/arm_vm_init.c are 993-s; this rung
+# has NO pcb.c, NO vm_resident.c, NO mach_kernelrpc.c change). A fresh checkout needs ALL SEVEN
+# tools/stage_d13_kextb_login.sh, tools/stage_d13_sp_align.sh, tools/stage_d13_vmhint_guard.sh,
+# tools/stage_d13_commpage_alias.sh, tools/stage_d13_ios7_traps.sh, tools/stage_d13_dyld_witness.sh
+# and tools/stage_d13_shreg_probe.sh drivers.
+#
+# 995 (pressed 2026-10-12, arm armed-d13-4efcabae, commit 947a75d, evidence
+# out/stage90/captures/cancro-last_kmsg-995-armed-d13-4efcabae.txt:4111-4138) FIRED the witness
+# exactly twice (MAX_PRINTS=2 works) and READ dyld-s real halt message by measurement: len=103,
+# BOTH live pointers (A+0x20 and r5) byte-identical, text beginning
+# `Library not loaded: /usr/lib/libbsm.0.dylib` (only the first 48 bytes printed - a chunker bug
+# in ios7wit_lines zeroed the byte after each chunk; fixed in rev-3). /usr/lib/libbsm.0.dylib is
+# launchd-s FIRST LC_LOAD_DYLIB; it has no file on the volume but IS in the shared cache (696
+# images), so the minimal explanation is that dyld-s shared cache was NEVER MAPPED: mapSharedCache
+# failed silently (no fd 2 on CANCRO) and every cached dylib degraded to a file lookup, whose
+# first miss halted dyld. dyld-s two entry points are BSD syscalls 294/438, BOTH wired in this
+# tree (init_sysent.c:440/:649), so 996 measures their runtime returns.
+#
+# THREE INDEPENDENT READINGS (pre-registered in scripts/press_996.sh + docs/reference/
+# d13-shreg-frontier.md sec 7): (1) the FULL message text from the witness rev-3; (2) dyld-s own
+# sharedCacheBaseAddress word (A+0x64; 0 = never mapped); (3) the IOS7SHREG syscall returns
+# (check_np expected 12 first; the pre-registered prediction is map_slide ret=22 with map_file
+# kr=4 = the 32 B-wire misparse, sec 2; ret=12 + kr=3 would finger sec 6 geometry instead).
+# tools/check_d13_dyld_witness.py --expect on (rev-3) and tools/check_d13_shreg_probe.py --expect
+# on --tree <the staged bsd/vm/vm_unix.c file> assert, off the linked image-s own disassembly and
+# bytes, the witness rev-3 shape and the five IOS7SHREG literals (plus the source-side 7 guard
+# regions); the FROZEN 994 image (out/stage90/captures/994-xnu_arm_entry.elf) is passed as
+# --control and must FAIL ON and PASS OFF for BOTH checkers.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-cea0c1c2 sha256=cea0c1c2288a751430a195b3b1711f32a90ac0657308e913c2e244a1682e8555 bytes=6339668 file=xnu_arm_entry.bin role=996-shreg-probe;-xnu_arm_entry.bin
+set=armed-d13-cea0c1c2 sha256=2af26d0a80d92cf86d3f8ac0a03f1ddb1a7a5feeff006433cbb249c9ba73d76a bytes=7380384 file=xnu_arm_entry.elf role=996-shreg-probe;-xnu_arm_entry.elf
+set=armed-d13-cea0c1c2 sha256=40a9dc325334d4ff70aa2cfc9b7f0877fd3b888ecd65b762b13f4e7a13376e04 bytes=1912 file=xnu_arm_entry.h role=996-shreg-probe;-xnu_arm_entry.h
+set=armed-d13-cea0c1c2 sha256=6264824fe1eadae3a187c7a45d37863070dad5f5289d4823939f2da5b1ea8c93 bytes=1592 file=xnu_arm_entry-config.txt role=996-shreg-probe;-xnu_arm_entry-config.txt
+set=armed-d13-cea0c1c2 sha256=74de61e1a1a0453b962dc3336cee8d0f7e24f7508b60b2d69e0fc706b07fd7ca bytes=3149 file=xnu_arm_entry-sources.txt role=996-shreg-probe;-xnu_arm_entry-sources.txt
+set=armed-d13-cea0c1c2 sha256=c6a4298c8e72fe1aa4dd85c85fe2a77e35d2875703260e113bf82ab55c37f1aa bytes=6835076 file=stage90.bin role=996-shreg-probe;-stage90.bin
+set=armed-d13-cea0c1c2 sha256=4839bd10a4593d57624b2720c68f1f1904f76281f6badc384ebd3585d80f6b34 bytes=6897148 file=stage90.elf role=996-shreg-probe;-stage90.elf
+set=armed-d13-cea0c1c2 sha256=564e8f60ad4be4b079ddbd6e08b8e9da35382a0cf330fe8a1efcad514fc3ca27 bytes=6838272 file=stage90.img role=996-shreg-probe;-stage90.img
+set=armed-d13-cea0c1c2 sha256=466efec187ab230b5d6e9a3760ed7e1801805b413878500c05f14aa6a7239f1b bytes=9359360 file=stage90-qcdt.img role=996-shreg-probe;-stage90-qcdt.img
+set=armed-d13-cea0c1c2 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=996-shreg-probe;-stage90_fixture.macho
+set=armed-d13-cea0c1c2 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=996-shreg-probe;-stage90-build-config.txt
+set=armed-d13-cea0c1c2 sha256=5d194219219b9f33e68ca352c0f4ea1d8eab1c1c5b80c9c894fee10401c152c8 bytes=560 file=SHA256SUMS.txt role=996-shreg-probe;-SHA256SUMS.txt

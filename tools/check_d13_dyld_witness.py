@@ -14,7 +14,9 @@ it out of the halting task from BOTH pointers that carry it - `task->all_image_i
 whose word at +0x20 is the message pointer (`setAlImageInfosHalt` @ dyld 0x2be08d04 is
 `str r0, [r3, #32]`), and `state->r[5]` is `dyld::halt`'s argument, still live at the `udf`.  Both are
 `copyinstr`'d and compared; and `state->r[8]` is classified by the exception block's signature pair
-0x432b2b00/0x434c4e47 (doc `docs/reference/d13-dyld-halt-message-recovery.md` 9.3).  The call sits
+0x432b2b00/0x434c4e47 (doc `docs/reference/d13-dyld-halt-message-recovery.md` 9.3).  Rev 3 (996)
+also reads, in the same trap, the rest of the version-0x0e struct: the shared-cache words and dyld's
+own referrer/target/symbol strings, each fail-soft.  The call sits
 immediately after the `dyld_all_image_info_addr` printf in `sleh_undef`, i.e. on the same path that
 prints the very A the witness dereferences.
 
@@ -22,19 +24,24 @@ CHECKS, ON (`--expect on`):
   (a) a text symbol `ios7wit_dyld_message` exists              - the function was compiled in;
   (b) `sleh_undef`'s region contains a `bl`/`blx` to it        - the call site is wired;
   (c) that call follows a `bl printf` in the same region       - it is on the dump path, not a stray;
-  (d) the witness's own region calls `copyin` at least 3 times and `copyinstr` at least 3 times -
-      the calls are the four prescribed reads (the A+0x20 field, the r5 text, the two 16-byte r8
-      signature windows) plus the r8 text probe; every user read is a copyin, so a build that dropped
-      one of the reads FAILs here rather than silently probing less;
-  (e) the witness's region names the immediates `#32` and `#48` - the +0x20 field offset / r8
-      back-offset and the 0x30 base-forward offset / 48-byte line stride are in the code.
+  (d) the witness's own region calls `copyin` at least 9 times and `copyinstr` at least 6 times -
+      the calls are the prescribed reads: the A+0x20 field, the two 16-byte r8 signature windows,
+      the six rev-3 version-0x0e field reads (errorKind/slide/cacheBase and the three char*
+      pointers), the A text, the r5 text, the r8 text and the three rev-3 strings; every user read is
+      a copyin, so a build that dropped one of the reads FAILs here rather than silently probing
+      less;
+  (e) the witness's region names the immediates `#32`, `#48`, `#100` and `#80` - the +0x20 field
+      offset / r8 back-offset, the 0x30 base-forward offset / 48-byte line stride, and the rev-3
+      sharedCacheBaseAddress (+0x64) / sharedCacheSlide (+0x50) offsets are in the code.
       NECESSARY, NOT SUFFICIENT: they prove the constants are there, not that they are added to the
       right addresses; the call-site and string checks are what pin the read;
   (f) the image bytes carry the witness's whole vocabulary - `IOS7WITNESS dyld msg=`,
       `IOS7WITNESS r5 msg=`, the three verdicts (`matches errorMessage` / `DIFFERS from errorMessage`
       / `unreadable, no comparison`), the `dyld> `/`dyld5> `/`dyld8> ` line tags, the three r8
-      classification lines and the `stale probe=` fallback - so every branch exists in the image,
-      not just the happy one (`mi4-silence-is-a-reading-only-if-success-is-silent`).
+      classification lines, the `stale probe=` fallback, and (rev 3) the `IOS7WITNESS info ...` set
+      (the cacheBase/slide/errKind line and its copyin fallback, `client=`/`target=`/`symbol=`,
+      `<null>`) - so every branch exists in the image, not just the happy one
+      (`mi4-silence-is-a-reading-only-if-success-is-silent`).
 
 CHECKS, OFF (`--expect off`): the mirror image, asserted positively so an empty or truncated file
 cannot pass it - `sleh_undef` must still exist and still call `printf` (the register dump survives),
@@ -65,13 +72,16 @@ NM = "arm-none-eabi-nm"
 SLEH = "sleh_undef"
 WITNESS = "ios7wit_dyld_message"
 # Minimum call counts in the witness's region: copyin = the A+0x20 field read + the two r8 signature
-# windows, copyinstr = the A text + the r5 text + the r8 text.
-CALLEES = (("copyin", 3), ("copyinstr", 3), ("printf", 1))
+# windows + the six rev-3 field reads (three u32 words, three char* pointers); copyinstr = the A text
+# + the r5 text + the r8 text + the three rev-3 strings.
+CALLEES = (("copyin", 9), ("copyinstr", 6), ("printf", 1))
 # The field offsets the witness must materialise.  Matched as EXACT immediates: `#32` as a plain
 # substring also matches `#32770` (measured on this image: `movt r2, #32770` at 0x8002c6f8), which
 # would make the check pass on a coincidence.
 FIELD_OFF_RE = re.compile(r"#32\b")
 BASE_FWD_RE = re.compile(r"#48\b")
+CACHE_BASE_OFF_RE = re.compile(r"#100\b")
+CACHE_SLIDE_OFF_RE = re.compile(r"#80\b")
 # Every string literal the ON image must carry.
 TOKENS_ON = (b"IOS7WITNESS dyld msg=", b"IOS7WITNESS r5 msg=", b"matches errorMessage",
              b"DIFFERS from errorMessage", b"unreadable, no comparison",
@@ -79,7 +89,11 @@ TOKENS_ON = (b"IOS7WITNESS dyld msg=", b"IOS7WITNESS r5 msg=", b"matches errorMe
              b"exception object (signature at r8-0x20)",
              b"exception block base (signature at r8+0x30)",
              b"message interior len=", b"stale probe=0x%08x",
-             b"dyld> <copyinstr failed>")
+             b"dyld> <copyinstr failed>",
+             b"IOS7WITNESS info cacheBase=0x%08x slide=0x%08x errKind=0x%08x",
+             b"IOS7WITNESS info cacheBase/slide/errKind copyin=",
+             b"IOS7WITNESS info client=", b"IOS7WITNESS info target=",
+             b"IOS7WITNESS info symbol=", b"<null>")
 # Every byte string the OFF image must NOT carry.
 TOKENS_OFF_ABSENT = (b"IOS7WITNESS", b"dyld> ", b"dyld5> ", b"dyld8> ")
 AII_FMT = b"dyld_all_image_info_addr: 0x%08x"
@@ -222,7 +236,9 @@ def check_on(env):
                         if got else
                         f"the witness region never calls {callee} - NOT found"))
         for rx, what in ((FIELD_OFF_RE, "+0x20 (the A field offset / the r8 back-offset)"),
-                         (BASE_FWD_RE, "+0x30 (the r8 base-forward offset) / the 48-byte line")):
+                         (BASE_FWD_RE, "+0x30 (the r8 base-forward offset) / the 48-byte line"),
+                         (CACHE_BASE_OFF_RE, "+0x64 (the sharedCacheBaseAddress field)"),
+                         (CACHE_SLIDE_OFF_RE, "+0x50 (the sharedCacheSlide field)")):
             hits = [f"{va:#010x} {mn} {ops}" for va, _w, mn, ops in wbody if rx.search(ops)]
             res.append((bool(hits), f"the witness names the field offset {what}: {hits[0]}" if hits
                         else f"the witness region never names the field offset {what} - the "

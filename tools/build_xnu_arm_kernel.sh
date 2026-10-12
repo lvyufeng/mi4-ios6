@@ -818,6 +818,22 @@ DEFINES=(
 # compiles trap.c's original bytes).
 [[ ${STAGE90_XNU_DYLD_WITNESS:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_DYLD_WITNESS=1)
 
+# 996's shared-region syscall probe (`bsd/vm/vm_unix.c`: bounded, fail-soft `IOS7SHREG` lines at the
+# entry and every return of `shared_region_check_np` (294) and `shared_region_map_and_slide_np` (438),
+# plus the kr immediately after `vm_shared_region_map_file()` inside `_shared_region_map`). 995's press
+# read dyld's real halt message by measurement (`Library not loaded: /usr/lib/libbsm.0.dylib` - launchd's
+# FIRST LC_LOAD_DYLIB, no file on the volume but present in the shared cache), so the frontier is WHY
+# the cache lookup missed; the leading hypothesis is that `mapSharedCache` failed silently and every
+# cached dylib degraded to a file lookup. dyld's two entry points are BSD syscalls 294/438, BOTH wired
+# in this tree (`init_sysent.c:440/:649`), so only the RUNTIME returns are unknown - and they are what
+# this probe measures (it changes no behaviour). `vm_unix.c` is a kernel-pool file, so the switch goes
+# to the SAME array as the kext guard / alignment / memq_hint / commpage / trap-wire / witness
+# switches, not to `EXTRA_DEFINES` - and the linked image only LINKS
+# `out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o`, so without this `-D` the probe is silently absent
+# (`tools/stage_d13_shreg_probe.sh` stages the tree; its gate is `defined()`-first, so switch OFF
+# compiles vm_unix.c's original bytes).
+[[ ${STAGE90_XNU_SHREG_PROBE:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_SHREG_PROBE=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.  (`$GENERATED` is

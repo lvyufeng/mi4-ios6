@@ -444,3 +444,187 @@ ASCII ⇒ #3 (the bytes name which part of the message); the `0x432b2b00`/`0x434
 one of the two offsets above ⇒ #1 or #2 with the offset saying which; all zero ⇒ #4, and `r8`
 should then be dropped from any further reasoning. The recovered `strlen(msg)` picks between
 148…151 and 68…71 and so decides between #1 and #2 independently.
+
+### 9.4 995 outcome — the witness read the message (measured)
+
+§9.2 was written as a prediction and the 995 press confirmed it. The evidence: log
+`out/stage90/captures/cancro-last_kmsg-995-armed-d13-4efcabae.txt` (arm `armed-d13-4efcabae`,
+slide **`0xD0000`**), lines 4103–4138 (the witness's rate limit prints the first two traps).
+
+```
+4105     r0: 0x2bf19564  r1: 0x00000001  r2: 0x2bef1b1c  r3: 0x2bef1c8c
+4106     r4: 0x2bf19564  r5: 0x2bef4390  r6: 0x00000002
+4107     r8: 0x2bef4428
+4108    r12: 0x00000000  sp: 0x2fd2f9f0  lr: 0x2bed1f07  pc: 0x2bed10c4
+4110 dyld_all_image_info_addr: 0x2bef1c8c   dyld_all_image_info_size: 0x000000a4
+4111 IOS7WITNESS dyld msg=0x2bf19564 copyinstr=0 len=103
+4112 IOS7WITNESS r5 msg=0x2bef4390 copyinstr=0 len=103
+4113 IOS7WITNESS r5 matches errorMessage
+4114 dyld> Library not loaded: /usr/lib/libbsm.0.dylib?  Re
+4120 IOS7WITNESS r8=0x2bef4428 message interior len=0
+```
+
+Slide check (every value minus `0xD0000`, and equal to 994's): `pc` → `0x2be010c4` =
+`_dyld_fatal_error`; `lr` → `0x2be01f07` = `halt+0x4b`; the word read *from* `A+0x20` →
+`0x2be49564` = `_error_string`; `r5` → `0x2be24390` = `initialPoolContent+0x11E0`; `r8` →
+`0x2be24428` = `+0x1278`; `A` = `0x2be21c8c`. **The pool geometry is byte-for-byte 994's**
+(only the slide moved), so §9.1/§9.3's arithmetic transfers without change.
+
+**§9.2 CONFIRMED by measurement.** The ABI read (`copyin` u32 at `A+0x20`, then `copyinstr`)
+and the register read (`copyinstr(r5)`) return the **same 103 bytes**, and the witness's own
+verdict line says so ("matches errorMessage", a `bcmp` over the cleaned buffers). Two
+pointers, one text — exactly what §9.2 predicted from `halt`'s order.
+
+**The message.** The first 48 bytes are `Library not loaded: /usr/lib/libbsm.0.dylib?  Re`;
+the `?` is the witness's cleaner replacing the message's `\n` at **index 43** (any byte
+`< 0x20` or `> 0x7e` → `'?'`, by design), i.e. the path ends at index 42 and byte 43 is the
+format's first newline ⇒ the "not loaded" path is the 23-char `/usr/lib/libbsm.0.dylib` and
+the 48-byte chunk is exactly one `IOS7WIT_LINE` worth of it.
+
+Format and call site, both by value: the `__cstring` at `0x2be1e0df` reads
+`Library not loaded: %s\n  Referenced from: %s\n  Reason: %s` (and "Referenced from" occurs
+nowhere else in the image), and its only use is `0x2be0a350-0x2be0a35e` in
+`ImageLoader::recursiveLoadLibraries`
+(`__ZN11ImageLoader22recursiveLoadLibrariesERKNS_11LinkContextEbRKNS_10RPathChainE`):
+`movw r0,#0x3d7f; movt r0,#1; add r0,pc` → `0x13d7f + 0x2be0a360 = 0x2be1e0df`, then
+`bl 0x2be01640` = `dyld::throwf`. The three arguments at that call:
+
+- `%s#1` (Library not loaded) = `[[r7,#-156]]+0` — the required dylib's record;
+- `%s#2` (Referenced from) = `[[r7,#-184]+8]`, else `+4` if `+8` is 0 — and `[r7,#-184]` is
+  `r0` on entry to the function (stored at `0x2be09d28`), i.e. the **referencing `ImageLoader*`
+  (`this`)** ⇒ this string is *its own* path;
+- `%s#3` (Reason) = `[r7,#-220]` = the **caught message**. The site is a
+  `catch (const char*)` — `bl 0x2be14950` = `___cxa_begin_catch` at `0x2be0a2a2` — which
+  classifies the caught text with `_strstr` (`0x2be15db8`) against `"Incompatible"`
+  (`0x2be1e0c5`, inside the 101-char "Incompatible library version…" reason) and
+  `"architecture"` (`0x2be1e0d2`), sets `errorKind` (7 / 14 / 15, then 16 immediately before
+  the throw), and **re-throws the loader's own failure text wrapped in this message**.
+
+Length arithmetic (what the 48-byte chunk makes checkable): literals 51 + path 23 ⇒
+**`|X| + |R| = 29`**. The load-failure reasons this dyld can throw, from its own `__cstring`:
+`image not found` (15), `no suitable image found.  Did find:` (35), `mach-o, but wrong
+architecture` (30), `no matching architecture in universal wrapper` (45), `unknown file
+type, …` (93, composed ≈85), `Incompatible library version: …` (101, composed ≥101). Only
+**`image not found` (15)** fits a plausible referencing path, forcing `|X| = 14`; the only
+other literal that fits the arithmetic at all is `symbol not found` (16 — a *binding* reason,
+not a load reason) with `|X| = 13` = `/sbin/launchd` (the exec path the kernel logs at
+`:4095`). **So the natural guess `/sbin/launchd` + `image not found` (= 102) is one character
+short of the measured 103** — either the referencing path is 14 chars or the reason is not
+`image not found`. 996's full print (48+48+7) decides it; the 48-byte chunk cannot.
+
+The chunker: the 995 witness printed only the first 48-byte line of each copy (the two
+following lines came out empty), but `copyinstr` returned the full `len=103` at **both**
+pointers — the text is intact and complete, and the truncation is the witness's own bug (the
+lead's note; fixed for 996), not dyld's and not `copyin`'s.
+
+**§9.3's table, resolved as far as measurement goes.** The witness implemented §9.3's two
+probes exactly — `r8-0x20` (row #2's position) and `r8+0x30` (row #1's position) — and **both
+MISSED**: neither offset holds the `__cxa_exception` signature pair. So the two exception
+readings are **retired by measurement**, not merely unproven. The fallback then ran
+`copyinstr(r8)` and **succeeded with `len=0`** ⇒ the byte at `r8` is `0x00` (a copy failure
+would have printed the `stale probe=…` branch instead; and "message interior" is only the
+witness's label for this branch — `r8 - r5 = 0x98 = 152 > 103`, so `r8` is *not* inside the
+message text).
+
+That length is the input §9.3 was missing. `strlen(msg) = 103` ⇒ the message block is
+`roundup(104,4) = 104 = 0x68` at `pool+0x11E0`, ending at `pool+0x1248`; the only pool
+allocation after it is the exception block (`__cxa_allocate_exception(4)` → `do_malloc(84)`),
+i.e. `0x1248…0x129C`, object at `base+0x50 = 0x1298`, and the `__cxa_exception` signature pair
+`0x432b2B00` / `0x434C4E47` sits at `obj-0x20 = **0x1278 = r8**` — whose first byte in memory
+is `0x00`, exactly the measured len-0 read. So the first reading of `r8` is **the address of
+the exception header's signature word**, a fifth reading §9.3's table did not list and the
+one that explains both misses (each probe was aimed one object-interpretation away from it).
+The remaining alternative is row #4 (zero-filled unallocated tail) — but with `strlen = 103`
+the tail begins at `0x129C`, *after* `r8`, so #4 now requires the exception block not to be
+where the arithmetic puts it. Note what this does and does not do: it **identifies** the
+address if the probe hits, it does not explain the provenance (r8 is still an inherited
+callee-saved register).
+
+**Pre-registered for 996 (one word, no new machinery).** `copyin` the u32 at **`r8`** — and
+at `r8+4`: `0x432b2B00` / `0x434C4E47` ⇒ `r8` is the signature address and the register can be
+closed out; `0` (or anything else) ⇒ row #4 holds and `r8` should be dropped.
+
+**Run state (measured).** 234 × `EXC_BAD_INSTRUCTION at 0x2bed10c4` (= `_dyld_fatal_error`) —
+the 995 log's count — with no panic anywhere; `xnu_live_exec_seq=0x00000001` (`:21255`) ⇒ the
+kernel is alive behind the looping user fault; `xnu_live_ostext_limited=0x00000001`
+(`:22753`) ⇒ the run is bounded by the console block, as designed; exactly **2**
+`IOS7WITNESS r5 matches errorMessage` lines (the witness's own rate limit). End to end the
+run reads: the kernel exec'd launchd (`:4095 attempting to start init of /sbin/launchd`),
+dyld parsed it, its **first** `LC_LOAD_DYLIB` (`/usr/lib/libbsm.0.dylib`; `libSystem.B.dylib`
+is second — launchd's load commands, by value, dyldtrace lane) failed to load, the loader's
+own failure text was re-thrown as this message, and `_main`'s catch halted.
+
+**The next question — a working hypothesis, NOT proven.** `libbsm.0.dylib` has no file on the
+rootfs (`usr/lib` holds only `dyld` + the two `ios7lab` dylibs) but *is* in the shared cache
+(marker `0x37454000`; 315,952,666-byte cache, 696 images) ⇒ the minimal explanation is that
+**the shared cache was never mapped**, and every cached dylib degraded to a file lookup. 996
+tests it with three independent readings: (i) the full 103-byte text (the `%s#2`/`%s#3`
+above), (ii) dyld's own `sharedCacheBaseAddress` word at **`A+0x64`** — *offset not confirmed
+here: this tree's `kdp_dyld.h` copy ends at `+0x38`, so it cannot corroborate it; the
+dyldtrace lane is confirming it against dyld's own struct*, (iii) a bounded kernel probe on
+syscalls 294/438.
+
+**dyld's syscall surface (by value, for the 996 probe).** Both shared-region entry points are
+BSD syscalls through dyld's own wrappers, and both are table-present in the D13 kernel:
+
+- `_shared_region_check_np` (`0x2be05774`, called from `0x2be04fe0`): `mov.w r0,#294 ; blx
+  0x2be1c200` (`_syscall`).
+- `_shared_region_map_and_slide_np` (`0x2be0579c`, called from `0x2be054b2`): on its mode
+  word `== 0` path it reaches `mov.w r0,#438` at `0x2be058d6` (the flag word is loaded from
+  `0x2be1195C+0x8C`, at `0x2be05804/0x2be05806`); the other path deallocates
+  `0x2C000000`/`0x14000000` (`_vm_deallocate` `0x2be1bba0`) and maps the segments itself.
+- The image holds exactly **four** Thumb `svc #0x80` encodings (bytes `80 df`) — whole-file
+  byte scan, at VAs `0x2be08351` / `0x2be0a263` / `0x2be114f5` / `0x2be188f7`. The BSD-syscall
+  surface itself is ARM-mode: `_syscall` at `0x2be1c200` (`mov r12,sp; push {r4,r5,r6,r8};
+  …`) with its `svc #0x80` at `0x2be1c210`, and ~100 ARM `svc #0x80` encodings in VA
+  `0x2be1ac0c`–`0x2be1c4d8` (the per-syscall trampolines the wrappers `blx` into).
+- Kernel side, by value in `out/stage90/xnu_arm_entry.elf`: `shared_region_check_np` is at
+  `0x8041fd84` and `shared_region_map_and_slide_np` at `0x804201c0` — both linked in — and
+  `bsd/kern/syscalls.master` tables the latter (the generated `bsd/kern/init_sysent.c` is not
+  part of the checkout; XNU builds it from the master). "Syscall missing" is therefore
+  excluded at the table level; what 996 measures is the **runtime return value**.
+
+### 9.5 996 rev 3 — the tooling landed; the chunker bug, by mechanism
+
+The 48-byte truncation is now explained mechanically, not just observed. `ios7wit_lines` prints
+`used` bytes as `IOS7WIT_LINE`-byte lines by writing `text[index + count] = 0` to terminate each
+chunk — but that store ran for **every** chunk, and for every chunk except the last,
+`index + count` **is the next chunk's first byte**. So the 995 log's
+`dyld> Library not loaded: /usr/lib/libbsm.0.dylib?  Re` is chunk 1 whose terminator NULed
+chunk 2's first byte, and the two empty `dyld>` lines are the chunks that were NULed. The text
+itself was never truncated (`copyinstr` returned `len=103` at **both** pointers), and the
+two-pointer `bcmp` runs **before** the printing — which is why `matches errorMessage` was still
+correct. The fix (landed in `tools/patch_d13_dyld_witness.py`, sha
+`1a3f0aee0bdd8f9f8c671f205a73fa1a9a45969b229c3f7430f9d5d51faee01a`) saves the byte before the NUL
+and restores it after, so `text` comes back intact. `ios7wit_clean` is untouched (the `?`
+sanitization is by design).
+
+The 996 field reads landed as named constants, single-sourced next to
+`IOS7WIT_ERROR_MESSAGE_OFF`: `IOS7WIT_AI_ERROR_KIND 0x40`, `IOS7WIT_AI_CLIENT_PATH 0x44`,
+`IOS7WIT_AI_TARGET_PATH 0x48`, `IOS7WIT_AI_ERROR_SYMBOL 0x4c`, `IOS7WIT_AI_CACHE_SLIDE 0x50`,
+`IOS7WIT_AI_CACHE_BASE 0x64`. Every read is fail-soft and every failure branch prints: the
+`IOS7WITNESS info cacheBase=0x%08x slide=0x%08x errKind=0x%08x` line with its
+`cacheBase/slide/errKind copyin=%d,%d,%d` fallback, then `client=` / `target=` / `symbol=` per
+field, each with its own `copyin=%d` / `copyinstr=%d` failure form and `"<null>"` for a zero (or
+empty) pointer. `IOS7WIT_MIN_INFO_SIZE` rose 0x24 → 0x68; the gate (unchanged in position) sits
+**before** the print-slot claim, so a struct smaller than the reads goes silent without burning
+one of the two firings. Measured size is 0xa4 — 0x3c of margin. The `+0x64` offset is still the
+one this tree's headers cannot corroborate, which is exactly why it lives in one named constant
+and why the read is fail-soft: a moved offset prints a wrong value, it cannot fault one in.
+
+Staging is now re-stage-capable, so the driver (`tools/stage_d13_dyld_witness.sh`) re-runs
+unedited: the patcher removes its own marker-bounded BEGIN..END regions (version-agnostic),
+re-checks the file's identity strings and both anchors on the stripped text (a partial or foreign
+edit is still refused), then re-inserts. Verified byte-for-byte: `strip(staged rev 2)` equals
+`git HEAD:osfmk/arm/trap.c` exactly (955 lines; 158 removed in 2 regions), and staging that HEAD
+text reproduces the staged file. The staged tree `osfmk/arm/trap.c` is sha256
+`b9fa138368d2457c6ed12d6246bc65c81da2ce3281398c6826340c91653bd831` — 1191 lines = 955 + 231
+witness + 5 call — equal to the patcher's output three independent ways (sandbox cmp,
+second-driver-run no-op, `stage(git HEAD)`).
+
+Checker (sha `fd8eb93d58dcb066d13d1fdcff13958b8dce4a6f7bbbd31dc2f7015ebe30adca`) asserts, off the
+linked image, `copyin` ≥ 9 / `copyinstr` ≥ 6 and the immediates `#32` / `#48` / `#100` / `#80`; a
+synthetic probe linked from the rev-3 block passes 33/33 with `#100`/`#80` materialised by value
+(`add r0, r0, #100` @ `0x80000670`, `#80` @ `0x80000658`). The pre-rebuild
+`out/stage90/xnu_arm_entry.elf` (`7cd89e81…`, still rev 2) FAILs ON on exactly the ten rev-3
+checks — the clean stale signal; the frozen 994 control still PASSes OFF and FAILs ON.

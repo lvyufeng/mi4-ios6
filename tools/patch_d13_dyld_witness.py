@@ -59,12 +59,27 @@ readings of it land on something: the signature pair sits 0x20 BELOW the excepti
 signature windows (a 16-byte copyin each) before falling through to a string probe, and reports an
 all-zero/all-failing r8 as the stale value it then is.
 
+REV 3 (996 - the 995 press measured this).  The 995 log
+(`out/stage90/captures/cancro-last_kmsg-995-armed-d13-4efcabae.txt`, lines 4111-4120) shows the
+witness firing and reading correctly - two slots, both pointers, `matches errorMessage`, the real
+message `Library not loaded: /usr/lib/libbsm.0.dylib` - but TRUNCATED: the first `dyld> ` chunk
+printed and the next two printed empty, because `ios7wit_lines` NULed `text[index + count]` in
+place, which for every chunk but the last is the NEXT chunk's first byte.  Rev 3 saves and restores
+that byte.  Rev 3 also reads the rest of the same dyld_all_image_infos struct (version 0x0e):
+errorKind (+0x40) and the shared-cache words sharedCacheSlide (+0x50) / sharedCacheBaseAddress
+(+0x64) - a zero cacheBase is dyld saying the shared cache was never mapped - plus dyld's own
+referrer / target-dylib / symbol strings (errorClientOfDylibPath +0x44, errorTargetDylibPath +0x48,
+errorSymbol +0x4c), each fail-soft with its own branch printed, inside the SAME rate-limited firing;
+the size gate rises to 0x68.  The new offsets live only in `IOS7WIT_AI_*` constants (dyldtrace
+confirms them by value off the pinned dyld in parallel - if a number moves, it moves there).
+
 WHAT IS INSERTED (two chunks, both inside `#if defined(STAGE90_XNU_DYLD_WITNESS) &&
 STAGE90_XNU_DYLD_WITNESS`):
 
   1. the witness function, after the LEO block's `/* IOS7LEO_DYLD_END */` (trap.c:126): its reads are
      `copyin(A + 0x20, &msgp, 4)`, `copyinstr(msgp, ..., 256, ...)`, `copyinstr(state->r[5], ...)`,
-     the comparison of the two, and the r8 probe above, printing `IOS7WITNESS dyld msg=...` /
+     the comparison of the two, the r8 probe above, and (rev 3) the six version-0x0e field reads
+     (`IOS7WIT_AI_*`), printing `IOS7WITNESS dyld msg=...` /
      `IOS7WITNESS r5 msg=...` / `IOS7WITNESS r5 <verdict>` / `IOS7WITNESS r8=...` headers with
      `dyld> `, `dyld5> ` and `dyld8> ` text lines;
   2. the call, immediately after the `dyld_all_image_info_addr` printf's continuation line
@@ -94,8 +109,9 @@ Idempotent, text based (`mi4-an-edit-on-a-prefix-deletes-the-suffix`: the two ch
 nothing, but the markers are, so the file is searched for the chunk text itself and for an exact
 marker count, never by substring replacement of a line that the patch also writes).  Both anchors are
 found by an exact two-line window with an asserted count of 1, every gate is decided before anything
-is written, a partial or double-staged file is REFUSED with the file untouched, and a second run
-prints "nothing to do".  `--dry-run` decides and proves without writing; `--verify-off` runs the proof
+is written, a partial or foreign edit is REFUSED with the file untouched, a file still carrying an
+OLDER revision's chunks (markers present, chunks different) is RE-STAGED - the marker-bounded
+regions are removed and the current chunks inserted - and a second run prints "nothing to do".  `--dry-run` decides and proves without writing; `--verify-off` runs the proof
 alone - which is how this tool can be exercised on a tree it must not edit.
 """
 import re
@@ -134,9 +150,20 @@ BLOCK_BODY = """
  * runs log -> strlcpy(_error_string) -> setAlImageInfosHalt BEFORE its `blx _dyld_fatal_error`, so
  * at the udf the word at +0x20 is a live NUL-terminated user pointer to the message. */
 #define IOS7WIT_ERROR_MESSAGE_OFF   0x20U
-#define IOS7WIT_MIN_INFO_SIZE       0x24U
+/* The rest of the same version-0x0e struct (the +0x40..+0x64 offsets are confirmed by value off the
+ * pinned dyld by dyldtrace in parallel; if one moves it moves here and nowhere else).  A zero
+ * sharedCacheBaseAddress says dyld never mapped the shared cache; the three char* fields are dyld's
+ * own referrer / target dylib / symbol for THIS halt - a second path to what the message says. */
+#define IOS7WIT_AI_ERROR_KIND       0x40U   /* uintptr_t */
+#define IOS7WIT_AI_CLIENT_PATH      0x44U   /* const char* */
+#define IOS7WIT_AI_TARGET_PATH      0x48U   /* const char* */
+#define IOS7WIT_AI_ERROR_SYMBOL     0x4cU   /* const char* */
+#define IOS7WIT_AI_CACHE_SLIDE      0x50U   /* uintptr_t */
+#define IOS7WIT_AI_CACHE_BASE       0x64U   /* uintptr_t */
+#define IOS7WIT_MIN_INFO_SIZE       0x68U
 #define IOS7WIT_MAX_PRINTS          2U
 #define IOS7WIT_MAX_TEXT            256U
+#define IOS7WIT_PATH_TEXT           128U
 #define IOS7WIT_LINE                48U
 /* The r8 classification (docs/reference/d13-dyld-halt-message-recovery.md 9.3, re-measured by value
  * in `___cxa_throw` 0x2be148c0: movw/movt build 0x434c4e47 and 0x432b2b00 and `str` them at
@@ -164,17 +191,21 @@ static unsigned ios7wit_clean(char *text, unsigned cap)
 }
 
 /* Print `used` bytes of `text` as IOS7WIT_LINE-byte lines prefixed with `tag`.  The caller has
- * already cleaned it; this clobbers the byte after each chunk, so it runs only after every
- * comparison has been made. */
+ * already cleaned it; the byte after each chunk is saved and restored, so `text` comes back intact.
+ * (The first version NULed that byte in place - and for every chunk but the last it IS the next
+ * chunk's first byte, so the 995 log printed one full line and then empty ones.) */
 static void ios7wit_lines(const char *tag, char *text, unsigned used)
 {
     unsigned index, count;
 
     for (index = 0; index < used; index += IOS7WIT_LINE) {
+        char tail;
         count = used - index;
         if (count > IOS7WIT_LINE) count = IOS7WIT_LINE;
+        tail = text[index + count];
         text[index + count] = 0;
         printf("%s%s\\n", tag, text + index);
+        text[index + count] = tail;
     }
 }
 
@@ -249,7 +280,70 @@ __attribute__((noinline)) static void ios7wit_dyld_message(task_t task, arm_save
         ios7wit_lines("dyld5> ", other, used5);
     }
 
-    /* (4) classify r8 (inherited from an outer frame - see the reference doc 9.3): the exception
+    /* (4) the same dyld_all_image_infos, rest of the version-0x0e struct: the shared-cache words and
+     * dyld's own referrer/target/symbol strings for this halt.  cacheBase == 0 says the shared cache
+     * was never mapped; the three paths are dyld's second copy of what the message says.  Every read
+     * is fail-soft and every failure branch prints, never skips. */
+    {
+        uint32_t cache_base = 0, cache_slide = 0, error_kind = 0, strp = 0;
+        vm_size_t copieds = 0;
+        char strv[IOS7WIT_PATH_TEXT];
+        int kr64, kr50, kr40, krp;
+
+        kr40 = copyin((user_addr_t)(task->all_image_info_addr + IOS7WIT_AI_ERROR_KIND),
+                      (char *)&error_kind, sizeof(error_kind));
+        kr50 = copyin((user_addr_t)(task->all_image_info_addr + IOS7WIT_AI_CACHE_SLIDE),
+                      (char *)&cache_slide, sizeof(cache_slide));
+        kr64 = copyin((user_addr_t)(task->all_image_info_addr + IOS7WIT_AI_CACHE_BASE),
+                      (char *)&cache_base, sizeof(cache_base));
+        if (kr40 || kr50 || kr64) {
+            printf("IOS7WITNESS info cacheBase/slide/errKind copyin=%d,%d,%d\\n", kr64, kr50, kr40);
+        } else {
+            printf("IOS7WITNESS info cacheBase=0x%08x slide=0x%08x errKind=0x%08x\\n",
+                   cache_base, cache_slide, error_kind);
+        }
+
+        krp = copyin((user_addr_t)(task->all_image_info_addr + IOS7WIT_AI_CLIENT_PATH),
+                     (char *)&strp, sizeof(strp));
+        if (krp) {
+            printf("IOS7WITNESS info client copyin=%d\\n", krp);
+        } else if (strp == 0) {
+            printf("IOS7WITNESS info client=\\"<null>\\"\\n");
+        } else {
+            err = copyinstr((user_addr_t)strp, strv, sizeof(strv), &copieds);
+            if (err) printf("IOS7WITNESS info client copyinstr=%d\\n", err);
+            else if (copieds == 0) printf("IOS7WITNESS info client=\\"<null>\\"\\n");
+            else printf("IOS7WITNESS info client=\\"%s\\"\\n", strv);
+        }
+
+        krp = copyin((user_addr_t)(task->all_image_info_addr + IOS7WIT_AI_TARGET_PATH),
+                     (char *)&strp, sizeof(strp));
+        if (krp) {
+            printf("IOS7WITNESS info target copyin=%d\\n", krp);
+        } else if (strp == 0) {
+            printf("IOS7WITNESS info target=\\"<null>\\"\\n");
+        } else {
+            err = copyinstr((user_addr_t)strp, strv, sizeof(strv), &copieds);
+            if (err) printf("IOS7WITNESS info target copyinstr=%d\\n", err);
+            else if (copieds == 0) printf("IOS7WITNESS info target=\\"<null>\\"\\n");
+            else printf("IOS7WITNESS info target=\\"%s\\"\\n", strv);
+        }
+
+        krp = copyin((user_addr_t)(task->all_image_info_addr + IOS7WIT_AI_ERROR_SYMBOL),
+                     (char *)&strp, sizeof(strp));
+        if (krp) {
+            printf("IOS7WITNESS info symbol copyin=%d\\n", krp);
+        } else if (strp == 0) {
+            printf("IOS7WITNESS info symbol=\\"<null>\\"\\n");
+        } else {
+            err = copyinstr((user_addr_t)strp, strv, sizeof(strv), &copieds);
+            if (err) printf("IOS7WITNESS info symbol copyinstr=%d\\n", err);
+            else if (copieds == 0) printf("IOS7WITNESS info symbol=\\"<null>\\"\\n");
+            else printf("IOS7WITNESS info symbol=\\"%s\\"\\n", strv);
+        }
+    }
+
+    /* (5) classify r8 (inherited from an outer frame - see the reference doc 9.3): the exception
      * object carries the signature pair 0x20 below the pointer, the block base carries it 0x30
      * above, and anything else is either a message interior or a stale value - all four reported. */
     kr8 = copyin((user_addr_t)state->r[8] - IOS7WIT_OBJ_BACK, (char *)probe, sizeof(probe));
@@ -300,7 +394,11 @@ _INCLUDE = re.compile(r"^[ \t]*#[ \t]*include[ \t]*[<\"]([^>\"]+)[>\"]", re.M)
 # never survive `clang -E` and asserting on one would be a check that is false by construction.
 ON_TOKENS = ("ios7wit_dyld_message", "IOS7WITNESS dyld msg=", "IOS7WITNESS r5 msg=",
              "IOS7WITNESS r8=0x%08x", "dyld> ", "dyld5> ", "dyld8> ",
-             "DIFFERS from errorMessage")
+             "DIFFERS from errorMessage",
+             "IOS7WITNESS info cacheBase=0x%08x slide=0x%08x errKind=0x%08x",
+             "IOS7WITNESS info cacheBase/slide/errKind copyin=",
+             "IOS7WITNESS info client=", "IOS7WITNESS info target=", "IOS7WITNESS info symbol=",
+             "<null>")
 
 
 def refuse(msg: str, code: int):
@@ -309,8 +407,10 @@ def refuse(msg: str, code: int):
 
 
 def stage(old: str):
-    """(text, already_staged) - every gate decided before a byte is written; SystemExit on a partial
-    or foreign edit, with the file untouched (3 = anchor mismatch, 4 = partial/double edit)."""
+    """(text, status, head) with status in {"staged", "already", "restage"} - every gate decided
+    before a byte is written; SystemExit on a partial or foreign edit, with the file untouched
+    (3 = anchor mismatch, 4 = partial/double edit).  `head` is the text the write is proved against
+    (the original for "staged", the marker-stripped predecessor for "restage")."""
     marks = old.count(MARK)
     if marks == 0:
         if "ios7wit_dyld_message" in old:
@@ -325,13 +425,17 @@ def stage(old: str):
             i = new.index(anchor)
             nl = new.index("\n", i)
             new = new[:nl + 1] + chunk + "\n" + new[nl + 1:]
-        return new, False
+        return new, "staged", old
     if marks != 2:
         refuse(f"{REL} carries {marks} {MARK} markers, expected 0 (unstaged) or 2 (staged)", 4)
-    if any(chunk not in old for _a, chunk, _w in CHUNKS):
-        refuse(f"{REL} carries the {MARK} markers but not this script's exact chunks - staged by a "
-               f"different version, not repaired in place", 4)
-    return old, True
+    if all(chunk in old for _a, chunk, _w in CHUNKS):
+        return old, "already", None
+    stripped = strip_marked(old)
+    if IDENTITY not in stripped or IDENTITY2 not in stripped:
+        refuse(f"re-staging would remove the file's identity text - the markers do not bound this "
+               f"script's chunks", 4)
+    new, _status, _head = stage(stripped)
+    return new, "restage", stripped
 
 
 def unstaged(text: str) -> str:
@@ -343,6 +447,32 @@ def unstaged(text: str) -> str:
             refuse(f"cannot reconstruct the unstaged text: {out.count(chunk)} {what} chunk(s)", 4)
         out = out.replace(chunk + "\n", "", 1)
     return out
+
+
+_END = "/* IOS7WITNESS_END */"
+
+
+def strip_marked(text: str) -> str:
+    """`text` with every IOS7WITNESS region removed, BEGIN marker through END marker inclusive.
+
+    Version-agnostic on purpose: the markers bound whatever chunks a PREVIOUS revision inserted, so
+    this is what a re-stage (tool upgraded, tree still carrying the old chunks) removes before the
+    current ones go in.  Called only on a file whose BEGIN count is already exactly 2."""
+    out, inside, regions, removed = [], False, 0, 0
+    for line in text.splitlines(keepends=True):
+        if not inside and MARK in line:
+            inside, regions = True, regions + 1
+        if inside:
+            removed += 1
+            if _END in line:
+                inside = False
+            continue
+        out.append(line)
+    if inside or regions != 2:
+        refuse(f"cannot re-stage: {regions} marker region(s), unterminated={inside}", 4)
+    print(f"  re-stage: removed {removed} line(s) in {regions} marker-bounded region(s) - the "
+          f"markers bound whatever version's chunks were there")
+    return "".join(out)
 
 
 def if_identifiers(text: str):
@@ -416,12 +546,17 @@ def main() -> int:
         refuse(f"{REL} carries no `{IDENTITY}` / dyld_all_image_info_addr dump - this is not the "
                f"file this patch was written for", 3)
 
-    new, already = stage(old)
+    new, status, head = stage(old)
     print(f"patch_d13_dyld_witness: {path}")
-    head = unstaged(new) if already else old
-    if already:
+    if status == "already":
+        head = unstaged(new)
         print("  already staged: the OFF proof below runs against the text this script's own chunks "
               "are removed from (HEAD itself is not available once the tree is staged)")
+    elif status == "restage":
+        print("  re-staging over an older revision: the OFF proof below runs against the "
+              "marker-stripped text - the previous chunks are removed by marker, not by content, so "
+              "that text's provenance is the previous stage's own OFF proof, and its identity "
+              "strings and both anchors are re-checked before the insert")
     with tempfile.TemporaryDirectory() as td:
         good = verify_off(head, new, Path(td))
     print(f"patch_d13_dyld_witness: OFF byte-identity proof {'PASS' if good else 'FAIL'}")
@@ -431,15 +566,24 @@ def main() -> int:
         print("patch_d13_dyld_witness: REFUSING to write - the OFF byte-identity proof did not pass "
               "(the file is untouched)", file=sys.stderr)
         return 1
-    if already:
+    if status == "already":
         print("patch_d13_dyld_witness: nothing to do")
         return 0
     if dry:
-        print(f"  --dry-run: would insert {len(BLOCK.splitlines())} witness lines + "
-              f"{len(CALL.splitlines())} call lines at the two anchors; nothing written")
+        if status == "restage":
+            print(f"  --dry-run: would RE-STAGE (marker-bounded strip of the older chunks, then "
+                  f"{len(BLOCK.splitlines())} witness lines + {len(CALL.splitlines())} call lines); "
+                  f"nothing written")
+        else:
+            print(f"  --dry-run: would insert {len(BLOCK.splitlines())} witness lines + "
+                  f"{len(CALL.splitlines())} call lines at the two anchors; nothing written")
         return 0
     path.write_text(new)
-    print(f"patch_d13_dyld_witness: staged the witness block + call into {REL}")
+    if status == "restage":
+        print(f"patch_d13_dyld_witness: re-staged the witness block + call into {REL} "
+              f"(marker-bounded strip of the older revision, then insert)")
+    else:
+        print(f"patch_d13_dyld_witness: staged the witness block + call into {REL}")
     print(f"patch_d13_dyld_witness: NOW RE-RUN tools/build_xnu_arm_kernel.sh with "
           f"STAGE90_XNU_DYLD_WITNESS=1 exported AND -DSTAGE90_XNU_DYLD_WITNESS=1 in "
           f"XNU_KERNEL_EXTRA_DEFINES (the pool's osfmk_arm_trap.o is what the linked image gets)")

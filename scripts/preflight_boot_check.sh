@@ -738,7 +738,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_VMHINT_GUARD
                 STAGE90_XNU_COMMPAGE_ALIAS
                 STAGE90_XNU_IOS7_TRAPS
-                STAGE90_XNU_DYLD_WITNESS)
+                STAGE90_XNU_DYLD_WITNESS
+                STAGE90_XNU_SHREG_PROBE)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this
@@ -1041,6 +1042,27 @@ do
   # record this build made carries a non-empty value and the branch above does not fire for it.
   if [[ -z $_v && $_k == STAGE90_XNU_DYLD_WITNESS ]]; then
     printf '  %s=(absent, and a record that does not name the dyld witness is one built before 995 - no reader was compiled into the sleh_undef udf path, the only value a pre-995 build could have written)\n' "$_k"
+    continue
+  fi
+  # **996's switch, the same one-way rule as 911b/911c/912/954/958/988/990/991/992/994/995, and for
+  # the same reason.** Every arm parked before 996 was built with the shared-region probe compiled out
+  # (the switch did not exist), so its record has no `STAGE90_XNU_SHREG_PROBE` line; an absent key is
+  # not a missing value but the value - the switch was off, because it did not exist, so
+  # `bsd/vm/vm_unix.c`'s `shared_region_check_np` / `shared_region_map_and_slide_np` /
+  # `_shared_region_map` printed no `IOS7SHREG` lines and the runtime returns of the two syscalls dyld's
+  # `mapSharedCache` depends on stayed unmeasured - exactly the unknown 995's read left on the frontier
+  # (dyld halted on `Library not loaded: /usr/lib/libbsm.0.dylib`, a library present in the shared
+  # cache but with no file on the volume). Demanding the key would make every existing park unpressable
+  # (882's own defect, sixteen times repaired now), and the ladder still owes those presses. Unlike
+  # HFS_ROOT_MEDIA / ROOT_FROM_CARD / HDD_WRITE / CARD_COW there is no entry-ELF marker to ground this
+  # on: the switch moves ONE pool object (`bsd/vm/vm_unix.c`), and a new unconditional `_off` marker in
+  # the entry image would move the parked arms' image hashes with no `--gc-sections` in the link
+  # (965c's reason). A post-996 record can never reach this branch: `build_entry.sh`'s two-way check
+  # refuses a record whose arm-key list omits the key, and the writer emits the line unconditionally
+  # (0 or 1), so a record this build made carries a non-empty value and the branch above does not fire
+  # for it.
+  if [[ -z $_v && $_k == STAGE90_XNU_SHREG_PROBE ]]; then
+    printf '  %s=(absent, and a record that does not name the shared-region probe is one built before 996 - the 294/438 returns printed nothing, the only value a pre-996 build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \

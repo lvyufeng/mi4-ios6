@@ -1169,6 +1169,30 @@ case "$DYLD_WITNESS" in
     *) echo "REFUSING: STAGE90_XNU_DYLD_WITNESS='$DYLD_WITNESS' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **996: the shared-region syscall probe, recorded the same way and for the same reason.** With
+# `STAGE90_XNU_SHREG_PROBE=1`, the D13 tree's `bsd/vm/vm_unix.c` grows bounded, fail-soft `IOS7SHREG`
+# printfs at the entry and every return of `shared_region_check_np` (294) and
+# `shared_region_map_and_slide_np` (438), plus the kr immediately after `vm_shared_region_map_file()`
+# inside `_shared_region_map` (its kr is not visible at 438's exit sites). 995's press (arm
+# armed-d13-4efcabae, commit 947a75d, log
+# out/stage90/captures/cancro-last_kmsg-995-armed-d13-4efcabae.txt:4111-4138) READ dyld's real halt
+# message by measurement - `Library not loaded: /usr/lib/libbsm.0.dylib`, launchd's FIRST
+# LC_LOAD_DYLIB, no file on the volume but present in the shared cache - so the frontier is WHY the
+# cache lookup missed; the leading hypothesis is that dyld's `mapSharedCache` failed silently and every
+# cached dylib degraded to a file lookup. Both syscalls are wired in this tree (`init_sysent.c:440` /
+# `:649`), so only the RUNTIME returns are unknown, and they are what 996 measures (it changes no
+# behaviour). `vm_unix.c` is a kernel-pool file, so the switch is compiled by
+# `tools/build_xnu_arm_kernel.sh` (DEFINES, from the same-named environment variable) - the two
+# spellings must carry the SAME value (`mi4-one-value-two-definitions`) - and the linked image only
+# LINKS `out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o`, so a stale pool hides the probe. The tree patch is
+# staged by `tools/stage_d13_shreg_probe.sh`; the by-value clause at the 996 link site below refuses a
+# link whose image carries no `IOS7SHREG` literal.
+SHREG_PROBE=${STAGE90_XNU_SHREG_PROBE:-0}
+case "$SHREG_PROBE" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_SHREG_PROBE='$SHREG_PROBE' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **911c: the RAM bank layout, measured from the Qualcomm SMEM RAM-partition table.** The goal's newest
 # clause is that XNU recognize the Mi 4's 3 GB of RAM, and the 911c design established that the repo
 # holds NO low-bank base or size anywhere - every "low bank" is an inference from "3 GB minus 1.5 GB".
@@ -1487,6 +1511,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_COMMPAGE_ALIAS
                 STAGE90_XNU_IOS7_TRAPS
                 STAGE90_XNU_DYLD_WITNESS
+                STAGE90_XNU_SHREG_PROBE
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1660,6 +1685,14 @@ do
         # clause at the link site below reads the linked image's own `sleh_undef` /
         # `ios7wit_dyld_message` and refuses a link whose witness is absent.
         STAGE90_XNU_DYLD_WITNESS)     _v=$DYLD_WITNESS ;;
+        # 996: whether the tree's shared-region syscall probe (`tools/stage_d13_shreg_probe.sh`) was
+        # compiled into this image's pool. Read from `$SHREG_PROBE`, validated 0/1 at its own assignment
+        # far above this loop, so the record and the pool's `DEFINES` cannot be built from two spellings
+        # of this switch (`mi4-one-value-two-definitions`). `vm_unix.c` is a POOL file: the linked image
+        # only LINKS `out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o`, which is why the 996 clause at the link
+        # site below reads the linked image's own `IOS7SHREG` literals and refuses a link whose probe is
+        # absent.
+        STAGE90_XNU_SHREG_PROBE)      _v=$SHREG_PROBE ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -30684,6 +30717,42 @@ verify_trace_symbols() {
         fi
         say "  xnu_entry_995: the linked image calls the dyld halt-message witness from sleh_undef's udf path (the word at all_image_info_addr + 0x20 is copied out with copyin/copyinstr and printed as IOS7WITNESS + dyld> lines, two slots at most) - $dw_out"
     fi
+    # **996: the shared-region syscall probe (pool).** 995's press (arm armed-d13-4efcabae, commit
+    # 947a75d, log out/stage90/captures/cancro-last_kmsg-995-armed-d13-4efcabae.txt:4111-4138) read
+    # dyld's real halt message by measurement: `Library not loaded: /usr/lib/libbsm.0.dylib` -
+    # launchd's FIRST LC_LOAD_DYLIB, no file on the volume but present in the shared cache (696 images)
+    # - so the frontier is WHY the cache lookup missed; the leading hypothesis is that dyld's
+    # `mapSharedCache` failed silently and every cached dylib degraded to a file lookup, whose first
+    # miss halted dyld. dyld's two entry points are BSD syscalls 294 (`shared_region_check_np`,
+    # wrapper 0x2be05774) and 438 (`shared_region_map_and_slide_np`, wrapper 0x2be0579c), BOTH wired in
+    # this tree (`init_sysent.c:440` / `:649`) - so only the RUNTIME returns are unknown. The fix is
+    # `tools/stage_d13_shreg_probe.sh` + STAGE90_XNU_SHREG_PROBE=1: bounded (first 4 calls), fail-soft
+    # `IOS7SHREG` printfs at the entry and every return of both syscalls, plus the kr immediately after
+    # `vm_shared_region_map_file()` inside `_shared_region_map` (its kr is not visible at 438's exit
+    # sites - `_shared_region_map` folds it into the errno it returns). It changes NO behaviour. The
+    # property is read BY VALUE off THIS linked image by `tools/check_d13_shreg_probe.py --expect on`:
+    # the five `IOS7SHREG` literals are in the image, the 294/438 `sysent` rows still name the real
+    # functions, and no body outside the three probed functions references an `IOS7SHREG` literal.
+    # `vm_unix.c` is a POOL file, so a stale `out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o` is invisible to
+    # the link - which is exactly what this clause refuses. Gated on the switch: with SHREG_PROBE=0 the
+    # tree's original text is compiled on purpose and there is nothing here to assert.
+    if [[ $SHREG_PROBE -eq 1 ]]; then
+        if ! sp_out=$(python3 "$REPO_ROOT/tools/check_d13_shreg_probe.py" "$OUT/xnu_arm_entry.elf" --expect on 2>&1); then
+            printf '%s\n' "$sp_out" >&2
+            say "REFUSING: STAGE90_XNU_SHREG_PROBE=1 but the linked image carries no IOS7SHREG probe -" >&2
+            say "          the FAIL lines above name the missing literal; no IOS7SHREG bytes at all means" >&2
+            say "          the switch never reached the POOL: vm_unix.c is compiled by" >&2
+            say "          tools/build_xnu_arm_kernel.sh and build_entry.sh only LINKS" >&2
+            say "          out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o. Stage the tree and rebuild the pool with" >&2
+            say "          the SAME value, then relink:" >&2
+            say "            tools/stage_d13_shreg_probe.sh" >&2
+            say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+            say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_SHREG_PROBE=$SHREG_PROBE' \\\\" >&2
+            say "            ./tools/build_xnu_arm_kernel.sh" >&2
+            layout_fail "STAGE90_XNU_SHREG_PROBE=1 did not reach the linked image: stage the tree first (tools/stage_d13_shreg_probe.sh) and rebuild the pool with -DSTAGE90_XNU_SHREG_PROBE=1 - vm_unix.c is a kernel-pool file and a stale bsd_vm_vm_unix.o links a 438 with no probe, which is exactly the blindness 995's read left on the frontier (dyld halted on Library not loaded: /usr/lib/libbsm.0.dylib - a library in the shared cache with no file on the volume; the 294/438 runtime returns are the only unknown)"
+        fi
+        say "  xnu_entry_996: the linked image carries the bounded IOS7SHREG probe on the shared-region syscalls 294/438 (entry + every return, plus the kr inside _shared_region_map, first 4 calls) - $sp_out"
+    fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
     # `ast_taken_user`**: its arm return path (`cswitch.s:144` `thread_exception_return`) delivers by
@@ -38700,6 +38769,10 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # DEFINES takes this value, and the by-value clause at the 995 site above refuses a linked image
     # that did not get it; this echo line is what the record self-check at the end of this file reads).
     echo "STAGE90_XNU_DYLD_WITNESS=${STAGE90_XNU_DYLD_WITNESS:-0}"
+    # 996's switch, read the same way and for the same reason (one value, two definitions: the pool's
+    # DEFINES takes this value, and the by-value clause at the 996 site above refuses a linked image
+    # that did not get it; this echo line is what the record self-check at the end of this file reads).
+    echo "STAGE90_XNU_SHREG_PROBE=${STAGE90_XNU_SHREG_PROBE:-0}"
     # 535's switch, and the only one whose *link* the build changes (see its own block above): the
     # record is what makes "this image has the seam hook" a thing the gate can read rather than a
     # thing a reader assumes from the hash.
