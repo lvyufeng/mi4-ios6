@@ -267,3 +267,115 @@ top `0x40000000`. If dyld's 4th mapping (a 996 delta vs the 3-mapping model) ext
 return EINVAL 22 — indistinguishable at 438's return value from the current wire failure. **997's
 pre-registered signature (b) covers this:** *no* `IOS7LAB cache mapping` lines + `ret=22` ⇒ the boundary
 guard fired; stop and remodel rather than press on (no extra action owed by this audit).
+
+---
+
+## 8. Post-997 addendum (2026-10-12, after press `armed-d13-518b6a94`)
+
+**Baseline.** Sections 1–7 above were frozen as sha256
+`d8339a247dc8f57b6ced6c37760d8856a8821c7bcba906d19f63ff692205f726`; this addendum is the single
+post-freeze edit and retires nothing by silence — where a paragraph is superseded it is named.
+Evidence: capture `out/stage90/captures/cancro-last_kmsg-997-armed-d13-518b6a94.txt`, sha256
+`23bb574ba7795bd4205f76af83d2e4b0622ba8978db64d8f55a7ea07060215f1`, 22,757 lines. All readings below
+MEASURED (re-derived by value from the capture bytes and the source).
+
+**§3's contrast paragraph (`:165-170`) is RETIRED; the rest of §3 stands.** With the wire fixed (G3 ON)
+and G1 off, 438 dies at the geometry — but by a different mechanism than the paragraph predicts.
+Measured (`:4108-4109`): `IOS7SHREG map_file kr=1`, `map_slide ret=14`. By value: m[0]'s relative
+target `start = 0x2cd9c000 − 0x30000000 = 0xFCD9C000`, `size = 0x0c266000`; `vm_map_offset_t` =
+`uint32_t` (`osfmk/mach/arm/vm_types.h:111`) ⇒ `end = start + size` **wraps 32-bit** to `0x09002000` ⇒
+the FIXED-path guard's `start >= end` clause (`vm_map.c:1843-1845`) fires ⇒
+`RETURN(KERN_INVALID_ADDRESS)` at **`vm_map.c:1846`** ⇒ folded to **errno 14 (EFAULT)** at
+`vm_unix.c:1448-1449` (G3-staged numbering; the fold block `:1447-1463`). **Retired with the
+paragraph:** 996's primed `kr=3`/`KERN_NO_SPACE` at `vm_map.c:1797` and `ret=12` (ENOMEM) — `:1797` is
+the ANYWHERE loop's range-fit, and this call passes `VM_FLAGS_FIXED | VM_FLAGS_ALREADY`
+(`vm_shared_region.c:1124`; call `:1119-1130`), so with `VM_FLAGS_FIXED` it is **structurally
+unreachable**; the paragraph's m[2]-fails-at-`:2380-2381` first-failure ordering is retired the same
+way (m[0]'s wrap fires first; under G1 m[2]'s end `0x10233000` fits `0x14000000`, as `:169-170`
+already noted). The paragraph's conclusion — geometry blocks 438, G1 must open — stands, now measured.
+
+**§7's boundary concern is resolved: signature (b) did NOT fire.** All four `IOS7LAB cache mapping`
+lines printed (`:4104-4107`); §7's `address + size > 0x40000000` guard (probe `:1205-1208`, staged
+`:1209-1212`) passed for every record (max end `0x3d148000`). No remodel owed. Under G1 every
+relative end ≤ `0x11148000 < 0x14000000` — constants frozen at the tree's own base `0x2C000000` /
+size `0x14000000`, with `status.c`'s `0x2BE00000` stack half a hard same-switch requirement (§2).
+
+**The contiguity over-claim dies here too (measured joints).** VA: m0 ends `0x39002000`, m1 starts
+`0x39004000` — **gap `0x2000`**; the m1→m2 and m2→m3 joints are exact; last end `0x3d148000`. File
+offsets `0, 0x0c266000, 0x0df46000` join exactly, then **gap `0x29A7000`** to `0x12bda000`; last ends
+`0x12d51000`. (VA span `0x2cd9c000..0x3d148000`; file span 301.32 MiB.) Nothing downstream keys on
+contiguity — the guard is per-mapping.
+
+**§6 closed by measurement.** `VM_PROT_SLIDE (0x20)` appears only on **m[1]** (`init=max=0x23`) ⇒
+`mapping_to_slide` = m[1]. The slide window `[0x3cf48000, +0x89000 = 0x3cfd1000)` is **m[2]'s exact
+tail in both spaces** (VA `0x3ace4000+0x2264000`; file `0x0df46000+0x2264000 = 0x101aa000`, ending
+`0x10233000 = m[2].offset+m[2].size`). The measured `slide=0xd9c000` is the **cache** slide (the value
+`map_slide` received); the process slide this run is a different draw (`0xD2000`: pc `0x2bed30c4` =
+`_dyld_fatal_error 0x2be010c4` + `0xD2000`).
+
+**Gate lines verified against the staged tree (998 pre-flight, 2026-10-12, by value).** The live tree
+implements §1's minimal open set exactly:
+
+* Staged shas: `vm_shared_region.c` `482b428857f382b939bf44204c6a4fba5c6bed9876f74cfff850f3777e27b2d8`,
+  `status.c` `da944439427d7258528fd790d5e261c4104f4e95eeef676deee71090d6e0aa72`,
+  `ios7_compat.h` `58cc282364efec7ec7b9937fcdd7da7ecee6bfb8514c79c2c5882ac734630c6f`.
+* The nested tree repo (`external/xnu-hd2-darwin13/.git`, HEAD `77fa165…`) commits bytes for both .c
+  files identical to this audit's Identity-table pre-images (`f91c3460…` / `d8f41a7b…` — blob-hash
+  equality), so `git diff` there is the complete staging delta: exactly the two 1:1 substitutions per
+  file, **net-zero line counts** (`#if` widened at `:626`/`:62`; selector swapped to
+  `ios7_shreg_geom_enabled()` at `:629`/`:66`). All this audit's `vm_shared_region.c` citations
+  therefore remain exact in the staged tree.
+* `ios7_compat.h` adds the helper at `:46-53` (block `:41-53`) between the 994-era
+  `ios7_traps_enabled()` and `#endif`; its OFF arm returns exactly `ios7_compat_vmabi_enabled()` —
+  §4's property, source-side. Tree-wide, the switch identifier occurs only at the header `:48` and the
+  two `#if` sites (`:62`, `:626`); the helper name only at the header `:46` and the two call sites
+  (`:66`, `:629`).
+* Transcription correction in §1's abridged block (doc line `:55`): the closing `#endif` is at
+  **`:638`** in both the pre-image and the staged tree, not `:637`. The load-bearing citations
+  (`:626`, `:629`, `:633-635`) are exact.
+* §4's empirical proof (the OFF rebuild-cmp, 212/212 objects, under 998's own switch set) is now
+  **MEASURED — see §9** (`tools/stage_d13_shreg_geom.sh` landed 2026-10-12; the checker returns green
+  on this tree, `--expect staged`).
+
+**Operational note (repository state).** In the nested tree repo the whole multi-rung staging — 22
+worktree-modified paths — is uncommitted against HEAD `77fa165…`; a `checkout`/`clean` there would
+silently un-stage G3/994/G1 and everything else (recoverable by re-running the staging tools +
+checkers). Recorded as a hazard, not a code fact.
+
+## 9. Post-998 OFF-identity pass (2026-10-12) — §4's empirical proof, MEASURED
+
+**Relation to §8.** §8 (frozen at `2265e40e7860cb79e377c3d75a2698e30f21158a54ce8cc5d1c6f389b28ba4a7`)
+left §4's empirical proof OWED; this addendum measures it and updates that one bullet in place.
+
+**Method (by value, scratch-isolated).** With `tools/stage_d13_shreg_geom.sh` landed, the OFF
+rebuild-cmp was taken in an isolated copy (`/tmp/g1off/repo`; the live `out/` and the running 998
+build were never touched — 0 `/mnt/.../out` path hits in both build logs). Same-path pool compile,
+`STAGE90_XNU_SHREG_GEOM` **off in BOTH builds**, every other switch 998's own build carries held
+fixed: the record's 15 keys + the 7 pins, collected exactly as `scripts/build_998.sh` collects them,
+with the single omission of `-DSTAGE90_XNU_SHREG_GEOM=1`; plus every `STAGE90_XNU_*` environment
+export build_998.sh sets except the GEOM one, with `STAGE90_XNU_HFS_ROOT_RW` read from the record.
+
+* build #1 on the stripped tree (pre-images re-verified byte-exact `f91c3460…` / `d8f41a7b…` /
+  `079c7a17…`) — 705 objects, rc 0.
+* the REAL stage script (staged shas re-verified `482b4288…` / `da944439…` / `58cc2823…`).
+* build #2, byte-identical command — 705 objects, rc 0.
+
+**Result: 705/705 objects byte-identical, 0 differing — and every one was genuinely recompiled in
+build #2** (mtime moved on all 705; 0 hash-changed), so the identity is over real compiles, not
+reused objects. The seven `ios7_compat.h`-includer dirs reproduce §4's split exactly, 0 differing:
+`osfmk/vm` 21 · `osfmk/arm` 19 · `osfmk/kern` 58 · `osfmk/ipc` 17 · `bsd/vm` 3 · `bsd/kern` 84 ·
+`bsd/dev/arm` 10 = **212**. The two objects the switch would change are identical in both builds:
+`osfmk_vm_vm_shared_region.o`
+`98c1998aa79caeaf2fd3cd305395b7145875b153970fa05d754a45141953e654`, `osfmk_arm_status.o`
+`28a3d47ccfea7d226127ce3abf8079bb5d15924a7a1ad85de8017423411c79c2`.
+
+**Two build-requirement facts found on the way.** (a) The pool build REQUIRES `out/mach_headers_d13`
+(`MIG_HEADERS`) already generated — a hand-run `tools/gen_mach_headers.sh` prerequisite; the device
+table, manifest, device headers, option headers and `pseudo_inits` are regenerated BY the build
+itself into its own roots. (b) The platform block hard-`#error`s if `STAGE90_XNU_CARD_TOTAL` /
+`STAGE90_XNU_FULL_EXTENT` / `STAGE90_XNU_CARD_COW` = 1 without `STAGE90_XNU_EMMC_STRATEGY` = 1: any
+build carrying the storage keys must also carry `HFS_ROOT_MEDIA` / `EMMC_STRATEGY` / `ROOT_FROM_CARD`
+(998 does, via the record).
+
+Full log retained at `/tmp/g1off/RESULT.txt` (`build1.log` / `build2.log`, sha/mtime snapshots)
+until 998's press is judged.
