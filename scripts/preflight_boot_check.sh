@@ -733,7 +733,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_MEM_TOTAL
                 STAGE90_XNU_ENTRY_WINDOW
                 STAGE90_XNU_TREE_D13
-                STAGE90_XNU_KEXTB_LOGIN)
+                STAGE90_XNU_KEXTB_LOGIN
+                STAGE90_XNU_SP_ALIGN)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this
@@ -943,6 +944,23 @@ do
   # this build made carries a non-empty value and the branch above does not fire for it.
   if [[ -z $_v && $_k == STAGE90_XNU_KEXTB_LOGIN ]]; then
     printf '  %s=(absent, and a record that does not name the kext-bootstrap guard is one built before 988 - the teardown was compiled in, the only value a pre-988 build could have written)\n' "$_k"
+    continue
+  fi
+  # **990's switch, the same one-way rule as 911b/911c/912/954/958/988, and for the same reason.** Every arm
+  # parked before 990 was built with the SP-alignment patch not in the tree at all, so its record has no
+  # `STAGE90_XNU_SP_ALIGN` line; an absent key is not a missing value but the value - the switch was off,
+  # because it did not exist, so the D13 tree handed C stacks at 4 (mod 8), which is exactly the fault
+  # 989's press stopped on (an alignment fault at `parse_machfile+0x60c`, `vld1.32 {d18}, [r1 :64]`,
+  # sp = 0xcfdbba7c). Demanding the key would make every existing park unpressable (882's own defect,
+  # eleven times repaired now), and the ladder still owes those presses. Unlike HFS_ROOT_MEDIA /
+  # ROOT_FROM_CARD / HDD_WRITE / CARD_COW there is no entry-ELF marker to ground this on: the switch moves
+  # a POOL object (`pcb.c`) and the ASSEMBLY layer (`machine_routines_asm.s`), and a new unconditional
+  # `_off` marker would move the parked arms' image hashes with no `--gc-sections` in the link (965c's
+  # reason). A post-990 record can never reach this branch: `build_entry.sh`'s 678 two-way check refuses a
+  # record whose arm-key list omits the key, and the writer emits the line unconditionally (0 or 1), so a
+  # record this build made carries a non-empty value and the branch above does not fire for it.
+  if [[ -z $_v && $_k == STAGE90_XNU_SP_ALIGN ]]; then
+    printf '  %s=(absent, and a record that does not name the SP-alignment switch is one built before 990 - the tree handed C 4-mod-8 stacks, the only value a pre-990 build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \
