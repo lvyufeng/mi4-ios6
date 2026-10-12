@@ -264,3 +264,183 @@ the allocation failure is fixed, **every** dyld diagnostic on this device will r
 unformattable by the same failure. The useful follow-ups are therefore (1) that read, to
 confirm the string and the `halt` site, and (2) a decision about the allocation failure
 itself (`task_self_trap` return value, and the `vm_allocate` path for pid 1).
+
+## 9. 994 confirmations — the three arithmetic checks, recomputed by value
+
+(§9 also **supersedes §8's closing paragraph** and §2's reading of the message: on the 994
+press the allocation failure is fixed, the formatted message is a *real* dyld error, and it
+lives in dyld's own malloc pool. Nothing in §1/§6 is invalidated — they are the same code
+and the same field.)
+
+Input: `out/stage90/captures/cancro-last_kmsg-994-armed-d13-8b4c9a3e.txt` (the path the task
+named, `/tmp/cancro-last_kmsg-994.txt`, does not exist; this is the archived capture, 22748
+lines). It is a **third** log: §0's table is the 991/993 pair. Slide this boot = **0xB8000**
+(`0x2bed9c8c − 0x2be21c8c` = `0x2beb90c4 − 0x2be010c4` = `0x2bedc390 − 0x2be24390` =
+`0x2bedc428 − 0x2be24428` = `0x2beb9f07 − 0x2be01f07`), so every register the dump prints
+reduces to a link-time address — **the task's numbers are the link-time ones**:
+
+| reg | dump (`:4103-4109`) | − slide | link | meaning (same as §1) |
+|---|---|---|---|---|
+| `pc` | `0x2beb90c4` | `0xB8000` | `0x2be010c4` | `_dyld_fatal_error` (`udf #0xdefe`) |
+| `lr` | `0x2beb9f07` | `0xB8000` | `0x2be01f07` | inside `dyld::halt`, the `blx` at `0x2be01f02` |
+| `r5` | `0x2bedc390` | `0xB8000` | `0x2be24390` | **the `halt()` argument** = `initialPoolContent+0x11E0` |
+| `r4`/`r0` | `0x2bf01564` | `0xB8000` | `0x2be49564` | `_error_string` (the `strlcpy` destination) |
+| `r1` | `1` | — | — | `!gLinkContext[0x97]`, the stored flags |
+| `r2` | `0x2bed9b1c` | `0xB8000` | `0x2be21b1c` | `&gProcessInfo` (left over from `setAlImageInfosHalt`) |
+| `r3` | `0x2bed9c8c` | `0xB8000` | `0x2be21c8c` | `dyld_all_image_infos` — the address the kernel prints |
+| `r6` | `2` | — | — | the catch pad's selector (§9.2, now by value) |
+| `r8` | `0x2bedc428` | `0xB8000` | `0x2be24428` | `initialPoolContent+0x1278` — see §9.3 |
+
+235 identical traps and **exactly two `IOS7LAB vm_*64` lines in the whole log** —
+`vm_allocate64 size=00000000:00001000 flags=1 result=0 address=000e1000` (`:4101`) and its
+`vm_deallocate64` twin (`:4102`). That pair is `__simple_salloc`/`__simple_sfree` **inside
+`throwf`** (§2): one 4 KB page, allocated and released *before* the first trap. So in this
+run exactly one dyld message was ever *formatted*, the formatting **succeeded**, and the
+`strdup`'d copy is the one that survives — there is no third copy, the salloc page is gone.
+
+### 9.1 (a) `r5 = initialPoolContent+0x11E0`, `r8 = +0x1278`, and the pool is `0x25800` bytes
+
+`r5` and `r8` are both inside `__ZL18initialPoolContent` (the local symbol `0x2be231b0`, in
+zero-fill `__DATA,__bss`), and the pool's **total size is `0x25800` = 153,600 B** — proven
+three independent ways, all by value:
+
+1. **Symbol-to-symbol**: the next symbol above it, `__ZZN23ImageLoaderMachOClassic26bindIndirectSymbolPointersE…13alreadyWarned`,
+   is at `0x2be489b0` = pool `+0x25800`. (`nlist` entries carry no size, so the distance to
+   the next symbol *is* the layout bound.) `__bss` itself is `0x2be21d30`+`0x27831` ending at
+   `0x2be49561`, so the pool is the last `0x25800` bytes of it — the symbol bound and the
+   section bound agree.
+2. **The allocator's own constant**: `_malloc` (`0x2be0dfc0`) refills by
+   `0x2be0e010 mov.w r2,#153600` and then writes a header `{next, available = p+12,
+   end = p+0x25800}` (`0x2be0e022-0x2be0e030`); `_free`'s "is this ours" test is
+   `0x2be0e09c add r2, pc → 0x2be231b0` … `0x2be0e09e add.w r2, r2, #153600` …
+   `0x2be0e0a2 cmp r0, r2`. (This is the same 153600 the earlier trace of the first
+   `vm_allocate` on this path reported — it is the *pool refill*, not a dyld message buffer.)
+3. **The initialiser in file-backed `__data`**: `[0x2be21b30] = 0x2be21b34` (the
+   `sCurrentPool` merged-global holds the header address), and the header words read
+   `{next = 0, available = 0x2be231b0, end = 0x2be489b0}` — i.e. the first allocation starts
+   at the pool's first byte and the end is exactly pool `+0x25800`.
+
+⇒ `+0x11E0` (4576) and `+0x1278` (4728) are far inside (the pool is 153,600 B): the task's
+parse is correct and **+0x1278 does not fall outside. No counterexample found.**
+
+### 9.2 (b) `aii+0x20`/`+0x24`: confirmed, and the ordering that makes the 995 read safe
+
+`setAlImageInfosHalt` `0x2be08d04` reads, in full (20 bytes):
+
+```
+2be08d04 movw r2,#0x8e0c ; movt r2,#1 ; add r2,pc   ; r2 = &dyld::gProcessInfo 0x2be21b1c
+2be08d0e ldr  r3,[r2]                                ; r3 = dyld_all_image_infos
+2be08d10 str  r0,[r3,#0x20]                          ; aii.errorMessage      = r0
+2be08d12 ldr  r0,[r2]
+2be08d14 str  r1,[r0,#0x24]                          ; aii.terminationFlags  = r1
+2be08d16 bx   lr
+```
+
+Confirmed: `r0 → +0x20`, `r1 → +0x24`. The dump's `r2`/`r3` are literally this function's
+exit state (its two loads), which is why they read `&gProcessInfo` / the aii at the `udf`.
+
+Field name, against the tree: `osfmk/kdp/kdp_dyld.h`'s `user32_dyld_all_image_infos` lists
+`version, infoArrayCount, infoArray, notification, processDetachedFromSharedRegion,
+libSystemInitialized, dyldImageLoadAddress, jitInfo, dyldVersion, **errorMessage**,
+**terminationFlags**, …`. With the two `bool`s at `+0x10`/`+0x11` and 4-byte alignment, that
+is `errorMessage = +0x20`, `terminationFlags = +0x24`, and three neighbours are pinned
+independently in this doc: `+0x0c notification = 0x2be010cc`, `+0x14
+dyldImageLoadAddress = 0x2be00000`, `+0x1c dyldVersion = 0x2be1df23` ("324.1"),
+`+0x38 dyldAllImageInfosAddress = 0x2be21c8c`; the kernel's printed size `0xa4` matches v14.
+
+**The ordering (this is the load-bearing part for 995)**: `dyld::halt` runs
+`log("dyld: %s\n", msg)` **first**, then `strlcpy(_error_string, msg, 0x400)`, then
+`setAlImageInfosHalt(_error_string, …)`, and only then `blx _dyld_fatal_error`. So the field
+is always written *before* the trap that wakes the witness — the log path's failure cannot
+prevent it — and `r5` (halt's argument) and `r0`/`r4` (`_error_string`) hold **the same text
+but different pointers**: `r5` is the `strdup`'d pool string, `r0` is the 1024-byte copy the
+field points at. `copyinstr(A+0x20)` therefore recovers the identical bytes, **truncated to
+1023 chars + NUL** (`_error_string`'s extent is the next `__common` symbol,
+`dyld::gSharedCacheOverridden` at `+0x400`); at *this* trap `r5` is also live and untruncated,
+so either read works — `A+0x20` is the register-free, ABI one.
+
+Bonus, by value: the catch is now *proven* to be `dyld::_main`'s top-level catch (retiring
+§7's "not proof" hedge, which rested on `r6 == 2` alone):
+
+```
+2be04baa ldr r0,[sp,#112]      ; the exception object
+2be04bb2 bl  ___cxa_begin_catch ; r0 = the thrown payload
+2be04bb6 str r0,[sp,#20]        ; [sp+20] = the char* message
+2be04bb0 movs r4,#2  /  2be04bb8 cmp r6,r4   ; r6 (=[sp+116]) compared with 2  <-- r6 = 2
+2be04bd2 bl  0x2be0184c         ; syncAllImages()
+2be04bde ldr r0,[sp,#20]        ; r0 = the message  (= r5 at the trap)
+2be04be0 bl  0x2be01ebc         ; dyld::halt(msg)
+```
+
+### 9.3 (c) Is `r8` the message's arena neighbour? What the allocator says
+
+The allocator, by value (`_malloc` `0x2be0dfc0`, `_free` `0x2be0e074`, `_strdup` `0x2be18144`):
+
+```
+_malloc(size):  size = (size+3) & ~3                       ; 4-byte round-up
+                pool = *sCurrentPool   (global 0x2be21b30)
+                p = pool->available ;  pool->available += size
+                if (pool->available <= pool->end) return p          ; strict bump, no free lists
+                else: vm_allocate(&q, 153600, VM_FLAGS_ANYWHERE)    ; 0x2be0e010-0x2be0e01c
+                      on failure: log("out of address space for dyld memory pool\n") + _exit(1)
+                      q = {next = pool, available = q+12, end = q+0x25800}; sCurrentPool = q
+_free(p):       if (gLibSystemHelpers == NULL) return       ; 0x2be0e082 — pre-libSystem: NO-OP
+                if (p in [0x2be00000, initialPoolContent+0x25800)) return   ; NO-OP
+                walk the pool list; inside any pool → return              ; NO-OP
+                else helpers->free(p)
+_strdup(s):     n = strlen(s)+1 ; p = _malloc(n) ; memcpy(p, s, n) ; return p
+```
+
+Three consequences, and they settle the premise: (i) the pool hands out memory **strictly
+monotonically** from `initialPoolContent+0`; (ii) `_free` **never** gives memory back to a
+pool (below `gLibSystemHelpers != NULL` it does nothing at all, and the pool test returns
+early regardless), so an address's offset is pure allocation order; (iii) `_strdup` returns
+the block's **first byte**, so `r5` *is* the string, and the bump pointer when it was
+allocated was exactly `pool+0x11e0` — the earlier allocations sum to `0x11e0` = 4576 B, each
+rounded up to 4. So the premise "~4576 B consumed before +0x11e0" is exact, not approximate.
+
+`r8 − r5 = 0x98`. Since allocation order is monotone, **whatever `r8` points at, if it is a
+pool object, was allocated *after* the message.** The throw path has exactly **one** pool
+allocation after the message:
+
+```
+throwf 0x2be0166e bl _strdup                      ; <-- the message, at pool+0x11e0
+       0x2be01676 bl __simple_sfree               ; frees the 4 KB salloc page (vm_deallocate: log :4102)
+       0x2be0169c movs r0,#4 ; bl ___cxa_allocate_exception
+___cxa_allocate_exception 0x2be14584: r0 = size+80 ; bl do_malloc     (0x2be1462c)
+__cxxabiv1::do_malloc     0x2be1462c: 0x2be1464a bl _malloc          ; <-- the POOL
+                                     then memset(base,0,84); returns base+0x50
+__cxa_throw  0x2be148c0:             fills the 80-byte header below that pointer
+```
+
+(the pad's other work, `syncAllImages()` `0x2be0184c`, contains **no** allocation — it only
+walks `sAllImages` and calls a notify — and the log path's only allocation is the 4 KB
+`vm_allocate` page, which is outside the pool). So the only readings of `r8 = +0x1278` are:
+
+| # | hypothesis for `r8` | block size of the message | implied `strlen(msg)` | signature bytes at `r8` |
+|---|---|---|---|---|
+| 1 | the exception **block base** (= `do_malloc`'s return, the *next* free offset) | `0x98` | **148…151** | `0x432b2b00` at `+0x30`, `0x434c4e47` at `+0x34` |
+| 2 | the exception **object pointer** (`base+0x50`, the value `throwf` is given) | `0x48` | **68…71** | `0x432b2b00` at `−0x20`, `0x434c4e47` at `−0x1C` |
+| 3 | **interior** of the message block itself | `≥ 0x98` | **≥ 148** | printable ASCII |
+| 4 | none of the above | — | `strlen < 148` (and not #2) | `r8` is then in the pool's **not-yet-handed-out tail** ⇒ zeroed `__bss`, a stale leftover |
+
+A neighbour that is *another string* is ruled out: nothing formats a string between the
+message's `strdup` and the trap, and any "Referenced from …" text was already an argument to
+the `throwf` that built the message, so it was allocated **below** `0x11e0`.
+
+**What cannot be proven from this dump**: that `r8` designates an object at all. No code on
+the halt path writes `r8` (`dyld::halt` pushes only `{r4,r5,r7,lr}`; `_dyld_fatal_error` is a
+bare `udf`; the pad `0x2be04baa-0x2be04be4` never touches it; every callee preserves it), so
+its value is *inherited* — the unwinder's register context for `_main`'s frame at the pad.
+`_main` does use `r8` as a live register earlier (`0x2be04590 ldr.w r8,[r4]`,
+`0x2be045da ldr.w r8,[sl],#4` — pointer elements of a vector; `0x2be04660 add r8,pc` → a
+`__cstring`), but none of those is `0x2be24428`, so the value came from outside `_main`'s own
+code and a register dump cannot name it — and it cannot *dereference* it either, since the
+pool is zero-fill `__bss` and the log has no memory.
+
+**Cheap decisive test for 995** (no new machinery: the same trap carries both registers):
+print the `copyinstr` at `r5` (or `A+0x20`) *and* a 48–64 B `copyin` at **`r8`**. Printable
+ASCII ⇒ #3 (the bytes name which part of the message); the `0x432b2b00`/`0x434c4e47` pair at
+one of the two offsets above ⇒ #1 or #2 with the offset saying which; all zero ⇒ #4, and `r8`
+should then be dropped from any further reasoning. The recovered `strlen(msg)` picks between
+148…151 and 68…71 and so decides between #1 and #2 independently.

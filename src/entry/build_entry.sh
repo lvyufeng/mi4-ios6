@@ -1143,6 +1143,32 @@ case "$IOS7_TRAPS" in
     *) echo "REFUSING: STAGE90_XNU_IOS7_TRAPS='$IOS7_TRAPS' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **995: the dyld halt-message witness, recorded the same way and for the same reason.** With
+# `STAGE90_XNU_DYLD_WITNESS=1`, the D13 tree's `osfmk/arm/trap.c` grows `ios7wit_dyld_message` (a
+# noinline, bounded, fail-soft reader: `copyin(task->all_image_info_addr + 0x20, &msgp, 4)` then
+# `copyinstr(msgp, text, 256, &copied)`, at most 2 print slots claimed before any I/O, every branch
+# printing its reason) and a call to it in `sleh_undef` immediately after the
+# `dyld_all_image_info_addr` printf - the SAME path that prints A, inside the `udf #0xdefe` branch
+# (`trap.c:877` returns early for every other undefined instruction). 994's press (arm
+# armed-d13-8b4c9a3e, commit a4a2532, evidence
+# out/stage90/captures/cancro-last_kmsg-994-armed-d13-8b4c9a3e.txt) CONFIRMED the trap-10 wire fix
+# (`IOS7LAB vm_allocate64 size=00000000:00001000 flags=1 result=0 address=000e1000`) and moved the
+# frontier: dyld still halts, but now at its REAL error - 235x `usermode undefined instruction,
+# EXC_BAD_INSTRUCTION at 0x2beb90c4` (slide 0xB8000, so pc 0x2be010c4 = `_dyld_fatal_error` =
+# `udf #0xdefe`), r5 a heap string in dyld's malloc pool. The message `dyld::halt` was handed is
+# unreadable on CANCRO because the tree's only reader for it (the LEO witness) is compiled out;
+# 995 opens a reader. `trap.c` is a kernel-pool file, so the switch is compiled by
+# `tools/build_xnu_arm_kernel.sh` (DEFINES, from the same-named environment variable) - the two
+# spellings must carry the SAME value (`mi4-one-value-two-definitions`) - and the linked image only
+# LINKS `out/xnu_kernel_obj_d13/osfmk_arm_trap.o`, so a stale pool hides the witness. The tree patch
+# is staged by `tools/stage_d13_dyld_witness.sh`; the by-value clause at the 995 link site below
+# refuses a link whose `sleh_undef` does not call the witness.
+DYLD_WITNESS=${STAGE90_XNU_DYLD_WITNESS:-0}
+case "$DYLD_WITNESS" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_DYLD_WITNESS='$DYLD_WITNESS' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **911c: the RAM bank layout, measured from the Qualcomm SMEM RAM-partition table.** The goal's newest
 # clause is that XNU recognize the Mi 4's 3 GB of RAM, and the 911c design established that the repo
 # holds NO low-bank base or size anywhere - every "low bank" is an inference from "3 GB minus 1.5 GB".
@@ -1460,6 +1486,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_VMHINT_GUARD
                 STAGE90_XNU_COMMPAGE_ALIAS
                 STAGE90_XNU_IOS7_TRAPS
+                STAGE90_XNU_DYLD_WITNESS
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1625,6 +1652,14 @@ do
         # below reads the linked image's own `locore_fleh_swi` and refuses a link whose -3 wire is
         # absent (the pool's wire adapters are what the build script's own object dumps carry).
         STAGE90_XNU_IOS7_TRAPS)       _v=$IOS7_TRAPS ;;
+        # 995: whether the tree's dyld halt-message witness (`tools/stage_d13_dyld_witness.sh`) was
+        # compiled into this image's pool. Read from `$DYLD_WITNESS`, validated 0/1 at its own
+        # assignment far above this loop, so the record and the pool's `DEFINES` cannot be built from
+        # two spellings of this switch (`mi4-one-value-two-definitions`). `trap.c` is a POOL file: the
+        # linked image only LINKS `out/xnu_kernel_obj_d13/osfmk_arm_trap.o`, which is why the 995
+        # clause at the link site below reads the linked image's own `sleh_undef` /
+        # `ios7wit_dyld_message` and refuses a link whose witness is absent.
+        STAGE90_XNU_DYLD_WITNESS)     _v=$DYLD_WITNESS ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -30605,6 +30640,50 @@ verify_trace_symbols() {
         fi
         say "  xnu_entry_994: the linked image wires the iOS 7 -3 SWI to the real 64-bit clock (the locore_fleh_swi \`cmn r12,#3\` fast path is gone; the saved-state \`cmn r11,#3\` route calls mach_absolute_time and branches through swi_exit64, so r0:r1 are written back) - $tr_out"
     fi
+    # **995: the dyld halt-message witness (pool).** 994's press (arm armed-d13-8b4c9a3e, commit
+    # a4a2532, evidence out/stage90/captures/cancro-last_kmsg-994-armed-d13-8b4c9a3e.txt) is a
+    # READ-CONFIRMED SUCCESS of the trap wire: `IOS7LAB vm_allocate64 size=00000000:00001000 flags=1
+    # result=0 address=000e1000` (log:4101) - `flags=1` is `VM_FLAGS_ANYWHERE`, where the pre-994 read
+    # produced 0 - and the frontier MOVED to dyld's real error: 235x `usermode undefined instruction,
+    # EXC_BAD_INSTRUCTION at 0x2beb90c4` (slide 0xB8000, so pc 0x2be010c4 = `_dyld_fatal_error` =
+    # `udf #0xdefe`), with r5 = 0x2bedc390 = a heap string in dyld's malloc pool - a message
+    # `dyld::halt` was handed and NOTHING on CANCRO can print (the tree's own reader, the LEO witness,
+    # is compiled out here). The fix is `tools/stage_d13_dyld_witness.sh` + STAGE90_XNU_DYLD_WITNESS=1:
+    # `trap.c`'s `sleh_undef` grows `ios7wit_dyld_message`, called immediately after the
+    # `dyld_all_image_info_addr` printf - the SAME path that prints A, inside the `udf #0xdefe` branch
+    # (`trap.c:877` returns early for every other undefined instruction) - and the reader takes the
+    # message pointer from the word at `task->all_image_info_addr + 0x20` (the field
+    # `setAlImageInfosHalt`, dyld 0x2be08d04 = `str r0, [r3, #32]`, writes) with `copyin` +
+    # `copyinstr`, printing `IOS7WITNESS dyld msg=... copyinstr=... len=...` then `dyld> <text>` in
+    # 48-byte lines, two print slots at most (claimed before any I/O; the halt re-executes forever and
+    # the console block drops silently past 128 KiB). Fail-soft, absolutely: every user read is a
+    # copyin, no branch panics, allocates, sleeps or locks, and a bad pointer can only cost one error
+    # line. The property is read BY VALUE off THIS linked image by
+    # `tools/check_d13_dyld_witness.py --expect on` - which DECODES the ARM encodings itself rather
+    # than trusting objdump's mnemonics: `ios7wit_dyld_message` is a symbol, `sleh_undef`'s region
+    # calls it after a `bl printf`, the witness's own region calls `copyin`, `copyinstr` and `printf`,
+    # names the `#32` field offset as an exact immediate, and the image carries the
+    # `IOS7WITNESS dyld msg=`, `dyld> %s` and `dyld> <copyinstr failed>` literals. `trap.c` is a POOL
+    # file, so a stale `out/xnu_kernel_obj_d13/osfmk_arm_trap.o` is invisible to the link - which is
+    # exactly what this clause refuses. Gated on the switch: with DYLD_WITNESS=0 the tree's original
+    # text is compiled on purpose and there is nothing here to assert.
+    if [[ $DYLD_WITNESS -eq 1 ]]; then
+        if ! dw_out=$(python3 "$REPO_ROOT/tools/check_d13_dyld_witness.py" "$OUT/xnu_arm_entry.elf" --expect on 2>&1); then
+            printf '%s\n' "$dw_out" >&2
+            say "REFUSING: STAGE90_XNU_DYLD_WITNESS=1 but the linked image does not call the dyld halt-message" >&2
+            say "          witness from sleh_undef - the FAIL lines above name the missing piece (no" >&2
+            say "          \`ios7wit_dyld_message\` symbol means the switch never reached the POOL: trap.c is" >&2
+            say "          compiled by tools/build_xnu_arm_kernel.sh and build_entry.sh only LINKS" >&2
+            say "          out/xnu_kernel_obj_d13/osfmk_arm_trap.o). Stage the tree and rebuild the pool with" >&2
+            say "          the SAME value, then relink:" >&2
+            say "            tools/stage_d13_dyld_witness.sh" >&2
+            say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+            say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_DYLD_WITNESS=$DYLD_WITNESS' \\\\" >&2
+            say "            ./tools/build_xnu_arm_kernel.sh" >&2
+            layout_fail "STAGE90_XNU_DYLD_WITNESS=1 did not reach the linked image: stage the tree first (tools/stage_d13_dyld_witness.sh) and rebuild the pool with -DSTAGE90_XNU_DYLD_WITNESS=1 - trap.c is a kernel-pool file and a stale osfmk_arm_trap.o links a sleh_undef with no witness, which is exactly the frontier 994 died on one step earlier (235x udf #0xdefe at 0x2be010c4 = _dyld_fatal_error with the real dyld message unreadable)"
+        fi
+        say "  xnu_entry_995: the linked image calls the dyld halt-message witness from sleh_undef's udf path (the word at all_image_info_addr + 0x20 is copied out with copyin/copyinstr and printed as IOS7WITNESS + dyld> lines, two slots at most) - $dw_out"
+    fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
     # `ast_taken_user`**: its arm return path (`cswitch.s:144` `thread_exception_return`) delivers by
@@ -38617,6 +38696,10 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # above refuses a linked image that did not get it; this echo line is what the record self-check at
     # the end of this file reads).
     echo "STAGE90_XNU_IOS7_TRAPS=${STAGE90_XNU_IOS7_TRAPS:-0}"
+    # 995's switch, read the same way and for the same reason (one value, two definitions: the pool's
+    # DEFINES takes this value, and the by-value clause at the 995 site above refuses a linked image
+    # that did not get it; this echo line is what the record self-check at the end of this file reads).
+    echo "STAGE90_XNU_DYLD_WITNESS=${STAGE90_XNU_DYLD_WITNESS:-0}"
     # 535's switch, and the only one whose *link* the build changes (see its own block above): the
     # record is what makes "this image has the seam hook" a thing the gate can read rather than a
     # thing a reader assumes from the hash.

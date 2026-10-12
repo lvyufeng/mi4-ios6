@@ -1,5 +1,14 @@
 # 993: what dyld was actually failing at when `throwf` itself OOM'd
 
+> **SUPERSEDED IN ONE RESPECT (2026-10-12, 994 press `armed-d13-8b4c9a3e`, commit `a4a2532`).**
+> §0's answer ("the halt message is the formatter's own OOM literal") was true for 993 **because
+> trap −10 was broken**. The 994 wire fix restored the formatter: the halt message is now a real
+> formatted **heap** string, and its length is arithmetically pinned to **68..71 bytes**. Under
+> that window this document's own §3 / §7.3 **rank 1 is excluded** (its message needs three args
+> summing 17..20; the real ones sum ≥ 38). The re-converged ranked list, the rewrap site's three
+> arguments, the launchd↔cache cross-check and a pre-registered expectation table for 995's
+> witness are all in **§10**.
+
 Read-only forensics over the already-extracted artifacts:
 
 | artifact | what it is |
@@ -473,3 +482,233 @@ Cross-references: `docs/reference/d13-dyld-halt-callers.md` (the 13 halt sites, 
 `docs/reference/d13-crash-state-forensics.md` (993's register block),
 `docs/reference/d13-post-alias-next-walls.md` (991's measured `lr`, the W1 silent-return mechanism),
 `docs/reference/d13-dyld-helper-table.md` (the LEO witness / aii+0x20 recovery route).
+
+---
+
+## 10. 994 update — the wire is fixed, the message is real, the ranking re-converges
+
+Evidence source: `out/stage90/captures/cancro-last_kmsg-994-armed-d13-8b4c9a3e.txt` (24,682 lines;
+line numbers below are 0-based indices over the copy indexed in `/tmp/w994_regs.txt`; the witness
+doc `d13-dyld-witness-995.md` cites `:4101`/`:4103` for the same lines — the two index bases differ
+by 52, cite the *content*, not the number).
+
+### 10.1 The delta 993 → 994
+
+| fact (all from the 994 capture) | 993 | 994 |
+|---|---|---|
+| dyld slide | `0x7D000` | `0xB8000` |
+| `pc` at the `udf` | `0x2be7e0c4` | `0x2beb90c4` → unslid **`0x2be010c4` = `_dyld_fatal_error`** 【测】 |
+| `lr` | `halt+0x4b` | `0x2beb9f07` → **`0x2be01f07` = `halt+0x4b`** (the `blx` return slot) 【测】 |
+| `r1` (`!byte[gLinkContext+151]`) | `1` | `1` ⇒ `initializeMainExecutable` still never entered 【测】 |
+| `r5` (halt's message argument) | `0x2be1c7fd` — the **static** OOM literal | `0x2bedc390` → unslid `0x2be24390` = `__ZL18initialPoolContent` (`0x2be231b0`) **+ 0x11E0 ⇒ a heap string** 【测】 |
+| the formatter's `vm_allocate` | fails (that is why 993 saw the OOM literal) | **succeeds**: capture `IOS7LAB vm_allocate64 size=00000000:00001000 flags=1 result=0 address=000e1000` then `vm_deallocate64 address=…:000e1000 size=…:00001000 result=0` = `__simple_salloc` + `__simple_sfree` of the fatal `throwf` 【测】 |
+
+The `0x000e1000` buffer is *not* the pool (pool = `0x2be231b0..0x2be489b0`); it is the salloc'd 4 KiB
+scratch. The **reported** message is the pool string at `r5`. The run reached
+`attempting to start init of /sbin/launchd` and the entry `0x2beb9028` = `__dyld_start` 【测】 —
+same pid-1 launch as 993. `_dyld_fatal_error`'s word is `fe de ff e7` = `0xE7FFDEFE` — an **ARM-mode**
+`udf`; `lr = 0x2be01f07` (Thumb bit set) + `cpsr 0xb0000010` (T = 0) are therefore *consistent*
+(a Thumb `blx` into an ARM leaf), not an artifact — this retires §8's cpsr non-claim 【推, on the two
+measured encodings】.
+
+### 10.2 The 994 register block, decoded (capture lines 4161–4169, duplicated 235×)
+
+| reg | raw | unslid | reading |
+|---|---|---|---|
+| `r0` = `r4` | `0x2bf01564` | `0x2be49564` | `_error_string` — `halt`'s own `strlcpy` destination (`mov r0,r4` at `0x2be01f00`) 【测】 |
+| `r1` | `1` | | `!byte[gLinkContext+151]` — `setAlImageInfosHalt`'s second argument (§2) 【测】 |
+| `r2` | `0x2bed9b1c` | `0x2be21b1c` | `&gProcessInfo` — `setAlImageInfosHalt`'s `r2 = 0x2be08d10 + 0x18e0c` 【测】 |
+| `r3` | `0x2bed9c8c` | `0x2be21c8c` | `[r2]` = the `__all_image_info` struct; the kernel prints the **same** address (`dyld_all_image_info_addr:`) two lines below 【测】 |
+| `r5` | `0x2bedc390` | `0x2be24390` | **the message** (halt's `mov r5,r0`, preserved over the `dyld::log` call) = pool + 0x11E0 【测】 |
+| `r6` | `2` | | the `_main` catch pad's clause selector — loaded `ldr r6,[sp,#16]` at `0x2be04ba4`, compared to `movs r4,#2` ⇒ the `catch (const char*)` fatal branch 【测, §5】 |
+| `r8` | `0x2bedc428` | `0x2be24428` | the **exception object**, pool + 0x1278 (§10.3) 【测】 |
+| `r9`/`r10`/`r11`/`r12`/`sp`/`r7` | stack values | | frames (`0x2fd47xxx`) 【测】 |
+
+### 10.3 `r8` is the exception object — the chain, by value
+
+* `__cxa_throw` @ `0x2be148c0`: `mov r6,r4` (`0x2be148f4`) then `mov r0,r6; bl __Unwind_SjLj_RaiseException`
+  (`0x2be14920`/`0x2be14922`) ⇒ the unwinder receives **the object pointer** `__cxa_allocate_exception`
+  returned.
+* `__Unwind_SjLj_RaiseException` @ `0x2be1c518`: `str r8,[sp,#-4]!` (`0x2be1c51c`) then **`mov r8,r0`**
+  (`0x2be1c526`) ⇒ `r8` = the object for the whole unwind.
+* The handler-install path (`0x2be1c5da`–`0x2be1c5e8`) restores only `sp` (`[r0+8]`), `r7` (`[r0]`) and
+  `pc` (`bx r1` = `[r0+4]`) ⇒ **`r8` survives to the landing pad**. (The *return* path just above does
+  restore `r8`; it was not taken — the pad ran, `r6 = 2` at the udf.) 【测】
+* No writer of `r8` in between: `___gxx_personality_sj0` (`0x2be14ec4`) has **no `r8` write**;
+  `_scan_eh_tab` restores it (`pop.w {r8,r10,r11}` @ `0x2be152e6`), `__cxa_allocate_exception`
+  (`0x2be14604`), `__cxa_begin_catch`, `dyld::syncAllImages` all save/restore it 【测, `r8`-write census】.
+* Cross-run check: 993's `r8 = 0x2bea13c0` (slide `0x7D000`) → `0x2be2a3c0` = pool + 0x7210 =
+  (**pool + 0x71C0**) + 0x50 — the *same* `+0x50` relation in a run whose message was static 【测】.
+* `__cxa_allocate_exception` @ `0x2be14584` calls `do_malloc(size+80)` (`add.w r0,r4,#80` @ `0x2be145d0`)
+  and returns **`block + 80`** (`0x2be145f0`) 【测】 ⇒ `r8 = block_cxa + 0x50`.
+
+### 10.4 ⇒ the message length is 68..71 bytes (this is the new discriminator)
+
+* `_strdup` @ `0x2be18144`: `strlen+1` → `bl _malloc` (`0x2be18152`), returns the **block start**
+  ⇒ `r5` = the message block start 【测】.
+* `_malloc`'s pool path (`0x2be0dfe0`–`0x2be0e046`): `adds r1,#3; bic r4,r1,#3` — **4-byte alignment
+  only** — returns the old bump, `free += align4(size)` 【测】.
+* `throwf` path B has **no allocation** between `bl _strdup` (`0x2be0166e`) and
+  `bl ___cxa_allocate_exception` (`0x2be0169e`): `mov r5,r0` → `bl __simple_sfree` (that is the
+  `vm_deallocate` of the capture's second IOS7LAB line — a *vm* free, not a pool allocation) →
+  `cmp r5,#0; bne` → `movs r0,#4` → the `bl` 【测, raw bytes】.
+* Therefore `block_cxa − r5 = align4(L+1)` with `L = strlen(message)`, and the measured block
+  difference is `0x2be243D8 − 0x2be24390 = 0x48` ⇒ **`L ∈ [68, 71]`** 【测 + 推 (`r8` = object is §10.3's measurement)】.
+* Same arithmetic for the other heap producers: any `strdup`- or `__Znam`-built message block has
+  size `align4(L+1)` and is immediately followed by the 0x54-byte exception block 【推 for the
+  direct throws; the `_free`-no-op assumption is §10.9.2】.
+* Invariant for the 995 witness (it prints `len=`): **(r8 − 0x50) − r5 == align4(len + 1)**.
+
+### 10.5 Which `throw` sites can produce it — the 44-site census and the re-windowed ranking
+
+**(a) Is the message heap or static?** Of the image's 44 direct `___cxa_throw` sites, 8 store a value
+whose producer is a register (heap-capable) and 36 store a PC-relative literal (`add rX,pc`) 【测,
+`/tmp/c_throw_class3.txt`】. The 8: `throwf`'s own `0x2be016b2` (`str r5,[r0]` after the strdup),
+`notifySingle` `0x2be01bd6` (after `bl _strdup`), `dyld::load` `0x2be02cb6` (after `bl __Znam`),
+`notifyBatchPartial` `0x2be03d90`, `Compressed::rebase` `0x2be114b8`, `eachBind` `0x2be12974`,
+`eachLazyBind` `0x2be1305a`, `__cxa_call_unexpected` `0x2be155f0`. **`r5` = a pool address is measured
+(§10.1) ⇒ CONFIRMED: the message is heap; the 36 static-literal sites are excluded** (a literal would
+put a `__TEXT/__cstring` address in `r5`). Because *every* one of the 145 `bl dyld::throwf` sites
+funnels through `throwf`'s own heap-capable site, all 145 formats remain in play; the L window is
+what selects among them.
+
+**(b) The window re-ranks all 145 formats** (base = printed chars with `%s`→empty, `%08X`/`%08lX`→8,
+`%lX`→minimum; literal lengths re-measured from the dyld bytes, `/tmp/w994_str2.txt`) 【测】:
+
+| site | message | required args for L∈[68,71] | verdict |
+|---|---|---|---|
+| `recursiveLoadLibraries+0x66a` `0x2be0a35e` | `Library not loaded: %s\n  Referenced from: %s\n  Reason: %s` (`0x2be1e0df`, len 57) | **three args summing 17..20** | **EXCLUDED** — needed lib alone is ≥ 24 (`/usr/lib/libbsm.0.dylib`), + `/sbin/launchd` 13 ⇒ ≥ 38 【测+推】 |
+| `throwSymbolNotFound+0x2c` | `Symbol not found: %s\n  Referenced from: %s\n  Expected in: %s` | three args 14..17 | EXCLUDED (paths alone ≥ 26) |
+| `mapSegments+0x1fe` | `mmap() error %d at address=0x%08lX, size=0x%08lX segment=%s in Segment::map() mapping %s` | base 73 > 71 | **EXCLUDED by arithmetic alone** |
+| `sniffLoadCommands+0x150` / `parseLoadCmds+0x362` / `mapSegments+0x1d0` | `load command #%d length (%u)…` (81) / `…built for OS version %u.%u…` (83) / `truncated mach-o error…` (72) | base > 71 | EXCLUDED by arithmetic |
+| `resolve+0xfa`, `resolveUndefined+0x27e`, `eachBind+0x18a`, `incrementCoalIterator+0x3f0`, `updateUsesCoalIterator+0x3fe`, … | `BIND_OPCODE_SET_SEGMENT…` (76+), `bad mach-o binary…` (70 + 3 args), `bad weak bind opcode…` (61 + args) | args must sum ≤ 1, or base > 71 | EXCLUDED |
+| `sniffLoadCommands+0x136` | `malformed mach-o image: wrong LC_SEGMENT[_64] for architecture` | n/a | EXCLUDED — fixed 62 ⇒ L = 62 ≠ window |
+| `loadPhase3` `@loader_path`/`@executable_path`/relative-rpath sites | base 53/57/56 | paths 15..18 / 11..14 / 12..15 | EXCLUDED in practice — all three require a **restricted** (`__RESTRICT`) binary; launchd is not one 【推】 |
+| rebase-family path messages (`Classic+0x2b4`, `Compressed+0x7e2`) | `%s in %s. reloc record…` / `dyld: rebase: %s:*0x%08lX += 0x%08lX` | paths 28..31 / 43..46 | EXCLUDED in practice — the only image rebased by opcodes here is the main executable, path `/sbin/launchd` = 13 ⇒ every message ≪ 68; cache images are prebound 【推】 |
+| `doBindFastLazySymbol`, `doBindLazySymbol`, `bindLazySymbol` (runtime lazy binding) | — | — | EXCLUDED by reachability — `r1 = 1` ⇒ no libSystem initializers ⇒ `dyld_stub_binder` cannot have run 【测+推】 |
+| `doImageInit+0xa0`, `doModInitFunctions+0xee`, `doTermination+0xd6` | `…function %p not in mapped image for %s` | — | EXCLUDED by reachability — these run in `runInitializers`, after `initializeMainExecutable` 【测, §2/§5】 |
+| Classic-only sites (`Classic::*`, `doBindExternalRelocations`, `doBindLazySymbol`, `mapSegmentsClassic`, …) | — | — | EXCLUDED in practice — cache images are **Compressed** (`instantiateFromCache` @ `0x2be108e2`) 【推】 |
+| `loadCodeSignature+0x80` | `code signature invalid for '%s'` | path 39..42 | weak — cache images carry no `LC_CODE_SIGNATURE` |
+| `ImageLoader` ctor `+0xa6` | `too many dependent dylibs in %s` | path 39..42 | structurally absurd (2 deps) — kept below the line |
+
+**What is left — the re-converged ranked list** (all four are reachable inside `link`'s call tree,
+i.e. after 991's measured entry into `ImageLoader::link`, and before the `r1 = 1` bound):
+
+| # | site | message | required argument | why it ranks here |
+|---|---|---|---|---|
+| **1** | `ImageLoaderMachO::sniffLoadCommands+0x1f4` | `malformed mach-o image: segment %s does not span all load commands` (`0x2be1e447`, len 66) | **segment name of 4..7 chars** — `__TEXT`/`__DATA` (6) gives exactly L = 70 | the only in-window message whose argument is *natural* at that length, and it fires exactly when a **mapped** image's header/segment geometry is inconsistent — i.e. a shared-cache mapping/offset defect. No auxiliary assumption (no unmeasured flag, no file fallback). The ctor path runs it for cache images too 【测 literal + 推 identity】 |
+| 2 | `dyld::load` `0x2be02cb6` (direct heap throw; buffer built by `bl __Znam` @ `0x2be02c32`, loop appends `"\n\t"+path` @ `0x2be02c70`/`0x2be02c80`) | `no suitable image found.  Did find:` (`0x2be1ccad`, 35) + `\n\t<path>` per tried path | **one path of 31..34 chars** (or two summing 29..32) — the cache has such paths (`/usr/lib/system/libsystem_m.dylib` 33, `libsystem_asl` 33, `libsystem_info` 34, `libMobileGestalt.dylib` 31 …) | the classic "cache lookup missed, file fallback found nothing" message. Two caveats: its branch is gated by a byte at `[LoadContext+5]` (`ldrb r0,[r0,#5]; cmp r0,#0` @ `0x2be02cc0`, the 0-byte side throws the **15-char** `image not found` @ `0x2be1cc9d` — itself excluded by length), and inside `recursiveLoadLibraries` it would be **rewrapped** unless the catch's gate byte is 0 (§10.6) |
+| 3 | `dyld::isCompatibleMachO+0xa2` | `incompatible cpu-subtype: 0x%08X in %s` (`0x2be1cc76`) | **path 28..31** | reachable **only** via `loadPhase6` (`bl` @ `0x2be02fe4`; the other caller `0x2be04812` is `_main`, already passed) ⇒ it implies a **file** was instantiated — i.e. both a cache miss *and* a loose file that parsed far enough to have a header |
+| 4 | `sniffLoadCommands+0x25a` | `malformed mach-o image: more than 255 segments in %s` (`0x2be1e5ee`) | path 18..21 | same family as #1 (geometry misread), needs a short-path image |
+
+### 10.6 `recursiveLoadLibraries+0x66a` — the three arguments and every precondition (brief Q2)
+
+Function base `0x2be09cf4` (prologue; the correspondence `0x2be0a35e − 0x66a` closes it) 【测】.
+The catch pad `0x2be0a28a`–`0x2be0a35e` 【测, full disassembly re-read】:
+
+```
+2be0a28a  ldr r4,[r7,#-140] ; ldr r0,[r7,#-136] ; cmp r0,#1 ; bne.w 0x2be0a3a8   ; SjLj selector gate
+2be0a2a2  bl ___cxa_begin_catch ; mov r4,r0                                     ; r4 = the thrown char*
+2be0a29e  ldr r5,[r7,#-164]   ; ldrb r0,[r5] ; cmp r0,#0 ; beq 0x2be0a362       ; THE GATE (§below)
+2be0a2be  strb.w r2,[r0,#44]  (r2=10, r0=[r7,-184])                             ; state byte := 10
+2be0a2c4  blx _strstr(message, "Incompatible" 0x2be1e0c5)  -> 0x2be0a304: code 3, state 7
+2be0a2dc  blx _strstr(message, "architecture" 0x2be1e0d2)  -> 0x2be0a328: code 2, state 14
+                                                              else        : code 1, state 15
+   (all three call r6 = [[r7,-180]+68] with (code, [this+4], *(needed), 0), then...)
+2be0a334  r1 = *(char**)[r7,#-156]        ; the NEEDED dylib's path (the vector element)
+2be0a33c  r2 = [this+8] (fInstallPath) ; if 0 -> r2 = [this+4] (fPath)   ; the REFERRING image
+2be0a340  r3 = [r7,#-220]                 ; the caught inner message (saved r4 on both paths)
+2be0a350  r0 = 0x2be1E0DF = "Library not loaded: %s\n  Referenced from: %s\n  Reason: %s"
+2be0a358  str 16 -> [r7,#-144]            ; state := 16
+2be0a35e  bl dyld::throwf
+```
+
+So the three `Reason` arguments, in format order, are **`%s`₁ = the needed library's path,
+`%s`₂ = `this->fInstallPath ?: this->fPath`, `%s`₃ = the inner failure message** — the canonical
+"Library not loaded / Referenced from / Reason" structure 【测】.
+
+Every precondition that must hold to reach this `throwf`:
+1. control unwinds into this pad — the SjLj selector `[r7,#-136] == 1` (`bne.w 0x2be0a3a8` = resume) — and the thrown object is a `const char*` (`r4` is used directly by `strstr`) 【测】;
+2. the byte **`*[r7,#-164] != 0`** — if it is 0 the pad jumps straight to `__cxa_end_catch` (`0x2be0a362`) and **no rewrap happens** 【测】;
+3. if (2) holds the `throwf` is **unconditional** — the `strstr` results only choose the notify code (3/2/1) and the transient state (7/14/15), they never gate the throw 【测】.
+The gate byte's semantic identity (a `LinkContext`/verbose flag) and its 994 value are **not**
+measured — but it is the *only* switch between "inner message propagates" and "message is rewrapped".
+Combined with §10.5(b): **if the rewrap fired in 994, the halt message would be ≥ ~89 bytes
+(51 + ≥24 + ≥13 + ≥1) and could not be the measured 68..71 — so either the rewrap was skipped, or
+the throw came from a site outside this try entirely (rebase/bind/notify families)**. That is the
+structural reason the §0/§7.3 answer had to move.
+
+### 10.7 launchd ↔ shared-cache cross-check (brief Q3) — the static closure is complete
+
+From `/tmp/c_closure.txt` (cache = `xnu_card_hfs.img+0x455d000`, magic `dyld_v1   armv7`) 【测】:
+
+| check | result |
+|---|---|
+| images parsed from the file | **696, 0 bad magic** |
+| launchd's `LC_LOAD_DYLIB`s | `/usr/lib/libbsm.0.dylib` and `/usr/lib/libSystem.B.dylib` — **both present** |
+| `libbsm.0.dylib` | filetype 6, `cur=1.0.0 compat=1.0.0`, 1 dep (`libSystem.B`, `cmd=0xc` = `LC_LOAD_DYLIB`) |
+| `libSystem.B.dylib` | filetype 6, `id=cur=1198.0.0 compat=1.0.0`, **28 deps, every one `cmd=0x8000001f`** (`LC_REEXPORT_DYLIB|LC_REQ_DYLD` — a *known* command in dyld-324.1, not an unknown one) |
+| transitive closure from launchd | **259 images, 0 missing, 0 version mismatches** |
+| `/sbin/launchd`, `/usr/lib/dyld` | **not in the cache** (rootfs files — expected) |
+
+⇒ **No static absence and no version mismatch exists.** Any 994 "not found / not loaded / unknown
+load command" for an image in the closure must be a **runtime failure of the cache lookup or of the
+mapped bytes**, not a missing file. Path-length sample for the window rows above: the cache's
+first 0x80000 holds 146 path-like strings, including `libMobileGestalt.dylib` 31,
+`libAccessibility.dylib` 31, `libcharset.1.0.0.dylib` 31, `libAXSpeechManager.dylib` 33,
+`libiconv.2.4.0.dylib` 29, `libstdc++.6.0.9.dylib` 30 — so #2/#3's 28..34-char requirement is
+satisfiable by real cache paths 【测】.
+
+### 10.8 Pre-registered expectation table for 995's witness (brief Q4)
+
+The witness (`d13-dyld-witness-995.md`) prints the message under **both** live pointers (`A+0x20`,
+`state->r[5]`), a verdict line, and an `r8` classification. Read the table top-down; the printed
+**text** decides the branch, the printed **len** enforces §10.4's invariant
+`(r8 − 0x50) − r5 == align4(len+1)`.
+
+| witness prints | failure judged | fix form |
+|---|---|---|
+| `dyld> malformed mach-o image: segment __TEXT does not span all load commands` (len 70) | **R1** — a mapped cache image's header/segment geometry is inconsistent: the cache is *mapped*, but one image's bytes are being read at the wrong offsets/addresses | dump that image's `mach_header` (`ncmds/sizeofcmds`, each `segment_command.fileoff/filesize/vmaddr`) from the mapped cache via the witness and compare with the file-backed cache at the same offsets; the defect is in the cache-base/slide or image-table offset arithmetic on the kernel path, not in the image |
+| `dyld> no suitable image found.  Did find:` + one `\t/usr/lib/system/libsystem_*.dylib` (len 68..71) | **R2** — the cache lookup itself missed an image that IS in the cache (§10.7) and the file fallback correctly found nothing on the rootfs | instrument the cache lookup (install-name → image-table walk) — the kernel's shared-region mapping returned OK but the loader's lookup over it fails; compare `localSymbolsOffset`/image-table reads through the witness |
+| `dyld> incompatible cpu-subtype: 0x…… in /usr/lib/…dylib` (len 68..71) | **R3** — `loadPhase6` instantiated a **file** (only caller path left) and its header was rejected | first establish *which file existed* (an unexpected file found ⇒ a search-path/`DYLD_ROOT_PATH` state issue); then compare the file's header with the cache entry |
+| `dyld> malformed mach-o image: more than 255 segments in <path 18..21>` | R4 — same family as R1, independent geometry check | as R1 |
+| `dyld> Library not loaded: …` (len ≥ 89) **and** `exception object (signature at r8-0x20)` | **the §10.4 length model is falsified** (that message cannot be 68..71) — do NOT trust the window; the r8 line tells which assumption broke | re-derive: if `r8` says `exception block base` the predicted len is 148..151; if the verdict says `DIFFERS`, one of `A+0x20`/`r5` is not halt's message |
+| `dyld> throwf, out of memory error` | the trap −10 wire fix is **not** in this build (regression) | check the build's IOS7LAB pair: the salloc line must read `size=…:00001000 flags=1 result=0` (994 §10.1) |
+| any real message with `len` ∉ 68..71 while `r8` classifies as the exception object | the block-adjacency part of §10.4 (a pool allocation between the message and the exception block that the measured `throwf` path does not contain — e.g. via `dyld::load`'s `_free` loop, §10.9.2) | re-derive L from the printed len; the text still names the site |
+| `IOS7WITNESS r5 DIFFERS from errorMessage` | the field and the register do not describe the same halt | report as such; do not use either string as the message |
+| no `IOS7WITNESS` line at all | the witness never ran (switch did not reach `osfmk_arm_trap.o`, or wrong pc path) | run `tools/check_d13_dyld_witness.py --expect on` on the built image |
+
+### 10.9 NON-CLAIMS (994 addendum)
+
+1. **The L window's assumptions.** `r8` = the exception object is measured (§10.3); the *block
+   adjacency* is measured for the `throwf` path (§10.4) and **assumed** for direct heap throws
+   (§10.5(a)). If a producer allocates between the message and the exception block, the window
+   shifts — which is exactly what §10.8's len-check row is for.
+2. **`_free` in the pool path is assumed to be a no-op** (dyld's pool allocator does not reclaim);
+   re-measured only at the call sites (`dyld::load` frees the vector's strings between `__Znam` and
+   `___cxa_allocate_exception`, `0x2be02c8a`) — if it reclaimed memory, row R2's measured gap could
+   include a recycled hole.
+3. **The rewrap gate byte's identity and 994 value are unmeasured** (§10.6 precond. 2). Both
+   branches of §10.5's structural argument are stated; the witness text decides.
+4. **The ranked order is by length-feasibility + reachability, not by measurement** of the failing
+   image. R1's message never names the image; only 995's text can pin it.
+5. **The rebase-family and Classic-family exclusions rest on structural premises** ("cache images
+   are prebound / Compressed") that were not re-measured in this pass.
+6. **The 993/994 pool watermark difference is unexplained**: in 993 the exception block was at
+   pool + 0x71C0, in 994 the message block at pool + 0x11E0 — ~0x6000 more pool consumed before
+   the fatal `throwf` in 993. Recorded, not explained (and 993's own arithmetic — static literal,
+   no strdup — is otherwise consistent).
+7. **The console is still silent** in 994 (no `dyld:` line even though `halt` logs before
+   `strlcpy`) — the fd-2 item (§8.4) remains open; the message exists only in memory, which is
+   precisely why 995's witness reads it there.
+
+### 10.10 Repro
+
+All commands are `python3 -I` scripts over `/tmp/dyld_ios7` and `/tmp/dyld_objd.txt`; new artifacts
+this pass: `/tmp/w994_regs.txt` (the raw 994 block + IOS7LAB lines), `/tmp/w994_alloc.txt`
+(`_malloc`/`__cxa_allocate_exception`/`__Znam`/`_strdup` bodies), `/tmp/w994_throw.txt`
+(`__cxa_throw` → `RaiseException`), `/tmp/w994_r8.txt` (`r8`-write census), `/tmp/w994_lenwin.txt`
+(per-format windows), `/tmp/w994_final.txt` (full-string windows over all 145 formats),
+`/tmp/w994_load.txt` (`dyld::load`'s two throws + caller census of `isCompatibleMachO`),
+`/tmp/w994_str.txt` / `w994_str2.txt` (exact literals + try-region bounds),
+`/tmp/c_closure.txt` (696-image cache cross-check).

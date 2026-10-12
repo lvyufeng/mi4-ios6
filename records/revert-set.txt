@@ -14025,3 +14025,61 @@ set=armed-d13-8b4c9a3e sha256=2af1236f973732135eaf9078910d18fc2a0ea4a8c5b5415f28
 set=armed-d13-8b4c9a3e sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=994-ios7-trap-wire-and-minus3-timebase;-stage90_fixture.macho
 set=armed-d13-8b4c9a3e sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=994-ios7-trap-wire-and-minus3-timebase;-stage90-build-config.txt
 set=armed-d13-8b4c9a3e sha256=9830f8fbf7ad6758724e7f1fb8edaf40d1fb830558ab2776f6f431415b2f1a3b bytes=560 file=SHA256SUMS.txt role=994-ios7-trap-wire-and-minus3-timebase;-SHA256SUMS.txt
+# armed-d13-4efcabae  -  995: THE DYLD HALT-MESSAGE WITNESS (pool: osfmk/arm/trap.c) IS WIRED INTO sleh_undef.
+# Switch set is 994-s VERBATIM + STAGE90_XNU_DYLD_WITNESS=1; the ENTRY BIN moved (8b4c9a3e -> 4efcabae) and
+# ONE tree SOURCE file moves in THIS rung: osfmk/arm/trap.c - a POOL file; 995 does NOT touch the
+# assembly layer (osfmk/ipc/mach_kernelrpc.c, osfmk/arm/ios7_compat.h and osfmk/arm/traps_lo.s are
+# 994-s, unchanged; osfmk/arm/arm_vm_init.c and osfmk/arm/pmap.c are 993-s; this rung has NO pcb.c
+# and NO vm_resident.c change). A fresh checkout needs ALL SIX tools/stage_d13_kextb_login.sh,
+# tools/stage_d13_sp_align.sh, tools/stage_d13_vmhint_guard.sh, tools/stage_d13_commpage_alias.sh,
+# tools/stage_d13_ios7_traps.sh and tools/stage_d13_dyld_witness.sh drivers.
+#
+# 994 (pressed 2026-10-12, arm armed-d13-8b4c9a3e, commit a4a2532, evidence
+# out/stage90/captures/cancro-last_kmsg-994-armed-d13-8b4c9a3e.txt) CONFIRMED the trap-10 wire fix:
+# `IOS7LAB vm_allocate64 size=00000000:00001000 flags=1 result=0 address=000e1000` (log:4101) -
+# flags=1 is VM_FLAGS_ANYWHERE, where the pre-994 read produced 0 - and the frontier MOVED one step
+# further: dyld still halts, but now at its REAL error -
+#     :4103 onward, 235x: `usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x2beb90c4`
+# (slide 0xB8000, i.e. pc 0x2be010c4 = _dyld_fatal_error = fe de ff e7 = `udf #0xdefe`), with the
+# register block-s r5 = 0x2bedc390 = a heap string in dyld-s malloc pool - the message dyld::halt
+# was handed, which NOTHING on CANCRO can print: the tree-s own reader (the LEO witness,
+# trap.c:71-126) is compiled out (`#if defined(BOARD_CONFIG_QSD8250_LEO)`).
+#
+# 995: tools/stage_d13_dyld_witness.sh stages ONE pool edit - osfmk/arm/trap.c grows
+# ios7wit_dyld_message, called in sleh_undef immediately after the dyld_all_image_info_addr printf
+# (the SAME path that prints A, inside the `udf #0xdefe` branch; trap.c:877 returns early for
+# every other undefined instruction). The reader takes the message pointer from the word at
+# task->all_image_info_addr + 0x20 (the field setAlImageInfosHalt, dyld 0x2be08d04 =
+# `str r0, [r3, #32]`, writes; dyld::halt strlcpy-s _error_string into it) with copyin + copyinstr,
+# printing `IOS7WITNESS dyld msg=... copyinstr=... len=...` then `dyld> <text>` in 48-byte lines,
+# two print slots at most (claimed BEFORE any I/O - the halt re-executes forever and the console
+# block drops silently past 128 KiB), every failure branch printing its reason. Fail-soft: every
+# user read is a copyin; no panic, allocation, sleep or lock.
+# tools/check_d13_dyld_witness.py --expect on asserts, off the linked image-s own disassembly and
+# bytes, that ios7wit_dyld_message exists, that sleh_undef-s region calls it after a `bl printf`,
+# that the witness-s region calls copyin/copyinstr/printf and names the `#32` field offset, and
+# that the image carries the `IOS7WITNESS dyld msg=`, `dyld> %s` and `dyld> <copyinstr failed>`
+# literals; the FROZEN 994 image (out/stage90/captures/994-xnu_arm_entry.elf) is passed as
+# --control and must FAIL ON and PASS OFF.
+#
+# READING: `IOS7WITNESS dyld msg=... copyinstr=0 len=...` followed by `dyld> <text>` lines in the
+# first two `udf #0xdefe` dumps, the text naming a REAL dyld error (candidates by value:
+# `Library not loaded: %s`, dyld 0x2be0a35e, or a mach_error_string, 0x2be09220).
+# FALSIFICATION: no IOS7WITNESS header at all => the witness never ran (the switch did not reach
+# osfmk_arm_trap.o, or the trap is not on the reader-s path); a header with copyinstr=<nonzero> =>
+# A + 0x20 is not the message pointer in this dyld (fall back to the pool string at r5).
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never written -
+# fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-4efcabae sha256=4efcabaea9a229eba926a49516d9a7a034d6041997ca9bf257a8aeb7de9f72a8 bytes=6335572 file=xnu_arm_entry.bin role=995-dyld-halt-message-witness;-xnu_arm_entry.bin
+set=armed-d13-4efcabae sha256=7cd89e816cf320bb3121a27cb509456a8ee4df908bf9f1372148abf1f8d9bc73 bytes=7376100 file=xnu_arm_entry.elf role=995-dyld-halt-message-witness;-xnu_arm_entry.elf
+set=armed-d13-4efcabae sha256=e142007da5215fb35c9eece004a20e539093cf51a721742a0ad8681ebfec9473 bytes=1912 file=xnu_arm_entry.h role=995-dyld-halt-message-witness;-xnu_arm_entry.h
+set=armed-d13-4efcabae sha256=266cd517127b3b7d86e188fcb5faa56abdcae84d3e08b90f7d2dfe504d42bfd4 bytes=1566 file=xnu_arm_entry-config.txt role=995-dyld-halt-message-witness;-xnu_arm_entry-config.txt
+set=armed-d13-4efcabae sha256=c307896361360d745d44816a3e65aed7f631cc58c9e0261ca5b7b17306e26aab bytes=3149 file=xnu_arm_entry-sources.txt role=995-dyld-halt-message-witness;-xnu_arm_entry-sources.txt
+set=armed-d13-4efcabae sha256=1d48e2ca1f78fe259236249fa820e7b3e0a1ebdb70085a7a21e0e140fb72c1ae bytes=6830980 file=stage90.bin role=995-dyld-halt-message-witness;-stage90.bin
+set=armed-d13-4efcabae sha256=f839a135231a95d0c7802b40c497414b8d1288604347d789e8e0e97109aaac18 bytes=6893052 file=stage90.elf role=995-dyld-halt-message-witness;-stage90.elf
+set=armed-d13-4efcabae sha256=013b50237d020256e7ba169d178b5a944196847c12e3828c3887ced596801cd4 bytes=6834176 file=stage90.img role=995-dyld-halt-message-witness;-stage90.img
+set=armed-d13-4efcabae sha256=2921833bd62a30c296b81b7e840021ea729ea5f3a5a4050cc77f3faa2e5c78ba bytes=9355264 file=stage90-qcdt.img role=995-dyld-halt-message-witness;-stage90-qcdt.img
+set=armed-d13-4efcabae sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=995-dyld-halt-message-witness;-stage90_fixture.macho
+set=armed-d13-4efcabae sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=995-dyld-halt-message-witness;-stage90-build-config.txt
+set=armed-d13-4efcabae sha256=8a43216c20a59e57469ded3587c5fe3056c63a7b89e741d18a4602fe65dfdf12 bytes=560 file=SHA256SUMS.txt role=995-dyld-halt-message-witness;-SHA256SUMS.txt

@@ -805,6 +805,19 @@ DEFINES=(
 # spellings must carry the SAME value (`mi4-one-value-two-definitions`).
 [[ ${STAGE90_XNU_IOS7_TRAPS:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_IOS7_TRAPS=1)
 
+# 995's dyld halt-message witness (`osfmk/arm/trap.c`: `ios7wit_dyld_message` reads the message dyld
+# recorded before executing its fatal `udf #0xdefe` - the word at `task->all_image_info_addr + 0x20`
+# is dyld's `setAlImageInfosHalt`-written message pointer, and `copyin`/`copyinstr` bring it out,
+# fail-soft and print-bounded to two slots). 994's press confirmed the trap-10 wire fix and then
+# halted at dyld's own deliberate trap with a message NOTHING in this kernel can print: the tree's
+# own reader (the LEO witness) is compiled out on CANCRO. `trap.c` is a kernel-pool file, so the
+# switch goes to the SAME array as the kext guard / alignment / memq_hint / commpage / trap-wire
+# switches, not to `EXTRA_DEFINES` - and the linked image only LINKS
+# `out/xnu_kernel_obj_d13/osfmk_arm_trap.o`, so without this `-D` the witness is silently absent
+# (`tools/stage_d13_dyld_witness.sh` stages the tree; its gate is `defined()`-first, so switch OFF
+# compiles trap.c's original bytes).
+[[ ${STAGE90_XNU_DYLD_WITNESS:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_DYLD_WITNESS=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.  (`$GENERATED` is
