@@ -12,8 +12,18 @@ runtime return values and the failure site. 996's probe measures them; this docu
 **Method.** Every value below is a machine reading: `python3 -I` (`struct.unpack`, `int.from_bytes`),
 `grep -n`, `arm-none-eabi-nm`, `arm-none-eabi-objdump -d` — read **by value**, from the linked image
 where the claim is about the image. Line numbers are of
-`external/xnu-hd2-darwin13/xnu/` (the **build tree**, sha256 `c9b845a9…` = `bsd/vm/vm_unix.c`,
-`f91c3460…` = `osfmk/vm/vm_shared_region.c`).
+`external/xnu-hd2-darwin13/xnu/` (the **build tree**) at the **996 pre-image** unless a passage says
+otherwise: sha256 `c9b845a9…` = `bsd/vm/vm_unix.c` (996 probe staged → `516df232…`; 997 wire staged →
+`4b3ec2b8…`, +4 more lines below each gate), `f91c3460…` = `osfmk/vm/vm_shared_region.c`,
+`d8f41a7b…` = `osfmk/arm/status.c`, `079c7a17…` = `osfmk/arm/ios7_compat.h`.
+
+**Image identity (2026-10-12 22:05).** Image addresses below are read from
+`out/stage90/xnu_arm_entry.elf` sha256 `1bc1750c…` (7,380,384 B) — the **997 wire-ON** build
+(`IOS7LAB cache mapping` = 1, `IOS7LAB shared region` = 0, `IOS7SHREG` = 5, `IOS7WITNESS` = 22) — and
+move with every relink. The wire-OFF image this document's original addresses came from is kept as
+`out/stage90/captures/994-xnu_arm_entry.elf`; the 996-elf (`2af26d0a…`) address deltas and the staged
+files' line-number drift are tabulated in `docs/reference/d13-shreg-g1-audit.md` §§5a–5b (cited, not
+duplicated).
 
 ## 1. The two syscalls as wired here
 
@@ -21,13 +31,13 @@ where the claim is about the image. Line numbers are of
 |---|---|---|
 | master | `bsd/kern/syscalls.master:452` `{ int shared_region_check_np(uint64_t *start_address) NO_SYSCALL_STUB; }` | `:671` `{ int shared_region_map_and_slide_np(int fd, uint32_t count, const struct shared_file_mapping_np *mappings, uint32_t slide, uint64_t* slide_start, uint32_t slide_size) NO_SYSCALL_STUB; }` |
 | generated row | `out/xnu_generated_d13/bsd/init_sysent.c:440` `munge_w, munge_d, _SYSCALL_RET_INT_T, 4` | `:649` `munge_wwwwww, munge_dddddd, _SYSCALL_RET_INT_T, 24` |
-| image row (`sysent` @ `0x804e5f84`, stride 24, read at `sysent+no*24`) | `narg=1 call=0x8041fd84 arg_bytes=4` | `narg=6 call=0x804201c0 arg_bytes=24` |
-| body | `shared_region_check_np @0x8041fd84` (`vm_unix.c:1105`) | `shared_region_map_and_slide_np @0x804201c0` (`vm_unix.c:1528`) |
-| helpers | — | `_shared_region_map @0x8041fe10` (`:1231`) · `_shared_region_slide @0x80420120` (`:1485`) · `vm_shared_region_map_file @0x80113cf4` (`vm_shared_region.c:969`) |
+| image row (`sysent` @ `0x804e6f84`, stride 24, read at `sysent+no*24`; rows @ `0x804e8b14` / `0x804e9894`) | `narg=1 call=0x8041fd84 arg_bytes=4` | `narg=6 call=0x80420320 arg_bytes=24` |
+| body | `shared_region_check_np @0x8041fd84` (`vm_unix.c:1105`) | `shared_region_map_and_slide_np @0x80420320` (`vm_unix.c:1528`) |
+| helpers | — | `_shared_region_map @0x8041ff40` (`:1231`) · `_shared_region_slide @0x80420280` (`:1485`) · `shared_region_copyin_mappings @0x8041fe4c` (`:1181`) · `vm_shared_region_map_file @0x80113cf4` (`vm_shared_region.c:969`) · `vm_shared_region_enter @0x80113fb8` (`:1221`) |
 
 `struct sysent` = `{int16 narg; int8; int8; ptr call; ptr munge32; ptr munge64; int32 ret; uint16
 arg_bytes}` (`bsd/sys/sysent.h:42-53`) = 22 B, aligned to **24**. The two rows above are the "the
-dispatch is the claim" check (`mi4-a-claim-in-a-comment-is-not-a-check`) the 996 checker re-runs.
+dispatch is the claim" check (`mi4-a-claim-in-a-comment-is-not-a-check`) the 996/997 checkers re-run.
 
 ## 2. The wire shape — PROVEN, and it is a 994-class defect *in the struct*, not in the arg list
 
@@ -46,13 +56,22 @@ For 294 the wrapper `0x2be05774` is `mov r1,r0; … mov.w r0,#294; blx 0x2be1c20
 * field use: `ldr r6,[r8]` (address), `ldr r4,[r8,#8]` (size), `ldr r2,[r8,#16]` (fileOffset),
   `ldr r1,[r8,#20]` (maxProt), `ldr r0,[r8,#28]` (initProt) — `0x2be05848-0x2be05870`.
 
-By value in the **linked image**: `shared_region_copyin_mappings @0x8041fdf0` is
+By value in the **wire-OFF image** (the 994 control `out/stage90/captures/994-xnu_arm_entry.elf`, and
+the 996 pool object `3d660224…`): `shared_region_copyin_mappings @0x8041fdf0` is
 
 ```
 8041fdf4: add r1, r2, r2, lsl #2     ; count * 5
 8041fdf8: lsl r2, r1, #2             ; count * 20        <- sizeof(struct shared_file_mapping_np) == 20
 8041fdfc: mov r1, r3 ; b copyin
 ```
+
+**In the current 997 wire-ON image the same function is @`0x8041fe4c` and the ×20 pair is gone —
+the gated 32 B branch is what is linked:** `0x8041fe60: add r0, r1, r2, lsl #5` (bounds: user +
+count*32), `0x8041fe7c: lsl r2, r9, #5` (copyin size = count*32), `0x8041ff28: add r6, r6, #32`
+(per-record pointer stride), guarded by `sub r0,r2,#9; cmn r0,#8; bcc → EINVAL` (count 0…8) and, per
+record, an `address>>32 | size>>32 | offset>>32` test and `address + size > 0x40000000`
+(`0x8041fee8: rsbs r1, r4, #1073741824`). The 996-elf addresses of the ×20 insns were
+`0x8041fe44`/`0x8041fe48`/`0x8041fe50` (audit §5a).
 
 because `mach_vm_address_t`/`_offset_t`/`_size_t` are `uint32_t` here (`osfmk/mach/arm/vm_types.h:107-113`,
 "We target iOS 4.3") while `vm_prot_t` is `int` → `{4,4,4,4,4}` (`osfmk/mach/shared_region.h:108-114`).
@@ -94,10 +113,14 @@ one mapping that gets slid**, filling `mapping_to_slide` (`:1061-1085`).
 | `vm_unix.c:1130-1138` | copyout to `uap->start_address` fails | EFAULT 14 (copyout's) |
 | `vm_unix.c:1150-1153` | `vm_shared_region_get(current_task()) == NULL` — no region | **EINVAL 22** |
 
-copyout width is `sizeof(mach_vm_offset_t)` = **4**; the image proves it (`shared_region_check_np`
-`0x8041fdc8: mov r2,#4; bl copyout`). dyld allocated 8 bytes for it and zeroed both words
-(`0x2be04fd4-0x2be04fd8`), then reads **only the low word** (`ldr.w r4,[r4,#156]`, `0x2be05020`), so
-both the 4-byte and the platform-gated 8-byte copyout stay inside dyld's buffer — no defect at 294.
+copyout width is `sizeof(mach_vm_offset_t)` = **4** in the wire-OFF image (`0x8041fdc8: mov r2,#4` /
+`0x8041fdcc: bl copyout` — the 994 control; the 996 elf's was `0x8041fdf8`/`0x8041fdfc`, audit §5a).
+The current wire-ON image widens this one site to the platform ABI's full 8 B
+(`0x8041fe04: mov r2,#8` / `0x8041fe08: bl copyout`, the high word assembled as 0 — the wire checker's
+clause 3), which is the same platform-gated width the source carries. dyld allocated 8 bytes for it
+and zeroed both words (`0x2be04fd4-0x2be04fd8`), then reads **only the low word**
+(`ldr.w r4,[r4,#156]`, `0x2be05020`), so **both widths** stay inside dyld's buffer and the
+caller-visible bytes are identical — no defect at 294 either way.
 
 **Reachability.** A region *does* exist on CANCRO: `vm_map_exec` calls `vm_shared_region_enter`
 unconditionally (`vm_map.c:8642`, `fsroot = p->p_fd->fd_rdir` = NULL, `bsd/kern/kern_exec.c:916-919`),
@@ -177,10 +200,50 @@ region *enter*, not from the 438 mapping path (which enters the region's submap,
 **Geometry (G1), by value:** the cache's three mappings live at **`0x2C000000..0x3C236000`**, the
 CANCRO shared region at **`0x30000000..0x40000000`**. `target_address = sfm_address - sr_base_address`
 (`vm_shared_region.c:1088-1089`) is computed in 32-bit arithmetic: mapping[0] gives `0xFC000000`, far
-outside the submap's `[0, 0x10000000)` — with `VM_FLAGS_FIXED|VM_FLAGS_ALREADY` that is a mount of
-KERN_NO_SPACE → **ENOMEM 12**, and mapping[2]'s end would not fit either. So even with the wire fixed,
-**G1 must open** (base `0x2C000000`, size `0x14000000`, the `IOS7_COMPAT_PLATFORM` create override) for
-the cache to land where dyld expects it.
+outside the submap's `[0, 0x10000000)` — the range-fit `RETURN` (`vm_map.c:1797`) is KERN_NO_SPACE →
+**ENOMEM 12** (folded at `vm_unix.c:1418-1433`). mapping[2]'s range **does** fit that submap
+(`0x39f48000 + 0x022ED000 − 0x30000000 = 0x0C236000 < 0x10000000`); its real wall is the **named-entry
+size check** (`vm_map.c:2380-2381`: `0x0DF46000 + 0x022ED000 = 0x10233000 > mem_entry->size`
+`0x10000000`, set at `vm_shared_region.c:681`) → KERN_INVALID_ARGUMENT → EINVAL (this corrects the
+earlier "mapping[2] would not fit either" — audit §5c1). Under G1 (entry size `0x14000000`) both fit.
+So even with the wire fixed, **G1 must open** (base `0x2C000000`, size `0x14000000`, the
+`IOS7_COMPAT_PLATFORM` create override) for the cache to land where dyld expects it.
+
+## 6b. The slide is fixup-only — the geometry tension, resolved by value
+
+996 measured `slide=0x3811000` (§7b DELTA 2), which raises arithmetic the model must survive: the cache
+is 315,952,666 B = `0x12D50D1A`; unslid from `0x2C000000` it ends `0x3ED50D1A` (fits
+`0x2C000000..0x40000000`), but that same span **plus** the slide would end `0x42561D1A` — past
+`0x40000000`, impossible in 32-bit VA. By value, **no code on this path adds `slide` to an address**:
+
+* Mapping addresses are used verbatim, region-relative: `target_address = mappings[i].sfm_address -
+  sr_base_address` (`vm_shared_region.c:1088-1089`) — there is no slide term.
+* `slide` is added only to **pointer words inside mapped pages**: `*ptr_to_slide += slide;`
+  (`vm_shared_region.c:1629`, inside `vm_shared_region_slide(vaddr, pageIndex)`), whose only caller is
+  the page-in slide (`vm_pageout.c:7948` in `vm_page_slide`; `pageIndex = (page->offset -
+  slide_info.start)/PAGE_SIZE`).
+* `slide_start` is a **user VA**: it is the *source of the kernel's copyin* of the slide-info blob —
+  `copyin((user_addr_t)slide_start, slide_info_entry, slide_size)` (`vm_unix.c:1533`) — so
+  `0x3F9BD000` must be mapped in dyld's space when the slide runs, and `slide_size` `0x89000` sits
+  under `SANE_SLIDE_INFO_SIZE` = 1 MiB (`vm_shared_region.c:1393`).
+* `slide_info.start/end` are **file offsets** of the slid mapping (`offset = start =
+  mapping_to_slide.sfm_file_offset` at `vm_shared_region.c:1456`; `slide_info.start = offset`,
+  `.end = start + size` at `:1508-1509`) — not virtual addresses.
+
+The tension dissolves rather than forcing a re-model: the slid values are page **content**, and the
+mapping addresses are whatever dyld sends. If the four `va` fields (997) are unslid, the layout
+`[0x2C000000, 0x3ED50D1A)` plus the slide-info at `[0x3F9BD000, 0x3FA46000)` fits the 320 MiB window
+exactly; if they are slid, the 32 B branch's own bound (`address+size > 0x40000000` → EINVAL) fires
+first — a distinguishable signature with no `map_file` line.
+
+**`mapping_to_slide`, the §5 wire**: selected by `mappings[i].sfm_init_prot & VM_PROT_SLIDE`
+(`vm_shared_region.c:1061`), **first match wins** (`found_mapping_to_slide`, `:1082`; later matches
+only log). §5's "the measured cache has no `0x20` prot" premise came from the now-falsified
+three-mapping model (§7b DELTA 1) — with `count=4`, 997's `init=` fields are what settle it. On the
+slide path `_shared_region_slide` runs `slide_init` → the `object->internal` check → `kmem_alloc` →
+`copyin` from `slide_start` → `vm_shared_region_slide_sanity_check` (`vm_shared_region.c:1548-1585`:
+toc/entry indexes bounded by the copied header's counts; a `vm_protect` failure **panics** at
+`:1564`; an index failure prints + EFAULT).
 
 ## 7. What the 996 probe will print, and what each reading means
 
@@ -206,20 +269,159 @@ not visible at 438's exit sites — `IOS7SHREG map_file kr=%d`.
   been recompiled); no `IOS7SHREG` lines in the log with the bytes present ⇒ dyld never reached
   `mapSharedCache` (cross-check the witness's `cacheBase` reading).
 
+## 7b. 996's RESULT — PRESSED `armed-d13-cea0c1c2` (the readings this document predicted)
+
+Capture: `out/stage90/captures/cancro-last_kmsg-996-armed-d13-cea0c1c2.txt` (sha256 `26ee7e84…`; the
+probe's lines at `:4101-4105`):
+
+```
+IOS7SHREG check_np  pid=1 out=0x2fd0b9d0 / ret=12
+IOS7SHREG map_slide pid=1 fd=0 count=4 mappings=0x2fd0b848 slide=0x3811000 slide_start=0x3f9bd000 size=0x00089000
+IOS7SHREG map_file  kr=4      IOS7SHREG map_slide ret=22
+```
+
+* `check_np ret=12` — the region exists and is empty: §3's first-call prediction, exactly.
+* `map_file kr=4` + `map_slide ret=22` — **§2 CONFIRMED on hardware**: KERN_INVALID_ARGUMENT folded to
+  EINVAL(22) at `vm_unix.c:1418-1433` is `vm_map_enter_mem_object`'s `initial_size == 0`
+  (`mapping[0].size` = the high word of dyld's 32-bit `0x2C000000`) — the 32-vs-20 B misparse, before
+  any slide work. The witness adds `cacheBase(aii+0x64) = 0`: the cache was never mapped.
+
+**The two DELTAS — registered, not reinterpreted** (this document's own rule, §7):
+1. **`count=4`, not 3.** dyld sends four 32 B mapping records (their `va/size/offset/max/init` print on
+   997); §2's model read a **three**-record `mappingInfo` out of the card image. The *mechanism*
+   (kernel copies N×20 of N×32) is unchanged — with N=4 it copies 80 of 128 bytes, and m[0].size is
+   still `hi32(0x2C000000)` = 0.
+2. **`slide=0x3811000`, not 0**, with `slide_start=0x3f9bd000` (`0x643000` below `0x40000000`, i.e.
+   inside any window that holds the cache) and `slide_size=0x89000`. The slide path is live for the
+   first time; how it composes with the geometry is resolved in §6b.
+
+**The full halt message** (witness rev-3; len=103 including the NUL — earlier captures' `?` was the
+witness's `\n`→`?` rendering): `Library not loaded: /usr/lib/libbsm.0.dylib` /
+`Referenced from: /sbin/launchd` / `Reason: image not found`. `target copyinstr=996748` (`0xF34CC`)
+is the **fault-address echo**, not the string pointer — the witness's `.Lcopystrfault` path does not
+set `r0`, so that companion word reads back the faulting address; it must not be used as a pointer.
+
 ## 8. Rungs this document maps, in order (design, not authorised here)
 
 1. **996 = measure** (this probe + the witness rev-3). No behaviour change; decides between the two
-   stories above.
-2. **G3 (the 32 B wire) first, only if 996 shows the §2 misparse**: the branch already exists at
-   `vm_unix.c:1174-1204` but is keyed on `ios7lab_cache_abi()`; opening it for CANCRO is a one-line
-   gate decision (`ios7lab_cache_abi` → true under a `STAGE90_XNU_*` switch), or a board-neutral
-   32 B-wire adapter mirroring 994's traps — same shape, same risk, and the checker must show the
-   `IOS7LAB cache mapping` lines appearing.
-3. **G1 (geometry) after G3**, because with G3 alone mapping[0] no longer dies at `initial_size == 0`
-   but dies at `0xFC000000` (§6). G1 is the `IOS7_COMPAT_PLATFORM` create override, which is also what
-   makes `vm_shared_region_enter`'s pre-nesting prefix branch (`vm_shared_region.c:1272-1305`, `0x30000000
-   - 0x2C000000` = 64 MiB mapped un-nested) necessary.
+   stories above. **DONE — §7b:** §2's story was the right one; the two DELTAS are registered.
+2. **G3 (the 32 B wire) — SHIPPED as `STAGE90_XNU_SHREG_WIRE` (997).** The 32 B branch
+   (`vm_unix.c:1174-1204` in this document's base file; `:1190-1219` with the 996 probe staged —
+   audit §5c4) is opened by the 994 pattern: each of the three
+   `#if IOS7_COMPAT_PLATFORM` lines gains
+   `|| (defined(STAGE90_XNU_SHREG_WIRE) && STAGE90_XNU_SHREG_WIRE)` (994's spelling,
+   `mach_kernelrpc.c:39`) and the file-local `ios7lab_cache_abi()` body returns 1 under the same
+   switch; the **global** selector is untouched (17 call sites, 12 files). Tools:
+   `tools/patch_d13_shreg_wire.py` (pre-image `516df232…` → staged `4b3ec2b8…`) and its sibling
+   checker `tools/check_d13_shreg_wire.py`. Line numbers throughout this document are the pre-image;
+   the staged file shifts regions below each gate (+3/+4). **997's pre-registration:** the four
+   `IOS7LAB cache mapping …` lines always print on a clean parse — their `va` fields are §6b's
+   discriminator. If geometry blocks: `map_file kr=3` (KERN_NO_SPACE) + `map_slide ret=12` (ENOMEM);
+   if instead the branch's own bound (`address+size > 0x40000000` → EINVAL) trips: **no `map_file`
+   line** + ret=22 — the addresses are slid and 32-bit VA cannot hold them; stop and re-model before
+   G1, do not widen anything.
+   **MEASURED (2026-10-12 22:05, the build now in `out/stage90`):** `xnu_arm_entry.elf` sha256
+   `1bc1750c…` carries the ON shape — the literal @`0x8053bcbe` referenced only in
+   `shared_region_copyin_mappings` @`0x8041fea4` → printf `0x8041ff1c`; the three 32 B shapes
+   @`0x8041fe60`/`0x8041fe7c`/`0x8041ff28`; the ×20 pair absent; 294's copyout `r2=8` @`0x8041fe08`;
+   the per-mapping bound guard @`0x8041fee8`. `tools/check_d13_shreg_wire.py --expect on --tree
+   <…/bsd/vm/vm_unix.c>` = **PASS** on this elf (all three clauses + the source state: 3 gated `#if`
+   lines, 1 helper body gate, the mapping printf on line 1218 inside a gate region). The ON rehearsal
+   object `3fa5c230…` (27,964 B; OFF `3d660224…` 27,628 B) is byte-equal to the pool object
+   `out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o` as buildplumb rebuilt it (22:04) — the build's own
+   receipt.
+3. **G1 (geometry + stack) after G3** — DRAFTED (tools exist, nothing staged or authorised; the
+   window constants stay the tree's own and are frozen only after 997's `va` readings). With G3 alone
+   mapping[0] no longer dies at `initial_size == 0` but dies region-relative at `target_address =
+   sfm_address - sr_base_address` (§6). G1 opens the create override **already in the tree** at
+   `vm_shared_region.c:626-639` (`base 0x2C000000`, `size 0x14000000`) **together with its stack half**
+   — `status.c:62-73`'s `ios7lab_user_stack()` (`0x2BE00000`), a hard requirement of the same arm:
+   otherwise the FIXED stack allocation at `trunc(user_stack − 1 MiB)` lands inside the new window and
+   *every* process's stack is relocated (audit §2). **Draft-v2 shape** (switch name **proposed, not
+   frozen**: `STAGE90_XNU_SHREG_GEOM`): four 1:1 line substitutions in the two `.c` files plus one header helper
+   — `#if IOS7_COMPAT_PLATFORM` → the 994 gate spelling in both; `if (ios7_compat_vmabi_enabled())` →
+   `if (ios7_shreg_geom_enabled())` at both call sites; `static inline int ios7_shreg_geom_enabled(void)`
+   added beside `ios7_traps_enabled()` (`ios7_compat.h:41`), returning 1 under the switch, the global
+   selector otherwise. Tools: `tools/patch_d13_shreg_geom.py` (pre-images `f91c3460…`/`d8f41a7b…`/
+   `079c7a17…` → staged `482b4288…`/`da944439…`/`58cc2823…`) and `tools/check_d13_shreg_geom.py`.
+   **OFF-identity, MEASURED (rehearsal 2026-10-12 22:09):** the `.c` line counts never change, the
+   header's own lines are never a `.c`'s `__LINE__`, and the helper's OFF branch expands token for
+   token to `ios7_compat_vmabi_enabled()` — a same-path pre-then-staged compile of **all 212 objects
+   in the seven `ios7_compat.h` includer dirs** (osfmk/vm 21, osfmk/arm 19, osfmk/kern 58, osfmk/ipc
+   17, bsd/vm 3, bsd/kern 84, bsd/dev/arm 10) is byte-identical, and a read-only live-tree compile
+   reproduces the repo's own 997 `osfmk_vm_vm_shared_region.o` exactly (`99c25c5b…` both). The draft's
+   **v1 inline `#if` wrap FAILED** that test: `debug.h:264-266`'s
+   `PANIC_LOCATION` (`# ex "@" __FILE__ ":" __LINE__`) moved this file's three `panic` sites to
+   `:1568`/`:1696`/`:1700` (from `:1564`/`:1692`/`:1696`) while `.text` stayed identical — hence
+   1:1-only. **ON evidence:** `IOS7LAB shared region` string 0→1; `mov r5, #738197504 ; 0x2c000000`
+   and `mov sl, #335544320 ; 0x14000000` in `vm_shared_region.o` (`ea0ba7f8…` vs OFF `0de06f8f…`);
+   `movt r0, #12256 ; 0x2fe0` → `movt r0, #11232 ; 0x2be0` at all three `status.o` sites
+   (`df0f2cd8…` vs OFF `28a3d47c…`); non-target objects unchanged ON vs OFF. The enter path it relies
+   on is real: `vm_shared_region_enter`'s pre-nesting prefix branch (`:1272-1305`) maps
+   `[base, nesting_start)` — the 64 MiB `0x2C000000..0x30000000` — un-nested before the nested loop;
+   `NESTING_BASE_ARM 0x30000000` / `NESTING_SIZE_ARM 0x10000000` (`shared_region.h:69-70`) complete
+   the `0x14000000` total. By-value audit of the whole arm: `docs/reference/d13-shreg-g1-audit.md`.
 4. **G2 (the `VM_FLAGS_RETURN_DATA_ADDR 0x100000` sites) and the slide** last: with the cache mapped
    the slide path is exercised for the first time, and §5's uninitialized `mapping_to_slide` is the
    first thing to measure (the probe's `slide=`/`size=` words and, on failure, `slide_info
    initialization failed with kr=` on the console).
+
+## 9. 997's RESULT — PRESSED `armed-d13-518b6a94`: G3 CONFIRMED on hardware; the block is G1's geometry
+
+Capture: `out/stage90/captures/cancro-last_kmsg-997-armed-d13-518b6a94.txt` (sha256 `23bb574b…`;
+22,757 lines; the probe's lines at `:4101-4109`; the witness at `:4120-4147`; runner exit 0 — the
+payload returned and reset, the USB ladder never reached `machine_idle`, so the last_kmsg channel
+carried the console, not the EP1 stream). Switch set = 996's verbatim + `STAGE90_XNU_SHREG_WIRE=1`.
+
+```
+IOS7SHREG check_np   pid=1 out=0x2fd2b9d0 / ret=12
+IOS7SHREG map_slide  pid=1 fd=0 count=4 mappings=0x2fd2b848 slide=0xd9c000 slide_start=0x3cf48000 size=0x00089000
+IOS7LAB cache mapping 0 va=2cd9c000 size=0c266000 offset=00000000 max=5  init=5
+IOS7LAB cache mapping 1 va=39004000 size=01ce0000 offset=0c266000 max=23 init=23
+IOS7LAB cache mapping 2 va=3ace4000 size=022ed000 offset=0df46000 max=1  init=1
+IOS7LAB cache mapping 3 va=3cfd1000 size=00177000 offset=12bda000 max=1  init=1
+IOS7SHREG map_file   kr=1
+IOS7SHREG map_slide  ret=14
+```
+
+**The four `va` lines are the point: the 32 B wire PARSES.** §8 item 2's fallback "no `map_file`
+line" did not happen — the branch read all four records correctly (the ends chain exactly:
+`2cd9c000+0c266000=39004000`, `+01ce0000=3ace4000`, `+022ed000=3cfd1000`, `+00177000=3d148000`;
+offsets contiguous from 0, the last ending `0x12d51000`). Zero-lines falsification retired: the
+define reached the compiled object, and the checker's ON clauses hold on the pressed elf.
+
+**Failure signature: (a), the pre-registered ALTERNATIVE inner return — kr=1, not kr=3.** `map_file
+kr=1` (KERN_INVALID_ADDRESS) folds at `vm_unix.c:1443-1459` to EFAULT(14) → `map_slide ret=14`. By
+value, the firing site is **`vm_map.c:1846`** in `vm_map_enter`'s **FIXED** path:
+`start = m[0].va − sr_base = 0x2cd9c000 − 0x30000000 = 0xFCD9C000`, `size = 0x0c266000`; with
+`vm_map_offset_t` = `uint32_t` (`osfmk/mach/arm/vm_types.h:111-113`), `end = start + size` wraps to
+`0x09002000` and the guard `(start < effective_min_offset) || (end > effective_max_offset) ||
+(start >= end)` (`:1843-1845`) trips on `start >= end`. **Correction to §8 item 2's forecast:** the
+primed `kr=3`/KERN_NO_SPACE at `vm_map.c:1797` is the ANYWHERE loop's range-fit; this call passes
+`VM_FLAGS_FIXED | VM_FLAGS_ALREADY` (`vm_shared_region.c:1116-1127`), so the FIXED-path guard fires
+first. Same conclusion — geometry blocks — different line; recorded, not reinterpreted.
+
+**What the `va` fields answer (the §6b discriminator — addresses ARE SLID).** m[0].va
+`0x2cd9c000` = `0x2C000000` (unslid base) + THIS run's `slide=0xd9c000` **exactly**; 996's
+`0x3811000` was a different per-run draw. So dyld passes **already-slid** addresses; the kernel's
+only relative arithmetic is `sfm_address − sr_base_address` (`vm_shared_region.c:1088-1089`), and
+the slide stage is fixup-only — §6b resolved by measurement. **G1's constants are now frozen per §8
+item 3's rule:** all four slid spans lie inside `[0x2C000000, 0x40000000)` (m[0] starts
+`0x2cd9c000`; m[3] ends `0x3d148000`), and under the override `target = va − 0x2C000000` gives
+m[0] `0xd9c000`..`0xd002000` and m[3] ending `0x11148000` — every mapping fits the `0x14000000`
+window. **VM_PROT_SLIDE (0x20) appears — on m[1]** (`init=max=0x23`), not the last mapping: the
+`mapping_to_slide` is the `0x01ce0000` piece at `va=0x39004000`, answering §5's open question.
+`slide_start=0x3cf48000` + `size=0x89000` = `0x3cfd1000` = **m[3].va exactly**, the window lying
+inside m[2]'s span — a dyldtrace datum, recorded here.
+
+**Everything else held.** `check_np ret=12` (§3's first-call reading, constant). Regression guards:
+`VMHINT991` 2× at exec (`:4096-4097`), `IOS7LAB vm_allocate64 flags=1 result=0` (`:4110`). The halt
+is unchanged — same 102-char `libbsm` message, both witnesses `len=103`, `r5 matches errorMessage`,
+`cacheBase=0` (vacuous per dyldtrace), `r8` interior `len=0` again — because 438 still dies, now at
+the geometry wall. 232× `udf` retry, `No errors detected` tail.
+
+**Rung order, updated:** §8 items 1–2 DONE (997 CONFIRMED G3 on hardware). Item 3 is the next
+build: **998 = G1 under `STAGE90_XNU_SHREG_GEOM`**, the draft-v2 shape with constants as frozen
+above plus the hard `status.c` stack half; with it `map_file` should return 0 for all four mappings
+and the slide stage runs for the first time (then dyld's halt, if any, moves past the shared cache
+— item 4's `mapping_to_slide` question is now expected to be exercised with m[1]).
