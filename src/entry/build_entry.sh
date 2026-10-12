@@ -1045,6 +1045,22 @@ if [[ $USB_STREAM -eq 1 && $USB_ENUM -eq 0 ]]; then
     echo "          stream would have nowhere to send and the switch would be a record that says otherwise." >&2
     exit 1
 fi
+# **988: the record's account of WHICH POOL this entry image links.** `STAGE90_XNU_KEXTB_LOGIN=1` is the
+# arm that compiles 987's `removeKextBootstrap` __LINKEDIT teardown out of `libkern/c++/OSKext.cpp`:
+# `tools/build_xnu_arm_kernel.sh:763` defines the guard for the kernel pool exactly when this variable is
+# 1, and the linked-image clause at the 988 site below refuses an image that still carries the faulting
+# dereference. This file compiles nothing from it - the pool is another script's - but the VALUE enters
+# `ENTRY_ARM_KEYS`' record below, and a record that says 1 over a pool that was built with 0 is the
+# one-value-two-definitions defect with a press in the middle of it. So it is validated like the USB keys
+# above, and for the same reason: a value that is neither 0 nor 1 is REFUSED here, because the pool's own
+# `[[ ${STAGE90_XNU_KEXTB_LOGIN:-0} -eq 1 ]]` would read a typo as *off* while the record carried it
+# verbatim - and the two would disagree with nothing able to fail on it.
+KEXTB_LOGIN=${STAGE90_XNU_KEXTB_LOGIN:-0}
+case "$KEXTB_LOGIN" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_KEXTB_LOGIN='$KEXTB_LOGIN' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **911c: the RAM bank layout, measured from the Qualcomm SMEM RAM-partition table.** The goal's newest
 # clause is that XNU recognize the Mi 4's 3 GB of RAM, and the 911c design established that the repo
 # holds NO low-bank base or size anywhere - every "low bank" is an inference from "3 GB minus 1.5 GB".
@@ -1357,6 +1373,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_MEM_SIZE_MAX
                 STAGE90_XNU_MEM_TOTAL
                 STAGE90_XNU_ENTRY_WINDOW
+                STAGE90_XNU_KEXTB_LOGIN
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1490,6 +1507,13 @@ do
         # is read with its own `${...:-0}`. The default is the same literal, so an unset switch and an
         # explicit `0x04000000` are the same arm and two spellings of one value.
         STAGE90_XNU_ENTRY_WINDOW)     _v=${STAGE90_XNU_ENTRY_WINDOW:-0x04000000} ;;
+        # 988: whether 987's `removeKextBootstrap` __LINKEDIT teardown was compiled out of this
+        # image's pool. Read from `$KEXTB_LOGIN`, which is validated 0/1 at its own assignment far above
+        # this loop (the USB keys' pattern) and which `tools/build_xnu_arm_kernel.sh:763` also reads to
+        # define the guard for the pool - so the record and the pool cannot be built from two spellings
+        # of this switch. The 988 clause at the link site below refuses a link that still carries the
+        # faulting dereference.
+        STAGE90_XNU_KEXTB_LOGIN)      _v=$KEXTB_LOGIN ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -30167,6 +30191,45 @@ verify_trace_symbols() {
             layout_fail "the first instruction at mlckwait in this image is [$mlckwait_orr] and not 'e3833003 orr r3,r3,#3' (setting ARM_LCK_WAITERS): with #0 the parked waiter sets no bit, lck_mtx_unlock takes its fast path, thread_wakeup_one is never delivered and the thread is stranded - the lost wakeup 985's run parked on. Run tools/stage_d13_hw_lock_986.sh, then tools/assemble_arm_layer.sh, then rebuild the entry image"
         say "  xnu_entry_986: mlckwait sets ARM_LCK_WAITERS unconditionally (\`orr r3,r3,#3\`), so lck_mtx_unlock's slow path wakes the parked waiter instead of taking the fast path and stranding it"
     fi
+    # **988: `removeKextBootstrap` must not tear down a `__LINKEDIT` segment this image does not have.**
+    # 987's run (`armed-d13-2df6333a`, `cb2dd66`) booted past the whole HFS mount and all of `bsd_init`
+    # to `bsd_init: done`, then prefetch-aborted at the first statement after it - `osfmk/kern/
+    # startup.c:408 OSKextRemoveKextBootstrap()`. Inside `OSKext::removeKextBootstrap()`
+    # (`libkern/c++/OSKext.cpp`) `getsegbyname("__LINKEDIT")` (`:843`) returns NULL - this image's
+    # synthetic Mach-O declares ncmds=3 (`__TEXT`/`__DATA`/`__PRELINK_TEXT`) and no `__LINKEDIT` - and
+    # the live `#if CONFIG_KXLD` block (`:861-950`; Apple's `:850-939` before the guard was staged)
+    # dereferences `seg_to_remove` unguarded at `:870`:
+    # `pc=0x800b2c90 e590501c ldr r5,[r0,#28]`, r0=0. `tools/stage_d13_kextb_login.sh` wraps that block
+    # in `#ifndef STAGE90_XNU_KEXTB_LOGIN`, so with the switch the teardown compiles out of the pool and
+    # must be **absent from the linked image**. This asserts that BY VALUE, both ways: the faulting
+    # `ldr rN,[rM,#28]` (ARM off-28 ldr immediate, `e59Rn Rd 01c`) is the segment dereference itself, and
+    # the block is the function's only `kmem_alloc` caller - so either one appearing means the switch did
+    # not reach the pool compile. Gated on the D13 tree: 4570's `OSKext.cpp` does not carry the guard and
+    # its `__LINKEDIT` is a real booter segment, so this is a D13-only property.
+    if [[ $D13_TRACE -eq 1 ]]; then
+        kxb_dump=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf")
+        grep -q '<_ZN6OSKext19removeKextBootstrapEv>:' <<< "$kxb_dump" ||
+            layout_fail "removeKextBootstrap is not in the linked image's disassembly, so 988's clause has no function to read the __LINKEDIT teardown out of - the boot stops at OSKextRemoveKextBootstrap (startup.c:408), so an image without the function is the wrong image"
+        # The function's instruction stream runs from its label to the next symbol label. Both bounds
+        # are read from objdump's own labels rather than by address arithmetic, so a label that moved
+        # cannot silently widen or narrow the range.
+        kxb_body=$(printf '%s\n' "$kxb_dump" |
+            awk '/<_ZN6OSKext19removeKextBootstrapEv>:/ { f = 1; next } f && /^[0-9a-f]+ </ { f = 0 } f { print }')
+        # The 987 fault SHAPE, and not merely an off-28 load: `bl getsegbyname` returns in r0 and the
+        # very next basic block dereferences it at the segment command's `vmaddr` (offset 28) with no
+        # intervening call - `e59 Rn Rd 01c`, the ARM ldr-immediate encoding. Walking the stream this
+        # way is what keeps an unrelated `[.., #28]` load elsewhere in the function from firing the
+        # clause, so the refusal below can only mean this link found the __LINKEDIT teardown.
+        kxb_deref=$(printf '%s\n' "$kxb_body" |
+            awk '{ if ($3 == "bl" || $3 == "blx") { gsb = ($5 ~ /getsegbyname/) ? 1 : 0; next }
+                   if (!hit && gsb && $2 ~ /^e59[0-9a-f][0-9a-f]01c$/) { hit = $2 } }
+                 END { if (hit) print hit }')
+        [[ -z $kxb_deref ]] ||
+            layout_fail "removeKextBootstrap in this image still dereferences the __LINKEDIT segment right after resolving it: [$kxb_deref] is an 'ldr rN,[rM,#28]' in the same block as a getsegbyname call, with no call in between - the unguarded \`seg_to_remove->vmaddr\` (987 faulted at 800b2c90 'e590501c ldr r5,[r0,#28]', r0=0). The pool was compiled without -DSTAGE90_XNU_KEXTB_LOGIN: run tools/stage_d13_kextb_login.sh, rebuild the kernel pool (STAGE90_XNU_KEXTB_LOGIN=1) and then the entry image"
+        grep -q '<kmem_alloc>' <<< "$kxb_body" &&
+            layout_fail "removeKextBootstrap in this image still calls kmem_alloc - the __LINKEDIT-copy path (OSKext.cpp:861-950) is that function's only caller, so its presence means the teardown block was compiled in and the switch did not reach the pool compile (STAGE90_XNU_KEXTB_LOGIN=1 not in the pool's DEFINES, or the pool was not rebuilt after tools/stage_d13_kextb_login.sh)"
+        say "  xnu_entry_988: removeKextBootstrap no longer dereferences an absent __LINKEDIT - no 'ldr rN,[rM,#28]' segment dereference and no kmem_alloc in the function, so the statement after bsd_init: done (startup.c:408) cannot prefetch-abort as 987's run did"
+    fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
     # `ast_taken_user`**: its arm return path (`cswitch.s:144` `thread_exception_return`) delivers by
@@ -38150,6 +38213,10 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "STAGE90_XNU_IDLE_CACHE_ENABLE=$IDLE_CACHE_ENABLE"
     echo "STAGE90_XNU_ISTACK_SEPARATE=$ISTACK_SEPARATE"
     echo "STAGE90_XNU_IDLE_STACK=$IDLE_STACK_FOR_RECORD"
+    # 988's switch. Read from the environment variable of the same name (the case arm above does the
+    # same), because the record this image replaces predates the key - so the value has exactly one
+    # source and the write-back and the check cannot disagree ([[mi4-one-value-two-definitions]]).
+    echo "STAGE90_XNU_KEXTB_LOGIN=${STAGE90_XNU_KEXTB_LOGIN:-0}"
     # 535's switch, and the only one whose *link* the build changes (see its own block above): the
     # record is what makes "this image has the seam hook" a thing the gate can read rather than a
     # thing a reader assumes from the hash.

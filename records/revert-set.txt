@@ -13646,3 +13646,45 @@ set=armed-d13-2df6333a sha256=200b1ef1f30213ee04a8f1923990d2f0f65c84da51969597c7
 set=armed-d13-2df6333a sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=987-d13-hfs-malloc-zone-redirect-gated;-stage90_fixture.macho
 set=armed-d13-2df6333a sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=987-d13-hfs-malloc-zone-redirect-gated;-stage90-build-config.txt
 set=armed-d13-2df6333a sha256=e0a7666d368fdce113c62a5593e770984f1dd296ab3f0423d337cde2df56fb61 bytes=560 file=SHA256SUMS.txt role=987-d13-hfs-malloc-zone-redirect-gated;-SHA256SUMS.txt
+# armed-d13-707801c4  -  988: 987 + the __LINKEDIT KEXT-BOOTSTRAP TEARDOWN COMPILED OUT (STAGE90_XNU_KEXTB_LOGIN).
+# Switch set is 987-s UNCHANGED; the ENTRY BIN moved (2df6333a -> 707801c4) and the WHOLE pool was
+# rebuilt (the fix is a pool edit: libkern/c++/OSKext.o must drop the __LINKEDIT dereference).
+#
+# 987 (pressed 2026-10-12, arm armed-d13-2df6333a, commit cb2dd66) is a DECISIVE SUCCESS: the boot
+# ran the WHOLE HFS mount (HFSX vol header read at LBA 0x400002) and EVERY bsd_init line to
+# `bsd_init: done` (55 bsd_init: lines), cal_enter/exit=1, iokitinit_exit=1, then panicked at the
+# FIRST statement after bsd_init returns (startup.c:408 OSKextRemoveKextBootstrap()).
+#
+# ROOT CAUSE (988): `OSKext::removeKextBootstrap()` (libkern/c++/OSKext.cpp:746) has an UNGUARDED
+# lookup+dereference inside a LIVE `#if CONFIG_KXLD` block:
+#   seg_to_remove = (kernel_segment_command_t *)getsegbyname("__LINKEDIT");  // :843
+#   seg_data = (void *) seg_to_remove->vmaddr;                               // :859 (r0 == NULL)
+# Our synthetic Mach-O declares ncmds=3 with segments __TEXT/__DATA/__PRELINK_TEXT and NO
+# __LINKEDIT, so getsegbyname returns NULL and :859 dereferences it. BY VALUE: pc=0x800b2c90 =
+# removeKextBootstrap+0x198, `e590501c ldr r5,[r0,#28]`, r0=0, far=0x1c, fsr=0x5. The sibling
+# guarded calls at :805 (__KLD) and :838 (__symtab) do not fault; :843/:859 is the unguarded one.
+#
+# 988: wrap the whole `#if CONFIG_KXLD ... #else ... #endif` block in `#ifndef
+# STAGE90_XNU_KEXTB_LOGIN ... #endif` (tools/stage_d13_kextb_login.sh, idempotent; switch-off text
+# is byte-identical to Apple so 4570-s object does not move), and refuse a linked image whose
+# removeKextBootstrap still carries the faulting dereference.
+#
+# READ: past OSKextRemoveKextBootstrap (a new stop, or further: serial_keyboard_init,
+# vm_page_init_local_q, thread_bind, then vm_pageout() and the idle loop) => the __LINKEDIT deref
+# was 987-s frontier. FALSIFICATION: the same fault recurs => it did not take (stale object / the
+# guard did not reach the compile) or the deref is not the (only) cause.
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-707801c4 sha256=707801c460049cf87bb6b7251d1c85c3574fcb99fb45e014a8ffe262732e4b56 bytes=6335572 file=xnu_arm_entry.bin role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry.bin
+set=armed-d13-707801c4 sha256=7193f69955268f07399be63c33b48b47e4181fa0714978693f70f7af667101fc bytes=7375508 file=xnu_arm_entry.elf role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry.elf
+set=armed-d13-707801c4 sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry.h
+set=armed-d13-707801c4 sha256=a90f8b6bb23e36879fb950d8d1ce916deb13339f151a8e3bdb877e2423379b51 bytes=1435 file=xnu_arm_entry-config.txt role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry-config.txt
+set=armed-d13-707801c4 sha256=4cd03fa9d4a826cea9ac40d1cf143b58c6b7b6435fb64ce86364bfb5b5901e12 bytes=3149 file=xnu_arm_entry-sources.txt role=988-d13-kextb-linkedit-teardown-out;-xnu_arm_entry-sources.txt
+set=armed-d13-707801c4 sha256=8b0942052c3bd109e7dea6c2ac3ba073388b601977eecd91f26780302ef04cfd bytes=6830980 file=stage90.bin role=988-d13-kextb-linkedit-teardown-out;-stage90.bin
+set=armed-d13-707801c4 sha256=1777c602bf5ceec95709a7dd2e4f47f3c676b71626b375aacaa8a40f0d8dc753 bytes=6893052 file=stage90.elf role=988-d13-kextb-linkedit-teardown-out;-stage90.elf
+set=armed-d13-707801c4 sha256=ffdf85ddefd18b7adf6f034a40ed7603c6dade6fd01b083f0bc4f192d6fdff23 bytes=6834176 file=stage90.img role=988-d13-kextb-linkedit-teardown-out;-stage90.img
+set=armed-d13-707801c4 sha256=7e838e9cca8d536ebc8d8c4b7cf82e546d74ebffa8be5109384d61f7608e9a8b bytes=9355264 file=stage90-qcdt.img role=988-d13-kextb-linkedit-teardown-out;-stage90-qcdt.img
+set=armed-d13-707801c4 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=988-d13-kextb-linkedit-teardown-out;-stage90_fixture.macho
+set=armed-d13-707801c4 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=988-d13-kextb-linkedit-teardown-out;-stage90-build-config.txt
+set=armed-d13-707801c4 sha256=8cc9a32b6e01a1424f8af1928974def299bf4ae1f1678dca18977b138d2f656b bytes=560 file=SHA256SUMS.txt role=988-d13-kextb-linkedit-teardown-out;-SHA256SUMS.txt

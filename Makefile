@@ -188,6 +188,16 @@ check:
 # property (present, guarded, adjacent to the ROOT hfs_mountfs call) and refuses drift, so a re-provisioned
 # `external/` cannot leave the arm silently disarmed. Source half, no compiler, no device.
 	@tools/check_d13_root_rw_staged.sh
+# 988: the statement after `bsd_init: done`. 987's run booted the whole mount and all of BSD init, then
+# prefetch-aborted at `startup.c:408 OSKextRemoveKextBootstrap()` - `OSKext::removeKextBootstrap()`'s live
+# `#if CONFIG_KXLD` block dereferences `getsegbyname("__LINKEDIT")`'s NULL return, and this image's
+# synthetic Mach-O has no `__LINKEDIT` segment to find. On D13 the teardown is compiled out by wrapping
+# that block in `#ifndef STAGE90_XNU_KEXTB_LOGIN` (`tools/stage_d13_kextb_login.sh`), and
+# `tools/build_xnu_arm_kernel.sh` defines the switch for the pool when `STAGE90_XNU_KEXTB_LOGIN=1`.
+# `check_d13_kextb_login_staged.py` re-derives the property (guard present, wrapping the KXLD block) and
+# refuses drift, so a re-provisioned `external/` cannot leave the teardown silently compiled back in.
+# Source half, no compiler, no device.
+	@tools/check_d13_kextb_login_staged.py
 # 971: the console fix's SECOND half. 970g (`tools/stage_d13_boot_path.sh`) makes the entry's console
 # reachable through the boot table; but D13's `arm_vm_init` bzeroes a FRESH system table where 4570
 # `bcopy`s the boot table into it, so the console is lost again the moment `set_mmu_ttb(cpu_ttb)` runs.

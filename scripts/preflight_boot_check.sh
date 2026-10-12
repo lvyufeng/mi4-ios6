@@ -732,7 +732,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_MEM_SIZE_MAX
                 STAGE90_XNU_MEM_TOTAL
                 STAGE90_XNU_ENTRY_WINDOW
-                STAGE90_XNU_TREE_D13)
+                STAGE90_XNU_TREE_D13
+                STAGE90_XNU_KEXTB_LOGIN)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this
@@ -926,6 +927,22 @@ do
   # this build made carries a non-empty value and the branch above does not fire for it.
   if [[ -z $_v && $_k == STAGE90_XNU_MEM_TOTAL ]]; then
     printf '  %s=(absent, and a record that does not name the memory total is one built before 958 - the switch was off, the only value a pre-958 build could have written)\n' "$_k"
+    continue
+  fi
+  # **988's switch, the same one-way rule as 911b/911c/912/954/958, and for the same reason.** Every arm
+  # parked before 988 was built with the kext-bootstrap guard not in the tree at all, so its record has no
+  # `STAGE90_XNU_KEXTB_LOGIN` line; an absent key is not a missing value but the value - the switch was
+  # off, because it did not exist, so the `__LINKEDIT` dereference was compiled in, which is exactly the
+  # fault 987's press stopped on. Demanding the key would make every existing park unpressable (882's own
+  # defect, ten times repaired now), and the ladder still owes those presses. Unlike HFS_ROOT_MEDIA /
+  # ROOT_FROM_CARD / HDD_WRITE / CARD_COW there is no entry-ELF marker to ground this on: the switch is a
+  # POOL switch (it compiles the teardown out of `OSKext.cpp`), and a new unconditional `_off` marker
+  # would move the parked arms' image hashes with no `--gc-sections` in the link (965c's reason). A
+  # post-988 record can never reach this branch: `build_entry.sh`'s 678 two-way check refuses a record
+  # whose arm-key list omits the key, and the writer emits the line unconditionally (0 or 1), so a record
+  # this build made carries a non-empty value and the branch above does not fire for it.
+  if [[ -z $_v && $_k == STAGE90_XNU_KEXTB_LOGIN ]]; then
+    printf '  %s=(absent, and a record that does not name the kext-bootstrap guard is one built before 988 - the teardown was compiled in, the only value a pre-988 build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \

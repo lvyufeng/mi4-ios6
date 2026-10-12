@@ -743,6 +743,25 @@ DEFINES=(
 # actually carries.
 [[ ${HFS_PORT:-0} -eq 1 ]] && ! grep -q 'hfs/hfs_cnode.h' "$XNU/bsd/kern/kern_malloc.c" && DEFINES+=(-DSTAGE90_HFS_MALLOC_ZONE=1)
 
+# **988's `removeKextBootstrap` __LINKEDIT teardown, compiled out where the segment cannot exist.**
+# `osfmk/kern/startup.c:408 OSKextRemoveKextBootstrap()` is the first statement after `bsd_init()`
+# returns, and on D13 it reached `OSKext::removeKextBootstrap()` (`libkern/c++/OSKext.cpp`) and
+# prefetch-aborted at `800b2c90 e590501c ldr r5,[r0,#28]` with r0=0: `getsegbyname("__LINKEDIT")`
+# (`:843`) returned NULL - our synthetic Mach-O declares ncmds=3, `__TEXT`/`__DATA`/`__PRELINK_TEXT`,
+# and no `__LINKEDIT` - and the live `#if CONFIG_KXLD` block (`:861-950`; Apple's `:850-939` before the
+# guard below was staged) dereferences `seg_to_remove` unguarded at `:870`
+# (`seg_data = (void *) seg_to_remove->vmaddr;`). There is no `__LINKEDIT` here for kxld to make
+# pageable, so the whole block is dead on
+# this target: `SECURE_KERNEL` is cancelled by `DEFINES`' own `-USECURE_KERNEL`, and `keepsyms` is not
+# passed, so the `#else` branch is empty too - the block executes nothing. The guarded edit lives in
+# the untracked tree, so it is a **tracked patch** (`tools/stage_d13_kextb_login.sh`) wrapping
+# `#if CONFIG_KXLD … #endif` in `#ifndef STAGE90_XNU_KEXTB_LOGIN`; when defined, the teardown compiles
+# out and only `seg_to_remove`'s assignment and the `alreadyDone` return remain. `OSKext.cpp` is a
+# kernel-pool file - it is compiled in the per-file loop of this same manifest (`:1456`), which passes
+# `$DEFINES` - so the guard is added to the array rather than to `EXTRA_DEFINES`, exactly like
+# `STAGE90_HFS_ROOT` above; a `--platform-only` run never sees it because the pool is not recompiled.
+[[ ${STAGE90_XNU_KEXTB_LOGIN:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_KEXTB_LOGIN=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.  (`$GENERATED` is
