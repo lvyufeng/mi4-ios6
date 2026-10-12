@@ -191,6 +191,8 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=_ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_
                    --wrap=mdevadd --wrap=mdevlookup
                    --wrap=_ZN9IOService22waitForMatchingServiceEP12OSDictionaryy
+                   --wrap=IOKitInitializeTime --wrap=clock_initialize_calendar
+                   --wrap=host_notify_calendar_change
                    --wrap=os_reason_create --wrap=load_machfile
                    --wrap=sleh_abort --wrap=sleh_undef
                    --wrap=getpid --wrap=mmap

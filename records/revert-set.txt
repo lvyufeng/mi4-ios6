@@ -13495,3 +13495,38 @@ set=armed-d13-887d60ea sha256=04f41f9983421408b77f75c6baee0d6943921cbf02e6d1d795
 set=armed-d13-887d60ea sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=983-gic-window-both-dist-and-cpu-mapped;-stage90_fixture.macho
 set=armed-d13-887d60ea sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=983-gic-window-both-dist-and-cpu-mapped;-stage90-build-config.txt
 set=armed-d13-887d60ea sha256=4989daeadd0c63db2146e2fb056511b6b715c9e6707d12ef0f25ea566d7d7684 bytes=560 file=SHA256SUMS.txt role=983-gic-window-both-dist-and-cpu-mapped;-SHA256SUMS.txt
+# armed-d13-6435778a  -  984: 983 + LIVE instrumentation of the IOKitInitializeTime frontier.
+# Switch set is 983-s UNCHANGED; the ENTRY BIN moved (887d60ea -> 6435778a).
+#
+# 983 (pressed 2026-10-11, commit 2a5cee2) cleared 982-s GIC fault - no far=0xf9000104, no
+# sleh, no panic, runner exit 0 - and went quiet at bsd_init: calling IOKitInitializeTime
+# (bsd/kern/bsd_init.c:673); the NEXT stage, ubc_init (:676), never printed. The live log
+# kept arming the deadline metronome (xnu_live_tmr_enter_seq -> 64) and the matching threads
+# ran (finddrv x319), so the boot thread is parked INSIDE IOKitInitializeTime
+# (iokit/Kernel/IOStartIOKit.cpp:61) = waitForService(resourceMatching("IORTC"), 2s) then
+# clock_initialize_calendar(). Every reading is an ABSENCE (no ubc_init, no tick after
+# ~4.767s, timerdrv_isr_calls=0, no dec_* keys) - and an absence is a reading only if its
+# publisher would have been reached on success.
+#
+# 984 ADDS four behaviour-neutral live wrappers: xnu_live_wait_enter/_exit (the wait),
+# xnu_live_iokitinit_enter/_exit, xnu_live_cal_enter/_exit + xnu_live_cal_hostnotify.
+# READ: log ending in _wait_enter with no _exit => the WAIT is the frontier; _cal_enter
+# present => the wait returned and the block is the calendar.
+#
+# VERIFIED BY VALUE: bsd_init bl 8049e770 __wrap_IOKitInitializeTime -> writes enter key ->
+# bl 800c1dc8 (real) -> writes exit key; the --wrap= flags are build_entry.sh:194-195.
+# make check 0. Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1,
+# HDD_WRITE=0, base never written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-6435778a sha256=6435778ad78f24bdcdcb37475252cec4c30298897fd781aa0cb6ed46c1696949 bytes=6335572 file=xnu_arm_entry.bin role=984-iortc-wait-and-calendar-live-instrumentation;-xnu_arm_entry.bin
+set=armed-d13-6435778a sha256=c081d4e6dc50be57136230a99b38df6250fec62b658cfcf0369615cc86da1c60 bytes=7375416 file=xnu_arm_entry.elf role=984-iortc-wait-and-calendar-live-instrumentation;-xnu_arm_entry.elf
+set=armed-d13-6435778a sha256=ee2fd6e88bea08e32f303ca84e115262da5fdd2aa28ec5c5e1032a37526fb022 bytes=1912 file=xnu_arm_entry.h role=984-iortc-wait-and-calendar-live-instrumentation;-xnu_arm_entry.h
+set=armed-d13-6435778a sha256=7b3a2e4b068b56147f354fb29d2f931364ca12bcd1159e39657489b1c14e7cb7 bytes=1409 file=xnu_arm_entry-config.txt role=984-iortc-wait-and-calendar-live-instrumentation;-xnu_arm_entry-config.txt
+set=armed-d13-6435778a sha256=75692c73d3d5cbbb6a2ba8910a03af8496d07b94a117dfeb79d5a00a3cff9559 bytes=3149 file=xnu_arm_entry-sources.txt role=984-iortc-wait-and-calendar-live-instrumentation;-xnu_arm_entry-sources.txt
+set=armed-d13-6435778a sha256=77778ddd39413efc5c4ae4ee655d116f5d9bddad26539694aadd28056425238f bytes=6830980 file=stage90.bin role=984-iortc-wait-and-calendar-live-instrumentation;-stage90.bin
+set=armed-d13-6435778a sha256=4802829afe4746d82ecb5df5b0fec977b943749f19f9b577e66e603b200e2942 bytes=6893052 file=stage90.elf role=984-iortc-wait-and-calendar-live-instrumentation;-stage90.elf
+set=armed-d13-6435778a sha256=5a93188d395e3bb380659435489cf848ea88aae80ff87404cbbe94cd6aec49ec bytes=6834176 file=stage90.img role=984-iortc-wait-and-calendar-live-instrumentation;-stage90.img
+set=armed-d13-6435778a sha256=a0dbf8e2c6eec640591f05415e02c505da83dd7c6d7131737a28ddb9cf2df6dc bytes=9355264 file=stage90-qcdt.img role=984-iortc-wait-and-calendar-live-instrumentation;-stage90-qcdt.img
+set=armed-d13-6435778a sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=984-iortc-wait-and-calendar-live-instrumentation;-stage90_fixture.macho
+set=armed-d13-6435778a sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=984-iortc-wait-and-calendar-live-instrumentation;-stage90-build-config.txt
+set=armed-d13-6435778a sha256=7815010cfb499125759e63267caa7c228faf8cc2befbe96b0946657fee7da168 bytes=560 file=SHA256SUMS.txt role=984-iortc-wait-and-calendar-live-instrumentation;-SHA256SUMS.txt

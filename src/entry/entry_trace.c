@@ -5408,12 +5408,20 @@ void *__wrap__ZN9IOService22waitForMatchingServiceEP12OSDictionaryy(void *matchi
     void *r;
 
     entry_note_wmatch(0u, caller, (uint32_t)(uintptr_t)matching, to_lo, to_hi, 0u);
+    /* 984: the SAME two facts, but into the LIVE log rather than the entry-side report. Every other
+     * reading of this frontier is an absence (no `ubc_init`, no tick, no ISR), and an absence is only
+     * a reading if its publisher would have been reached on success - so this run must say, in the log
+     * that survives a hang, whether the wait ever RETURNED. `_enter` is written before the real call
+     * (the only safe moment: a call that never returns has no "after"); `_exit` carries the result. A
+     * log ending with `_enter=1` and no matching `_exit` is the wait itself, by measurement. */
+    entry_live_write("xnu_live_wait_enter", caller);
     if (matching != 0) {
         entry_probe_wait(matching);
     }
 
     r = __real__ZN9IOService22waitForMatchingServiceEP12OSDictionaryy(matching, timeout);
 
+    entry_live_write("xnu_live_wait_exit", (uint32_t)(uintptr_t)r);
     entry_note_wmatch(1u, caller, (uint32_t)(uintptr_t)matching, to_lo, to_hi,
                       (uint32_t)(uintptr_t)r);
     return r;
@@ -6216,4 +6224,46 @@ void __wrap_vm_pageout(void)
      * function returned, which the kernel says cannot happen. The `tail_seen[4]` count written before
      * the call is the whole measurement.
      */
+}
+
+
+/* ------------------------------------------------------------------------------------------------
+ * 984: the two calls `IOKitInitializeTime` is made of, live. 983's press cleared 982's GIC fault and
+ * then went quiet at `bsd_init: calling IOKitInitializeTime` (`bsd/kern/bsd_init.c:673`) with the very
+ * next stage, `ubc_init` (:676), never printed - while the timer deadline metronome kept arming
+ * (`xnu_live_tmr_enter_seq` -> 64) and the IOKit matching threads ran (finddrv x319). So the boot
+ * thread is parked INSIDE `IOKitInitializeTime` (`iokit/Kernel/IOStartIOKit.cpp:61`), which is
+ * `IOService::waitForService(resourceMatching("IORTC"), &t)` (2 s) then `clock_initialize_calendar()`.
+ *
+ * Which of the two, and whether the wait returned, is what these four one-line wrappers decide - with
+ * no behaviour change: the real function runs and its result is returned as it came.
+ *   `clock_initialize_calendar` ENTERs  => the IORTC wait returned; the block is the calendar path
+ *                                          (`PEGetGMTTimeOfDay` / `host_notify_calendar_change`).
+ *   no `xnu_live_cal_enter`             => the wait did not return; `xnu_live_wait_enter` is the last
+ *                                          record and the frontier is `waitForMatchingService`.
+ * `host_notify_calendar_change` is wrapped too because it is the second half of the calendar call and
+ * a `cal_enter` with no `hostnotify` narrows the frontier again. Nothing here probes or maps: these
+ * write the live log and return.
+ */
+void __real_IOKitInitializeTime(void);
+void __wrap_IOKitInitializeTime(void)
+{
+    entry_live_write("xnu_live_iokitinit_enter", (uint32_t)(uintptr_t)__builtin_return_address(0));
+    __real_IOKitInitializeTime();
+    entry_live_write("xnu_live_iokitinit_exit", 1u);
+}
+
+void __real_clock_initialize_calendar(void);
+void __wrap_clock_initialize_calendar(void)
+{
+    entry_live_write("xnu_live_cal_enter", 1u);
+    __real_clock_initialize_calendar();
+    entry_live_write("xnu_live_cal_exit", 1u);
+}
+
+void __real_host_notify_calendar_change(void);
+void __wrap_host_notify_calendar_change(void)
+{
+    entry_live_write("xnu_live_cal_hostnotify", 1u);
+    __real_host_notify_calendar_change();
 }
