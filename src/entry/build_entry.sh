@@ -1193,6 +1193,34 @@ case "$SHREG_PROBE" in
     *) echo "REFUSING: STAGE90_XNU_SHREG_PROBE='$SHREG_PROBE' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **997: the shared-region WIRE WIDTH, recorded the same way and for the same reason.** With
+# `STAGE90_XNU_SHREG_WIRE=1`, the D13 tree's `bsd/vm/vm_unix.c` opens the tree's own 32-byte
+# `struct shared_file_mapping_np` branch - the one dyld 239 actually speaks (dyld 0x2be057ba is
+# `add.w r0, r4, r3, lsl #5`; the copy loop advances by 32) - which is already IN the file, two gates
+# deep: `#if IOS7_COMPAT_PLATFORM` is 0 on CANCRO and the runtime selector `ios7lab_cache_abi()`
+# returns 0. 996's press (arm armed-d13-cea0c1c2, commit 821fb40, log
+# out/stage90/captures/cancro-last_kmsg-996-armed-d13-cea0c1c2.txt:4101-4105) MEASURED the defect by
+# value: `IOS7SHREG map_file kr=4` + `map_slide ret=22` = `shared_region_copyin_mappings` computing
+# `count * 5 << 2` against dyld's 32-byte array, so m[0].size read 0 and `vm_map_enter_mem_object`'s
+# `initial_size == 0` check (`osfmk/vm/vm_map.c:2344`) returned EINVAL before any slide work - which is
+# WHY the shared cache was never mapped and dyld halted on `Library not loaded:
+# /usr/lib/libbsm.0.dylib`. The fix is `tools/stage_d13_shreg_wire.sh` (the vmabi-recon lane's
+# `tools/patch_d13_shreg_wire.py`): exactly three `#if IOS7_COMPAT_PLATFORM` lines gain the 994
+# spelling `|| (defined(STAGE90_XNU_SHREG_WIRE) && STAGE90_XNU_SHREG_WIRE)` and the file-local
+# `ios7lab_cache_abi()` body is gated to `return 1;` - the MACRO itself is NOT touched (13 files
+# reference it and widening it would wake exec/fork/ipc wholesale; the 994 "do not widen the macro"
+# lesson). `vm_unix.c` is a kernel-pool file, so the switch is compiled by
+# `tools/build_xnu_arm_kernel.sh` (DEFINES, from the same-named environment variable) - the two
+# spellings must carry the SAME value (`mi4-one-value-two-definitions`) - and the linked image only
+# LINKS `out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o`, so a stale pool keeps the 20-byte wire. The tree
+# patch is staged by `tools/stage_d13_shreg_wire.sh`; the by-value clause at the 997 link site below
+# refuses a link whose image does not carry the 32 B wire shape.
+SHREG_WIRE=${STAGE90_XNU_SHREG_WIRE:-0}
+case "$SHREG_WIRE" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_SHREG_WIRE='$SHREG_WIRE' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **911c: the RAM bank layout, measured from the Qualcomm SMEM RAM-partition table.** The goal's newest
 # clause is that XNU recognize the Mi 4's 3 GB of RAM, and the 911c design established that the repo
 # holds NO low-bank base or size anywhere - every "low bank" is an inference from "3 GB minus 1.5 GB".
@@ -1512,6 +1540,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_IOS7_TRAPS
                 STAGE90_XNU_DYLD_WITNESS
                 STAGE90_XNU_SHREG_PROBE
+                STAGE90_XNU_SHREG_WIRE
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1693,6 +1722,15 @@ do
         # site below reads the linked image's own `IOS7SHREG` literals and refuses a link whose probe is
         # absent.
         STAGE90_XNU_SHREG_PROBE)      _v=$SHREG_PROBE ;;
+        # 997: whether the tree's 32 B shared-region wire (`tools/stage_d13_shreg_wire.sh`) was
+        # compiled into this image's pool. Read from `$SHREG_WIRE`, validated 0/1 at its own assignment
+        # far above this loop, so the record and the pool's `DEFINES` cannot be built from two spellings
+        # of this switch (`mi4-one-value-two-definitions`). `vm_unix.c` is a POOL file: the linked image
+        # only LINKS `out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o`, which is why the 997 clause at the link
+        # site below reads the linked image's own wire shape (`count * 32` in
+        # `shared_region_copyin_mappings`, the 20 B pair gone, 294's copyout at 8 bytes) and refuses a
+        # link whose wire is still the tree's 20 B one.
+        STAGE90_XNU_SHREG_WIRE)       _v=$SHREG_WIRE ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -30737,21 +30775,80 @@ verify_trace_symbols() {
     # the link - which is exactly what this clause refuses. Gated on the switch: with SHREG_PROBE=0 the
     # tree's original text is compiled on purpose and there is nothing here to assert.
     if [[ $SHREG_PROBE -eq 1 ]]; then
-        if ! sp_out=$(python3 "$REPO_ROOT/tools/check_d13_shreg_probe.py" "$OUT/xnu_arm_entry.elf" --expect on 2>&1); then
-            printf '%s\n' "$sp_out" >&2
-            say "REFUSING: STAGE90_XNU_SHREG_PROBE=1 but the linked image carries no IOS7SHREG probe -" >&2
-            say "          the FAIL lines above name the missing literal; no IOS7SHREG bytes at all means" >&2
-            say "          the switch never reached the POOL: vm_unix.c is compiled by" >&2
+        # **997's wire move turns exactly ONE of the frozen 996 checker's clauses into a by-design
+        # FAIL.** `check_d13_shreg_probe.py --expect on` asserts the probe's presence AND - in BOTH
+        # modes, per its own header ("996 measures the misparse, it does not fix it") - that the wire
+        # is still 20 B (`count * 5 << 2`). 997's whole point is that straddle moving to 32 B, so on a
+        # SHREG_WIRE=1 image that ONE clause must fail while every probe-PRESENCE clause (the sysent
+        # rows, the five IOS7SHREG literals reaching printfs, the no-stray-literal scan) still passes -
+        # and the 997 clause below asserts the 32 B inversion. So this clause requires: the checker
+        # FAILs, EXACTLY ONE clause FAIL line is printed, and it is the 20 B straddle one. A PASS
+        # (rc 0) or any other failing clause is a real refusal, not the by-design one.
+        sp_rc=0
+        sp_out=$(python3 "$REPO_ROOT/tools/check_d13_shreg_probe.py" "$OUT/xnu_arm_entry.elf" --expect on 2>&1) || sp_rc=$?
+        if [[ $SHREG_WIRE -eq 1 ]]; then
+            sp_fails=$(printf '%s\n' "$sp_out" | grep -c '^  FAIL ' || true)
+            if [[ $sp_rc -eq 0 ]]; then
+                printf '%s\n' "$sp_out" >&2
+                layout_fail "STAGE90_XNU_SHREG_WIRE=1 but the frozen 996 probe checker still PASSES on the linked image - the image still parses the 20 B wire, so the wire switch did not reach the POOL: stage the tree (tools/stage_d13_shreg_wire.sh) and rebuild out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o with XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_SHREG_WIRE=1' (plus the same-named env var), then relink - the 997 clause below refuses this image too"
+            fi
+            if [[ $sp_fails -ne 1 ]] || ! printf '%s\n' "$sp_out" | grep -q '^  FAIL shared_region_copyin_mappings does not compute'; then
+                printf '%s\n' "$sp_out" >&2
+                layout_fail "STAGE90_XNU_SHREG_WIRE=1 and the 996 probe checker failed on something OTHER than its one by-design 20 B clause ($sp_fails clause FAIL line(s); the expected single one is 'shared_region_copyin_mappings does not compute count * 5 << 2') - the FAIL lines above name the missing probe clause: the probe itself did not reach the linked image; stage the tree (tools/stage_d13_shreg_probe.sh) and rebuild the pool with -DSTAGE90_XNU_SHREG_PROBE=1"
+            fi
+            say "  xnu_entry_996: probe checker's ONE by-design failure is its frozen 20 B clause (996 measures the misparse, 997 fixes it; the 32 B inversion is xnu_entry_997 below) and every probe-presence clause passed - $(printf '%s\n' "$sp_out" | grep '^  FAIL ')"
+        else
+            if [[ $sp_rc -ne 0 ]]; then
+                printf '%s\n' "$sp_out" >&2
+                say "REFUSING: STAGE90_XNU_SHREG_PROBE=1 but the linked image carries no IOS7SHREG probe -" >&2
+                say "          the FAIL lines above name the missing literal; no IOS7SHREG bytes at all means" >&2
+                say "          the switch never reached the POOL: vm_unix.c is compiled by" >&2
+                say "          tools/build_xnu_arm_kernel.sh and build_entry.sh only LINKS" >&2
+                say "          out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o. Stage the tree and rebuild the pool with" >&2
+                say "          the SAME value, then relink:" >&2
+                say "            tools/stage_d13_shreg_probe.sh" >&2
+                say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+                say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_SHREG_PROBE=$SHREG_PROBE' \\\\" >&2
+                say "            ./tools/build_xnu_arm_kernel.sh" >&2
+                layout_fail "STAGE90_XNU_SHREG_PROBE=1 did not reach the linked image: stage the tree first (tools/stage_d13_shreg_probe.sh) and rebuild the pool with -DSTAGE90_XNU_SHREG_PROBE=1 - vm_unix.c is a kernel-pool file and a stale bsd_vm_vm_unix.o links a 438 with no probe, which is exactly the blindness 995's read left on the frontier (dyld halted on Library not loaded: /usr/lib/libbsm.0.dylib - a library in the shared cache with no file on the volume; the 294/438 runtime returns are the only unknown)"
+            fi
+            say "  xnu_entry_996: the linked image carries the bounded IOS7SHREG probe on the shared-region syscalls 294/438 (entry + every return, plus the kr inside _shared_region_map, first 4 calls) - $sp_out"
+        fi
+    fi
+    # **997: the 32 B shared-region wire (pool).** 996's press (arm armed-d13-cea0c1c2, commit 821fb40,
+    # log out/stage90/captures/cancro-last_kmsg-996-armed-d13-cea0c1c2.txt:4101-4105) MEASURED the
+    # misparse by value: `IOS7SHREG map_file kr=4` + `map_slide ret=22` = `shared_region_copyin_mappings`
+    # computing `count * 5 << 2` against dyld's 32-byte array (dyld 0x2be057ba is `add.w r0, r4, r3,
+    # lsl #5`), so m[0].size read 0 and `vm_map_enter_mem_object`'s `initial_size == 0` check returned
+    # EINVAL before any slide work - the shared cache was never mapped and dyld halted on `Library not
+    # loaded: /usr/lib/libbsm.0.dylib`. The fix is `tools/stage_d13_shreg_wire.sh` +
+    # STAGE90_XNU_SHREG_WIRE=1: three `#if IOS7_COMPAT_PLATFORM` lines gain the 994 spelling and
+    # `ios7lab_cache_abi()`'s body is gated to `return 1;`, so the tree's OWN 32 B branch
+    # (vm_unix.c:1190-1220, with its per-mapping `IOS7LAB cache mapping ...` printf) compiles in. The
+    # property is read BY VALUE off THIS linked image by `tools/check_d13_shreg_wire.py --expect on`:
+    # the `IOS7LAB cache mapping` literal is in the image and `shared_region_copyin_mappings` carries
+    # `count * 32` (`lsl #5` + `add ..., #32`), the 20 B `count * 5 << 2` pair is GONE, and 294's
+    # copyout writes the full 8-byte `uint64_t` (dyld allocates 8 and reads the low word, so the 4-byte
+    # write was silently wrong, not loud). `vm_unix.c` is a POOL file, so a stale
+    # `out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o` is invisible to the link - which is exactly what this
+    # clause refuses. Gated on the switch: with SHREG_WIRE=0 the tree's original text is compiled on
+    # purpose and there is nothing here to assert.
+    if [[ $SHREG_WIRE -eq 1 ]]; then
+        if ! sw_out=$(python3 "$REPO_ROOT/tools/check_d13_shreg_wire.py" "$OUT/xnu_arm_entry.elf" --expect on 2>&1); then
+            printf '%s\n' "$sw_out" >&2
+            say "REFUSING: STAGE90_XNU_SHREG_WIRE=1 but the linked image carries no 32 B shared-region wire -" >&2
+            say "          the FAIL lines above name the missing shape; no IOS7LAB cache mapping bytes at all" >&2
+            say "          means the switch never reached the POOL: vm_unix.c is compiled by" >&2
             say "          tools/build_xnu_arm_kernel.sh and build_entry.sh only LINKS" >&2
             say "          out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o. Stage the tree and rebuild the pool with" >&2
             say "          the SAME value, then relink:" >&2
-            say "            tools/stage_d13_shreg_probe.sh" >&2
+            say "            tools/stage_d13_shreg_wire.sh" >&2
             say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
-            say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_SHREG_PROBE=$SHREG_PROBE' \\\\" >&2
+            say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_SHREG_WIRE=$SHREG_WIRE' \\\\" >&2
             say "            ./tools/build_xnu_arm_kernel.sh" >&2
-            layout_fail "STAGE90_XNU_SHREG_PROBE=1 did not reach the linked image: stage the tree first (tools/stage_d13_shreg_probe.sh) and rebuild the pool with -DSTAGE90_XNU_SHREG_PROBE=1 - vm_unix.c is a kernel-pool file and a stale bsd_vm_vm_unix.o links a 438 with no probe, which is exactly the blindness 995's read left on the frontier (dyld halted on Library not loaded: /usr/lib/libbsm.0.dylib - a library in the shared cache with no file on the volume; the 294/438 runtime returns are the only unknown)"
+            layout_fail "STAGE90_XNU_SHREG_WIRE=1 did not reach the linked image: stage the tree first (tools/stage_d13_shreg_wire.sh) and rebuild the pool with -DSTAGE90_XNU_SHREG_WIRE=1 - vm_unix.c is a kernel-pool file and a stale bsd_vm_vm_unix.o links the 20 B wire dyld's 32 B array cannot survive (996 measured it: map_file kr=4 + map_slide ret=22, the shared cache never mapped and dyld halted on Library not loaded: /usr/lib/libbsm.0.dylib)"
         fi
-        say "  xnu_entry_996: the linked image carries the bounded IOS7SHREG probe on the shared-region syscalls 294/438 (entry + every return, plus the kr inside _shared_region_map, first 4 calls) - $sp_out"
+        say "  xnu_entry_997: the linked image carries the 32 B shared-region wire dyld builds (count*32 in shared_region_copyin_mappings, the 20 B pair gone, 294's copyout at 8 bytes) - $sw_out"
     fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
@@ -38773,6 +38870,10 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # DEFINES takes this value, and the by-value clause at the 996 site above refuses a linked image
     # that did not get it; this echo line is what the record self-check at the end of this file reads).
     echo "STAGE90_XNU_SHREG_PROBE=${STAGE90_XNU_SHREG_PROBE:-0}"
+    # 997's switch, read the same way and for the same reason (one value, two definitions: the pool's
+    # DEFINES takes this value, and the by-value clause at the 997 site above refuses a linked image
+    # that did not get it; this echo line is what the record self-check at the end of this file reads).
+    echo "STAGE90_XNU_SHREG_WIRE=${STAGE90_XNU_SHREG_WIRE:-0}"
     # 535's switch, and the only one whose *link* the build changes (see its own block above): the
     # record is what makes "this image has the seam hook" a thing the gate can read rather than a
     # thing a reader assumes from the hash.

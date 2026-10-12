@@ -834,6 +834,19 @@ DEFINES=(
 # compiles vm_unix.c's original bytes).
 [[ ${STAGE90_XNU_SHREG_PROBE:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_SHREG_PROBE=1)
 
+# 997's shared-region WIRE WIDTH (`bsd/vm/vm_unix.c`: the tree's OWN 32 B `struct
+# shared_file_mapping_np` branch behind `IOS7_COMPAT_PLATFORM`, opened by exactly three gate lines + a
+# gated `ios7lab_cache_abi()` body - the per-mapping `IOS7LAB cache mapping ...` printf rides inside
+# it). 996's press MEASURED the 20 B-vs-32 B misparse by value (`IOS7SHREG map_file kr=4` + `map_slide
+# ret=22`: the 20 B struct read dyld's 32 B array at stride 20, m[0].size = 0, `vm_map_enter_mem_object`
+# EINVAL), so this rung compiles the wire dyld 239 actually speaks. `vm_unix.c` is a kernel-pool file,
+# so the switch goes to the SAME array as the kext guard / alignment / memq_hint / commpage / trap-wire /
+# witness / probe switches, not to `EXTRA_DEFINES` - and the linked image only LINKS
+# `out/xnu_kernel_obj_d13/bsd_vm_vm_unix.o`, so without this `-D` the wire is silently the old 20 B one
+# (`tools/stage_d13_shreg_wire.sh` stages the tree; its gate spelling is `defined()`-first, so switch
+# OFF compiles vm_unix.c's original bytes).
+[[ ${STAGE90_XNU_SHREG_WIRE:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_SHREG_WIRE=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.  (`$GENERATED` is

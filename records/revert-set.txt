@@ -14136,3 +14136,49 @@ set=armed-d13-cea0c1c2 sha256=466efec187ab230b5d6e9a3760ed7e1801805b413878500c05
 set=armed-d13-cea0c1c2 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=996-shreg-probe;-stage90_fixture.macho
 set=armed-d13-cea0c1c2 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=996-shreg-probe;-stage90-build-config.txt
 set=armed-d13-cea0c1c2 sha256=5d194219219b9f33e68ca352c0f4ea1d8eab1c1c5b80c9c894fee10401c152c8 bytes=560 file=SHA256SUMS.txt role=996-shreg-probe;-SHA256SUMS.txt
+# armed-d13-518b6a94  -  997: THE 32 B SHARED-REGION WIRE (G3) IS OPENED - THE TREE-S OWN IOS 7 CACHE ABI COMPILES IN.
+# Switch set is 996-s VERBATIM (STAGE90_XNU_DYLD_WITNESS stays 1, STAGE90_XNU_SHREG_PROBE stays 1)
+# + STAGE90_XNU_SHREG_WIRE=1; the ENTRY BIN moved (cea0c1c2 -> 518b6a94) and ONE tree SOURCE file moves in
+# THIS rung: bsd/vm/vm_unix.c (516df232... -> 4b3ec2b8..., the SAME pool file the 996 probe rides -
+# three `#if IOS7_COMPAT_PLATFORM` lines gain the 994 spelling and the file-local
+# `ios7lab_cache_abi()` body is gated to `return 1;`, so the tree-s OWN 32 B branch at :1190-1220
+# (shared_region_copyin_mappings + its per-mapping `IOS7LAB cache mapping ...` printf) compiles in;
+# the MACRO itself is NOT touched - the 994 "do not widen the macro" lesson; vm_unix.c is a POOL
+# file and 997 does NOT touch the assembly layer, NO trap.c change, NO pmap.c/commpage.c/
+# arm_vm_init.c change, NO pcb.c, NO vm_resident.c, NO mach_kernelrpc.c change). A fresh checkout
+# needs ALL EIGHT tools/stage_d13_*.sh drivers (988/990/991/992+993/994/995+996/996/997).
+#
+# 996 (pressed 2026-10-12, arm armed-d13-cea0c1c2, commit 821fb40, evidence
+# out/stage90/captures/cancro-last_kmsg-996-armed-d13-cea0c1c2.txt:4101-4105) MEASURED the G3
+# fix-s target by value: IOS7SHREG check_np ret=12; map_slide count=4 slide=0x3811000
+# slide_start=0x3f9bd000 size=0x89000; map_file kr=4 (KERN_INVALID_ARGUMENT) + map_slide ret=22
+# (EINVAL) = shared_region_copyin_mappings computed count*5<<2 against dyld 239-s 32-byte-stride
+# array, m[0].size read 0, vm_map_enter_mem_object-s initial_size==0 check returned EINVAL before
+# any slide work. The witness read the FULL 102-char halt message and cacheBase=0: the shared
+# cache was never mapped BECAUSE 438 died.
+#
+# THE 997 PRESS- PRE-REGISTRATION (frozen; deviations reported, not reinterpreted) is embedded in
+# scripts/press_997.sh: up to 4x `IOS7LAB cache mapping <n> va=... size=... offset=... max=...
+# init=...` BEFORE 438 fails again; the va fields answer SLID OR NOT; three mutually
+# distinguishable signatures (a) PREDICTED geometry-blocked kr=3 + ret=12, (b) the branch-s own
+# bound trips (NO map_file line, ret=22) - stop and re-model, (c) full success. FALSIFICATION:
+# zero `IOS7LAB cache mapping` lines == the define did not reach the compiled object.
+# tools/check_d13_shreg_wire.py --expect on asserts the 32 B wire off the linked image-s own bytes
+# (plus --tree 3 gates + 1 body gate); the FROZEN 996 image and the 994 capture are --controls
+# and must FAIL ON and PASS OFF.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-518b6a94 sha256=518b6a940ed960ea00e7a1c3eeb7027fc5b3da68e1567332c75a4ef574e2eb7b bytes=6339668 file=xnu_arm_entry.bin role=997-shreg-wire;-xnu_arm_entry.bin
+set=armed-d13-518b6a94 sha256=1bc1750c192ad57793bc59dd3479f56b324fae5cc91aa5613f2bfeabff75ceff bytes=7380384 file=xnu_arm_entry.elf role=997-shreg-wire;-xnu_arm_entry.elf
+set=armed-d13-518b6a94 sha256=40a9dc325334d4ff70aa2cfc9b7f0877fd3b888ecd65b762b13f4e7a13376e04 bytes=1912 file=xnu_arm_entry.h role=997-shreg-wire;-xnu_arm_entry.h
+set=armed-d13-518b6a94 sha256=9f503172ef8a144f6e65239906d112297c5fdb4ff5b9a30033eb3a2d8847a9b5 bytes=1617 file=xnu_arm_entry-config.txt role=997-shreg-wire;-xnu_arm_entry-config.txt
+set=armed-d13-518b6a94 sha256=2b16e909dd0ed2f128a9b6616610de2c82ba8971aa5e71176059a47236cde704 bytes=3149 file=xnu_arm_entry-sources.txt role=997-shreg-wire;-xnu_arm_entry-sources.txt
+set=armed-d13-518b6a94 sha256=291f59e7f06560a5007632d78806c3f4358badccc01b0487a7334c0911694ed9 bytes=6835076 file=stage90.bin role=997-shreg-wire;-stage90.bin
+set=armed-d13-518b6a94 sha256=600b1ebe7d02a8c2fc86041d3fe3e2dae756d582bd8bab16a360579227e83ef9 bytes=6897148 file=stage90.elf role=997-shreg-wire;-stage90.elf
+set=armed-d13-518b6a94 sha256=1ceebe5894c62ae6067aac7c977963d93b4f44816215ae13ef86bfd7c4d28a3b bytes=6838272 file=stage90.img role=997-shreg-wire;-stage90.img
+set=armed-d13-518b6a94 sha256=617a064d6b4a54e4a0455ab54a87b74a090fac72be998500448c3bd7a7361a87 bytes=9359360 file=stage90-qcdt.img role=997-shreg-wire;-stage90-qcdt.img
+set=armed-d13-518b6a94 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=997-shreg-wire;-stage90_fixture.macho
+set=armed-d13-518b6a94 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=997-shreg-wire;-stage90-build-config.txt
+set=armed-d13-518b6a94 sha256=984ea31e7a50c64e70d1619820adf10ba1f1937545de86c1693f3ae89fc98325 bytes=560 file=SHA256SUMS.txt role=997-shreg-wire;-SHA256SUMS.txt
