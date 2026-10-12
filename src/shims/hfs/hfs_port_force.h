@@ -203,9 +203,21 @@ typedef struct cp_wrap_func *cp_wrap_func_t;
 #ifndef VM_KERN_MEMORY_FILE
 #define VM_KERN_MEMORY_FILE 20
 #endif
+/* **The redirect itself is 4570-ONLY - gated on `STAGE90_HFS_MALLOC_ZONE`.** The build defines that
+ * guard iff the tree's own `kern_malloc.c` includes `<hfs/hfs_cnode.h>` (see build_xnu_arm_kernel.sh),
+ * i.e. iff the tree's `kmzones[]` rows for M_HFSMNT/M_HFSNODE/M_HFSFORK/M_HFSDIRHINT/M_JNL_* are the
+ * real `KMZ_CREATEZONE` rows that serve the types. 4570's `kern_malloc.c` has no such include and its
+ * rows are `{0, KMZ_MALLOC}`, so 4570 needs this redirect (else `_malloc_zone ZONE` panics, 900); the
+ * Darwin-13 tree DOES include it and serves every HFS type through its own zone path, so the redirect
+ * is not owed there - and on D13 it is actively wrong, because D13's allocator is named `_MALLOC`
+ * (3-arg), not 4570's `__MALLOC` (4-arg): the redirect would reference a symbol the D13 pool does not
+ * define, and the linker makes it a stub. 987's press died at exactly that (`stub_hit=__MALLOC`, first
+ * cnode allocation of the mount). With the guard off, the tree's own `MALLOC_ZONE`/`FREE_ZONE` stand. */
+#ifdef STAGE90_HFS_MALLOC_ZONE
 #undef  MALLOC_ZONE
 #undef  FREE_ZONE
 #define MALLOC_ZONE(space, cast, size, type, flags)  ((space) = (cast)__MALLOC((size), (type), (flags), NULL))
 #define FREE_ZONE(addr, size, type)                  _FREE((void *)(addr), (type))
+#endif /* STAGE90_HFS_MALLOC_ZONE */
 
 #endif /* _HFS_PORT_FORCE_H_ */

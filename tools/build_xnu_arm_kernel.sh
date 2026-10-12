@@ -727,6 +727,22 @@ DEFINES=(
 # bridge gate in the force-include block above: judge the tree by its own header.
 [[ ${HFS_PORT:-0} -eq 1 ]] && grep -q 'vm_tag_t' "$XNU/osfmk/vm/vm_kern.h" && DEFINES+=(-DSTAGE90_HFS_KMEM_TAG=1)
 
+# **The port's HFS `MALLOC_ZONE` redirect, only where the tree's zone table cannot serve HFS.** §3 of
+# `hfs_port_force.h` rewrites the HFS `MALLOC_ZONE`/`FREE_ZONE` onto `__MALLOC`/`_FREE` because 4570's
+# `kmzones[]` rows 75/76/77/91/92/95 are the literal `{0, KMZ_MALLOC}` - its `kern_malloc.c` cannot see
+# `struct cnode`, so `__MALLOC_ZONE` would PANIC (`_malloc_zone ZONE`) at the first cnode allocation
+# (900). The Darwin-13 tree's `kern_malloc.c` DOES include `<hfs/hfs_cnode.h>` and its rows are the real
+# `{SOS(cnode),KMZ_CREATEZONE}`..`{SOS(journal),...}` - so D13 serves every HFS type through its OWN
+# zone path and the redirect is not owed. Worse, D13 names the allocator `_MALLOC` (3-arg), not 4570's
+# `__MALLOC` (4-arg), so the redirect targets a symbol the D13 pool does not define: it becomes one of
+# `xnu_arm_entry_undef.txt`'s stub bodies, and a boot stops with `stub_hit=__MALLOC` from
+# `hfs_chash_getcnode` - the FIRST cnode allocation of the mount (the same site 900 panicked at, by the
+# other route). Define the guard iff the tree's own `kern_malloc.c` does NOT see `hfs_cnode.h` (i.e. its
+# rows are the `KMZ_MALLOC` fallback and it needs the redirect); the force header makes §3 a no-op
+# without it. Same authoring rule as `STAGE90_HFS_KMEM_TAG` above: judge the tree by the definition it
+# actually carries.
+[[ ${HFS_PORT:-0} -eq 1 ]] && ! grep -q 'hfs/hfs_cnode.h' "$XNU/bsd/kern/kern_malloc.c" && DEFINES+=(-DSTAGE90_HFS_MALLOC_ZONE=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.  (`$GENERATED` is

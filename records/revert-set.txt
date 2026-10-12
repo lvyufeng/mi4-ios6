@@ -13607,3 +13607,42 @@ set=armed-d13-2171f0d1 sha256=6838477a2203bfe6b8f0fb11df2176c05113c99f33191f8a71
 set=armed-d13-2171f0d1 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=986-d13-mlckwait-waiters-bit;-stage90_fixture.macho
 set=armed-d13-2171f0d1 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=986-d13-mlckwait-waiters-bit;-stage90-build-config.txt
 set=armed-d13-2171f0d1 sha256=f2d9ed1a21de54aa45d28f06cfa99b7d76aa25ec5ea84e06c4af8421b9ba0b6c bytes=560 file=SHA256SUMS.txt role=986-d13-mlckwait-waiters-bit;-SHA256SUMS.txt
+# armed-d13-2df6333a  -  987: 986 + the HFS MALLOC_ZONE redirect GATED TO 4570 (D13 uses its own _MALLOC_ZONE).
+# Switch set is 986-s UNCHANGED; the ENTRY BIN moved (2171f0d1 -> 2df6333a) and the WHOLE pool
+# was rebuilt (the fix is a pool edit: the HFS objects must stop referencing __MALLOC).
+#
+# 986 (pressed 2026-10-12, arm armed-d13-2171f0d1, commit bcd4039) is a DECISIVE SUCCESS for
+# the mutex fix: the boot leapt from 985-s IOKitInitializeTime stop past EVERY BSD-init line to
+# `bsd_init: vfs_mountroot` -> `hfs_mountfs` -> `hfs_chash_getcnode`, and READ A BLOCK OFF THE
+# CARD (HFSX volume header at LBA 0x400002, w0=0x05005848 -> HFSX 0x4858 v5). It then stopped
+# with `stub_hit=__MALLOC` from `hfs_chash_getcnode+0x100` (0x801c90b4).
+#
+# ROOT CAUSE: `hfs_port_force.h` §3 redirects the HFS MALLOC_ZONE/FREE_ZONE onto __MALLOC/_FREE - a
+# 4570-only necessity (4570-s kern_malloc.c cannot see struct cnode, so its kmzones rows are
+# {0,KMZ_MALLOC} and __MALLOC_ZONE PANICS, 900). D13-s kern_malloc.c DOES include hfs_cnode.h and
+# its rows are real KMZ_CREATEZONE rows, so the redirect is unneeded - and WRONG, because D13 names
+# the allocator `_MALLOC` (3-arg), not 4570-s `__MALLOC` (4-arg): the redirect names a symbol the
+# D13 pool never defines, the linker stubs it, and the boot dies at the mount-s first allocation.
+#
+# 987: gate §3 on STAGE90_HFS_MALLOC_ZONE, defined iff the tree-s kern_malloc.c does NOT see
+# hfs_cnode.h (i.e. 4570). With the guard off, D13-s own MALLOC_ZONE/FREE_ZONE stand and the HFS
+# objects call the real _MALLOC_ZONE. VERIFIED: no bsd_hfs*.o references __MALLOC; the linked
+# image has a real _MALLOC_ZONE at 0x80117008 and no __MALLOC symbol.
+#
+# READ: the boot moves PAST hfs_chash_getcnode-s first allocation => the redirect was the frontier;
+# the same stub_hit recurs => the mechanism is not the (or not the only) cause.
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-2df6333a sha256=2df6333a7a5b255aeee1f68a6c729503e0f813d048255005cff3e216b342e060 bytes=6335572 file=xnu_arm_entry.bin role=987-d13-hfs-malloc-zone-redirect-gated;-xnu_arm_entry.bin
+set=armed-d13-2df6333a sha256=54a25978efc68ecb2e7d6cdd511e75c8d98a7b3be73a6a33498c8d7e1d5802e7 bytes=7375508 file=xnu_arm_entry.elf role=987-d13-hfs-malloc-zone-redirect-gated;-xnu_arm_entry.elf
+set=armed-d13-2df6333a sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=987-d13-hfs-malloc-zone-redirect-gated;-xnu_arm_entry.h
+set=armed-d13-2df6333a sha256=69c15830ec1868626f19e05968ce53b6b28904201262f0efaa1e7e433762fddc bytes=1409 file=xnu_arm_entry-config.txt role=987-d13-hfs-malloc-zone-redirect-gated;-xnu_arm_entry-config.txt
+set=armed-d13-2df6333a sha256=d30f98f239a07e5faca3d24b244c595c742fee98c0708d576982d3108f5f85b1 bytes=3149 file=xnu_arm_entry-sources.txt role=987-d13-hfs-malloc-zone-redirect-gated;-xnu_arm_entry-sources.txt
+set=armed-d13-2df6333a sha256=a6db32a12242230b6c0eb91ccd12b025f7621e12cea7a9168e01d0e28642225b bytes=6830980 file=stage90.bin role=987-d13-hfs-malloc-zone-redirect-gated;-stage90.bin
+set=armed-d13-2df6333a sha256=8fc8a122e9d43d061adca9b064dc102a86c9fecf8e879a7bae46af4bd37329f6 bytes=6893052 file=stage90.elf role=987-d13-hfs-malloc-zone-redirect-gated;-stage90.elf
+set=armed-d13-2df6333a sha256=c799ad8e2606fd65af05336e64609f6d9622aaf694eb4472ff4b13aa038613a5 bytes=6834176 file=stage90.img role=987-d13-hfs-malloc-zone-redirect-gated;-stage90.img
+set=armed-d13-2df6333a sha256=200b1ef1f30213ee04a8f1923990d2f0f65c84da51969597c74168284837ba9e bytes=9355264 file=stage90-qcdt.img role=987-d13-hfs-malloc-zone-redirect-gated;-stage90-qcdt.img
+set=armed-d13-2df6333a sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=987-d13-hfs-malloc-zone-redirect-gated;-stage90_fixture.macho
+set=armed-d13-2df6333a sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=987-d13-hfs-malloc-zone-redirect-gated;-stage90-build-config.txt
+set=armed-d13-2df6333a sha256=e0a7666d368fdce113c62a5593e770984f1dd296ab3f0423d337cde2df56fb61 bytes=560 file=SHA256SUMS.txt role=987-d13-hfs-malloc-zone-redirect-gated;-SHA256SUMS.txt
