@@ -13569,3 +13569,41 @@ set=armed-d13-c36a3e06 sha256=4d8444d7eea2c73ab953d7543a808cc1e39e280a07e7e67241
 set=armed-d13-c36a3e06 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=985-d13-clock-tick-arm;-stage90_fixture.macho
 set=armed-d13-c36a3e06 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=985-d13-clock-tick-arm;-stage90-build-config.txt
 set=armed-d13-c36a3e06 sha256=bd6ee00c9f8129f21f08f3c22282b75aae47a5c903268a509a23c25d51850420 bytes=560 file=SHA256SUMS.txt role=985-d13-clock-tick-arm;-SHA256SUMS.txt
+# armed-d13-2171f0d1  -  986: 985 + the MLCKWAIT WAITERS-BIT FIX (wake the parked mutex waiter).
+# Switch set is 985-s UNCHANGED; the ENTRY BIN moved (c36a3e06 -> 2171f0d1).
+#
+# 985 (pressed 2026-10-12, arm armed-d13-c36a3e06, commit cfe99f4) ARMED and FIRED the D13 clock
+# (tick_arm_rc=1, tick_line_rc=1, tick_irq 1->2->4->8->16) and the boot thread-s 2 s deadline
+# sleep (lck_mtx_sleep_deadline @0x8001ccb0) now RETURNS. But the boot still stops in
+# IOKitInitializeTime (no cal_enter, no ubc_init): the SAME thread then enters `mlckwait`
+# (0x80497510 = the return address of mlckwait-s `bl lck_mtx_lock_wait`) and never returns.
+#
+# ROOT CAUSE: a LOST WAKEUP in the D13 ARM mutex wait. `mlckwait` must set bit 1
+# (ARM_LCK_WAITERS) before it sleeps; the linked image had `orr r3, r3, #0` (0x80497504:
+# e3833000) - NEITHER bit 0 nor bit 1 - so lck_mtx_unlock-s fast path ((word&3)==0) was always
+# taken, lck_mtx_unlock_wakeup/thread_wakeup_one never ran, and the waiter was stranded.
+# `lmuslow` PANICS unless bit 1 is set (the invariant). The correct `orr r3, r3, #3` is gated
+# behind `#if BOARD_CONFIG_ARMPBA8 || BOARD_CONFIG_QSD8250_LEO` (a 4-line fork addition;
+# upstream Apple is plain #0), and this ELF build-s assembler gets no board macro.
+#
+# 986: make the `#3` UNCONDITIONAL (tools/stage_d13_hw_lock_986.sh; hw_lock.s is D13-only),
+# rebuild out/xnu_asm_obj_d13/hw_lock.o, and refuse a linked image whose first mlckwait
+# instruction is not `e3833003 orr r3,r3,#3`. VERIFIED BY VALUE: 0x80497504 = e3833003.
+#
+# READ: past `mlckwait` => the lost wakeup is CONFIRMED as 985-s frontier; still parked there
+# => the deadlock hypothesis wins and the next rung is who holds the mutex.
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-2171f0d1 sha256=2171f0d1fd4e9e4bccc39dff0c8bea9a15ad07d4ff781a717863cfbaf34fd795 bytes=6335572 file=xnu_arm_entry.bin role=986-d13-mlckwait-waiters-bit;-xnu_arm_entry.bin
+set=armed-d13-2171f0d1 sha256=896f70582c2c6857691ca7e4ae7a4837306a68039a71f80f1158d86fdfc84206 bytes=7375528 file=xnu_arm_entry.elf role=986-d13-mlckwait-waiters-bit;-xnu_arm_entry.elf
+set=armed-d13-2171f0d1 sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=986-d13-mlckwait-waiters-bit;-xnu_arm_entry.h
+set=armed-d13-2171f0d1 sha256=f9e817c7dd054506d5bfa9fc2523ea2771aaeee4b6630f465f4206637e78b11d bytes=1409 file=xnu_arm_entry-config.txt role=986-d13-mlckwait-waiters-bit;-xnu_arm_entry-config.txt
+set=armed-d13-2171f0d1 sha256=64438253b4b3f0a212d53273e6f073ea13b3a699591613af4205517c54eba131 bytes=3149 file=xnu_arm_entry-sources.txt role=986-d13-mlckwait-waiters-bit;-xnu_arm_entry-sources.txt
+set=armed-d13-2171f0d1 sha256=b212213667386eec3977fc552559875d054297d69a7fb19f68f2d66ccb7dac50 bytes=6830980 file=stage90.bin role=986-d13-mlckwait-waiters-bit;-stage90.bin
+set=armed-d13-2171f0d1 sha256=0c330a004c22f7c0d2dd4c51da3e397b9f413497cca5dd4ba48241358dec6c2a bytes=6893052 file=stage90.elf role=986-d13-mlckwait-waiters-bit;-stage90.elf
+set=armed-d13-2171f0d1 sha256=f2f500b214f2b0619e4048eb3db02f0031e4d4563acb3cc11d04900d4c9e87c8 bytes=6834176 file=stage90.img role=986-d13-mlckwait-waiters-bit;-stage90.img
+set=armed-d13-2171f0d1 sha256=6838477a2203bfe6b8f0fb11df2176c05113c99f33191f8a710b6bfd102977a1 bytes=9355264 file=stage90-qcdt.img role=986-d13-mlckwait-waiters-bit;-stage90-qcdt.img
+set=armed-d13-2171f0d1 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=986-d13-mlckwait-waiters-bit;-stage90_fixture.macho
+set=armed-d13-2171f0d1 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=986-d13-mlckwait-waiters-bit;-stage90-build-config.txt
+set=armed-d13-2171f0d1 sha256=f2d9ed1a21de54aa45d28f06cfa99b7d76aa25ec5ea84e06c4af8421b9ba0b6c bytes=560 file=SHA256SUMS.txt role=986-d13-mlckwait-waiters-bit;-SHA256SUMS.txt

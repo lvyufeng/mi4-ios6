@@ -74,6 +74,16 @@ def write_record(manifest, out_path):
         # Absent-from-tarball sources are not compiled and have no bytes to record.
         if not os.path.isfile(p):
             continue
+        # **986: `.s`/`.S` sources are NOT compiled by this pool either, so they are not recorded.**
+        # `tools/build_xnu_arm_kernel.sh`'s compile loop skips every `.s`/`.S` (it is a C/C++ compile
+        # loop; the ARM assembly is assembled by `tools/assemble_arm_layer.sh` into a *different* pool,
+        # `out/xnu_asm_obj*/`), and `list_sources.py` still lists them because the manifest is the
+        # tree's source list. Recording them made an asm-only edit - 986's `hw_lock.s` fix - trip this
+        # record and report "the kernel pool is stale" for a pool whose objects never depended on that
+        # file. The record's own claim is "the sources THIS POOL WAS BUILT FROM", so it must be the
+        # compiled set: same extension filter, one definition ([[mi4-one-value-two-definitions]]).
+        if p.endswith((".s", ".S")):
+            continue
         rows.append((p, sha256_file(p)))
     rows.sort()
     with open(out_path, "w", encoding="utf-8") as f:
@@ -132,9 +142,22 @@ def selftest():
             f.write(a + "\n" + b + "\n" + os.path.join(d, "absent.c") + "\n")
         rec = os.path.join(d, "rec.sha256")
 
+        # **986: a `.s`/`.S` source in the manifest is NOT recorded.** This pool skips every assembly
+        # file (the ARM layer assembles them into a different pool), so recording one made an
+        # asm-only edit refuse a pool whose objects never read that file - the false-stale 986's
+        # `hw_lock.s` fix hit. The `.s` here exists on disk, so its absence from the record is the
+        # filter and not the absent-file skip.
+        s = os.path.join(d, "c.s")
+        with open(s, "w") as f:
+            f.write("/* asm */\n")
+        with open(man, "w") as f:
+            f.write(a + "\n" + b + "\n" + s + "\n" + os.path.join(d, "absent.c") + "\n")
+
         n = write_record(man, rec)
-        ok("writes one row per PRESENT source (absent skipped)", n == 2)
+        ok("writes one row per PRESENT compiled source (absent AND .s skipped)", n == 2)
         ok("a clean tree verifies", verify_record(rec) == [])
+        with open(rec) as f:
+            ok("a present .s source is NOT recorded", s not in f.read())
 
         # mtime-only change: must NOT drift (the false-stale the content check exists to avoid).
         os.utime(a, (0, 0))

@@ -30146,6 +30146,27 @@ verify_trace_symbols() {
         layout_fail "511's instrument calls bsd_ast through \`__real_\` and the pass-1 undefined set contains it - nothing in this image defines it, so the state the run reads back would be a fact about the stand-in and not about the kernel"
     bast=$(sym_addr bsd_ast) || layout_fail "bsd_ast is not in the linked image - the function whose return is the kernel's return to user mode is not here, so 511 has no route to measure"
     bwrap=$(sym_addr __wrap_bsd_ast) || layout_fail "__wrap_bsd_ast is not in the linked image - --wrap=bsd_ast did not link, and the run's absence of xnu_live_ast_* records would say nothing about the boot"
+    # **986: the D13 mutex wait must set the WAITERS bit, or its wakeup is LOST.** `lck_mtx_lock`'s
+    # slow path reaches `mlckwait` with owner bits in the lock word and must record that a waiter is
+    # queued (bit 1, `ARM_LCK_WAITERS`) before it sleeps. Upstream Apple's file sets **nothing**
+    # (`orr r3,r3,#0`, identical in every mirror); the fork added `orr r3,r3,#3` behind
+    # `#if BOARD_CONFIG_ARMPBA8 || BOARD_CONFIG_QSD8250_LEO` - but this ELF build's assembler receives
+    # **no** `BOARD_CONFIG_*` macro (`tools/xnu_config/arm_asm_defines.sh` emits only the
+    # configuration's `CONFIG_*` options), so the gate was closed and the defective arm linked. With
+    # `#0`, `lck_mtx_unlock`'s fast path (`(word & 3) == 0`) is always taken, `lck_mtx_unlock_wakeup`
+    # -> `thread_wakeup_one` never runs, and the parked thread is stranded - the exact lost wakeup
+    # 985's run parked on; and `lmuslow` PANICS unless bit 1 is set, which is the invariant in words.
+    # `tools/stage_d13_hw_lock_986.sh` stages the fix; this clause stops the build if it is absent,
+    # because a claim in a comment is not a check ([[mi4-a-claim-in-a-comment-is-not-a-check]]).
+    # Gated on `hw_lock.o` in the assembly pool: `hw_lock.s` is D13-only - 4570 locks with
+    # `osfmk/arm/locks_arm.c` and ships no such file, so a 4570 build has no `mlckwait` to read.
+    if [[ -f $XNU_ASM_OBJ_OUT/hw_lock.o ]]; then
+        mlckwait_orr=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" |
+            awk '/<mlckwait>:/ { seen = 1; next } seen && !got { printf "%s %s", $2, $3; got = 1 }')
+        [[ "$mlckwait_orr" == "e3833003 orr" ]] ||
+            layout_fail "the first instruction at mlckwait in this image is [$mlckwait_orr] and not 'e3833003 orr r3,r3,#3' (setting ARM_LCK_WAITERS): with #0 the parked waiter sets no bit, lck_mtx_unlock takes its fast path, thread_wakeup_one is never delivered and the thread is stranded - the lost wakeup 985's run parked on. Run tools/stage_d13_hw_lock_986.sh, then tools/assemble_arm_layer.sh, then rebuild the entry image"
+        say "  xnu_entry_986: mlckwait sets ARM_LCK_WAITERS unconditionally (\`orr r3,r3,#3\`), so lck_mtx_unlock's slow path wakes the parked waiter instead of taking the fast path and stranding it"
+    fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
     # `ast_taken_user`**: its arm return path (`cswitch.s:144` `thread_exception_return`) delivers by
