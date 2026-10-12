@@ -762,6 +762,15 @@ DEFINES=(
 # `STAGE90_HFS_ROOT` above; a `--platform-only` run never sees it because the pool is not recompiled.
 [[ ${STAGE90_XNU_KEXTB_LOGIN:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_KEXTB_LOGIN=1)
 
+# 990's stack-alignment edit (`osfmk/arm/pcb.c`: `machine_stack_attach`/`machine_stack_handoff` round
+# the saved-state block - `iss` = `stack_top - 68` = 4 mod 8 - and the frame below it down to 8, so
+# every continuation/syscall C entry runs at an 8-aligned sp; 989 died at
+# `parse_machfile+0x60c`'s `vld1.32 {d18},[r1 :64]` on a 4-mod-8 sp). `pcb.c` is a kernel-pool file,
+# so the switch goes to the SAME array as the kext guard, not to `EXTRA_DEFINES`
+# (`tools/stage_d13_sp_align.sh`). The `.s` half of 990 (`machine_routines_asm.s`'s astloop) is an
+# ASSEMBLY-layer file - its `-D` rides `tools/assemble_arm_layer.sh`'s ASFLAGS instead.
+[[ ${STAGE90_XNU_SP_ALIGN:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_SP_ALIGN=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.  (`$GENERATED` is

@@ -1061,6 +1061,21 @@ case "$KEXTB_LOGIN" in
     *) echo "REFUSING: STAGE90_XNU_KEXTB_LOGIN='$KEXTB_LOGIN' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **990: the pool's stack-alignment edit, recorded the same way and for the same reason.** With
+# `STAGE90_XNU_SP_ALIGN=1`, `osfmk/arm/pcb.c`'s `machine_stack_attach`/`machine_stack_handoff` round the
+# saved-state block (and the frame below it) down to 8 and `machine_routines_asm.s`'s astloop realigns
+# its 9-word frame around `blx _ast_taken` - 989's pid-1 exec ran C at a 4-mod-8 sp and died at
+# `parse_machfile+0x60c`'s `vld1.32 {d18},[r1 :64]`. The C half is compiled by
+# `tools/build_xnu_arm_kernel.sh` (DEFINES, from the same-named environment variable), the `.s` half by
+# `tools/assemble_arm_layer.sh` (ASFLAGS) - the two spellings must carry the SAME value
+# (`mi4-one-value-two-definitions`), and the by-value clause at the 990 site below refuses a linked
+# image whose ast call sites or stack functions do not carry the compiled fix.
+SP_ALIGN=${STAGE90_XNU_SP_ALIGN:-0}
+case "$SP_ALIGN" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_SP_ALIGN='$SP_ALIGN' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **911c: the RAM bank layout, measured from the Qualcomm SMEM RAM-partition table.** The goal's newest
 # clause is that XNU recognize the Mi 4's 3 GB of RAM, and the 911c design established that the repo
 # holds NO low-bank base or size anywhere - every "low bank" is an inference from "3 GB minus 1.5 GB".
@@ -1374,6 +1389,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_MEM_TOTAL
                 STAGE90_XNU_ENTRY_WINDOW
                 STAGE90_XNU_KEXTB_LOGIN
+                STAGE90_XNU_SP_ALIGN
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1514,6 +1530,11 @@ do
         # of this switch. The 988 clause at the link site below refuses a link that still carries the
         # faulting dereference.
         STAGE90_XNU_KEXTB_LOGIN)      _v=$KEXTB_LOGIN ;;
+        # 990: whether the tree's stack-alignment edit (`tools/stage_d13_sp_align.sh`) was compiled into
+        # this image's pool AND its assembly layer. Read from `$SP_ALIGN`, validated 0/1 at its own
+        # assignment far above this loop, so the record, the pool's `DEFINES` and the asm layer's
+        # `ASFLAGS` cannot be built from two spellings of this switch ([[mi4-one-value-two-definitions]]).
+        STAGE90_XNU_SP_ALIGN)         _v=$SP_ALIGN ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -30365,6 +30386,24 @@ verify_trace_symbols() {
             layout_fail "entry_dt_recorded_walk's first call is [$gcr_pubfirst] and not <entry_note_dtref>: the guard must PUBLISH the recorded address' first word, the word it had while alive, and whether they match, BEFORE it walks anything, so a run that stops in the walk still says which address it was about and whether the guard passed. Publish first, walk second"
         say "  xnu_entry_989: the census' recorded address is identity-checked before it is walked - entry_probe_dt_children walks only the tree root (2 getChildSetReference calls), entry_dt_recorded_walk carries the recorded address' pair behind a comparison against $gcr_how, and it publishes the reading first, so a freed address is named and not dispatched through"
     fi
+    # **990: the tree must hand C 8-byte-aligned stacks at its two measured gates.** 989's pid-1 exec
+    # ran every C frame from `thread_return_join`'s `blx ast_taken` and every continuation off
+    # `Call_continuation`'s `ldr sp, [thread, TH_PCB_ISS]` at sp = 4 (mod 8) - `iss = stack_top - 68` and
+    # astloop's 9-word push are 4 (mod 8) - and died at `parse_machfile+0x60c`'s `vld1.32 {d18},[r1 :64]`
+    # (sp = 0xcfdbba7c). The fix is `tools/stage_d13_sp_align.sh` + `STAGE90_XNU_SP_ALIGN=1`; the
+    # property is read BY VALUE off THIS linked image by `tools/check_sp_alignment.py` (each ast_taken
+    # call site's cumulative sp delta = 0 mod 8; `machine_stack_attach`/`machine_stack_handoff` carry
+    # the compiled `& ~7u` as a `bic rN, rN, #7`; `Call_continuation` still loads sp from TH_PCB_ISS).
+    # The checker is the same walker that REFUSES the 989 image, so a build of this file whose switch
+    # never reached the pool (or the asm layer) cannot pass. Gated on the switch: with SP_ALIGN=0 the
+    # tree's original text is compiled on purpose and there is nothing here to assert.
+    if [[ $SP_ALIGN -eq 1 ]]; then
+        if ! sp_out=$(python3 "$REPO_ROOT/tools/check_sp_alignment.py" "$OUT/xnu_arm_entry.elf" 2>&1); then
+            printf '%s\n' "$sp_out" >&2
+            layout_fail "the linked image still hands C 4-mod-8 stacks even though STAGE90_XNU_SP_ALIGN=1 was requested: a site above is misaligned, or a stack function lacks the compiled rounding - the pool was built without -DSTAGE90_XNU_SP_ALIGN=1 (run tools/stage_d13_sp_align.sh and rebuild BOTH layers: tools/assemble_arm_layer.sh with STAGE90_XNU_SP_ALIGN=1 exported, THEN tools/build_xnu_arm_kernel.sh) or the asm layer's ASFLAGS did not carry the switch. 989 died exactly there (parse_machfile+0x60c vld1.32 {d18},[r1 :64], sp=0xcfdbba7c)"
+        fi
+        say "  xnu_entry_990: the linked image hands C 8-byte-aligned stacks at both measured gates - every ast_taken call site's cumulative sp delta is 0 mod 8 (astloop carries its sub/add #4), machine_stack_attach and machine_stack_handoff carry the compiled & ~7u (bic rN,rN,#7), and Call_continuation still takes sp from TH_PCB_ISS - $sp_out"
+    fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
     # `ast_taken_user`**: its arm return path (`cswitch.s:144` `thread_exception_return`) delivers by
@@ -38359,6 +38398,10 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # same), because the record this image replaces predates the key - so the value has exactly one
     # source and the write-back and the check cannot disagree ([[mi4-one-value-two-definitions]]).
     echo "STAGE90_XNU_KEXTB_LOGIN=${STAGE90_XNU_KEXTB_LOGIN:-0}"
+    # 990's switch, read the same way and for the same reason (one value, two definitions: the pool's
+    # DEFINES and the asm layer's ASFLAGS both take this value, and the by-value clause at the 990 site
+    # above refuses a linked image that did not get it).
+    echo "STAGE90_XNU_SP_ALIGN=${STAGE90_XNU_SP_ALIGN:-0}"
     # 535's switch, and the only one whose *link* the build changes (see its own block above): the
     # record is what makes "this image has the seam hook" a thing the gate can read rather than a
     # thing a reader assumes from the hash.

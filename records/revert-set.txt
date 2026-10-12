@@ -13724,15 +13724,69 @@ set=armed-d13-707801c4-spent sha256=8cc9a32b6e01a1424f8af1928974def299bf4ae1f167
 # Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
 # written - fully reversible. fastboot boot only, NEVER flash.
 # =================================================================================================
-set=armed-d13-2e0eebf5 sha256=2e0eebf5a8bef01f87033a775ddae45c191703b16f936e1a9b599041f8aa6e10 bytes=6335572 file=xnu_arm_entry.bin role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry.bin
-set=armed-d13-2e0eebf5 sha256=1b650cf5aa8fe256bfcda68a081ed3ff8105327680669b8f6883f3a2525cc413 bytes=7375772 file=xnu_arm_entry.elf role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry.elf
-set=armed-d13-2e0eebf5 sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry.h
-set=armed-d13-2e0eebf5 sha256=24c8dd64f8466ebb6f534605920f0ca37c4feb3607213fe9f42978d6c5ddc0ff bytes=1435 file=xnu_arm_entry-config.txt role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry-config.txt
-set=armed-d13-2e0eebf5 sha256=24ebc83785c952ee044c248cefafa58198360c83b1d7f8ea56b06c9852294221 bytes=3149 file=xnu_arm_entry-sources.txt role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry-sources.txt
-set=armed-d13-2e0eebf5 sha256=860dc00584ee495175cb4c804193b3a70f8daed48826257f93e5f7a4515e34b7 bytes=6830980 file=stage90.bin role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90.bin
-set=armed-d13-2e0eebf5 sha256=bb3302cecaf8f07143810965d6f6981f382afc197ee70294451d2371e3bacdcc bytes=6893052 file=stage90.elf role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90.elf
-set=armed-d13-2e0eebf5 sha256=98a516930813a436e1bf7e83d99c306a5713dfa7f0fe44f06ab50678c49dc4cb bytes=6834176 file=stage90.img role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90.img
-set=armed-d13-2e0eebf5 sha256=a2e1bdf18a624dc84ccda629be1faae75b311332ca271d2b21eb0c34771a51a0 bytes=9355264 file=stage90-qcdt.img role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90-qcdt.img
-set=armed-d13-2e0eebf5 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90_fixture.macho
-set=armed-d13-2e0eebf5 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90-build-config.txt
-set=armed-d13-2e0eebf5 sha256=f537469098e2044633d84b74a159e743bba18ef60ee0f4cc1904f34caad9571a bytes=560 file=SHA256SUMS.txt role=989-d13-dt-census-recorded-address-identity-guard-out;-SHA256SUMS.txt
+set=armed-d13-2e0eebf5-spent sha256=2e0eebf5a8bef01f87033a775ddae45c191703b16f936e1a9b599041f8aa6e10 bytes=6335572 file=xnu_arm_entry.bin role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry.bin
+set=armed-d13-2e0eebf5-spent sha256=1b650cf5aa8fe256bfcda68a081ed3ff8105327680669b8f6883f3a2525cc413 bytes=7375772 file=xnu_arm_entry.elf role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry.elf
+set=armed-d13-2e0eebf5-spent sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry.h
+set=armed-d13-2e0eebf5-spent sha256=24c8dd64f8466ebb6f534605920f0ca37c4feb3607213fe9f42978d6c5ddc0ff bytes=1435 file=xnu_arm_entry-config.txt role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry-config.txt
+set=armed-d13-2e0eebf5-spent sha256=24ebc83785c952ee044c248cefafa58198360c83b1d7f8ea56b06c9852294221 bytes=3149 file=xnu_arm_entry-sources.txt role=989-d13-dt-census-recorded-address-identity-guard-out;-xnu_arm_entry-sources.txt
+set=armed-d13-2e0eebf5-spent sha256=860dc00584ee495175cb4c804193b3a70f8daed48826257f93e5f7a4515e34b7 bytes=6830980 file=stage90.bin role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90.bin
+set=armed-d13-2e0eebf5-spent sha256=bb3302cecaf8f07143810965d6f6981f382afc197ee70294451d2371e3bacdcc bytes=6893052 file=stage90.elf role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90.elf
+set=armed-d13-2e0eebf5-spent sha256=98a516930813a436e1bf7e83d99c306a5713dfa7f0fe44f06ab50678c49dc4cb bytes=6834176 file=stage90.img role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90.img
+set=armed-d13-2e0eebf5-spent sha256=a2e1bdf18a624dc84ccda629be1faae75b311332ca271d2b21eb0c34771a51a0 bytes=9355264 file=stage90-qcdt.img role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90-qcdt.img
+set=armed-d13-2e0eebf5-spent sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90_fixture.macho
+set=armed-d13-2e0eebf5-spent sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=989-d13-dt-census-recorded-address-identity-guard-out;-stage90-build-config.txt
+set=armed-d13-2e0eebf5-spent sha256=f537469098e2044633d84b74a159e743bba18ef60ee0f4cc1904f34caad9571a bytes=560 file=SHA256SUMS.txt role=989-d13-dt-census-recorded-address-identity-guard-out;-SHA256SUMS.txt
+# armed-d13-0d531453  -  990: THE D13 TREE HANDS C 8-BYTE-ALIGNED STACKS AT ITS TWO MEASURED GATES.
+# Switch set is 989-s + STAGE90_XNU_SP_ALIGN=1; the ENTRY BIN moved (2e0eebf5 -> 0d531453) and TWO tree
+# objects move: the assembly layer-s machine_routines_asm.o and the pool-s osfmk_arm_pcb.o (a fresh
+# checkout needs BOTH tools/stage_d13_kextb_login.sh and tools/stage_d13_sp_align.sh).
+#
+# 989 (pressed 2026-10-12, arm armed-d13-2e0eebf5, commit 1bc3fdb, evidence /tmp/press989.log) is a
+# DECISIVE SUCCESS in the pre-registered sense - the abort MOVED. 988-s dt-census guard HELD
+# (xnu_live_dtref_ok=0; the probe walked only the tree root), and the boot ran the WHOLE mount +
+# bsd_init: Added memory device md0/rmd0 -> BSD root: md0 -> bsd_init: done -> attempting to start
+# init of /sbin/launchd -> NEW first abort: sleh_abort: alignment fault at pc=0x8021b6a8 =
+# parse_machfile+0x60c, instruction f461279f vld1.32 {d18}, [r1 :64], r1 = sp+168 = 0xcfdbbb24,
+# sp = 0xcfdbba7c (4 mod 8; 168 is 8-aligned, so the qualified NEON pair load faulted on the sp).
+#
+# ROOT CAUSE (990): the D13 tree has TWO gates 4570 lacks. (1) osfmk/arm/pcb.c: iss =
+# STACK_IKS(stack) = stack_top - 68 and sizeof(arm_saved_state_t) = 68 = 4 (mod 8), and
+# Call_continuation (cswitch.s:46) loads the continuation-s sp straight from machine.iss -
+# fleh_swi runs syscall handlers on the same value; 4570-s thread_kernel_state was 16-aligned (80)
+# - one value, two definitions. (2) machine_routines_asm.s:133: astloop saves 9 words (36 = 4 mod
+# 8) immediately before blx _ast_taken, and bsdinit-s thread first ran C in ast_taken (entered
+# from thread_return_join, no push of its own), whose sp came from gate 1; the exec chain that
+# died is ast_taken -> bsd_ast -> bsdinit_task -> load_init_program -> execve -> __mac_execve ->
+# exec_activate_image -> exec_mach_imgact -> load_machfile -> parse_machfile. By value:
+# osfmk_arm_pcb.o carries movw #16316 (iss) / movw #16248 (iss->sp); check_sp_alignment.py walks
+# the linked elf and shows astloop-s delta -36 = 4 (mod 8) while __preempt (-8), thread_return_join
+# (0), preempt_kernel (0), thread_terminate (16) are all 0 (mod 8).
+#
+# 990: tools/stage_d13_sp_align.sh (gated #if STAGE90_XNU_SP_ALIGN, original text in the #else -
+# switch-OFF byte-identical) rounds STACK_IKS(stack) AND kstack - sizeof(arm_saved_state_t) down to
+# 8 in BOTH pcb.c functions (top 4 stack bytes unused), and adds plain sub sp,#4 / add sp,#4 around
+# astloop-s blx _ast_taken. The switch threads through build_xnu_arm_kernel.sh:772 (pool DEFINES),
+# assemble_arm_layer.sh (ASFLAGS) and build_entry.sh (validation at :1063, ENTRY_ARM_KEY, record
+# emission, and a by-value clause that runs tools/check_sp_alignment.py and REFUSES a linked image
+# whose ast call sites are not 0 mod 8, whose stack functions lack the compiled bic rN,rN,#7, or
+# whose Call_continuation no longer loads sp from TH_PCB_ISS).
+#
+# READ: past the pid-1 exec (no vld1.32 {d18} alignment fault; launchd-s own C runs) => the 4-mod-8
+# stack was the wall. FALSIFICATION: the same fault recurs => the switch did not take (the 990
+# clause should have refused such an image) or another 4-mod-8 producer exists beyond the two
+# gates the walker models.
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-0d531453 sha256=0d531453911e916d799ab2e09b537b0cfd457ebc713d5f9b70d944aea044184b bytes=6335572 file=xnu_arm_entry.bin role=990-d13-stack-alignment-at-the-two-measured-gates;-xnu_arm_entry.bin
+set=armed-d13-0d531453 sha256=9018190e3963f886ce61f4771ec18da2005f698b72bcf35ed9dd170155b64978 bytes=7375772 file=xnu_arm_entry.elf role=990-d13-stack-alignment-at-the-two-measured-gates;-xnu_arm_entry.elf
+set=armed-d13-0d531453 sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=990-d13-stack-alignment-at-the-two-measured-gates;-xnu_arm_entry.h
+set=armed-d13-0d531453 sha256=9e2e37a9a0d17ebcf751e167a4a6770e15d5753dc231dc6b0d6c1216341d5fa3 bytes=1458 file=xnu_arm_entry-config.txt role=990-d13-stack-alignment-at-the-two-measured-gates;-xnu_arm_entry-config.txt
+set=armed-d13-0d531453 sha256=f54fb3907cceaed95458da25ca20ab11b5d189ba24efd2fb41ccd1b4d8217441 bytes=3149 file=xnu_arm_entry-sources.txt role=990-d13-stack-alignment-at-the-two-measured-gates;-xnu_arm_entry-sources.txt
+set=armed-d13-0d531453 sha256=bf62d513b33cef935bd839396dcabeaf1e1868c8c08502f486ba5d5ef1b6b9f0 bytes=6830980 file=stage90.bin role=990-d13-stack-alignment-at-the-two-measured-gates;-stage90.bin
+set=armed-d13-0d531453 sha256=b590a9819b12ed898de24264f3554aefc2360505fd0a1abcea999f43fd5f10e1 bytes=6893052 file=stage90.elf role=990-d13-stack-alignment-at-the-two-measured-gates;-stage90.elf
+set=armed-d13-0d531453 sha256=a492b7e5c57794e398b30fae52c38ad3496a42e1c636b86dddc5c919ee78ef71 bytes=6834176 file=stage90.img role=990-d13-stack-alignment-at-the-two-measured-gates;-stage90.img
+set=armed-d13-0d531453 sha256=146c2f25b19f30de2bd725c2c20bcd891c02e6e80ac8e67657a7ec08ac59eab5 bytes=9355264 file=stage90-qcdt.img role=990-d13-stack-alignment-at-the-two-measured-gates;-stage90-qcdt.img
+set=armed-d13-0d531453 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=990-d13-stack-alignment-at-the-two-measured-gates;-stage90_fixture.macho
+set=armed-d13-0d531453 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=990-d13-stack-alignment-at-the-two-measured-gates;-stage90-build-config.txt
+set=armed-d13-0d531453 sha256=48c0cf353b9145354a5c5af8b89e434af557b87114230efb732192f0dd10779c bytes=560 file=SHA256SUMS.txt role=990-d13-stack-alignment-at-the-two-measured-gates;-SHA256SUMS.txt

@@ -102,6 +102,16 @@ esac
 case "$IDLE_STACK_SIZE" in
     ''|*[!0-9]*) echo "STAGE90_XNU_IDLE_STACK_SIZE must be a decimal byte count, not [$IDLE_STACK_SIZE]" >&2; exit 1 ;;
 esac
+# 990: make the tree hand C code 8-byte-aligned stacks at its two measured gates
+# (`tools/stage_d13_sp_align.sh`). The `.s` half of the edit (`machine_routines_asm.s`'s astloop)
+# rides the ASFLAGS below; the C half (`osfmk/arm/pcb.c`) is a POOL object and takes the same switch
+# through `build_xnu_arm_kernel.sh`'s `DEFINES` - the two spellings must carry the SAME value
+# (`mi4-one-value-two-definitions`). Default 0: the tree's original text is compiled byte for byte.
+SP_ALIGN=${STAGE90_XNU_SP_ALIGN:-0}
+case "$SP_ALIGN" in
+    0|1) ;;
+    *) echo "STAGE90_XNU_SP_ALIGN must be 0 or 1, not [$SP_ALIGN]" >&2; exit 1 ;;
+esac
 PATCH_IDLE_STACK=$TOOLS_DIR/patch_idle_stack.py
 idle_patched=0
 ASSYM=$XNU_ASSYM_OUT/$CONFIG
@@ -178,6 +188,9 @@ ASFLAGS=(
 # the array is assigned, not extended, further down the file - an `ASFLAGS+=(...)` before this line is
 # discarded by this line, which the first version of this change did.
 ASFLAGS+=("-DSTAGE90_IDLE_STACK_SIZE=$IDLE_STACK_SIZE")
+# 990: the astloop realignment (`tools/patch_d13_sp_align.py`) - same append-after-assignment rule as
+# the line above.
+ASFLAGS+=("-DSTAGE90_XNU_SP_ALIGN=$SP_ALIGN")
 INCLUDES=(
     -I"$ASSYM" -I"$REPO_ROOT/src/entry"
     -I"$OPTION_HEADERS" -I"$DEVICE_HEADERS"
