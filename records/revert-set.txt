@@ -13841,3 +13841,67 @@ set=armed-d13-13355bf0 sha256=68a068e2793b59c378dbd005e82edfae10e04fc83edfab4ab6
 set=armed-d13-13355bf0 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=991-vm-page-lookup-memq-hint-guard;-stage90_fixture.macho
 set=armed-d13-13355bf0 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=991-vm-page-lookup-memq-hint-guard;-stage90-build-config.txt
 set=armed-d13-13355bf0 sha256=e474373b9dbc6e20c7dfd5dca25ede2de6fadad288d39f071f2ae054dd6222e6 bytes=560 file=SHA256SUMS.txt role=991-vm-page-lookup-memq-hint-guard;-SHA256SUMS.txt
+# armed-d13-fce6e8dd  -  992: THE COMMPAGE IS MAPPED AT 0xFFFF4000 FOR iOS 7 USERSPACE (IOS7LAB ALIAS OPENED).
+# Switch set is 991-s + STAGE90_XNU_COMMPAGE_ALIAS=1; the ENTRY BIN moved (13355bf0 -> fce6e8dd) and TWO tree
+# objects move: the pool-s osfmk_arm_pmap.o and osfmk_arm_commpage_commpage.o - this rung has NO
+# assembly-layer, NO pcb.c and NO vm_resident.c change (a fresh checkout needs ALL FOUR
+# tools/stage_d13_kextb_login.sh, tools/stage_d13_sp_align.sh, tools/stage_d13_vmhint_guard.sh and
+# tools/stage_d13_commpage_alias.sh).
+#
+# 991 (pressed 2026-10-12, arm armed-d13-13355bf0, commit af099f4, evidence
+# /tmp/cancro-last_kmsg-991.txt) is a READ-CONFIRMED SUCCESS in the pre-registered sense: the VMHINT991
+# guard fired exactly TWICE (obj=0xc0005b48 mem=0x1 lr=0x8003d8ec w00=8000 w04=baddecaf w18=1000 w1c=0
+# w24=0; and obj=0xc0005ab0, same shape) and the boot moved PAST the kernel-mode exec wall into
+# USERSPACE: /sbin/launchd EXECUTED - dyld ran from the mapped shared cache (dyld_all_image_info set,
+# pc/lr in the 0x2be5-0x2be7 region) - and then aborted 231x: launchd[1]: usermode data abort,
+# EXC_BAD_ACCESS at 0xffff4090 in map 0xc00057b8 (pmap 0xc0ba3cc0) (Translation fault on page). Zero
+# kernel fatal exceptions, zero panics in the whole 22,707-line log.
+#
+# THE w04 DECODE (991-s pre-registered branch, ANSWERED): w04=0xbaddecaf is ZP_NOT_POISONED
+# (osfmk/kern/zalloc.c:135-137), which free_to_zone-s default else-branch leaves in elem[1] when
+# check-sampling is off; a real _vm_object_allocate copies the template over +4 and would have erased
+# it. The two reported "objects" are FREED zone-element memory; the first abort MOVED to userspace,
+# where the commpage wall stopped launchd.
+#
+# ROOT CAUSE (992), read BY VALUE: 0xffff4090 = the iOS 7 commpage + 0x90. This tree-s control ABI is
+# _COMM_PAGE32_BASE_ADDRESS = 0x40000000 (osfmk/arm/cpu_capabilities.h:13) and pmap.c-s leo_pte_build
+# grants exactly THAT va L2_ACCESS_USER; userspace reads the commpage at 0xffff4000, unmapped. The fix
+# for exactly this symptom already exists in the tree - the 4570/HD2 line-s IOS7LAB alias
+# (pmap.c:205,2848,3242,3434 + commpage.c:57,99; its comment: "the address used by the original iOS 7
+# dyld") - compiled out on D13 behind six BOARD_CONFIG_ARMPBA8 || BOARD_CONFIG_QSD8250_LEO gates. The
+# alias nests cleanly: arm_vm_init.c:413-423 maps the high vectors at 0xffff0000 as an L2_SMALL_PAGE,
+# so the region-s L1 slot already points at an L2 table and slot 0xf4 (0xffff4000) is free.
+#
+# 992: tools/stage_d13_commpage_alias.sh appends `|| (defined(STAGE90_XNU_COMMPAGE_ALIAS) &&
+# STAGE90_XNU_COMMPAGE_ALIAS)` to the six byte-identical gate lines (switch OFF compiles the tree-s
+# original text byte for byte; the defined() form never evaluates an undefined identifier).
+# tools/check_commpage_alias.py walks the LINKED elf (both IOS7LAB anchors, the alias va AND the
+# control-ABI va materialized inside pmap_create_sharedpage, >=2 pmap_enter calls with the alias va
+# live in r1 at the second - the static read-back, since the asserts compile out under MACH_ASSERT=0 -
+# and the alias va in >=2 bodies) and REFUSES the 991 image.
+#
+# READ: the log carries BOTH markers - IOS7LAB commpage alias 0xffff4000: same page, user read-only,
+# XN (staged as printf: kprintf is a no-op at pmap.c:409; the three asserts compile out under
+# MACH_ASSERT=0) and IOS7LAB commpage cpus: configured=... active=... physical=...
+# logical=... - and launchd-s usermode data abort ... 0xffff4090 does NOT recur; the boot moves further
+# into userspace (candidates: libdispatch heap from +0x36=1; the commpage VERSION/timebase fields still
+# ZERO; a new dyld read elsewhere).
+# FALSIFICATION: the SAME 0xffff4090 Translation fault abort recurs => the alias did not reach the pool
+# (the 992 clause should have refused such an image), the perms are wrong (then the SAME page faults
+# with a PERMISSION fault - the compiled-out asserts cannot name it), or the alias landed in a pmap the
+# user context does not consult.
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never written -
+# fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-fce6e8dd sha256=fce6e8dd252541a29f2dfd0ab39049d27518e032c9b3bc979f1db3e7b501a749 bytes=6335572 file=xnu_arm_entry.bin role=992-commpage-alias-0xffff4000;-xnu_arm_entry.bin
+set=armed-d13-fce6e8dd sha256=04afac8481e4b68739a3e3f99dce74ccb50e877952a148c4793111688d68ec8a bytes=7375824 file=xnu_arm_entry.elf role=992-commpage-alias-0xffff4000;-xnu_arm_entry.elf
+set=armed-d13-fce6e8dd sha256=bd4c007fe6e07bc5c29e5b140f671e486ff2f023b8eb2059c7e403f2590ad257 bytes=1912 file=xnu_arm_entry.h role=992-commpage-alias-0xffff4000;-xnu_arm_entry.h
+set=armed-d13-fce6e8dd sha256=a91a77ee191f8f75d3352af9533cf91d9687b91a8d517b50985e38c137dadf1b bytes=1514 file=xnu_arm_entry-config.txt role=992-commpage-alias-0xffff4000;-xnu_arm_entry-config.txt
+set=armed-d13-fce6e8dd sha256=9ca71eedc2a07760a8fa90460266766c68fe7585c32decfe7f03ddc1f3ecee45 bytes=3149 file=xnu_arm_entry-sources.txt role=992-commpage-alias-0xffff4000;-xnu_arm_entry-sources.txt
+set=armed-d13-fce6e8dd sha256=d6692deba253281848a42c9779d88e7e2c78897faa6d99ada53fdecf27a6ff2c bytes=6830980 file=stage90.bin role=992-commpage-alias-0xffff4000;-stage90.bin
+set=armed-d13-fce6e8dd sha256=f3e18b28a32f88166609d08e4b680eb33a74e2e27ee43017f1d1637a89bcfb56 bytes=6893052 file=stage90.elf role=992-commpage-alias-0xffff4000;-stage90.elf
+set=armed-d13-fce6e8dd sha256=26a8cc3ef111a70b39b6260abeb0b8110809a2f82e0679f4619a62af1b7e94ee bytes=6834176 file=stage90.img role=992-commpage-alias-0xffff4000;-stage90.img
+set=armed-d13-fce6e8dd sha256=6c54f3c455afc6d80f5da9dc9d6521dbf1a25669014830afbb611a2f89f4b5b4 bytes=9355264 file=stage90-qcdt.img role=992-commpage-alias-0xffff4000;-stage90-qcdt.img
+set=armed-d13-fce6e8dd sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=992-commpage-alias-0xffff4000;-stage90_fixture.macho
+set=armed-d13-fce6e8dd sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=992-commpage-alias-0xffff4000;-stage90-build-config.txt
+set=armed-d13-fce6e8dd sha256=b0859a8418120cb3f08785b0f98e54cb0eb975005d731d2f334dd8af9960ae91 bytes=560 file=SHA256SUMS.txt role=992-commpage-alias-0xffff4000;-SHA256SUMS.txt

@@ -779,6 +779,16 @@ DEFINES=(
 # the kext guard and the alignment switch, not to `EXTRA_DEFINES` (`tools/stage_d13_vmhint_guard.sh`).
 [[ ${STAGE90_XNU_VMHINT_GUARD:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_VMHINT_GUARD=1)
 
+# 992's iOS 7 commpage alias (`osfmk/arm/pmap.c` + `osfmk/arm/commpage/commpage.c`: the six dormant
+# IOS7LAB board gates open, so `pmap_create_sharedpage` maps the commpage page a second time at
+# 0xFFFF4000 - user read-only, XN - and `commpage_populate` fills the iOS 7 count bytes at
+# `_COMM_PAGE_BASE_ADDRESS+0x34..0x36`). 991's press reached userspace: launchd EXECUTED (dyld ran
+# from the mapped shared cache) and then aborted 231x at `0xffff4090` - translation fault - the
+# address the real iOS 7 dyld reads the commpage at. Both files are kernel-pool files, so the switch
+# goes to the SAME array as the kext guard / alignment / memq_hint switches, not to `EXTRA_DEFINES`
+# (`tools/stage_d13_commpage_alias.sh`).
+[[ ${STAGE90_XNU_COMMPAGE_ALIAS:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_COMMPAGE_ALIAS=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.  (`$GENERATED` is

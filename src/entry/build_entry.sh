@@ -1093,6 +1093,26 @@ case "$VMHINT_GUARD" in
     *) echo "REFUSING: STAGE90_XNU_VMHINT_GUARD='$VMHINT_GUARD' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
+# `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
+# commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
+# L2_ACCESS_USER|L2_ACCESS_APX, NX; its boot marker is staged as a live `printf` - pmap.c:409's
+# `#define kprintf(args...)` is a no-op - and its read-back asserts compile out under MACH_ASSERT=0,
+# so the by-value evidence is the checker's r1 binding), and
+# `commpage.c` fills the iOS 7 count bytes at `_COMM_PAGE_BASE_ADDRESS+0x34..0x36` (libdispatch
+# sizes its heap from +0x36). 991's press ran `/sbin/launchd` - dyld executed from the mapped shared
+# cache - and then aborted 231x at `0xffff4090` (`_COMM_PAGE_BASE_ADDRESS + 0x90` in the iOS 7 ABI)
+# with a translation fault, because this tree's control ABI sits at 0x40000000
+# (`cpu_capabilities.h:13`) and the high page was left unmapped. The edit is compiled by
+# `tools/build_xnu_arm_kernel.sh` (DEFINES, from the same-named environment variable), so the two
+# spellings must carry the SAME value (`mi4-one-value-two-definitions`), and the by-value clause at
+# the 992 site below refuses a linked image whose pmap_create_sharedpage does not carry the alias.
+COMMPAGE_ALIAS=${STAGE90_XNU_COMMPAGE_ALIAS:-0}
+case "$COMMPAGE_ALIAS" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_COMMPAGE_ALIAS='$COMMPAGE_ALIAS' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **911c: the RAM bank layout, measured from the Qualcomm SMEM RAM-partition table.** The goal's newest
 # clause is that XNU recognize the Mi 4's 3 GB of RAM, and the 911c design established that the repo
 # holds NO low-bank base or size anywhere - every "low bank" is an inference from "3 GB minus 1.5 GB".
@@ -1408,6 +1428,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_KEXTB_LOGIN
                 STAGE90_XNU_SP_ALIGN
                 STAGE90_XNU_VMHINT_GUARD
+                STAGE90_XNU_COMMPAGE_ALIAS
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1559,6 +1580,12 @@ do
         # of this switch (`mi4-one-value-two-definitions`). The 991 clause at the link site below
         # refuses a link whose vm_page_lookup does not carry the guard.
         STAGE90_XNU_VMHINT_GUARD)     _v=$VMHINT_GUARD ;;
+        # 992: whether the tree's commpage alias (`tools/stage_d13_commpage_alias.sh`) was compiled
+        # into this image's pool. Read from `$COMMPAGE_ALIAS`, validated 0/1 at its own assignment far
+        # above this loop, so the record and the pool's `DEFINES` cannot be built from two spellings
+        # of this switch (`mi4-one-value-two-definitions`). The 992 clause at the link site below
+        # refuses a link whose pmap_create_sharedpage does not carry the alias.
+        STAGE90_XNU_COMMPAGE_ALIAS)   _v=$COMMPAGE_ALIAS ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -30452,6 +30479,42 @@ verify_trace_symbols() {
         fi
         say "  xnu_entry_991: the linked image treats an implausible memq_hint as absent inside vm_page_lookup (the VMHINT991 report is referenced from the lookup's own body) - $vh_out"
     fi
+    # **992: the iOS 7 commpage must be mapped where the real dyld reads it, 0xFFFF4000.** 991's press
+    # (arm armed-d13-13355bf0, commit af099f4, evidence /tmp/cancro-last_kmsg-991.txt) is a
+    # READ-CONFIRMED SUCCESS in the pre-registered sense: the VMHINT991 guard fired exactly twice
+    # (lr=0x8003d8ec = vm_map_pmap_enter's call) and the boot moved PAST the kernel-mode exec wall into
+    # userspace - `/sbin/launchd` EXECUTED, dyld ran from the mapped shared cache (dyld_all_image_info
+    # set, pc/lr in the 0x2be5-0x2be7 region) - and then aborted 231x:
+    #     launchd[1]: usermode data abort, EXC_BAD_ACCESS at 0xffff4090 in map 0xc00057b8 (pmap
+    #     0xc0ba3cc0) (Translation fault on page)
+    # 0xffff4090 is `_COMM_PAGE_BASE_ADDRESS + 0x90` in the iOS 7 ABI. This tree's control ABI sits at
+    # 0x40000000 (`osfmk/arm/cpu_capabilities.h:13` `_COMM_PAGE32_BASE_ADDRESS`, and `pmap.c`'s
+    # `leo_pte_build` grants exactly THAT va L2_ACCESS_USER), so on D13 the high page is unmapped and
+    # the 4570/HD2 line's fix for this exact symptom - the IOS7LAB alias - was dormant behind six
+    # `BOARD_CONFIG_ARMPBA8 || BOARD_CONFIG_QSD8250_LEO` gates. The fix is
+    # `tools/stage_d13_commpage_alias.sh` + STAGE90_XNU_COMMPAGE_ALIAS=1: `pmap_create_sharedpage`
+    # maps the commpage's own physical page a second time at `IOS7LAB_COMMPAGE_ALIAS` = 0xFFFF4000
+    # (user read-only via L2_ACCESS_USER|L2_ACCESS_APX, NX); its boot marker is staged as a LIVE
+    # `printf`, because `pmap.c:409` is `#define kprintf(args...)` - a no-op for the whole file, so
+    # the 4570 line's kprintf marker could never reach the image - and its three read-back asserts
+    # compile OUT under MACH_ASSERT=0 (`assert(ex)` is `((void)0)`, `osfmk/kern/assert.h:97`). And
+    # `commpage_populate` fills the iOS 7 count bytes at `_COMM_PAGE_BASE_ADDRESS+0x34..0x36`
+    # (libdispatch sizes its heap from +0x36) plus the cache-line byte at +0x26. The property is read
+    # BY VALUE off THIS linked image by `tools/check_commpage_alias.py` (both `IOS7LAB` report strings
+    # in allocated data; the alias va AND the control-ABI va both materialized inside
+    # `pmap_create_sharedpage`; >=2 pmap_enter calls in that body AND the alias va live in r1 at the
+    # second one - the register binding is the static stand-in for the compiled-out asserts; and the
+    # alias va materialized in at least two bodies, so the permission path carries it too); the
+    # checker REFUSES the 991 image, so a build whose switch never reached the pool cannot pass.
+    # Gated on the switch: with COMMPAGE_ALIAS=0 the tree's original text is compiled on purpose and
+    # there is nothing to assert.
+    if [[ $COMMPAGE_ALIAS -eq 1 ]]; then
+        if ! ca_out=$(python3 "$REPO_ROOT/tools/check_commpage_alias.py" "$OUT/xnu_arm_entry.elf" 2>&1); then
+            printf '%s\n' "$ca_out" >&2
+            layout_fail "the linked image does not carry the iOS 7 commpage alias at 0xFFFF4000 even though STAGE90_XNU_COMMPAGE_ALIAS=1 was requested: the checker's FAIL lines above name the missing piece (the alias va or the 0x40000000 control-ABI va not materialized in pmap_create_sharedpage, <2 pmap_enter calls, the alias va not live in r1 at the second call, no 0xffff4000 outside pmap_create_sharedpage, or a report string absent - the pmap.c marker is staged as printf because kprintf is a no-op at pmap.c:409, and the read-back asserts compile out under MACH_ASSERT=0). The pool is built by tools/build_xnu_arm_kernel.sh with -DSTAGE90_XNU_COMMPAGE_ALIAS=1 (stage the tree with tools/stage_d13_commpage_alias.sh first). 991 died exactly there (launchd[1] usermode data abort at 0xffff4090, Translation fault, map 0xc00057b8)"
+        fi
+        say "  xnu_entry_992: the linked image maps the commpage page at 0xFFFF4000 for iOS 7 userspace (both IOS7LAB anchors present, the alias va materialized inside pmap_create_sharedpage beside the 0x40000000 control ABI and live in r1 at the second pmap_enter) - $ca_out"
+    fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
     # `ast_taken_user`**: its arm return path (`cswitch.s:144` `thread_exception_return`) delivers by
@@ -38454,6 +38517,11 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # DEFINES takes this value, and the by-value clause at the 991 site above refuses a linked image
     # that did not get it).
     echo "STAGE90_XNU_VMHINT_GUARD=${STAGE90_XNU_VMHINT_GUARD:-0}"
+    # 992's switch, read the same way and for the same reason (one value, two definitions: the pool's
+    # DEFINES takes this value, and the by-value clause at the 992 site above refuses a linked image
+    # that did not get it; this echo line is what the record self-check at the end of this file reads,
+    # and its absence was the one refusal of 992's first ON build).
+    echo "STAGE90_XNU_COMMPAGE_ALIAS=${STAGE90_XNU_COMMPAGE_ALIAS:-0}"
     # 535's switch, and the only one whose *link* the build changes (see its own block above): the
     # record is what makes "this image has the seam hook" a thing the gate can read rather than a
     # thing a reader assumes from the hash.
