@@ -209,9 +209,23 @@ i.e. empty on D13. `grep -c IOS7LAB` = 0 too. The census above is therefore voca
 execution evidence (see §7).
 
 The register block in the log is consistent with all of this (r12 0xffff4088, sp 0x2fdb0870, cpsr 0x40000010;
-`dyld_all_image_info_addr/size` echoed by our own loader). lr = 0x2be58a9f → link 0x2be19a9f, whose nearest
-symbol is `__platform_memchr+0x2b` — **not** one of the 90 measured call sites into
-`_mach_absolute_time`; it is reported here but attributed to nothing.
+`dyld_all_image_info_addr/size` echoed by our own loader).
+
+**lr = 0x2be58a9f is attributed** (verified by value, `/tmp/abi993-tools/verify_lr.py`): lr − slide 0x4f000 =
+0x2be09a9f, low bit set ⇒ a Thumb call site; the return point is 0x2be09a9e and the calling instruction is
+the Thumb BLX at **0x2be09a9a** (halfwords `f011 ec12`, imm +0x11824; target by the BLX rule
+`Align(PC,4)+imm` = **0x2be1b2c0 = `_mach_absolute_time`**). The site is
+`__ZN11ImageLoader4linkERKNS_11LinkContextEbbbRKNS_10RPathChainE + 0x32` (function opens 0x2be09a68; the
+next symbol is `__ZN11ImageLoader22recursiveLoadLibraries…` exactly at 0x2be09cf4), and after the call the
+64-bit result is stored — `str r0,[sp,#72]` (`9012` at 0x2be09a9e) and `str r1,[sp,#68]` (`9111` at
+0x2be09aa2) — before `bl …recursiveLoadLibraries` at 0x2be09aaa (target re-derived = 0x2be09cf4, equal).
+
+So the faulted `_mach_absolute_time` call is dyld's own, made by `ImageLoader::link` before it recursively
+loads libraries. dyld's text holds **21** direct call sites into `_mach_absolute_time` (all Thumb BLX;
+0x2be09a9a is one) — the 90 sites in §3.1 are calls into the *svc trap stubs*, a different census. Caution
+recorded: the earlier draft's `0x2be58a9f − 0x3f000 = 0x2be19a9f` lands self-consistently on
+`__platform_memchr+0x2b` — an arithmetic artifact (the draft then said "attributed to nothing"); the true
+slide is 0x4f000, checked three ways above.
 
 ## 5. Verdict
 

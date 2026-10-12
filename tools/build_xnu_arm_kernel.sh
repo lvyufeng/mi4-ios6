@@ -789,6 +789,22 @@ DEFINES=(
 # (`tools/stage_d13_commpage_alias.sh`).
 [[ ${STAGE90_XNU_COMMPAGE_ALIAS:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_COMMPAGE_ALIAS=1)
 
+# 994's iOS 7 VM wire width + timebase (`osfmk/ipc/mach_kernelrpc.c` + `osfmk/arm/ios7_compat.h`: the
+# three `_kernelrpc_*` VM trap bodies (10/12/14) route through their real-width iOS 7 wire adapters
+# (5/5/7 words) when the narrow `ios7_traps_enabled()` selector answers 1, so trap-10's `args->flags`
+# reads the FIFTH word instead of the size's high half - the 4-word
+# read of a 5-word wire that makes dyld's `__simple_salloc` `vm_allocate` look like a failure
+# (`syscall_sw.c` needs NO edit: traps 10/12/14 already carry arg counts 5/5/7 and on `__arm__` the
+# mungers are ignored; traps 15/24/25/41/42 stay `kern_invalid`); and
+# `osfmk/arm/traps_lo.s`'s `r12 == -3` SWI returns the real 64-bit timebase instead of the silent
+# `movs pc, lr`). 993's press reached dyld's own deliberate halt: `dyld::halt` -> `_dyld_fatal_error`
+# (`udf #0xdefe` at pc 0x2be7e0c4, slide 0x7d000), thrown by `dyld::throwf`'s out-of-memory path after
+# that `vm_allocate`. The C files are kernel-pool files, so the switch goes to the SAME array as the
+# kext guard / alignment / memq_hint / commpage switches, not to `EXTRA_DEFINES`. The `.s` half is an
+# ASSEMBLY-layer file - its `-D` rides `tools/assemble_arm_layer.sh`'s ASFLAGS instead - and the two
+# spellings must carry the SAME value (`mi4-one-value-two-definitions`).
+[[ ${STAGE90_XNU_IOS7_TRAPS:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_IOS7_TRAPS=1)
+
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.  (`$GENERATED` is

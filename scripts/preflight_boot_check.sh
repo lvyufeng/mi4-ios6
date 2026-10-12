@@ -736,7 +736,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_KEXTB_LOGIN
                 STAGE90_XNU_SP_ALIGN
                 STAGE90_XNU_VMHINT_GUARD
-                STAGE90_XNU_COMMPAGE_ALIAS)
+                STAGE90_XNU_COMMPAGE_ALIAS
+                STAGE90_XNU_IOS7_TRAPS)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this
@@ -999,6 +1000,27 @@ do
   # record this build made carries a non-empty value and the branch above does not fire for it.
   if [[ -z $_v && $_k == STAGE90_XNU_COMMPAGE_ALIAS ]]; then
     printf '  %s=(absent, and a record that does not name the commpage alias is one built before 992 - userspace read the iOS 7 commpage through an unmapped 0xffff4000, the only value a pre-992 build could have written)\n' "$_k"
+    continue
+  fi
+  # **994's switch, the same one-way rule as 911b/911c/912/954/958/988/990/991/992, and for the same
+  # reason.** Every arm parked before 994 was built with the IOS7LAB trap gates closed and the -3 SWI
+  # fast return compiled in (the switch did not exist), so its record has no `STAGE90_XNU_IOS7_TRAPS`
+  # line; an absent key is not a missing value but the value - the switch was off, because it did not
+  # exist, so `mach_trap_table` entries 15/24/25/41/42 were `kern_invalid`, the trap-10 wire was read
+  # as FOUR words (its `args->flags` the size's high half, 0), and userspace's `mach_absolute_time`
+  # SWI (r12 == -3) returned r0 = 0 / r1 = stale through `swi_trap_tb: movs pc, lr` - exactly the
+  # silent state 993's press stopped on (dyld's own deliberate halt, `udf #0xdefe` at 0x2be7e0c4,
+  # reached from `dyld::throwf`'s out-of-memory path). Demanding the key would make every existing park
+  # unpressable (882's own defect, fourteen times repaired now), and the ladder still owes those
+  # presses. Unlike HFS_ROOT_MEDIA / ROOT_FROM_CARD / HDD_WRITE / CARD_COW there is no entry-ELF marker
+  # to ground this on: the switch moves POOL objects (`mach_kernelrpc.c`, `ios7_compat.h`) and the
+  # ASSEMBLY layer (`traps_lo.s`), and a new unconditional `_off` marker would move the parked arms'
+  # image hashes with no `--gc-sections` in the link (965c's reason). A post-994 record can never reach
+  # this branch: `build_entry.sh`'s two-way check refuses a record whose arm-key list omits the key, and
+  # the writer emits the line unconditionally (0 or 1), so a record this build made carries a non-empty
+  # value and the branch above does not fire for it.
+  if [[ -z $_v && $_k == STAGE90_XNU_IOS7_TRAPS ]]; then
+    printf '  %s=(absent, and a record that does not name the iOS 7 trap wire is one built before 994 - the mach traps were kern_invalid and the -3 SWI returned r0=0, the only value a pre-994 build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \

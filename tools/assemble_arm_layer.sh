@@ -112,6 +112,20 @@ case "$SP_ALIGN" in
     0|1) ;;
     *) echo "STAGE90_XNU_SP_ALIGN must be 0 or 1, not [$SP_ALIGN]" >&2; exit 1 ;;
 esac
+# 994: wire iOS 7's `svc #0x80` r12 = -3 (`mach_absolute_time`) to the real 64-bit clock
+# (`tools/stage_d13_ios7_traps.sh` -> `osfmk/arm/traps_lo.s`: the :116 gate closes the `cmn r12, #3` /
+# `swi_trap_tb: movs pc, lr` fast path and the :162/:264 gates open
+# `ios7lab_timebase: blx _mach_absolute_time; b swi_exit64`). The C half of the switch
+# (`mach_kernelrpc.c`'s three wire-adapted VM trap bodies + `ios7_compat.h`'s `ios7_traps_enabled`
+# selector) is POOL objects and
+# takes the same switch through `build_xnu_arm_kernel.sh`'s `DEFINES` - the two spellings must carry the
+# SAME value (`mi4-one-value-two-definitions`). Default 0: the tree's original text is compiled byte for
+# byte.
+IOS7_TRAPS=${STAGE90_XNU_IOS7_TRAPS:-0}
+case "$IOS7_TRAPS" in
+    0|1) ;;
+    *) echo "STAGE90_XNU_IOS7_TRAPS must be 0 or 1, not [$IOS7_TRAPS]" >&2; exit 1 ;;
+esac
 PATCH_IDLE_STACK=$TOOLS_DIR/patch_idle_stack.py
 idle_patched=0
 ASSYM=$XNU_ASSYM_OUT/$CONFIG
@@ -191,6 +205,9 @@ ASFLAGS+=("-DSTAGE90_IDLE_STACK_SIZE=$IDLE_STACK_SIZE")
 # 990: the astloop realignment (`tools/patch_d13_sp_align.py`) - same append-after-assignment rule as
 # the line above.
 ASFLAGS+=("-DSTAGE90_XNU_SP_ALIGN=$SP_ALIGN")
+# 994: the traps_lo.s -3 timebase wiring (`tools/patch_d13_ios7_traps.py`) - same append-after-assignment
+# rule as the two lines above.
+ASFLAGS+=("-DSTAGE90_XNU_IOS7_TRAPS=$IOS7_TRAPS")
 INCLUDES=(
     -I"$ASSYM" -I"$REPO_ROOT/src/entry"
     -I"$OPTION_HEADERS" -I"$DEVICE_HEADERS"

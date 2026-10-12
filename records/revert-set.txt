@@ -13962,3 +13962,66 @@ set=armed-d13-1d5cf20e sha256=4dc8e3a980fab5336b0249fa75e18470a56a04f0b55bc47973
 set=armed-d13-1d5cf20e sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=993-vecl2-zeroing-and-slot-probe;-stage90_fixture.macho
 set=armed-d13-1d5cf20e sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=993-vecl2-zeroing-and-slot-probe;-stage90-build-config.txt
 set=armed-d13-1d5cf20e sha256=4cadf650564d13b9aa085b7866c643f3c4ab3d248b31f0831ddadd7f09d02102 bytes=560 file=SHA256SUMS.txt role=993-vecl2-zeroing-and-slot-probe;-SHA256SUMS.txt
+# armed-d13-8b4c9a3e  -  994: THE iOS 7 MACH-TRAP WIRE (pool) + THE -3 SWI TIMEBASE (asm) ARE WIRED IN.
+# Switch set is 993-s VERBATIM + STAGE90_XNU_IOS7_TRAPS=1; the ENTRY BIN moved (1d5cf20e -> 8b4c9a3e) and
+# THREE tree SOURCE files move in THIS rung: osfmk/ipc/mach_kernelrpc.c,
+# osfmk/arm/ios7_compat.h and osfmk/arm/traps_lo.s (osfmk/kern/syscall_sw.c is NOT one: traps
+# 10/12/14 already carry arg counts 5/5/7 and on __arm__ the mungers are ignored, and traps
+# 15/24/25/41/42 stay kern_invalid); osfmk/arm/arm_vm_init.c and osfmk/arm/pmap.c are
+# 993-s, unchanged - this rung has NO pcb.c and NO vm_resident.c change (a fresh checkout needs ALL
+# FIVE tools/stage_d13_kextb_login.sh, tools/stage_d13_sp_align.sh, tools/stage_d13_vmhint_guard.sh,
+# tools/stage_d13_commpage_alias.sh and tools/stage_d13_ios7_traps.sh).
+#
+# 993 (pressed 2026-10-12, arm armed-d13-1d5cf20e, commit 160650b, evidence /tmp/cancro-last_kmsg.txt)
+# CONFIRMED the commpage alias AND the high-vector L2 zeroing: the log carries `IOS7LAB vecl2: N
+# nonzero slot(s) ... before zeroing`, then `... 0 nonzero slot(s) after zeroing`, then
+# `IOS7LAB commpage alias: L2 slot pre = 0x00000000`, the 992 marker `IOS7LAB commpage alias
+# 0xffff4000: same page, user read-only, XN` and `IOS7LAB commpage cpus: ...`; the 991
+# `0xffff4090 ... Translation fault` burst is GONE (0 commpage faults) and there is NO panic.
+#
+# THE NEW FRONTIER, read BY VALUE: the boot HALTS inside dyld at dyld-s own deliberate trap -
+# `launchd[1]: usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x2be7e0c4 ...` (236x).
+# 0x2be7e0c4 - slide 0x7d000 = 0x2be010c4 = _dyld_fatal_error (fe de ff e7 at file 0x10c4, i.e.
+# `udf #0xdefe`), whose ONLY caller is dyld::halt. dyld::halt is reached from dyld::throwf-s
+# out-of-memory path: __simple_salloc-s 4 KiB vm_allocate(..., VM_FLAGS_ANYWHERE) (or the following
+# strdup) returned NULL, so the real error string was destroyed before it could print.
+#
+# ROOT CAUSE: the trap-10 wire-width defect. The tree-s own struct ios7lab_vm_allocate_wire
+# (mach_kernelrpc.c:50-54) is FIVE 32-bit words - { target, addr, size_low, size_high, flags } -
+# the iOS 7 ARMv7 wire. The kernel-s mach_vm_size_t is 32 bits on this legacy ABI, so a FOUR-word
+# read makes args->flags read the size-s HIGH half (0) instead of the real flags word, and dyld-s
+# vm_allocate looks like a failure.
+#
+# 994: tools/stage_d13_ios7_traps.sh - (a) POOL: mach_kernelrpc.c-s file-wide
+# `#if IOS7_COMPAT_PLATFORM` (:39) opens under the switch and the three _kernelrpc_* VM trap
+# bodies (10/12/14) route through their real-width wire adapters (5/5/7 words) when the
+# ios7_traps_enabled selector in ios7_compat.h answers 1 (syscall_sw.c needs NO edit; traps
+# 15/24/25/41/42 stay kern_invalid);
+# (b) ASSEMBLY: traps_lo.s-s :116 gate closes the `cmn r12, #3` / `swi_trap_tb: movs pc, lr` fast
+# path and :162/:264 open `ios7lab_timebase: blx _mach_absolute_time; b swi_exit64`, so a -3 SWI
+# returns the real 64-bit ns clock.
+# tools/check_d13_ios7_traps.py --expect on asserts, off the linked image-s own disassembly, that
+# the `cmn r12,#3` / `beq swi_trap_tb` pair is ABSENT, that a `cmn r11,#3` branches to the
+# mach_absolute_time call, and that this call is immediately followed by `b swi_exit64`.
+#
+# READ: IOS7LAB vm_allocate64 size=... flags=1 result=0 address=... markers (the trap-10 wire now
+# reads the real flags word - flags=1 is VM_FLAGS_ANYWHERE, where the pre-994 read produced 0), the
+# trap-12/-14 equivalents (IOS7LAB vm_deallocate64 / vm_protect64) reading their real width, the
+# OOM gone, and EITHER the real halt message appears (dyld: <msg>) OR the boot PROCEEDS PAST dyld.
+# FALSIFICATION: the udf at 0x2be7e0c4 (_dyld_fatal_error) RECURS - the wire still misreads (the
+# switch did not reach the pool) or the OOM has a different cause.
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never written -
+# fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-8b4c9a3e sha256=8b4c9a3e3ccb059cd01068ceeab9a9269b2df877ac93f829cbaf09b215fd7db0 bytes=6335572 file=xnu_arm_entry.bin role=994-ios7-trap-wire-and-minus3-timebase;-xnu_arm_entry.bin
+set=armed-d13-8b4c9a3e sha256=f85b24e49cdb361d88f6edaa3d2ab527a997373dba4ff76abe1faa17fc364e5e bytes=7376000 file=xnu_arm_entry.elf role=994-ios7-trap-wire-and-minus3-timebase;-xnu_arm_entry.elf
+set=armed-d13-8b4c9a3e sha256=ab0c452a6ffe72c0c5d343152610a7d060d45452c8045197483a4b8371c32bdf bytes=1912 file=xnu_arm_entry.h role=994-ios7-trap-wire-and-minus3-timebase;-xnu_arm_entry.h
+set=armed-d13-8b4c9a3e sha256=de695f346f69d0103143d1c9722db0504828d0042b45bf9a2276a2f8f0c08eab bytes=1539 file=xnu_arm_entry-config.txt role=994-ios7-trap-wire-and-minus3-timebase;-xnu_arm_entry-config.txt
+set=armed-d13-8b4c9a3e sha256=d8839beb660e58bf84a081d96a013e1529e4cf279bb50e6b7b37cefeb4b199bf bytes=3149 file=xnu_arm_entry-sources.txt role=994-ios7-trap-wire-and-minus3-timebase;-xnu_arm_entry-sources.txt
+set=armed-d13-8b4c9a3e sha256=6d8b98185d1f874eb8ff1cf9fd0ec2081bb3bc5a47fe1c78fbc53708d7a0da51 bytes=6830980 file=stage90.bin role=994-ios7-trap-wire-and-minus3-timebase;-stage90.bin
+set=armed-d13-8b4c9a3e sha256=9d14dad9c426504eb2249e111f51f81f9a204d61a7c23236327130279c7913cb bytes=6893052 file=stage90.elf role=994-ios7-trap-wire-and-minus3-timebase;-stage90.elf
+set=armed-d13-8b4c9a3e sha256=812521421bf5d5372cddab63425a4bc274a03373e9cb8b22755cf3c6257cdac2 bytes=6834176 file=stage90.img role=994-ios7-trap-wire-and-minus3-timebase;-stage90.img
+set=armed-d13-8b4c9a3e sha256=2af1236f973732135eaf9078910d18fc2a0ea4a8c5b5415f28ac52a252365543 bytes=9355264 file=stage90-qcdt.img role=994-ios7-trap-wire-and-minus3-timebase;-stage90-qcdt.img
+set=armed-d13-8b4c9a3e sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=994-ios7-trap-wire-and-minus3-timebase;-stage90_fixture.macho
+set=armed-d13-8b4c9a3e sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=994-ios7-trap-wire-and-minus3-timebase;-stage90-build-config.txt
+set=armed-d13-8b4c9a3e sha256=9830f8fbf7ad6758724e7f1fb8edaf40d1fb830558ab2776f6f431415b2f1a3b bytes=560 file=SHA256SUMS.txt role=994-ios7-trap-wire-and-minus3-timebase;-SHA256SUMS.txt

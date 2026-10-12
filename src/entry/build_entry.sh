@@ -1113,6 +1113,36 @@ case "$COMMPAGE_ALIAS" in
     *) echo "REFUSING: STAGE90_XNU_COMMPAGE_ALIAS='$COMMPAGE_ALIAS' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **994: the iOS 7 trap wire + the -3 SWI timebase, recorded the same way and for the same reason.**
+# With `STAGE90_XNU_IOS7_TRAPS=1`, the D13 tree's three `_kernelrpc_*` VM trap bodies (10/12/14) route
+# through their real-width iOS 7 wire adapters inside `osfmk/ipc/mach_kernelrpc.c` (the file-wide
+# `#if IOS7_COMPAT_PLATFORM` at :39 opens under the switch, and the narrow `ios7_traps_enabled()`
+# selector added to `osfmk/arm/ios7_compat.h` answers 1). The trap-10 wire keeps the iOS 7 five-word
+# shape (`target, addr, size_low, size_high, flags` - `struct ios7lab_vm_allocate_wire`,
+# `mach_kernelrpc.c:50-54`); traps 12/14 keep their 5/7-word shapes the same way. The kernel's own
+# `mach_vm_size_t` is
+# 32 bits on this legacy ABI, so a FOUR-word read of a FIVE-word wire makes `args->flags` read the
+# size's high half (0) - dyld's `__simple_salloc` `vm_allocate(..., VM_FLAGS_ANYWHERE)` then looks like
+# a failure. `osfmk/kern/syscall_sw.c` needs NO edit (traps 10/12/14 already carry arg counts 5/5/7
+# and on `__arm__` the mungers are ignored) and traps 15/24/25/41/42 stay `kern_invalid`.
+# `osfmk/arm/traps_lo.s`'s `fleh_swi` also gets the iOS 7 timebase: `r12 == -3` (the
+# `mach_absolute_time` SWI) currently falls into `swi_trap_tb: movs pc, lr` and returns with r0:r1
+# UNTOUCHED - r0 = 0, r1 = stale - instead of the real 64-bit ns clock. 993's press (arm
+# armed-d13-1d5cf20e, commit 160650b, evidence /tmp/cancro-last_kmsg.txt) CONFIRMED the commpage alias
+# and the high-vector L2 zeroing - the 991 `0xffff4090` burst is gone and there is no panic - and then
+# HALTED inside dyld: `dyld::halt` -> `_dyld_fatal_error` (`udf #0xdefe`, pc 0x2be7e0c4, slide 0x7d000)
+# reached via `dyld::throwf`'s out-of-memory path, whose root cause is the trap-10 wire-width defect
+# above. The C files are compiled by `tools/build_xnu_arm_kernel.sh` (DEFINES, from the same-named
+# environment variable) and the `.s` half by `tools/assemble_arm_layer.sh` (ASFLAGS) - the spellings
+# must carry the SAME value (`mi4-one-value-two-definitions`). The two layers' patches are staged by
+# `tools/stage_d13_ios7_traps.sh` (swi's `patch_d13_ios7_traps.py` + vmwire's
+# `patch_d13_ios7_vmwire.py`).
+IOS7_TRAPS=${STAGE90_XNU_IOS7_TRAPS:-0}
+case "$IOS7_TRAPS" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_IOS7_TRAPS='$IOS7_TRAPS' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **911c: the RAM bank layout, measured from the Qualcomm SMEM RAM-partition table.** The goal's newest
 # clause is that XNU recognize the Mi 4's 3 GB of RAM, and the 911c design established that the repo
 # holds NO low-bank base or size anywhere - every "low bank" is an inference from "3 GB minus 1.5 GB".
@@ -1429,6 +1459,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_SP_ALIGN
                 STAGE90_XNU_VMHINT_GUARD
                 STAGE90_XNU_COMMPAGE_ALIAS
+                STAGE90_XNU_IOS7_TRAPS
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1586,6 +1617,14 @@ do
         # of this switch (`mi4-one-value-two-definitions`). The 992 clause at the link site below
         # refuses a link whose pmap_create_sharedpage does not carry the alias.
         STAGE90_XNU_COMMPAGE_ALIAS)   _v=$COMMPAGE_ALIAS ;;
+        # 994: whether the tree's iOS 7 trap wire + -3 SWI timebase
+        # (`tools/stage_d13_ios7_traps.sh`) was compiled into this image's pool AND its assembly
+        # layer. Read from `$IOS7_TRAPS`, validated 0/1 at its own assignment far above this loop, so
+        # the record, the pool's `DEFINES` and the asm layer's `ASFLAGS` cannot be built from two
+        # spellings of this switch (`mi4-one-value-two-definitions`). The 994 clause at the link site
+        # below reads the linked image's own `locore_fleh_swi` and refuses a link whose -3 wire is
+        # absent (the pool's wire adapters are what the build script's own object dumps carry).
+        STAGE90_XNU_IOS7_TRAPS)       _v=$IOS7_TRAPS ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -30515,6 +30554,57 @@ verify_trace_symbols() {
         fi
         say "  xnu_entry_992: the linked image maps the commpage page at 0xFFFF4000 for iOS 7 userspace (both IOS7LAB anchors present, the alias va materialized inside pmap_create_sharedpage beside the 0x40000000 control ABI and live in r1 at the second pmap_enter) - $ca_out"
     fi
+    # **994: the iOS 7 mach-trap wire (pool) and the -3 SWI's real clock (assembly).** 993's press (arm
+    # armed-d13-1d5cf20e, commit 160650b, evidence /tmp/cancro-last_kmsg.txt) is a READ-CONFIRMED
+    # SUCCESS in the pre-registered sense: the high-vector L2 zeroing HELD - `IOS7LAB vecl2: N nonzero
+    # slot(s) ... before zeroing`, then `... 0 nonzero slot(s) after zeroing`, `IOS7LAB commpage alias:
+    # L2 slot pre = 0x00000000` - and the commpage alias is live (`IOS7LAB commpage alias 0xffff4000:
+    # same page, user read-only, XN`, `IOS7LAB commpage cpus: ...`); the 991 `0xffff4090 ...
+    # Translation fault` burst is GONE (0 commpage faults) and there is NO panic. The boot ran bsd_init
+    # and exec'd launchd's dyld from the shared cache - and then HALTED inside dyld:
+    #     launchd[1]: usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x2be7e0c4 ... (236x)
+    # 0x2be7e0c4 - slide 0x7d000 = 0x2be010c4 = `_dyld_fatal_error` (`fe de ff e7`, i.e. `udf #0xdefe`),
+    # whose ONLY caller is `dyld::halt`, reached from `dyld::throwf`'s out-of-memory path:
+    # `__simple_salloc`'s 4 KiB `vm_allocate(..., VM_FLAGS_ANYWHERE)` (or the following `strdup`)
+    # returned NULL, so the real error string was destroyed before it could print. The ROOT CAUSE is
+    # the trap-10 wire width: this tree's own `struct ios7lab_vm_allocate_wire`
+    # (`osfmk/ipc/mach_kernelrpc.c:50-54`) is FIVE 32-bit words (`target, addr, size_low, size_high,
+    # flags`), but the kernel's `mach_vm_size_t` is 32 bits on this legacy ABI, so a FOUR-word read
+    # makes `args->flags` read the size's HIGH half (0) instead of the real flags word - and dyld's
+    # `vm_allocate` looks like a failure. The fix is `tools/stage_d13_ios7_traps.sh` +
+    # STAGE90_XNU_IOS7_TRAPS=1: `mach_kernelrpc.c`'s file-wide `#if IOS7_COMPAT_PLATFORM` (:39) opens
+    # under the switch and the three `_kernelrpc_*` VM trap bodies (10/12/14) route through their
+    # real-width wire adapters (5/5/7 words) when `ios7_compat.h`'s narrow `ios7_traps_enabled()`
+    # answers 1 (`syscall_sw.c` needs NO edit - traps 10/12/14 already carry arg counts 5/5/7 and on
+    # `__arm__` the mungers are ignored; traps 15/24/25/41/42 stay `kern_invalid`), and
+    # `osfmk/arm/traps_lo.s`'s :116 gate closes the `cmn r12, #3` / `swi_trap_tb: movs pc, lr` fast
+    # path while :162/:264 open `ios7lab_timebase: blx _mach_absolute_time; b swi_exit64`, so a -3 SWI
+    # returns the real 64-bit ns clock (D13's `mach_absolute_time()` is ns-scaled) instead of r0=0 /
+    # r1=stale. The property is read BY VALUE off THIS linked image by
+    # `tools/check_d13_ios7_traps.py --expect on` - which DECODES the ARM encodings itself rather than
+    # trusting objdump's mnemonics: the `cmn r12, #3` / `beq swi_trap_tb` pair is ABSENT from
+    # `locore_fleh_swi`, a `cmn r11, #3` there branches to a `bl/blx mach_absolute_time`, and that
+    # call's next instruction is `b swi_exit64` (the writeback of r1). The checker REFUSES this image
+    # (the 993 arm: `--expect off` PASSES and `--expect on` FAILS on it, by value), so a build whose
+    # switch never reached the assembly layer cannot pass. Gated on the switch: with IOS7_TRAPS=0 the
+    # tree's original text is compiled on purpose and there is nothing here to assert.
+    if [[ $IOS7_TRAPS -eq 1 ]]; then
+        if ! tr_out=$(python3 "$REPO_ROOT/tools/check_d13_ios7_traps.py" "$OUT/xnu_arm_entry.elf" --expect on 2>&1); then
+            printf '%s\n' "$tr_out" >&2
+            say "REFUSING: STAGE90_XNU_IOS7_TRAPS=1 but the linked image does not wire the iOS 7 -3 SWI to" >&2
+            say "          the real clock - the FAIL lines above name the missing piece (the \`cmn r12, #3\` /" >&2
+            say "          \`beq swi_trap_tb\` fast path still at the top of locore_fleh_swi means the :116 gate" >&2
+            say "          did not close; no \`cmn r11, #3\` reaching a \`bl mach_absolute_time\` that is" >&2
+            say "          followed by \`b swi_exit64\` means the :162/:264 gates did not open). Rebuild BOTH" >&2
+            say "          layers with the SAME value, then relink:" >&2
+            say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+            say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_IOS7_TRAPS=$IOS7_TRAPS' \\\\" >&2
+            say "            ./tools/build_xnu_arm_kernel.sh" >&2
+            say "            STAGE90_XNU_IOS7_TRAPS=$IOS7_TRAPS tools/assemble_arm_layer.sh" >&2
+            layout_fail "STAGE90_XNU_IOS7_TRAPS=1 did not reach the linked image: stage the tree first (tools/stage_d13_ios7_traps.sh) and rebuild BOTH layers - the pool with -DSTAGE90_XNU_IOS7_TRAPS=1 and the assembly layer with STAGE90_XNU_IOS7_TRAPS=1 exported into ASFLAGS - or a -3 syscall still returns r0=0 and the trap-10 wire still misreads, which is exactly where 993 died one frontier earlier (launchd's dyld halted at 0x2be7e0c4 = _dyld_fatal_error via dyld::throwf's OOM path)"
+        fi
+        say "  xnu_entry_994: the linked image wires the iOS 7 -3 SWI to the real 64-bit clock (the locore_fleh_swi \`cmn r12,#3\` fast path is gone; the saved-state \`cmn r11,#3\` route calls mach_absolute_time and branches through swi_exit64, so r0:r1 are written back) - $tr_out"
+    fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
     # `ast_taken_user`**: its arm return path (`cswitch.s:144` `thread_exception_return`) delivers by
@@ -38522,6 +38612,11 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # that did not get it; this echo line is what the record self-check at the end of this file reads,
     # and its absence was the one refusal of 992's first ON build).
     echo "STAGE90_XNU_COMMPAGE_ALIAS=${STAGE90_XNU_COMMPAGE_ALIAS:-0}"
+    # 994's switch, read the same way and for the same reason (one value, two definitions: the pool's
+    # DEFINES and the asm layer's ASFLAGS both take this value, and the by-value clause at the 994 site
+    # above refuses a linked image that did not get it; this echo line is what the record self-check at
+    # the end of this file reads).
+    echo "STAGE90_XNU_IOS7_TRAPS=${STAGE90_XNU_IOS7_TRAPS:-0}"
     # 535's switch, and the only one whose *link* the build changes (see its own block above): the
     # record is what makes "this image has the seam hook" a thing the gate can read rather than a
     # thing a reader assumes from the hash.
