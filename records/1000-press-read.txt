@@ -1,0 +1,211 @@
+# 1000 press read - adjudication of armed-d13-bbdf41bc (2026-10-13)
+
+WHO WRITES THIS: by hand, in the step that measured it, never by the build.
+WHY: the capture lives under `out/stage90/captures/`, and `out/` is not tracked - this file IS the
+run's identity: the sha256 below is the only copy of the evidence that outlives the working tree.
+The mechanical half is `tools/check_1000_capture.py` (EXIT=1 on this capture: five hard anomalies,
+each adjudicated BY VALUE below). What this file adds is the adjudication against the FROZEN
+pre-registration block in `scripts/press_1000.sh:39-115`, and the deviations reported rather than
+reinterpreted.
+HOW TO RE-READ: `python3 tools/check_1000_capture.py out/stage90/captures/recovered-unknown-arm-20261013-072537-last_kmsg.txt`
+-> exit 1; its five anomalies are the five items of §[5] below.
+READER NOTE: every `@:` number is that tool's reader (split on `\n`, lone CR kept inside lines;
+17,374 lines). The PANIC STANZA is quoted de-doubled BY VALUE: in this capture the panic text
+arrives character-doubled (`ppaanniicc(...)`) - a property of the panic path's tank flush - and
+its own line numbers are reader-dependent, so none are cited.
+
+## Identity
+
+- capture: out/stage90/captures/recovered-unknown-arm-20261013-072537-last_kmsg.txt
+    sha256 65322044c073a4e02d000b11673cfe98902595248ecf8f9ac1f3257682ab8817
+    938,356 bytes / 17,374 lines
+  carrier: /proc/last_kmsg of the FLASHED ROM via `scripts/recover_last_kmsg.sh --read-only`,
+  read while the self-recovered Android was up; identity: "yes - it is a MI4IOS6_STAGE90 console"
+  (runner log). NOT a fastboot-boot read (that would burn the single-slot record).
+- arm: armed-d13-bbdf41bc - 999's switch set verbatim + `STAGE90_XNU_USVC=1`; parked in
+  out/stage90/frozen/ (12 members); records/revert-set.txt carries the `role=1000-*` lines.
+  commits af55302 / add9114 / 4df0380 (edits) / 8112dcc (park) / 3016d13 (adjudicator) /
+  826cd4f (preflight) / 516caf1 (999-record prose).
+- runner: out/stage90/captures/press-1000-20261013-072047.log; press at 07:20:47Z; runner exit 0;
+  the USB console capture EMPTY (expected - the ladder never reached the idle path); the recovery
+  stored the capture (:1694); the readings grep (:1698-1700) confirms `xnu_live_wdt_pets=0` and
+  `xnu_entry_args_memSize=0x1e400000`.
+- timeline (the shape of this press): XNU time 10.31 s - panic in `init` -> serial-KDP wait ->
+  the SoC watchdog (never fed, §[2]) bites at its ~29 s bark and resets the SoC (XNU's own reboot
+  path cannot reset this device) -> the flashed ROM's Android comes up -> `adb` sees the device
+  51 s after the `fastboot boot` send (runner log :1495). No operator action; this is the press
+  that came back by itself.
+
+## [1] TICK - the instrument's record geometry is exactly the pre-reg's; 4/4 events MASKED DELIVERY
+
+- 16 `xnu_live_tick_anom_*` records = the first FOUR anomalies in full (publisher: pe_msm8974.c
+  :415-425 records only while n <= 4; the counter itself keeps climbing), first @:4253 last
+  @:4720 - count and shape match (1)'s frozen text.
+- n=1 d=0x00346129(3,432,745 = 178.8 ms); n=2 d=0x0006b3c5(439,237 = 22.9 ms); n=3
+  d=0x00038564(230,756 = 12.0 ms); n=4 d=0x0002f557(193,879 = 10.1 ms). ALL FOUR: `_tval`
+  consistent with `_d` => MASKED DELIVERY (the countdown ran through the whole gap), and ALL
+  FOUR `_ctl=0x00000005` (ENABLE set, IMASK clear, ISTAT fired) - NO second-writer signature in
+  any sampled event.
+- 12 `xnu_live_tick_sum_*` records = 3 keys x 4 summary moments (@:8086/9580/12502/16480):
+  count 107/107/107/121 deliveries, anom 5/5/5/8, maxd 0x00346129 -> 0x02f3c121(49,529,121 =
+  2.58 s). The 999 shape (fast early, collapse to a trickle) reproduced: 107 deliveries by the
+  first summary (whose neighbour sample reads 2.11 s of dog-elapsed), +14 after it; largest
+  sampled masked window 2.58 s.
+- `xnu_live_tick_hz=0x0124f800(19,200,000)` @:4190; power-of-two ladder 1..0x40 @:4260-5534.
+
+## [2] DIRECT CHANNEL + PET - zero feeds is this boot's CORRECT reading
+
+- no `xnu_live_capped` tombstone; header cap stays 0x6000(24576) - the whole boot fit.
+- `xnu_live_storage_rd_ordinal` x158, 1..0x9e (@:6190 .. @:17321) - the storage read door was used.
+- WDT: install @:7513 (`_map=1`), bark @:7517 = 0x000e7fa9(950,185 ticks = 29.0 s @32,765 Hz);
+  the frozen timeout/bite keys present (adjudicator PASS).
+- 4 counted samples (@:8085/9579/12501/16479): `pets=0` with countdown 2.11/2.45/3.14/4.54 s -
+  every sample below bark/2 = 14.5 s.
+- BY VALUE the feed gate is INSIDE `entry_wdt_pet` (entry_trace.c:2250:
+  `count >= (g_wdt_bark_ticks / 2u)` feeds); the read door calls the pet on every read
+  (entry_storage.c:7718-7725, weak extern) - so the CALLS happened (158+), but no call ever found
+  the count past 14.5 s because THE BOOT DIED AT 10.31 s. The first feedable moment is 4.2 s
+  after the death. Zero `_pet_n/_calls/_countdown` records (written only on an actual feed,
+  entry_trace.c:2257-2262) is therefore exactly right - and the pre-reg's (6)(b) "zero feed with
+  the door demonstrably used => rebuild" is REFUTED BY THE TIMELINE, not satisfied.
+
+## [3] USVC - absent; and (6)(a) does not apply
+
+- 0 `xnu_live_usvc_*` records. (6)(a)'s premise ("usvc absent WHILE the exec-done trio and
+  `map_slide ret=0` are present") is false here - both are absent too - so (6)(a) does not fire
+  (the adjudicator agreed). The user-SVC frontier of THIS press is "no user mode"; 999's
+  cs_invalid_page remains the last measured user-mode frontier.
+
+## [4] CAP AND THINNING
+
+- Cap unchanged 0x6000; no tombstone. The rd thinning (full-width dump while rd < 64, committed
+  0504be5) is checked AT THE SOURCE by scripts/build_1000.sh, not re-derivable from the capture.
+
+## [5] THE FIVE HARD ANOMALIES - each adjudicated by value
+
+The tool's exit-1 list: (a) exec-done trio ABSENT "=> the exempt-path edit did not reach the image
+=> rebuild"; (b) IOS7LAB cache mapping x0 - regression; (c) IOS7LAB shared region x0 - regression;
+(d) check_np ret=12 x0 - regression; (e) (6)(b) pet - see §[2]. Also observed: `map_slide ret=` x0
+(999 had ret=0), `map_file kr=` none, VMHINT991 x0 (frozen guard says 2), vm_allocate64 x0 (PASS),
+the frozen WDT values (PASS), USB/pcx x0 (PASS).
+
+ARRIVAL ORDER settles all of them. 999's own text block, BY VALUE, ran:
+  `attempting to start init of /sbin/launchd` -> VMHINT991 x2 (obj 0xc0005b48 / 0xc0005ab0,
+  lr=0x8003d8ec) -> `IOS7LAB shared region ...` -> check_np ret=12 -> map_slide / map_file ->
+  four `IOS7LAB cache mapping` -> `map_slide ret=0` -> cs_invalid_page.
+This press died AT THE FIRST LOCK of the very call that produced 999's VMHINT991 lines (below):
+BEFORE the guard prints, BEFORE any of (b)-(d). And (a)'s "did not reach" inference is refuted by
+the instrument that is 1000-only: the tick records' exact geometry (16 = 4x4 anomaly fields, 12 =
+3x4 summaries; §[1]) is the shape (1) specifies - the image carries 1000's edits. The exec ENTRY
+quartet is present and identical to 999's (@:16079-82 = 999 @19406-09: seq=1,
+caller=0x80036100, who=1, proc=0xc0c41cf8); the exec-DONE trio (`xnu_live_exec_done_*`, 999
+@28715-22) is absent - the exec never returned. All five anomalies are death artifacts; ZERO
+regressions. The tool itself now carries the lesson its pre-reg text missed: it reads guard
+absence as regression even when the run died before the guard's print site - a death-aware gate
+("absence counts only if the boot survived the point") is owed to the 1001 adjudicator.
+
+## The death, by value
+
+Text (de-doubled), immediately after `attempting to start init of /sbin/launchd`:
+  `panic(cpu 0 caller 0x80498058): hw_lock_lock(): PANIC: Lock 0xc0005b50 = 0xffb5be0b`
+  `Debugger called: <panic>` x2; a backtrace frame `0x80498058 : 0x6c5f7768` (`hw_l` - the
+  format-string pointer); `Unaligned frame`; `Backtrace terminated-invalid frame pointer
+  0xeafffffe`; `BSD process name corresponding to current thread: init`;
+  `System uptime in nanoseconds: 10313841822`; `Using serial KDP.` x2; `Waiting for remote
+  debugger connection.` x2; the winocm report line.
+Symbols (out/stage90/xnu_arm_entry.elf, 27,381 syms, ARM EXEC):
+  `hw_lock_lock` = 0x80498020 (the panic's caller = +0x38 INSIDE it);
+  `vm_map_pmap_enter` = 0x8003d894 (static); `vm_map_enter` = 0x8003c7ac.
+The locked word 0xc0005b50 - 8 = 0xc0005b48 = the "object". 0xc0005b48 and 0xc0005ab0 are ONE
+0x98-stride lattice apart (#19 and #18), and that lattice's element #13 = 0xc00057b8 is launchd's
+task map per the committed 990 record (records/revert-set.txt:13857: EXC_BAD_ACCESS "at
+0xffff4090 in map 0xc00057b8"). The lattice is the vm_map zone: `vm_map_zone =
+zinit(sizeof(struct _vm_map), 40*1024, PAGE_SIZE, "maps")` (vm_map.c:627); `zcram(vm_map_zone,
+map_data, map_data_size)` (:665) with `map_data_size = round_page(10 x sizeof(struct _vm_map))` =
+one page (:683); element 0 lands exactly on the page-aligned 0xc0005000 (13 x 0x98 below #13) -
+26 elements fit, #13/#18/#19 inside.
+999's guard records on the SAME two addresses (999 capture, de-doubled by value):
+  `VMHINT991: obj=0xc0005b48 mem=0x1 lr=0x8003d8ec w00=8000 w04=baddecaf w18=1000 w1c=0 w24=0`
+  `VMHINT991: obj=0xc0005ab0 mem=0x1 lr=0x8003d8ec w00=8000 w04=baddecaf w18=1000 w1c=0 w24=0`
+w04 = 0xbaddecaf = zalloc's ZP_NOT_POISONED = the free marker `free_to_zone` writes at elem[1]
+(zalloc.c:137) => both "objects" are FREED vm_map-zone elements passed as vm_objects.
+990's press died on the SAME object one field over: `ldrd r0,[r5,#24]` at pc=0x80020838, inside
+vm_page_lookup, object = 0xc0005b48, lr = vm_map_pmap_enter (tools/build_xnu_arm_kernel.sh:776-778).
+DRAM pre-state: this boot's stolen-L2 readback found 256 nonzero slots, every printed slot
+0xffb6be0b (0x00-0x03) or 0xffb5be0b (0x04-0x0f) (@:3977-3993; zeroed after, @:3994) - and THE
+PANIC'S LOCK WORD IS 0xffb5be0b, exactly one of those two values. 999's identical read, at the
+SAME @:3977: "0 nonzero slot(s)". The delta 999->1000 is DRAM residue, not code: 1000's press
+followed an Android session and a dd, 999's followed a cold boot. Who wrote 0xffb5be0b: OPEN, and
+not needed for the fix.
+
+## Root cause: the one unguarded clause in vm_map_enter's tail
+
+The call at vm_map.c:2149-2161 is guarded by `object != VM_OBJECT_NULL && vm_map_pmap_enter_enable
+&& !anywhere && !needs_copy && size < 128K` - with NO is_submap guard. On a SUBMAP enter the
+`object` parameter is the submap itself (`:2063 submap = (vm_map_t) object;`) - a vm_map, not a
+vm_object - so vm_map_pmap_enter locks and probes a vm_map AS IF it were a vm_object:
+vm_object_lock lands on the element's +8 word (the lock of a struct vm_object) and vm_page_lookup
+reads its +0x18 (memq_hint). At launchd's exec two submap enters (<128K, needs_copy FALSE) run
+this path; 999's guard records prove it reaching the lookup; 1000's lock word held 0xffb5be0b
+(bit0 set) => hw_lock_lock's panic.
+The SAME function guards the SAME parameter 30 lines later - `:2192 if (!is_submap &&
+object != VM_OBJECT_NULL && object->named && ...)` for the pager block. The missing clause is
+that idiom. All four 2050-era trees in this workspace carry the unguarded call verbatim (pristine
+apple-xnu-rel-2050 :2143, xnu-2050.18.24 :2143, xnu-upstream :2143, hd2-darwin13 :2149). The
+xnu-4570.1.46 tree in-tree carries only bsd/; its osfmk/vm/vm_map.c was fetched raw (462 KB, four
+windows): `vm_map_pmap_enter` appears only in an `__unused` forward declaration, and no call site
+surfaced in the ~400 KB the fetcher surfaced (in-window truncation caveat) - consistent with
+Apple retiring the call after 2050, but NOT load-bearing: the guard stands on this reproduction.
+
+## Why 999 lived and this press died
+
+Same code, same two freed elements, same caller. 999's elements happened to hold benign words
+(vm_object_lock succeeded; the 991 memq_hint guard then caught the lookup and the boot went on to
+user mode); 1000's +8 held 0xffb5be0b. 990, 991-999 and 1000 have now died OR been guarded at
+three different fields of the same two non-objects (+0x18 load in 990, +0x18 guard in 991-999,
++0x8 lock in 1000). The call is the common cause; skipping it for submaps removes all three
+exposures and makes the rung independent of what DRAM happens to hold.
+
+## Guards verified present (the image is the 1000 build)
+
+tick_anom x16 (exact geometry) + tick_sum x12 + tick_hz; WDT install/bark/samples; rd_ordinal
+x158; cap 24576, no tombstone; exec ENTRY quartet @:16079-82 identical to 999's; IOS7LAB x22, all
+pre-exec (vecl2 census + commpage cpus); frozen WDT values PASS; vm_allocate64 x0 PASS; USB/pcx
+x0 PASS.
+
+## Run end state
+
+Counted channel's last records: rd_ordinal=0x9e @:17321, rootmedia_refused=4 @:17332 (999's boot
+also ended at 4-5 - normal mount-probe traffic); file tail `xnu_live_slot_rtcab_*`, then
+`xnu_live_ostext_heals=8 / _chars=_total=0x1fee` and the stock line `No errors detected`. Text
+channel's last: the panic stanza. Then KDP; then the SoC reset.
+
+## Pre-registration deviations (reported, not papered over)
+
+1. All five of the tool's exit-1 anomalies are death artifacts (§[5]); NONE is a regression and
+   NONE justifies the pre-registered "rebuild".
+2. (6)(b) refuted by the timeline (§[2]); (6)(a)'s premise false (§[3]); (6)(c) moot (no usvc
+   records at all).
+3. VMHINT991 x0 vs the frozen "exactly 2x": the 991 guard is DOWNSTREAM of the lock in the same
+   call; with the death AT the lock, 0 is the death signature. 1001's pre-reg must carry the NEW
+   expectation (the call is skipped => VMHINT991 should be 0 while the boot SURVIVES; a surviving
+   boot with VMHINT991 > 0 means the skip did not reach the image).
+4. The tool reads guard absence as regression; a death-aware gate is owed (see §[5]).
+
+## Givens handed to 1001
+
+(a) FIX: skip the tail call when is_submap, keeping `pmap_empty = FALSE` by putting the skip
+    INSIDE the existing block (`if (!is_submap) { override_nx...; vm_map_pmap_enter(...); } else
+    { probe; }`), behind `STAGE90_XNU_SUBMAP_PMAP_SKIP` staged defined()-first like every 991+
+    kernel edit (tools/stage_d13_submap_pmap_skip.sh + the DEFINES array in
+    tools/build_xnu_arm_kernel.sh - vm_map.c is a kernel-pool file, so the switch rides the SAME
+    array as VMHINT_GUARD).
+(b) PROBE in the skip branch: a bounded kprintf (the VMHINT991 pattern) printing
+    obj/start/end/size/lr once per hit - names the two submap callers and ranges by measurement.
+(c) KEEP all 1000 instruments + the 991 guard ON; carry the exact switch set.
+(d) EXPECTED READING: no panic; exec-done trio + probe appear; USVC first records appear (user
+    mode reached); VMHINT991 x0 (the new expectation); tick summaries continue; pet feeds become
+    possible only if the boot passes 14.5 s.
+(e) The 2.58 s masked window (tick) stays OPEN - mechanism unnamed; no second-writer signature in
+    the four sampled events.
+(f) Who wrote 0xffb5be0b: OPEN, not needed.
