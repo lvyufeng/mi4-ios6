@@ -1,0 +1,141 @@
+# 999 press read - adjudication of armed-d13-467d59e4 (2026-10-13)
+
+WHO WRITES THIS: by hand, in the step that measured it, never by the build.
+WHY: the capture lives under `out/stage90/captures/`, and `out/` is not tracked - this file IS the
+run's identity: the sha256 below is the only copy of the evidence that outlives the working tree.
+The mechanical half is `tools/check_999_capture.py` (EXIT=0 on this capture; its docstring carries a
+998-baseline self-test). What this file adds is the by-value adjudication against the FROZEN
+pre-registration block in `scripts/press_999.sh`, with line numbers, and the deviations reported.
+HOW TO RE-READ: tools/check_999_capture.py out/stage90/captures/recovered-unknown-arm-20261013-030640-last_kmsg.txt -> exit 0.
+
+## Identity
+
+- capture: out/stage90/captures/recovered-unknown-arm-20261013-030640-last_kmsg.txt
+    sha256 1952adc91dc7a3d8f8bad6e92cf4107f0958edc5098d87b40b5c48da07335302
+    1,406,550 bytes / 28,739 lines
+  carrier: /proc/last_kmsg of the FLASHED ROM, read by `scripts/recover_last_kmsg.sh --read-only`
+  at 03:06:40Z - NOT a fastboot-boot read (that would burn the single-slot record). The recovered
+  file's name says "unknown-arm" because the recovery cannot name a resident run's arm by itself;
+  the arm is established below by content (cap=0x6000 + the payload sha in records/revert-set.txt).
+- arm: armed-d13-467d59e4 - entry bin 6,343,764 B; payload stage90-qcdt.img
+    sha256 2590eb990d56c5c4c1f78cd2bb92e47b67b9da1f1f817ef5fe8ae144c5cb705d, 9,363,456 B
+  parked: out/stage90/frozen/armed-d13-467d59e4 (12 members); records/revert-set.txt carries the
+  12 `set=armed-d13-467d59e4 ... role=999-past-the-cap` lines.
+  commits: 6d61639 (build+park scripts) -> b5849d8 (entry-layer edits) -> db126bd (park record);
+  fdab32c = the frozen press script (pre-registration embedded); post-press tooling 07d0798 +
+  c4af51d (this adjudicator). The press's own runner log did not land under captures/ - the
+  recovered capture is this run's only artifact.
+- timeline: press ~02:35Z (after the 02:33Z park); runner exit 2 (a resident arm not returning is
+  design-expected); the device left the USB bus and did not come back within 31 min; the operator
+  power-cycled; Android came up only at ~03:06-03:07Z (adb alive 03:06:40Z; uptime 28 min @03:35:10Z).
+
+## [1] The cap moved (8192 -> 24576) and STILL BIT
+
+- `xnu_live_capped=0x00006000` @:28714 (tombstone; its value IS the cap).
+- `xnu_live_storage_rd_ordinal` 1..0xda = 218 records (998: 129; +89; pre-reg predicted +92).
+- The thinning (rd_ordinal > 256) never ran - dead code this boot.
+- Everything counted past :28714 is invisible; only the direct (cap-exempt) stream continues.
+
+## [2] exec-done trio + probe - BYTE-CLOSED, ZERO RESIDUAL
+
+- trio :28715-17: seq=1 / who=1 / current=1.
+- probe :28718-22: sig=0x43474244 ("GBDB"), size=0x0015735c=1,405,788,
+  records=0x0000739e=29,598, state=1.
+- Independent recompute (re-measured 2026-10-13): off(:28715)=1,405,679 (1-based byte position of
+  its first char); the trio occupies exactly 109 bytes - line lengths 34+34+38 (each line carries
+  the channel's leading space) plus 3 newlines. So :28718 begins at byte 1,405,788 = probe `_size`;
+  zero residual. File tail: 1,406,550-1,405,788 = 762 B = 82 (:28718-19: 40+40+2) + 680 (:28720-39).
+- records=29,598 vs cap 24,576: the counter counts ATTEMPTS; ~5,022 were swallowed post-exec.
+  Swallowed attempts write no bytes, so the tombstone sitting immediately before the trio is
+  consistent, not contradictory.
+- mechanism (entry_stubs.c:2548-2614): the five words are read back at the done point;
+  entry_write_kv flushes the header first (flag cleared to block recursion); the trio itself goes
+  through the direct entry_write_kv path (entry_stubs.c:5065-5067) = cap-exempt BY DESIGN. 998's
+  instrument defect (done-trio absent while the same wrapper's printf printed) is FIXED: this is
+  its repair, confirmed on hardware.
+
+## [3] The 29 s watchdog net - armed, and the physics say FED
+
+- payload :14 `hw_watchdog_timeout_s=0x0000001d` (29 s); :19
+  `hw_watchdog_bite_ticks_written=0x000fffa0` (the frozen value).
+- install :7447-52: map=1 slot_before=0 desc=0xf9010402 base=0xf9017000 bark=0x000e7fa9 via=1.
+- samples :8017-19 / :9508-10 / :12427-29 / :20434-36: countdown 0x10d66/0x1396e/0x1918f/0x244a3
+  = 2.105 / 2.449 / 3.138 / 4.537 s (WDT clock 32,765 Hz), `pets=0` at all four samples.
+- Door semantics BY VALUE (entry_trace.c:2160-2231): count=(STS>>1)&0xfffff rises since the last
+  feed; the feed gate is count >= bark/2 = 475,092 = 14.5 s. All four samples are < 14.5 s, so
+  pets=0 is consistent, not a defect. The first feedable moment (~14.5 s) lies past the cap
+  (:28714), and the pet's own records ride the COUNTED channel - pet evidence is structurally
+  invisible on this log (a design gap handed to 1000).
+- Physics (the actual proof): 998 (unfed) bit itself ~28 s in and USB came back by itself; 999 ran
+  31 min with no USB return, and Android's uptime pins its boot to the operator's power press - had
+  the SoC reset at any point in those 31 min, Android would have been up long before. => the dog
+  was fed continuously for ~30 min => the read door (entry_storage.c:7716) was calling entry_wdt_pet
+  the whole time (the idle-path sites are all dead: door_seq 0). The machine spent 30 min doing
+  storage I/O.
+- script hygiene note: recover_last_kmsg.sh's closing line ("wdt_pets>0 => RESIDENT") is a canned
+  gloss printed regardless of the value; on this capture pets=0, so the physics above - not that
+  line - is the residency reading.
+
+## [4] The 438 frontier - launchd's dyld mapped the shared cache; the run reached user mode
+
+Text block :4098-4114, line by line:
+- :4098 IOS7LAB shared region (geometry, exactly once)
+- :4102-03 check_np ret=12 (the pre-438 constant, exactly once)
+- :4104 IOS7SHREG map_slide entry: slide=0x340f000 slide_start=0x3f5bb000 size=0x00089000
+- :4105-08 four `IOS7LAB cache mapping` lines (mapping0 va=2f40f000)
+- :4109 `IOS7SHREG map_file kr=0` (G1 HELD)
+- :4110 slide_enter; :4111 slide_init kr=0; :4112 slide_copyin kr=0
+- :4113 **`IOS7SHREG map_slide ret=0`** - the 438 call COMPLETED
+- :4114 cs_invalid_page(0x2f40f000) p=1[launchd]
+- 998's "stopped inside the slide" did NOT reproduce on the same code plus probes. Recorded OPEN:
+  either the probes perturbed the timing-dependent hang, or 998's text tail was not a stop.
+- The copyin range [0x4a3838,0x4a3c80] shows no visible LBA (post-cap).
+
+## [5] Timer - the "freeze at tick 64" was an artifact; the real defect is a RATE COLLAPSE
+
+- 1 kHz by construction: MSM8974_TICK_HZ_DIV 1000u (pe_msm8974.c:82); msm8974_tick_arm writes
+  CNTV_TVAL -> CNTV_CTL=1 -> reads back (:200-215). The capture's own arm record :4117-4141:
+  arm_calls=1 line_rc=1 ticks=0x4b00=19,200 hz=0x124f800=19,200,000 arm_rc=1.
+- the ladder (1@:4209, 2@:4333, 4@:4487, 8@:5420, 16@:5431, 32@:5458, 64@:5468; no 0x80) exists
+  only because the publisher writes powers of two (pe_msm8974.c:382-385: (count & (count-1)) == 0).
+  "Delivery stops at 64" was reading the publish rule; the interval (64,128) is unrepresentable.
+- direct edge probes (cap-exempt, first-4-per-site):
+    mlie :5479-90: 4x {seq, cpsr=0x60000113 (SVC, I clear), tick=0x62=98}   <- BEFORE the :8017 sample
+    texr :28723-34: 4x {seq, cpsr=0x10/0x60000010/0x60000010/0x20000010 (USR, I clear), tick=0x7a=122}
+- the A/B dichotomy is DISSOLVED by measurement: deliveries did not stop (98 then 122, both past
+  64). What the probes measure instead: 122 total deliveries; the first 98 landed before the
+  2.105 s watchdog sample; the whole remainder of the boot (>= 2.4 s, to :28715+) added 24 => the
+  tick rate collapsed, it did not stop. To discriminate in 1000: a second CNTV writer (XNU's own
+  timer taking TVAL over) vs a long masked window.
+
+## Run end state
+
+ast_seq :19374-77 -> exec_seq :19406-09 (thread 0xc0bfa000) -> ~104 reads -> trio :28715 (the exec
+returned) -> texr (user mode) -> cs_invalid_page -> the COUNTED channel goes quiet; the machine
+stayed alive >= 30 min (the [3] physics is the evidence). The direct stream's last records
+:28735-37: ostext_heals=7 / _chars=0x1bee=7,150 / _total=0x1bee; the file's last line :28739 is
+"No errors detected".
+
+## Pre-registration deviations (reported, not papered over)
+
+1. [1] the predicted "the 8192 B header read becomes visible" did NOT come true - the raise (+89
+   reads) still left the relevant read past the cap.
+2. [1] the predictor "the capped key's last dr_lba implies a stop before copyin" is REFUTED by the
+   text channel: the run PASSED the copyin (:4112).
+3. [4] 998's stop point (inside the slide) did not reproduce - carried OPEN (above).
+4. [5] the A/B question dissolved by direct measurement; a NEW defect (rate collapse) replaces it.
+
+## Guards re-verified (frozen CONSTANTS/GUARDS)
+
+check_np ret=12 x1; VMHINT991 x2; IOS7LAB cache mapping x4; IOS7LAB shared region x1; map_file
+kr=0; vm_allocate64 absent (expected - 997's failure-path buffer alloc); exec trio present
+(998's absence was the instrument defect repaired here).
+
+## Givens handed to 1000
+
+(a) tick rate collapse: ISR reads CNTV_CTL/TVAL/CNTVCT back and reports only on anomaly (direct);
+    discriminate second writer vs masked window.
+(b) record channel: any record whose ABSENCE is read as evidence must be cap-exempt; pet and
+    timer-anomaly records move to the direct channel; thin from rd_ordinal > 64.
+(c) launchd's syscall frontier: first-N direct records of the syscalls after cs_invalid_page, to
+    localize where pid 1 stops now.
