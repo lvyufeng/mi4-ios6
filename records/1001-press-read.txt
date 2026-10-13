@@ -1,0 +1,195 @@
+# 1001 press read - adjudication of armed-d13-6ab42af7 (2026-10-13)
+
+WHO WRITES THIS: by hand, in the step that measured it, never by the build.
+WHY: the capture lives under `out/stage90/captures/`, and `out/` is not tracked - this file IS the
+run's identity: the sha256 below is the only copy of the evidence that outlives the working tree.
+The mechanical half is `tools/check_1001_capture.py` (EXIT=1 on this capture: three hard anomalies,
+each adjudicated BY VALUE below). What this file adds is the adjudication against the FROZEN
+pre-registration block embedded in `scripts/press_1001.sh`, and the deviations reported rather than
+reinterpreted.
+HOW TO RE-READ: `python3 -I tools/check_1001_capture.py out/stage90/captures/recovered-unknown-arm-20261013-090413-last_kmsg.txt`
+-> exit 1; its three anomalies are §[R1]-[R3] below.
+READER NOTE: every `@:` number is that capture's own line number (31,035 lines). The capture is a
+MEMORY-order rendering, not time-order: a 128 KiB OS-text block is reserved early and filled in
+place, so the abort storm (§[3]) sits @:4104-5936 while the live-key records that FOLLOW it in time
+appear @:6033+ and the exec trio appears @:23498. Read position, not sequence, as time.
+
+## Identity
+
+- capture: out/stage90/captures/recovered-unknown-arm-20261013-090413-last_kmsg.txt
+    sha256 0b7c1a4110eab97f767124fb7154be0be888767f0ac6f195b32e9664b6a6e22f
+    1,383,387 bytes / 31,035 lines
+  carrier: /proc/last_kmsg of the FLASHED ROM via `scripts/recover_last_kmsg.sh --read-only`,
+  read while the self-recovered Android was up. NOT a fastboot-boot read (that burns the single-slot
+  record). The trailing `No errors detected` line is the CARRIER's fixed tail (present on every
+  capture incl. stock Android rungs) - not this run's reading (grep of the whole tree finds no such
+  string).
+- arm: armed-d13-6ab42af7 - 1000's switch set VERBATIM + ONE new switch
+  `STAGE90_XNU_SUBMAP_PMAP_SKIP=1`; parked in out/stage90/frozen/ (12 members); records/revert-set.txt
+  carries the `role=1001-submap-pmap-skip+probe` lines. commits 6250ce7 / 62173d4 / 50e3460 (build)
+  / f38dfe1 (park).
+- runner: press at 2026-10-13T09:04Z; `fastboot boot` only (Sending boot.img 9144 KB OKAY / Booting
+  OKAY, /tmp/press-1001.log); stage90-qcdt.img sha256 f2bc5836445720b5194e4db1a298c7f966c76e46dd107c0f1bc4c2f9e9abf890
+  (matches the live build); card c9b9080de2a1de00707c6c282650b61608405a7dbc8fe2c0bced475705fb9fea.
+- timeline: XNU reached pid-1 user mode (dyld), faulted, then the never-fed SoC watchdog reset the
+  SoC at its ~29 s bark; the flashed ROM's Android self-recovered. No operator action; no panic.
+
+## [1] THE FIX TOOK: SUBMAPSKIP x2, exact MATCH to 999's two objects
+
+  @:4096 SUBMAPSKIP: obj=0xc0005b48 start=0x40000000 end=0x40001000 size=0x1000 lr=0x8003de00
+  @:4097 SUBMAPSKIP: obj=0xc0005ab0 start=0x40001000 end=0x40002000 size=0x1000 lr=0x8003de00
+
+  Both `obj` values are EXACTLY the two VMHINT991 objects 999's guard recorded (999 @:4098-4099:
+  obj=0xc0005b48 / obj=0xc0005ab0, mem=0x1, w04=0xbaddecaf). start/end/size are self-consistent
+  (size==end-start=0x1000), and lr=0x8003de00 names the caller by measurement. CONFIRMED: the
+  `!is_submap` guard in vm_map_enter's pmap-enter tail fired for launchd's two submap enters, so the
+  call that locked a vm_map as a vm_object (1000's 10.31 s hw_lock_lock panic) did NOT run.
+  This is pre-reg expectation (1), met by value (>=1, exactly 2, the predicted objects).
+
+## [2] THE INVERTED GUARD: VMHINT991 x0 WHILE THE BOOT SURVIVED - PASS
+
+  0 `VMHINT991` records in the whole capture (999 had 2). The guard lives at the FAR end of the
+  skipped call; skipping the call is exactly why it never ran. Pre-reg expectation (2) INVERTED from
+  999's 2 - met. Together with §[1] this is the positional reading the pre-reg wanted:
+  SUBMAPSKIP present + VMHINT991 0 + survival = the call was skipped before the lookup AND the boot
+  lived past it.
+
+## [3] SURVIVAL GATE - OPEN; the exec-done trio + 7528 records past it
+
+  @:23498-23500 xnu_live_exec_done_seq=1 / who=1 / current=1   (the only non-panic exit)
+  @:23495 xnu_live_entrypt_done_entry=0x2bee8028 (== the entry point the OS started the process at,
+            @:4099 `mini4: the OS starts the process at 0x2bee8028`)
+  @:23505+ 7528 direct records past the exec-return point (counted channel capped at 24576,
+            tombstone @:30796 - see §[5]).
+  OS ENTERED: the kernel's own load of /sbin/launchd RETURNED. Death gate OPEN (no panic). This is
+  pre-reg expectation (3), met.
+
+## [4] THE USVC FRONTIER - 6 records, user mode, pid 1
+
+  48 field lines (`xnu_live_usvc_*`), pid 1, CPSR user bits set. The 6th:
+  @:28375-28382 n=6 num=0x00000000 r0=0x00000126(=294=shared_region_check_np) pc=0x2bf03214
+              lr=0x2beec79b
+  n=3 num=0x174(372=thread_selfid) pc=0x2bf03270 - the SVC path is live and instrumenting.
+  The frontier 1000 armed and never reached (1000 died at 10.31 s before user mode) is OPEN here.
+
+## [5] THE CAP (context) - 24576, biting mid-boot, as pre-reg'd
+
+  @:3933 xnu_live_cap=0x00006000; @:30796 xnu_live_capped=0x00006000. `cs_invalid_page` - which 999
+  saw @:4114 - is ABSENT here (0 hits). Pre-reg (4) allowed this: "cs_invalid_page may recur... if it
+  does, the dyld frontier MOVED rather than stopped". It did not recur, and the frontier DID move -
+  forward, into pid-1 user mode (§[6]).
+
+## [6] THE NEW FRONTIER - 230x `usermode data abort` @0x4, TPIDRURO = 0 (dyld's own errno path)
+
+  @:4103 IOS7SHREG check_np ret=12
+  @:4104-5936 230x, byte-identical:
+      `launchd[1]: usermode data abort, EXC_BAD_ACCESS at 0x00000004 in map 0xc00057b8
+       (pmap 0xc0ba3cc0) (Translation fault on page)`
+      r0=0x0000000c r1=0x00000000 r2=0x00000011 r3=0x00000001 r4=0x0000000c
+      r5=0x2bf0895c r6=0x2bd168c8 r7=0x2bd168b8 r8=0x00000012 r9=0x00000001
+      r10=0x2bf0a010 r11=0x2bf03788 r12=0x2bf028e9 sp=0x2bd168b4 lr=0x2bf028f9
+      pc=0x2bf028d4 cpsr=0x60000030
+  The abort handler RE-RETURNS to the same pc (the 230x is a live-lock; 991's 231x at _COMM_PAGE+0x90
+  is the same class, one round earlier).
+
+  IDENTIFIED BY VALUE (slide = 0x2bf08c8c - 0x2be21c8c = 0xE7000; dyld mapped at 0x2bee7000):
+  fault vmaddr = 0x2bf028d4 - 0xE7000 = 0x2be1b8d4. In `/tmp/ios7bin/dyld.dis`:
+      2be1b8c0 <_cerror_nocancel>:
+        mrc  p15,0,r1,c13,c0,3   ; READ TPIDRURO            (2be1b8cc)
+        bic  r1,r1,#3                                       (2be1b8d0)
+        2be1b8d4: ldr r1,[r1,#4] ; FAULTS: TPIDRURO=0 -> addr 0x4
+        it ne / strne r1,[r2] / mov r0,-1 / mov r1,-1 / bx lr
+      caller: _cerror (2be1b8e8) = push {r4,r7,lr}; mov r4,r0; bl __pthread_exit_if_canceled;
+        bl _cerror_nocancel (2be1b8f4) -> lr=0x2be1b8f8|Thumb = 0x2bf028f9 (=obs lr). r12=0x2be1b8e9
+        =obs r12 (0x2bf028e9-0xE7000). r4=r0=0xc=12 = the errno value stored. r2=0x11=17 (dyld's TLS
+        offset to errno), r8=0x12 (cookie-addr low byte pair), r3=1 (bic result bit).
+  The syscall: dyld `__syscall` (dyld.dis:2be1c200) does `svc #128`, and on error (`blo`) branches
+  into this errno store. `shared_region_check_np` returns 12 = ENOMEM = doc'd "shared region is
+  empty" (vm_unix.c:1109, ERROR VALUES) - dyld's NORMAL go-ahead-to-map signal. dyld's TEMP_FAILURE
+  store must reach its TLS via `[TPIDRURO + 4]`; TPIDRURO=0 makes it fault at 0x4.
+  So the fault is dyld's OWN error bookkeeping, not a bad mapping - the read at 0x2be1b8d4 is data,
+  not instruction.
+
+  *** THE 999 CONTRAST (decisive). *** 999's capture @:4102-4104 is the SAME binary, SAME syscall,
+  SAME return value, and the very NEXT line is dyld PROCEEDING:
+      999 @:4103 IOS7SHREG check_np ret=12
+      999 @:4104 IOS7SHREG map_slide pid=1 fd=0 count=4 ... slide=0x340f000   <- no fault
+  999 has ZERO `usermode data abort` in its whole capture; its dyld ran on to map the shared cache
+  (@:4105-4113 cache mapping x4 / map_file kr=0 / map_slide ret=0), then hit `cs_invalid_page`
+  (@:4114). 1001's identical syscall return reaches the identical error path and faults at the
+  identical instruction. The ONLY variable that differs is the VALUE dyld reads from TPIDRURO:
+  999's was a valid pointer; 1001's is 0 (the abort's own instrument, ios7leo037_cp15_thread(),
+  reads TPIDRURO into that r1 field - r1=0 is the measurement).
+
+  KERNEL SIDE, BY VALUE (who is supposed to establish the user thread pointer):
+  - our tree WRITES TPIDRURO in exactly TWO places: `osfmk/arm/cswitch.s:88` (`Switch_context`:
+    `ldr r3,[r2,MACHINE_THREAD_CTHREAD_SELF]; mcr p15,0,r3,c13,c0,3`) and `osfmk/arm/pcb.c:84`
+    (`arm_set_threadpid_user_readonly`, called by `machine_set_current_thread` pcb.c:113 and
+    `thread_set_cthread_self` pcb.c:119/124).
+  - our `machine_load_context` (cswitch.s:106-125) LOADS `[r0,CTHREAD_SELF]` into r1 and READS
+    TPIDRURO into r2 and writes NEITHER - both dead. The 4570 reference
+    (`external/xnu-4570.1.46/osfmk/arm/cswitch.s:83-97`) writes BOTH TPIDRURO and TPIDRURW here.
+  - our tree has NO `osfmk/arm/start.s`, NO `osfmk/arm/machine_routines_asm.s`, NO
+    `osfmk/arm/machdep_call.c`; 4570 has all three, and each writes TPIDRURO.
+  - our tree has NO `machine_thread_set_tsd_base` and no `tsd_base` plumbing in thread_act.c
+    (4570 pcb.c:370 / thread_act.c:778 = the syscall that sets a thread's TSD base and writes
+    TPIDRURO). Our `machine_thread_create` never initializes `cthread_self`.
+  NONE of 1001's changes (SUBMAPSKIP / VMHINT991 / USVC / timer-edge / ostext) touch any of these.
+
+  CONCLUSION (by value, and bounded): 1001's frontier is a latent kernel defect in USER THREAD
+  POINTER establishment (TPIDRURO), reachable the moment pid 1's dyld takes its first error path.
+  999 did not exhibit it - its earlier changes did not remove any TPIDRURO writer, so the divergence
+  is either nondeterministic pcb state or a 999-specific value; the captures do NOT resolve which,
+  and this record does not claim they do. What IS resolved: the fault MECHANISM and LOCATION (dyld's
+  `_cerror_nocancel` reading [TPIDRURO+4] with TPIDRURO=0), and that the kernel's TPIDRURO
+  establishment is INCOMPLETE versus the 4570 reference. This is the 1002 rung's input.
+
+## [7] REGRESSION GUARDS (3 HARD FAILs, adjudicated by value - NOT regressions)
+
+The adjudicator's 3 HARD FAILs all fire "only while the death gate is OPEN" - but the gate is OPEN
+because the boot SURVIVED, not because it regressed. Each is an ABSENCE whose cause is the same:
+the run stopped at §[6] BEFORE the guarded lines could print.
+  [R1] `IOS7LAB cache mapping x0` - 999 printed 4 (@:4105-4108). Here the fault happens at @:4104,
+       one line after check_np, BEFORE dyld's first cache-mapping printf. Absence = the frontier is
+       upstream of the print, not that the wire regressed. NOTE (a measurement caveat, m-class): the
+       128 KiB OS-text block is SATURATED by the abort storm - `xnu_live_ostext_limited=0x1`,
+       chars=0x1ffef ~ total=0x1ffee (@last lines) - so any text the run might have produced after
+       @:5936 was SILENTLY DROPPED. Absence of a text line past the saturation is evidence of
+       nothing ([[mi4-silence-is-a-reading-only-if-success-is-silent]], [[mi4-measurement-defects]]).
+  [R2] `no map_slide ret=` / [R3] `no map_file kr=` - 999 measured ret=0 / kr=0. Both are the SAME
+       second exec-path call as the skip; here dyld never reached map_slide (it faults at the errno
+       store that PRECEDES the map_slide call). Absence = upstream frontier, not regression. The
+       pre-reg's own falsifier (7)(a) does NOT fire (no panic naming hw_lock_lock / vm_map_pmap_enter
+       / vm_map_enter; SUBMAPSKIP x2) and (7)(b) does NOT fire (VMHINT991 x0). So the death did NOT
+       recur at the fixed call: the frontier ADVANCED past it into pid-1 user mode.
+
+  GUARDS THAT PASS: shared region x1 (geometry, exactly once) / check_np ret=12 x1 (the pre-438
+  constant) / VMHINT991 x0 / vm_allocate64 x0 / hw_watchdog_timeout_s=29 / bite_ticks_written
+  =0x0fffa0 / bark=0x000e7fa9 (all 999's frozen net) / USB-pcx 0/0 (kernel never idles).
+
+## [8] THE PET - ZERO feeds, correctly SOFT (not a door failure)
+
+  5 `xnu_live_wdt_pets=0x00000000` records. The feed gate (entry_trace.c:2248-2254) is
+  `count >= g_wdt_bark_ticks/2` = 950185/2 = 475092 ticks. The capture's max live count is
+  238425 (~7.28 s) < 475092, so the gate was never crossed and 0 feeds is EXPECTED (adjudicator
+  SOFT, correct). The SoC watchdog was never fed -> it reset at ~29 s. Pre-reg (5): zero feeds past
+  ~14.5 s with the read door in use would be a READING; here NO record shows the boot surviving past
+  the half-bark, so the condition never arose. Not a defect.
+
+## [9] TICKS - instrument healthy; the 2.58 s masked-window question STAYS OPEN
+
+  4 anomalies @:6033-6497 (maxd=0x0030d308 ~2.58 s, the same masked-window value 999 carried),
+  then summaries `tick_sum_count` climbing 0x6a->0x6a->0x78(@:23505+) as the boot proceeds. No new
+  reading; the masked-window question is unchanged and out of this rung's scope.
+
+## VERDICT
+
+  Death gate OPEN (survival). The 1001 fix is CONFIRMED BY VALUE (SUBMAPSKIP x2 == 999's two objects;
+  VMHINT991 inverted to 0 as predicted). The frontier ADVANCED from 999's `cs_invalid_page` into a
+  NEW, earlier-in-boot defect: pid 1's dyld faults 230x at 0x4 reading TPIDRURO=0 on its
+  `shared_region_check_np` errno path - a latent USER THREAD POINTER establishment defect, exposed
+  the moment the boot survives far enough to run dyld's error bookkeeping. The 3 HARD FAILs are the
+  text channel's saturation + the upstream frontier, NOT regressions. No panic; the device
+  self-recovered. NEXT (1002): establish TPIDRURO for exec'd user threads - audit every 4570
+  TPIDRURO writer our tree lacks (`machine_load_context` dead write, `machine_thread_set_tsd_base` /
+  `tsd_base` plumbing, `start.s` / `machine_routines_asm.s` bootstrap init).
