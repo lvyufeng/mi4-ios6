@@ -586,7 +586,8 @@ def s_abort(cap):
     n_upc = cap.family_count(SLEH_UPC_KEY)
     if n_upc == 0:
         hard("the 1004 addition `%s` is ABSENT - STAGE90_XNU_ABORT_TRACE did not reach the image: "
-             "REBUILD with it threaded into the entry payload (see scripts/build_1004.sh)" % SLEH_UPC_KEY)
+             "REBUILD with it threaded into the entry payload (see scripts/build_1004.sh)"
+             % SLEH_UPC_KEY, absence_based=True)
     else:
         say("PASS", "`%s` x%d - the 1004 addition reached the image (the frame's user pc, published "
                     "beside the fault pair)" % (SLEH_UPC_KEY, n_upc))
@@ -606,32 +607,57 @@ def s_abort(cap):
         say("OBS", "  @:%d %s" % (r["ln"], row(r)))
     if len(recs) > 12:
         say("OBS", "  ... (%d records) ..." % (len(recs) - 12))
-    for r in recs[-6:]:
-        say("OBS", "  @:%d %s" % (r["ln"], row(r)))
+        for r in recs[-6:]:
+            say("OBS", "  @:%d %s" % (r["ln"], row(r)))
+    elif len(recs) > 6:
+        # 7..12 records: the head is rows 0..5, so print only the ones NOT already shown (no dup).
+        for r in recs[6:]:
+            say("OBS", "  @:%d %s" % (r["ln"], row(r)))
 
     # ---- the `far` walk classification.
+    #
+    # **TWO PRIMITIVES, AND THE PAGE-GRANULAR ONE IS THE LOOP SIGNAL.** A raw `far` comparison (`far >
+    # prev`) is the wrong primitive for "the same page re-faulting": real demand faults within ONE page
+    # carry DIFFERENT `far` values (1003's head: 0x2be89fe0 / 0x2be8c78f / 0x2be8a084 are three offsets
+    # inside one 4 KiB page), so a same-page re-fault reads as ADVANCE and mislabels a LOOP as a WALK.
+    # The LOOP signature is therefore a repeated **page** (`far & ~0xfff`), not a repeated word. Both
+    # are printed; the VERDICT below decides on the page-granular count, the word-granular one beside it
+    # as corroboration. (Page size 4096 = the shared cache's mapping granularity.)
+    PAGE_MASK = ~0xFFF
     fars = [_u32(r["f"].get("far", (0, None))[1]) for r in recs]
     upcs = [_u32(r["f"].get("upc", (0, None))[1]) for r in recs]
     types = [_u32(r["f"].get("type", (0, None))[1]) for r in recs]
     n_pf = sum(1 for t in types if t == ABT_PREFETCH)
     n_da = sum(1 for t in types if t == ABT_DATA)
-    prev = []
-    walk = loop = flat = 0
-    repeats = []
-    for i, far in enumerate(fars):
-        if far is None or i == 0 or fars[i - 1] is None:
-            prev.append(far)
-            continue
-        if far in prev[-REPEAT_WINDOW:]:
-            loop += 1
-            repeats.append(i)
-        elif far > fars[i - 1]:
-            walk += 1
-        else:
-            flat += 1
-        prev.append(far)
-    say("OBS", "far classification: ADVANCE x%d, REPEAT(past-%d) x%d, other x%d (type: prefetch-abort "
+
+    def _classify(vals, mask=None):
+        """Count ADVANCE / REPEAT-within-window / other over `vals`, optionally masked to a page."""
+        prev, adv, rep, oth, reps = [], 0, 0, 0, []
+        for i, v in enumerate(vals):
+            if v is None or i == 0 or vals[i - 1] is None:
+                prev.append(v)
+                continue
+            cmp_v = v & mask if (mask is not None and v is not None) else v
+            win = [(p & mask if (mask is not None and p is not None) else p) for p in prev[-REPEAT_WINDOW:]]
+            if cmp_v in win:
+                rep += 1
+                reps.append(i)
+            elif v > vals[i - 1]:
+                adv += 1
+            else:
+                oth += 1
+            prev.append(v)
+        return adv, rep, oth, reps
+
+    walk, loop, flat, repeats = _classify(fars)
+    p_walk, p_loop, p_flat, p_repeats = _classify(fars, PAGE_MASK)
+    say("OBS", "far WORD-granular: ADVANCE x%d, REPEAT(past-%d) x%d, other x%d (type: prefetch-abort "
                "x%d, data-abort x%d)" % (walk, REPEAT_WINDOW, loop, flat, n_pf, n_da))
+    say("OBS", "far PAGE-granular (far & ~0xfff): ADVANCE x%d, REPEAT(past-%d) x%d, other x%d - this is "
+               "the LOOP signal (a word-level `>` cannot see a same-page re-fault)"
+               % (p_walk, REPEAT_WINDOW, p_loop, p_flat))
+    # keep the word-granular repeat indices for the OBS line below (compat with 1003's shape)
+    _word_repeats = repeats
     # ---- frame_ok self-check: the frame fields (fsr_frame/far_frame) DE-SLIDE onto fsr/far.
     fok = [r["f"].get("frame_ok", (0, None))[1] for r in recs if "frame_ok" in r["f"]]
     if fok and all(v == 0 for v in fok):
@@ -645,12 +671,43 @@ def s_abort(cap):
                     "pair (the instrument checks itself)" % (n_ok, len(fok)))
 
     # ---- the VERDICT: LOOP vs WALK, and the frontier (the LAST abort's far/upc).
-    verdict = ("WALK - the `far` addresses advance (dyld paging the shared cache forward: slow, not "
-               "stuck)" if walk > loop else
-               "LOOP - consecutive `far` values REPEAT within a %d-window (the same page re-faulting: "
-               "a validation-style cycle)" % REPEAT_WINDOW if loop > 0 else
+    # Decided on the PAGE-granular counts (the word-level `>` cannot see a same-page re-fault). A repeat
+    # within the window is the LOOP signature; else the fars strictly advance => WALK.
+    verdict = ("LOOP - consecutive `far` PAGES REPEAT within a %d-window (the same page re-faulting: "
+               "a validation-style cycle)" % REPEAT_WINDOW if p_loop > 0 and p_loop >= p_walk else
+               "WALK - the `far` pages advance (dyld paging the shared cache forward: slow, not stuck)"
+               if p_walk > 0 else
                "NO-WALK - fewer than two comparable `far` values (the trace is too short to classify)")
     say("VERDICT", verdict)
+    repeats = p_repeats
+    # ---- the register state at the END: does the trace FROZEN-OUT (the tail holds one far) or keep
+    # MIXING?  A frozen tail + a high repeat count is the LOOP signature the 1003 sampler saw (one
+    # frame held across the powers-of-two ladder); a mixing tail with advancing far is WALK.  Read the
+    # LAST few COMPARABLE fars by value rather than inferring from the aggregate.
+    tail = [f for f in fars[-8:] if f is not None]
+    if len(tail) >= 2:
+        n_uniq = len(set(tail))
+        n_pages = len(set(f & PAGE_MASK for f in tail))
+        say("OBS", "tail far (last %d comparable): x%d distinct word / x%d distinct page %s -> %s" % (
+            len(tail), n_uniq, n_pages,
+            "[" + ",".join(fmt(f) for f in tail) + "]",
+            "PAGE-FROZEN (one page held - the LOOP signature; differing words within it are offsets)"
+            if n_pages == 1 else "MIXING (pages keep changing)"))
+    # ---- the caps are 512 under the switch: if the record count REACHES 512 the tail is truncated and
+    # the true abort count needs the cumulative `_storm` (written once, at 513).  A channel cap (24576)
+    # would also silently drop the newest records; both are read here by value, not inferred.
+    n_storm = cap.family_count("xnu_live_sleh_storm")
+    if len(recs) >= 512:
+        hard("the abort count REACHED the 1004 cap (512) - the record set is the first 512 aborts, not "
+             "the tail; read `xnu_live_sleh_storm` (x%d present?) and widen, or read the tail "
+             "differently" % n_storm, absence_based=True)
+    if cap.all("xnu_live_capped"):
+        hard("the live channel hit its own cap (`xnu_live_capped` present) - the newest records were "
+             "dropped SILENTLY, so the LAST abort above is NOT the death-time frontier: the abort "
+             "trace is truncated upstream of 512", absence_based=True)
+    if n_storm:
+        say("OBS", "`xnu_live_sleh_storm` present x%d - the abort count EXCEEDED the detailed band "
+                   "(more than %d aborts); the recorded set is the head" % (n_storm, 512))
     if repeats:
         say("OBS", "the repeat positions (0-based record idx): %s" % ",".join(str(i) for i in repeats[:24]))
     last = recs[-1]
