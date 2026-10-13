@@ -575,9 +575,12 @@ string. (ii) The console channel CANNOT drop: the 128 KB os-block is space-fille
 `link`; the next blocking-capable work is cache page-ins while loading libs.
 
 **Where it can wait** (all wakeup-only; the timer is frozen per §10c, so no deadline can expire):
-the `_shared_region_map` tail — atime `vnode_setattr` (`vm_unix.c:1479`; settled by value: an
-atime-only VATTR takes HFS's in-memory fast path, `hfs_vnops.c:1236-1239` `c_touch_acctime=TRUE;
-goto out` — no I/O; at most the cnode lock `:1224`) and put/drop/deallocate (`:1493-1503`, no
+the `_shared_region_map` tail — atime `vnode_setattr` (`vm_unix.c:1479`; DISPUTED — the lead
+reads the atime-only fast path `hfs_vnop_setattr` hfs_vnops.c:1236-1239 `c_touch_acctime=TRUE;
+goto out`, no disk write, with decmpfs_update_attributes `:1134` (xattr reads) and the cnode
+lock `:1224` as the only prior I/O-capable steps; shreg-hang report #2 reads it as the tail's
+ONLY I/O, a metadata write delivered by the CNTVCT-polled ladder `entry_storage.c:8942`;
+shreg-g1 arbitrates by value) and put/drop/deallocate (`:1493-1503`, no
 I/O) — then `_shared_region_slide` (`:1513`): `slide_init` (`:1524`; object lock
 `vm_shared_region.c:1458`, `kmem_alloc` `:1502`), `copyin(0x3dc32000, 0x89000)` (`:1533-1535`) =
 137 cache-file pages, the only mass-I/O step (m2 tail, file offset 0x101aa000, card LBA
@@ -589,15 +592,22 @@ I/O) — then `_shared_region_slide` (`:1513`): `slide_init` (`:1524`; object lo
 truncated mid-read by the cap. NONE of the 129 lies in the cache file's block span [LBA 0x422AE8
 (vol 0x455d000) .. 0x4B9550]: dyld's 8,192-B header read fell after the cap.
 
-**The 999 probe ladder** (two prints, same gate as the existing `IOS7SHREG` probes, each with its
-own `static … < 4`): **L1** `IOS7SHREG slide enter` = first statement of `_shared_region_slide`
-(after the declarations `:1521-1522`, before the `slide_init` call `:1524`); **L2**
-`IOS7SHREG slide_init kr=%d entry=%p n=%x src=%08x` = between `:1527` and `:1529` (fires only
-when `slide_init` SUCCEEDED — its failure print `:1525` would otherwise have appeared). Reading:
-L1 absent ⇒ stop in the map tail (now a near-empty candidate set — a lock wait, not I/O); L1
-present + L2 absent ⇒ stop inside `slide_init`; L2 present + no exit `:1654` ⇒ stop in
-`get_slide_info_entry`/copin/sanity — the mass-I/O step. Independent record-channel ladder (cap
-24576 + thinning): the 8,192-B cache-header read (LBA 0x422AE8+, 16 sectors) becomes visible, and
-cache-span reads at LBA 0x4a3838+ appear iff the copyin's page-ins run. Exit `:1654` printed ⇒ the
+**The 999 probe ladder** (three prints — shreg-hang report #2, 2026-10-13; same gate as the
+existing `IOS7SHREG` probes, each with its own `static … < 4`): **(a)**
+`IOS7SHREG slide_enter slide=0x%x src=0x%08x n=0x%x` at `:1523` (before the `slide_init` call
+`:1524`); **(b)** `IOS7SHREG slide_init kr=%d entry=%p n=0x%x` at `:1528` (between the `:1527`
+brace and the `:1529` assignment; fires only when `slide_init` SUCCEEDED — its failure print
+`:1525` would otherwise have appeared; `entry=%p` is necessarily NULL there and serves as a
+presence marker only); **(c)** `IOS7SHREG slide_copyin kr=%d` between `:1536` and `:1537`
+(before the error test, so BOTH outcomes print). Reading: none ⇒ stop in the map tail (atime
+`:1479` DISPUTED, above; put/drop/deallocate `:1493-1503` no-I/O); (a) only ⇒ stop inside
+`slide_init` (object lock `vm_shared_region.c:1458` / `kmem_alloc` `:1502`); +(b) ⇒ stop inside
+the copyin or its page delivery; +(c) kr=0 ⇒ stop in sanity (`:1541`); (c) kr≠0 ⇒ a real
+EFAULT — and `map_slide ret=14` (`:1646`) must follow. No deadline anywhere on these paths; the
+frozen timer enters them only via an empty page pool (a 137-page `kmem_alloc` does not reach
+that — vm_resident.c:4574/:4737). Record-channel prediction (cap 24576 + thinning): the 8,192-B
+cache-header read (16 sectors at LBA 0x422AE8+) becomes visible; if the copyin's page-ins run,
+`dr_lba` enters [0x4a3838, 0x4a3c80] (137 pages); if the new capped key's last `dr_lba` is still
+in the launchd/cache-header range, the stop is before the copyin. Exit `:1654` printed ⇒ the
 slide stage completed and the hang moved into dyld's load/link path. shreg-g1 audits this ladder
 by value (every cited line against the staged tree).
