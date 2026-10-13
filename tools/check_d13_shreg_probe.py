@@ -10,13 +10,13 @@ WHAT IT CHECKS (mode-independent, both modes):
      narg / arg_bytes / function pointer - the master's signature, re-run off the image
      (`bsd/kern/syscalls.master:452/:671` -> `out/xnu_generated_d13/bsd/init_sysent.c:440/:649`).
      The probe must never move the dispatch.
-  2. the two syscall bodies, `_shared_region_map` and `_shared_region_slide` have disassembly bodies.
+  2. the two syscall bodies and `_shared_region_map` have disassembly bodies.
   3. the wire is STILL 20 bytes wide: `shared_region_copyin_mappings` computes `count * 5 * 4`
      (`add rX, rY, rY, lsl #2` then `lsl rZ, rX, #2` - measured at 0x8041fdf4/0x8041fdf8 in the
      994/995 image).  The 996 probe MEASURES the misparse, it does not fix it: a 20 -> 32 change here
      at this rung would make the probe's own reading uninterpretable (`mi4-measurement-defects`).
 
-SWITCH ON (`--expect on`, the default): each of the eight literals (patch_d13_shreg_probe.LITERALS) is
+SWITCH ON (`--expect on`, the default): each of the five literals (patch_d13_shreg_probe.LITERALS) is
   (a) present in the image, and
   (b) referenced INSIDE its own function's body - by a `movw rX, #lo` / `movt rX, #hi` pair composing
       to the literal's VA (the shape this tree's compiler emits for a string argument, measured in the
@@ -33,11 +33,24 @@ SWITCH OFF (`--expect off`): the mirror image, asserted POSITIVELY: zero occurre
   `#if defined(STAGE90_XNU_SHREG_PROBE) && STAGE90_XNU_SHREG_PROBE`, so OFF must leave the image as if
   the probe did not exist.
 
+THE 999 LADDER (`--ladder`, default off): the 999 slide half adds three literals - `_shared_region_slide`'s
+  entry, its step past `slide_init`, its step past the copyin - held in their own table
+  (LADDER_LITERALS, 3 print sites).  With `--ladder` they join the ON clauses above (and their host
+  joins the allowed set), and `--tree` expects the fully staged file's 10 guard regions instead of 7.
+  WITHOUT the flag the checker is the 996 checker, so the frozen 996/998 home images keep passing
+  unchanged - a default that demanded literals the home image cannot carry would fail every build's
+  own home-image discipline.  The 999 spelling is `--expect on --ladder --tree bsd/vm/vm_unix.c`
+  (note: --tree takes the FILE, not the tree root).  On the 999 image that run is EXPECTED to fail
+  exactly one clause - the frozen 20 B straddle (`996 measures the misparse, it does not fix it`; the
+  wire is 32 B from 997 on) - and build_999.sh asserts exactly one `^  FAIL ` line, naming it.  A 999
+  image run WITHOUT `--ladder` fails the outsiders clause (the slide half's host is not among the base
+  hosts) and the message says to re-run with the flag.
+
 `--tree PATH` is optional and adds the SOURCE-SIDE gate check the image cannot show: the guard line
-`#if defined(STAGE90_XNU_SHREG_PROBE) && STAGE90_XNU_SHREG_PROBE` occurs 10 times in the staged
-`bsd/vm/vm_unix.c` and every one of the ten print sites sits INSIDE a guard region (a line scan
-that tracks the guard depth).  That is the "the gate line" assertion; without it the checker can only
-assert the gate's EFFECT (present ON / absent OFF).
+`#if defined(STAGE90_XNU_SHREG_PROBE) && STAGE90_XNU_SHREG_PROBE` occurs 7 times in the staged
+`bsd/vm/vm_unix.c` - 10 with `--ladder`, the fully staged 999 file - and every print site in scope
+sits INSIDE a guard region (a line scan that tracks the guard depth).  That is the "the gate line"
+assertion; without it the checker can only assert the gate's EFFECT (present ON / absent OFF).
 
 `--control ELF` (repeatable) runs BOTH modes against an image that predates the change and demands it
 discriminate: ON must FAIL and OFF must PASS.  The frozen 994 image
@@ -61,9 +74,9 @@ SYSENT_ROWS = (
 )
 
 # (literal, function whose body must reference it, what it prints, print SITES in the staged source)
-# The sites are 10 for 8 literals: 438 has THREE returns (an early `return kr`, the slide-failure one,
+# The sites are 7 for 5 literals: 438 has THREE returns (an early `return kr`, the slide-failure one,
 # and the shared `done:` exit) all printing the same text, and clang merges identical string constants
-# into ONE .rodata copy (measured: the 996-era image carried 5 distinct IOS7SHREG strings).
+# into ONE .rodata copy (measured: the merged image carries 5 distinct IOS7SHREG strings).
 PROBE_LITERALS = (
     (b"IOS7SHREG check_np pid=%d out=0x%08x\n", "shared_region_check_np", "294 entry", 1),
     (b"IOS7SHREG check_np ret=%d\n", "shared_region_check_np", "294 exit (the errno)", 1),
@@ -71,6 +84,16 @@ PROBE_LITERALS = (
      b"size=0x%08x\n", "shared_region_map_and_slide_np", "438 entry (the whole wire)", 1),
     (b"IOS7SHREG map_slide ret=%d\n", "shared_region_map_and_slide_np", "438 exit (all three)", 3),
     (b"IOS7SHREG map_file kr=%d\n", "_shared_region_map", "the kr inside _shared_region_map", 1),
+)
+PROBE_SITES = sum(n for _l, _f, _w, n in PROBE_LITERALS)
+
+# The 999 slide half's three literals.  They stay OUT of the table above and out of the default run:
+# the frozen 996/998 home images cannot carry them, and a checker that demanded them by default would
+# fail every build's own home-image discipline.  `--ladder` judges the 999 image: this table joins
+# the ON clauses and check_tree() expects the fully staged file's 10 guard regions; its host then
+# joins the allowed set, so `_shared_region_slide`'s references stop being "outside the probed
+# functions" (see the module docstring's THE 999 LADDER).
+LADDER_LITERALS = (
     (b"IOS7SHREG slide_enter slide=0x%x src=0x%08x n=0x%x\n", "_shared_region_slide", "999 entry "
      "(slide, slide_start, slide_size)", 1),
     (b"IOS7SHREG slide_init kr=%d entry=%p n=0x%x\n", "_shared_region_slide", "999 step past "
@@ -78,7 +101,8 @@ PROBE_LITERALS = (
     (b"IOS7SHREG slide_copyin kr=%d\n", "_shared_region_slide", "999 step past the copyin "
      "(both outcomes)", 1),
 )
-PROBE_SITES = sum(n for _l, _f, _w, n in PROBE_LITERALS)
+LADDER_SITES = sum(n for _l, _f, _w, n in LADDER_LITERALS)
+LADDER_FNS = {fn for _l, fn, _w, _n in LADDER_LITERALS}   # the hosts only --ladder allows
 
 STRADDLE_FN = "shared_region_copyin_mappings"
 PROBE_PREFIX = b"IOS7SHREG"
@@ -396,14 +420,17 @@ def check_common(env):
     return ok, table_va
 
 
-def check_on(env):
+def check_on(env, ladder=False):
+    """The image-side ON clauses.  `ladder` adds LADDER_LITERALS to the demanded set and their host
+    to the allowed set (module docstring, THE 999 LADDER)."""
     ok, _ = check_common(env)
+    table = PROBE_LITERALS + (LADDER_LITERALS if ladder else ())
     refs_by_fn = {}
     for fn in env.funcs:
         r = string_refs(env.path, env.secs, env.funcs[fn], env.read_u32, env.raw)
         if r:
             refs_by_fn[fn] = r
-    for lit, fn, why, _sites in PROBE_LITERALS:
+    for lit, fn, why, _sites in table:
         found = find_string(env.path, env.secs, lit)
         if found is None:
             print(f"  FAIL {why}: the literal {lit[:34]!r} is not in the image at all")
@@ -412,8 +439,8 @@ def check_on(env):
         va, sec = found
         body = env.funcs.get(fn)
         # The reference must be in the named function.  If the compiler INLINED that function into its
-        # caller, the named body need not exist: the reference is then accepted in any of the three
-        # probed bodies (the caller), and the report says so - a name match is never trusted on its own.
+        # caller, the named body need not exist: the reference is then accepted in any of the probed
+        # bodies (the caller), and the report says so - a name match is never trusted on its own.
         host = fn if va in refs_by_fn.get(fn, {}) else \
             next((f for f, r in refs_by_fn.items() if va in r), None)
         if host is None:
@@ -438,12 +465,14 @@ def check_on(env):
         extra = f", +{len(good) - 1} more reference(s)" if len(good) > 1 else ""
         print(f"  ok   {why}: {host} loads @{va:#x} ({sec}) at {at:#x} via {form} -> printf "
               f"{p:#x} ({len(prints)} bl printf in the body{extra})")
-    allowed = {fn for _l, fn, _w, _n in PROBE_LITERALS}
+    allowed = {fn for _l, fn, _w, _n in table}
     outsiders = {fn: sorted(r) for fn, r in refs_by_fn.items() if fn not in allowed}
     if outsiders:
         for fn, addr in outsiders.items():
+            hint = " (this is the 999 slide half - re-run with --ladder)" if (
+                not ladder and fn in LADDER_FNS) else ""
             print(f"  FAIL {fn} references a probe literal ({', '.join(hex(a) for a in addr)}) - the "
-                  f"prints must live in the probed functions ONLY")
+                  f"prints must live in the probed functions ONLY{hint}")
         ok = False
     else:
         print(f"  ok   no body outside {{{', '.join(sorted(allowed))}}} references an IOS7SHREG "
@@ -451,7 +480,7 @@ def check_on(env):
     for fn in sorted(allowed):
         if fn in refs_by_fn:
             print(f"       (info: {fn} carries {len(calls_to(env.funcs[fn], 'printf'))} bl printf "
-                  f"for {sum(n for _l, f, _w, n in PROBE_LITERALS if f == fn)} print site(s) in "
+                  f"for {sum(n for _l, f, _w, n in table if f == fn)} print site(s) in "
                   f"source; "
                   f"clang merges identical tails, so fewer calls than sites is the compiler's "
                   f"choice, never a defect)")
@@ -475,18 +504,25 @@ def check_off(env):
     return ok
 
 
-def check_tree(path):
-    """The source-side gate: the guard line and every literal inside a guard region."""
+def check_tree(path, ladder=False):
+    """The source-side gate: the guard line and every literal inside a guard region.
+
+    `ladder` selects the scope: 996's 5 literals / 7 guard regions by default, the 999 file's
+    8 / 10 with the flag (see LADDER_LITERALS).
+    """
+    table = PROBE_LITERALS + (LADDER_LITERALS if ladder else ())
+    want = PROBE_SITES + (LADDER_SITES if ladder else 0)
     ok = True
     if not os.path.isfile(path):
         print(f"  FAIL --tree {path}: no such file")
         return False
     text = open(path).read()
     opens = text.count(GUARD_OPEN)
-    if opens != PROBE_SITES:
-        print(f"  FAIL --tree: {opens} guard line(s) `{GUARD_OPEN}`, expected {PROBE_SITES} "
-              f"(one per print site: 2 in check_np, 4 in map_slide, 1 in _shared_region_map, "
-              f"3 in _shared_region_slide)")
+    if opens != want:
+        detail = "2 in check_np, 4 in map_slide, 1 in _shared_region_map"
+        detail += ", 3 in _shared_region_slide" if ladder else " (+3 more with --ladder)"
+        print(f"  FAIL --tree: {opens} guard line(s) `{GUARD_OPEN}`, expected {want} "
+              f"(one per print site: {detail})")
         ok = False
     else:
         print(f"  ok   --tree: {opens} guard regions in {path}")
@@ -496,13 +532,13 @@ def check_tree(path):
             depth += 1
         elif depth and line.strip() == "#endif":
             depth -= 1
-        for lit, _fn, why, _n in PROBE_LITERALS:
+        for lit, _fn, why, _n in table:
             needle = lit.decode().rstrip("\n")
             if needle in line:
                 seen[lit] = seen.get(lit, 0) + 1
                 if depth < 1:
                     bad.append(f"line {no} ({why}) is OUTSIDE every guard")
-    for lit, _fn, why, sites in PROBE_LITERALS:
+    for lit, _fn, why, sites in table:
         n = seen.get(lit, 0)
         if n != sites:
             print(f"  FAIL --tree: {why}: the literal {lit[:34]!r} occurs {n} time(s) in the "
@@ -512,14 +548,14 @@ def check_tree(path):
         for b in bad:
             print(f"  FAIL --tree: {b}")
         ok = False
-    elif not bad and all(seen.get(l, 0) == n for l, _f, _w, n in PROBE_LITERALS):
-        print(f"  ok   --tree: all {PROBE_SITES} print sites of the {len(PROBE_LITERALS)} literals are "
+    elif not bad and all(seen.get(l, 0) == n for l, _f, _w, n in table):
+        print(f"  ok   --tree: all {want} print sites of the {len(table)} literals are "
               f"INSIDE a guard region - the gate line is the only way they reach the image")
     return ok
 
 
-def run(path, expect, tree=None):
-    print(f"  -- {path} (expect switch {expect.upper()})")
+def run(path, expect, tree=None, ladder=False):
+    print(f"  -- {path} (expect switch {expect.upper()}{', ladder on' if ladder else ''})")
     if not os.path.isfile(path):
         print("  FAIL no such file - nothing to check")
         return False
@@ -528,15 +564,15 @@ def run(path, expect, tree=None):
     except (OSError, subprocess.CalledProcessError) as exc:
         print(f"  FAIL {OBJDUMP} could not read it: {exc}")
         return False
-    ok = (check_on if expect == "on" else check_off)(env)
+    ok = (check_on(env, ladder) if expect == "on" else check_off(env))
     if tree:
-        ok = check_tree(tree) and ok
+        ok = check_tree(tree, ladder) and ok
     return ok
 
 
 def main() -> int:
     argv = sys.argv[1:]
-    expect, args, controls, tree, i = "on", [], [], None, 0
+    expect, args, controls, tree, ladder, i = "on", [], [], None, False, 0
     while i < len(argv):
         a = argv[i]
         if a == "--expect" and i + 1 < len(argv):
@@ -552,6 +588,8 @@ def main() -> int:
             expect = "off"
         elif a == "--on":
             expect = "on"
+        elif a == "--ladder":
+            ladder = True
         elif not a.startswith("--"):
             args.append(a)
         else:
@@ -563,14 +601,15 @@ def main() -> int:
         return 2
     path = args[0] if args else "out/stage90/xnu_arm_entry.elf"
 
-    print(f"check_d13_shreg_probe: {path} (expect switch {expect.upper()})")
-    ok = run(path, expect, tree)
+    print(f"check_d13_shreg_probe: {path} (expect switch {expect.upper()}"
+          f"{', ladder on' if ladder else ''})")
+    ok = run(path, expect, tree, ladder)
     print(f"check_d13_shreg_probe: {'PASS' if ok else 'FAIL'} ({expect})")
 
     for ctl in controls:
         print(f"check_d13_shreg_probe: control {ctl} (must FAIL on and PASS off)")
-        on = run(ctl, "on")
-        off = run(ctl, "off")
+        on = run(ctl, "on", ladder=ladder)
+        off = run(ctl, "off", ladder=ladder)
         if on or not off:
             print(f"  FAIL the control does not discriminate: on={on} off={off} - it is not an image "
                   f"this checker can tell apart")
