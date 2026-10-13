@@ -1126,6 +1126,24 @@ case "$STALL" in
     *) echo "REFUSING: STAGE90_XNU_STALL='$STALL' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **1004: the abort trace - the sleh detail caps widened so the TAIL of a fault run is published.**
+# With `STAGE90_XNU_ABORT_TRACE=1`, `src/entry/entry_stubs.c` raises `SLEH_LIVE_MAX`/`SLEH_LIVE_FRAMES`
+# /`SLEH_LIVE_SEEN` from 8/16/64 to 512/512/512 and adds the frame's user pc as
+# `xnu_live_sleh_upc`. This is a pure MEASUREMENT switch: OFF, the three constants are the tokens that
+# were there before, byte for byte, and the image does not move. It is read by `entry_stubs.c` (the
+# entry payload's own stub object), which is compiled here, so the flag is written to `STUB_DEFINES`
+# below - the record, the arm-key list and the compile line are one value
+# ([[mi4-one-value-two-definitions]]).
+ABORT_TRACE=${STAGE90_XNU_ABORT_TRACE:-0}
+case "$ABORT_TRACE" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_ABORT_TRACE='$ABORT_TRACE' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+# The flag reaches `entry_stubs.c` through `STUB_DEFINES` (the file's whole sleh body is inside the
+# `STAGE90_ENTRY_TRACE` region), exactly as the seam flags above do - so it is added here and
+# `entry_trace.c` (whose `#if`s consume the seam flags, not this one) does not need it.
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_ABORT_TRACE="$ABORT_TRACE")
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
 # commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
@@ -1641,6 +1659,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_SHREG_WIRE
                 STAGE90_XNU_SHREG_GEOM
                 STAGE90_XNU_STALL
+                STAGE90_XNU_ABORT_TRACE
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1865,6 +1884,11 @@ do
         # and the PE object cannot be built from two spellings of this switch. Read from `$STALL`,
         # validated 0/1 at its own assignment above this loop.
         STAGE90_XNU_STALL)            _v=$STALL ;;
+        # 1004: the sleh detail caps widened so the tail of a fault run is published. It is read by
+        # `entry_stubs.c` (inside the ENTRY_TRACE region), compiled here with `-DSTAGE90_XNU_ABORT_TRACE`
+        # from `STUB_DEFINES`, so the record and the stub object cannot be built from two spellings of
+        # this switch. Read from `$ABORT_TRACE`, validated 0/1 at its own assignment above this loop.
+        STAGE90_XNU_ABORT_TRACE)     _v=$ABORT_TRACE ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -39548,6 +39572,14 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # record; a record that omitted this key would let a stall-free image pass as the 1003 frontier arm.
     # Written as the RESOLVED `$STALL`, not `${STAGE90_XNU_STALL}`, for 882's reason.
     echo "STAGE90_XNU_STALL=$STALL"
+    # **1004's switch, written here for the same reason the STALL line above states**: this writer is
+    # the one site a name-keyed diff does not visit and the only site the gate ever reads, and
+    # ABORT_TRACE is an ARM key - it widens the sleh detail caps and adds `xnu_live_sleh_upc` in the
+    # entry payload's stub object. OFF, the image is byte-for-byte a build with the old 8/16/64 caps
+    # and no `_upc` record; a record that omitted this key would let a cap-cut image pass as the 1004
+    # abort-trace arm. Written as the RESOLVED `$ABORT_TRACE`, not `${STAGE90_XNU_ABORT_TRACE}`, for
+    # 882's reason.
+    echo "STAGE90_XNU_ABORT_TRACE=$ABORT_TRACE"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

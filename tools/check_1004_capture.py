@@ -1,48 +1,44 @@
 #!/usr/bin/env python3
-"""SKELETON - mechanical adjudicator for the 1004 press capture - by value, and DEATH-AWARE.
+"""Mechanical adjudicator for the 1004 press capture - by value, and DEATH-AWARE.
 
-MODELLED BYTE-STRUCTURALLY ON tools/check_1003_capture.py.  1004 adds ONE instrument - the per-tick
-PID-1 FRAME sampler (switch `STAGE90_XNU_USER_PC`), a GENERALISATION of 1003's stall sampler - and
-keeps 1003's stall sampler, 1002's r3-save fix and 1001's submap skip as regressions.  The section
-that carries the new reading is `[U]`; its VERDICT blocks are marked 1004-TODO and must be completed
-by the 1004 design before the rung is pressed.
+MODELLED BYTE-STRUCTURALLY ON tools/check_1003_capture.py.  1004 adds ONE measurement - the ABORT
+TRACE (switch `STAGE90_XNU_ABORT_TRACE`): the sleh (data/prefetch abort) detail caps are widened so
+EVERY abort of a run publishes its full tuple, and the faulting frame's USER pc is published beside
+it as `xnu_live_sleh_upc`.  It keeps 1003's stalled-frame sampler, 1002's r3-save fix and 1001's
+submap skip as regressions.  The section that carries the new reading is `[A]`.
 
 numpy-free: this tool imports only os / re / sys (like its 1003 sibling).
 
-1004-TODO TOKENS (replace each when the design lands; search for "1004-TODO"):
-  * __1004_RECORDER__ = `entry_note_user_pc` - the PROPOSED recorder symbol (mirrors 1003's
-    `entry_note_stall_sample`).  The real name is chosen by the 1004 implementer.
-  * The USER_PC key set: `xnu_live_user_pc` (the sampled pc) plus `xnu_live_user_pc_n` (sample
-    counter), `xnu_live_user_pc_nz` (frame word count), `xnu_live_user_pc_cpsr` (the frame's cpsr).
-    These four are given by the task; the walker below assumes `_n` OPENS a sample and the three
-    fields follow - mirroring 1003's seven-key block.
-  * The USER_PC sample CADENCE and the SPIN/ASLEEP thresholds are TODO (see `[U]`).
+1003's baseline (answered by 1003, kept as background): 1003's per-tick sampler settled that pid 1 is
+NOT a user spin and NOT a passive sleep - the last samples are ONE kernel frame (pc=0x8001b1fd,
+sp=0xcfdbbf00, lr=sleh_abort+0x468), i.e. pid 1's thread 0xc0bfa000 is in the data-abort RETURN path.
+Total abort entries that boot reached 40 (`xnu_live_sleh_seen`), but the sleh caps published only the
+first 8, and those 8 name DIFFERENT `far` values (dyld walking forward).  The 1002 r3-save fix holds
+(the 230x `usermode data abort at 0x4` is GONE) and `cs_invalid_page` is a TOLERATED warning.
 
-1003's baseline (kept): 1003's r3-save fix TOOK BY VALUE (the USVC hook's save set gained r3), the
-230x byte-identical `launchd[1]: usermode data abort ... at 0x00000004` is GONE, and the frontier
-MOVED to a pid-1 user-space STALL (22 SVCs, the last three num=-3 = mach_absolute_time from pc
-0x2be97328, then NO further syscall for ~23 min).  `cs_invalid_page(0x2f7f6000): p=1[launchd]` is a
-TOLERATED warning (retval 0), NOT the frontier.  1003 sampled the interrupted frame to settle
-SPIN vs ASLEEP; 1004 generalises that sample so the user pc can be read as CHANGING (naming a
-function) rather than a single fixed reading.
+[A] THE ABORT TRACE - THE 1004 RUNG ITSELF.  Reads the full ordered sleh sequence, one record per
+abort (`seq` opens a record; `type`/`fsr`/`far`/`thr`/`recover` + the frame's `pc`/`lr`/`sp`/`cpsr`/
+`fsr_frame`/`far_frame`/`frame_ok`/`user` + the NEW `upc`), and CLASSIFIES the `far` walk:
+    * consecutive `far` values that REPEAT within a small window => LOOP (the same page re-faulting,
+      a validation-style cycle);
+    * `far` values that strictly ADVANCE => WALK (dyld paging the shared cache forward - slow, not
+      stuck).
+  The verdict reports the LAST abort's `far`/`upc` (the frontier).  A MEASUREMENT by design: the
+  stall is the EXPECTED outcome, so [A] FAILS only on ZERO `_upc` records (the switch did not reach
+  the image: REBUILD) or on an all-`frame_ok`=0 run (a wrong saved-state offset - a MEASUREMENT
+  defect, [[mi4-measurement-defects]]).
 
 [0] THE DEATH GATE - the toggle every absence-based verdict below is routed through.  It is the
 FROZEN three-way conjunction: no panic stanza + the exec-done trio (and its five probe keys) +
-kv records after the exec-returned point.  Verbatim from the 1003 tool - a segment that clause 1004
-does not change.  Gate CLOSED: absence-based readings print `[death-gated]` and are NOT counted.
-Presence-based readings stay hard.
+kv records after the exec-returned point.  Verbatim from the 1003 tool.  Gate CLOSED: absence-based
+readings print `[death-gated]` and are NOT counted.  Presence-based readings stay hard.
 
 WHAT 1004 CHECKS (the frozen block in `scripts/press_1004.sh` is the authority; `authority_line()`
 reads THAT file):
   [R] THE 1002 r3-SAVE FIX AS A REGRESSION (verbatim from 1003): after `IOS7SHREG check_np ret=12`,
       the count of `usermode data abort ... at 0x00000004` must STILL be 0.  A recurrence is a
       REGRESSION - REBUILD, not a reading.
-  [U] THE PID-1 FRAME SAMPLE - THE 1004 RUNG ITSELF (the reason this rung exists).  Per-tick samples
-      of the interrupted pid-1 frame, published as `xnu_live_user_pc` / `_n` / `_nz` / `_cpsr`.
-      Classifies each sample's cpsr/pc as USER vs KERNEL, and reports SPINNING (user cpsr, changing
-      or looping pc) vs ASLEEP (all-kernel).  A MEASUREMENT by design: the stall is the EXPECTED
-      outcome, so [U] FAILS only on ZERO samples or on all-`_nz`=0 (a wrong saved-state offset).
-      1004-TODO: the SPIN/ASLEEP VERDICT WORDS and the pc-domain NAMING are TODO (see `s_userpc`).
+  [A] THE ABORT TRACE - THE 1004 RUNG ITSELF (see above).
   [S] THE 1003 STALL SAMPLE - KEPT AS A REGRESSION.  1003's `xnu_live_stall_*` (7 keys) must STILL be
       present; its SPIN/ASLEEP reading is restated by value (adjudicated in the 1003 tool's [S]).
   [F] THE CODE-SIGNING PAGE-VALIDATION WALL - `cs_invalid_page` is a TOLERATED warning (retval 0),
@@ -53,8 +49,7 @@ reads THAT file):
 
 METHOD.  Every reader (the `newline=""` file read, the de-doubling panic reader, the KV regex, the
 `@:line` numbering, `groups_of`, the death gate) is the 1001/1002/1003 tool's, key for key.  This
-tool is `tools/check_1003_capture.py` with the ONE new section [U] and the 1004 authority path; the
-clauses 1003 got right are mirrored verbatim.
+tool is `tools/check_1003_capture.py` with the ONE new section [A] and the 1004 authority path.
 
 Usage:  tools/check_1004_capture.py <capture.txt>
 
@@ -100,14 +95,23 @@ SHARED_CACHE_BASE = 0x2c000000
 SHARED_CACHE_SLIDE = 0x37f6000
 SS_WORDS = 19
 
-# ---- [U] THE 1004 PID-1 FRAME SAMPLE - THE NEW RUNG.  1004-TODO: the key set and the cadence are
-#      PROVISIONAL, mirroring 1003's block shape.  The pc key is the BARE `xnu_live_user_pc`; the
-#      three fields are `_n` (opens a sample), `_nz`, `_cpsr`.
-USERPC_PC_KEY = "xnu_live_user_pc"           # the sampled interrupted pc (BARE key)
-USERPC_FIELDS = ("n", "nz", "cpsr")          # the field suffix set following `_n`
-USERPC_NS = "xnu_live_user_pc_n"             # opens a sample
-# 1004-TODO: whether the 1004 instrument replaces or coexists with 1003's [S] is a design choice;
-# this checker treats [S] as a KEPT regression and [U] as the NEW reading.
+# ---- [A] THE 1004 ABORT TRACE - THE NEW RUNG.  One record per sleh abort; `xnu_live_sleh_seq` opens
+#      a record and every `xnu_live_sleh_<field>` below it belongs to it.  `upc` is the 1004 addition
+#      (the faulting frame's user pc, published beside the fault pair); `far`/`fsr`/`type`/`thr` are
+#      the tuple the caps hid the TAIL of before 1004.  The widened caps mean the record count this
+#      reader sees IS the abort count (`_seen`'s value), not the old 8/16 head.
+SLEH_SEQ_KEY = "xnu_live_sleh_seq"
+SLEH_PREFIX = "xnu_live_sleh_"
+SLEH_FIELDS = ("type", "fsr", "far", "thr", "recover", "seen", "pc", "lr", "sp", "cpsr",
+               "fsr_frame", "far_frame", "frame_ok", "user", "upc", "back", "redirect", "at_back")
+SLEH_UPC_KEY = "xnu_live_sleh_upc"           # the 1004 addition (the frame's user pc)
+SLEH_FRAME_OK_KEY = "xnu_live_sleh_frame_ok"
+SLEH_OLD_MAX = 8                             # the pre-1004 SLEH_LIVE_MAX (the head the tail hid behind)
+SLEH_OLD_FRAMES = 16                         # the pre-1004 SLEH_LIVE_FRAMES
+REPEAT_WINDOW = 4                            # a `far` matching one of the previous N = a small window
+# The abort classes (`osfmk/arm/trap.h`): 3 = prefetch abort, 4 = data abort.
+ABT_PREFETCH = 3
+ABT_DATA = 4
 
 # ---- 999's VMHINT991 objects, by value.
 SUB_OBJS = ((0xc0005b48, "999's VMHINT991 object #19"),
@@ -127,7 +131,7 @@ NEW_FAMILIES = (
     ("xnu_live_wdt_pet_",   "(2) the pet feed records (direct)"),
     ("xnu_live_usvc_",      "(4) the user-SVC frontier"),
     ("xnu_live_stall_",     "(S) 1003's stall sampler (kept)"),
-    ("xnu_live_user_pc",    "(U) 1004's pid-1 frame sampler (the NEW instrument)"),
+    ("xnu_live_sleh_upc",   "(A) 1004's abort trace (the NEW instrument)"),
 )
 
 LADDER_LITERALS = (
@@ -324,29 +328,26 @@ class Capture:
             out.append(cur)
         return out
 
-    def userpc_samples(self):
-        """[U] THE 1004 PID-1 FRAME SAMPLE - THE NEW RUNG.
+    def abort_samples(self):
+        """[A] THE 1004 ABORT TRACE - THE NEW RUNG.
 
-        1004-TODO: the walker is PROVISIONAL.  It assumes the recorder writes, in ONE block,
-        `xnu_live_user_pc_n` (opens) -> `xnu_live_user_pc` (the pc, the BARE key) ->
-        `xnu_live_user_pc_nz` -> `xnu_live_user_pc_cpsr`, mirroring 1003's `_n`-opens block.  If the
-        implementer chooses a different field order or key spelling, update this walker AND the
-        recorder together (one value, two definitions - [[mi4-one-value-two-definitions]])."""
+        One record per sleh entry.  `xnu_live_sleh_seq` OPENS a record; every `xnu_live_sleh_<field>`
+        that follows, until the next `_seq`, belongs to it (the recorder writes them in that order:
+        seq -> type/fsr/far/thr/recover -> seen -> pc/lr/sp/cpsr/fsr_frame/far_frame/frame_ok/user
+        -> upc, with back/redirect/at_back written by `entry_note_sleh_back`).  The field set is
+        KNOWN, so a key outside it (e.g. the 1004 build's `_armed`) is skipped rather than trusted -
+        the walker binds to the recorder one value, [[mi4-one-value-two-definitions]]."""
         out, cur = [], None
-        pc_key = USERPC_PC_KEY
+        fkeys = {SLEH_PREFIX + f: f for f in SLEH_FIELDS}
         for ln, key, raw, val in self.toks:
-            if key == USERPC_NS:
+            if key == SLEH_SEQ_KEY:
                 if cur is not None:
                     out.append(cur)
-                cur = {"ln": ln, "f": {"n": (ln, val)}, "order": ["n"]}
-            elif cur is not None and key.startswith("xnu_live_user_pc_"):
-                fk = key[len("xnu_live_user_pc_"):]
-                if fk in USERPC_FIELDS:
-                    cur["f"][fk] = (ln, val)
-                    cur["order"].append(fk)
-            elif cur is not None and key == pc_key:
-                cur["f"]["pc"] = (ln, val)
-                cur["order"].append("pc")
+                cur = {"ln": ln, "f": {"seq": (ln, val)}, "order": ["seq"]}
+            elif cur is not None and key in fkeys:
+                f = fkeys[key]
+                cur["f"][f] = (ln, val)
+                cur["order"].append(f)
         if cur is not None:
             out.append(cur)
         return out
@@ -487,7 +488,10 @@ def s3_submapskip(cap):
     for ln, line in enumerate(cap.lines, 1):
         if SUBMAPSKIP_LIT in line:
             m = SUBMAPSKIP_RE.search(line)
-            (parsed if m else unparsed).append((ln, [int(g, 16) for g in m.groups()] if m else clip(line.strip(), 160)))
+            if m:
+                parsed.append((ln, [int(g, 16) for g in m.groups()], clip(line.strip(), 160)))
+            else:
+                unparsed.append((ln, clip(line.strip(), 160)))
     total = len(parsed) + len(unparsed)
     say("OBS" if total else "---", "SUBMAPSKIP lines: x%d (parsed x%d, unparsed x%d)" % (
         total, len(parsed), len(unparsed)))
@@ -555,75 +559,111 @@ def s_rung(cap):
         hard("no anchor - the 1002 regression cannot be read", absence_based=True)
 
 
-def s_userpc(cap):
-    """[U] THE PID-1 FRAME SAMPLE - THE 1004 RUNG ITSELF (the pure MEASUREMENT, the NEW section).
+def _u32(v):
+    return v if v is None else (v & 0xFFFFFFFF)
 
-    1004-TODO: the whole SPIN/ASLEEP VERDICT is a PLACEHOLDER.  The walk (the per-sample table, the
-    USER/KERNEL classification by cpsr mode bits) is structural and mirrors 1003's [S]; the two
-    VERDICT blocks (SPINNING vs ASLEEP and the pc-domain NAMING) are TODO because they depend on the
-    frame semantics the 1004 design fixes (which candidate call site, which thread filter, which pc
-    domain).  Complete them before the rung is pressed."""
-    print("\n== [U] THE PID-1 FRAME SAMPLE - the per-tick interrupted frame (the 1004 MEASUREMENT rung) ==")
-    recs = cap.userpc_samples()
-    n_tok = cap.family_count("xnu_live_user_pc")
+
+def s_abort(cap):
+    """[A] THE ABORT TRACE - THE 1004 RUNG ITSELF (the pure MEASUREMENT, the NEW section).
+
+    Reads the full ordered sleh sequence (now that the caps are 512, the record set IS the abort set)
+    and CLASSIFIES the `far` walk: consecutive `far` values that REPEAT within a small window => LOOP
+    (the same page re-faulting, a validation-style cycle); strictly ADVANCING => WALK (dyld paging the
+    shared cache forward - slow, not stuck).  Reports the LAST abort's `far`/`upc` = the frontier.
+
+    A MEASUREMENT: the stall is the EXPECTED outcome (1004 changes no kernel behaviour), so this
+    section FAILS only on ZERO `_upc` records (the switch did not reach the image: REBUILD) or on an
+    all-`frame_ok`=0 run (the saved-state offsets are wrong - a MEASUREMENT defect)."""
+    print("\n== [A] THE ABORT TRACE - every sleh entry, far/upc, LOOP vs WALK (the 1004 rung) ==")
+    recs = cap.abort_samples()
     if not recs:
-        # (a) THE FALSIFIER - PRESENT-BASED (mirrors 1003's [S]): the instrument did not reach the
-        # image.  1004-TODO: the reader counts 4 keys; if the design uses a different set, update here.
-        hard("ZERO `xnu_live_user_pc*` records - the 1004 pid-1 frame instrument did not reach the "
-             "image: REBUILD with STAGE90_XNU_USER_PC=1 exported before build_xnu_arm_kernel.sh, do "
-             "not judge the frontier from this capture")
-        if n_tok:
-            soft("xnu_live_user_pc* tokens x%d but no `_n` record - the record shape broke" % n_tok)
+        hard("ZERO `xnu_live_sleh_seq` records - the sleh instrument did not reach the image: REBUILD",
+             absence_based=True)
         return
-    ns = [r["f"].get("n", (0, None))[1] for r in recs]
-    say("OBS", "samples x%d (n %s .. %s; 1004-TODO: confirm the cadence)" % (
-        len(recs), fmt(ns[0]), fmt(ns[-1])))
-    user_n = kern_n = 0
-    pcs, cpsrs, nzs = [], [], []
-    for r in recs:
-        ln = r["ln"]
-        f = r["f"]
-        n = f.get("n", (None, None))[1]
-        pc = f.get("pc", (None, None))[1]
-        cpsr = f.get("cpsr", (None, None))[1]
-        nz = f.get("nz", (None, None))[1]
-        missing = [k for k in ("pc", "nz", "cpsr") if k not in f]
-        if missing:
-            soft("user_pc sample n=%s @:%d is missing fields (%s) - the block shape broke" % (
-                fmt(n), ln, ",".join(missing)))
-        mode = (cpsr & 0x1F) if cpsr is not None else None
-        is_user = (mode == 0x10) or (pc is not None and pc < 0x80000000)
-        if nz is not None:
-            nzs.append(nz)
-        if pc is not None:
-            pcs.append(pc)
-        if cpsr is not None:
-            cpsrs.append(cpsr)
-        user_n += 1 if is_user else 0
-        kern_n += 0 if is_user else 1
-        say("OBS", "  @:%d n=%s pc=%s cpsr=%s nz=%s  -> %s" % (
-            ln, fmt(n), fmt(pc), fmt(cpsr), fmt(nz), "USER" if is_user else "KERNEL"))
-    # ---- THE SELF-CHECK: `_nz` = the count of non-zero frame words (mirrors 1003's [S]).
-    if nzs and all(v == 0 for v in nzs):
-        hard("EVERY user_pc sample carries `_nz`=0 - the frame read ALL ZERO: the frame pointer or the "
-             "STAGE90_SS_* offsets are WRONG. This is a MEASUREMENT defect - adjudicate the offsets "
-             "against src/entry/entry_saved_state.h before any [U] conclusion")
+    say("OBS", "abort records x%d" % len(recs))
+
+    # ---- the 1004 ADDITION must be present: `_upc` beside `_far` on every detailed record.
+    n_upc = cap.family_count(SLEH_UPC_KEY)
+    if n_upc == 0:
+        hard("the 1004 addition `%s` is ABSENT - STAGE90_XNU_ABORT_TRACE did not reach the image: "
+             "REBUILD with it threaded into the entry payload (see scripts/build_1004.sh)" % SLEH_UPC_KEY)
     else:
-        say("PASS", "`_nz` > 0 on every sample - the interrupted-frame reader read a REAL frame")
-    # ---- THE CLASSIFICATION VERDICT.  1004-TODO: PLACEHOLDER - the SPIN/ASLEEP reading and the
-    #      pc-domain NAMING are the 1004 design's decision.  The structure is 1003's [S]; the words
-    #      and the domains must be filled in by the implementer.
-    distinct = sorted(set(pcs))
-    say("OBS", "classification: USER pc x%d, KERNEL pc x%d; distinct pcs x%d" % (
-        user_n, kern_n, len(distinct)))
-    say("TODO", "1004-TODO VERDICT (PLACEHOLDER): fill in the SPIN/ASLEEP reading - a CHANGING user pc "
-                "(cpsr low 5 bits = 0x10) = pid 1 is SPINNING and the pc NAMES THE FUNCTION; every "
-                "sample a KERNEL cpsr = ASLEEP/blocked.  (1003's [S] classifies: user pcs that ADVANCE "
-                "or REPEAT on a small loop = SPINNING; all-kernel = ASLEEP.  Reuse that shape, keyed "
-                "to the 1004 instrument.)")
-    say("TODO", "1004-TODO VERDICT (PLACEHOLDER): fill in the pc-domain NAMING - which address ranges "
-                "count as dyld (0x2be00000..0x2be58000), the shared-cache window (0x2c000000 + slide "
-                "0x37f6000), or the 0x2be58000..0x2c000000 gap.  See `_stall_region` for 1003's map.")
+        say("PASS", "`%s` x%d - the 1004 addition reached the image (the frame's user pc, published "
+                    "beside the fault pair)" % (SLEH_UPC_KEY, n_upc))
+
+    # ---- the death-time frame fields need the FRAMES band, which the widened cap now grants:
+    starts = [r["f"].get("cpsr", (None,))[0] for r in recs]
+    n_frame = sum(1 for r in recs if "cpsr" in r["f"])
+    n_seen = cap.family_count("xnu_live_sleh_seen")
+
+    # ---- table (first few + last few, so both ends are visible in the log).
+    def row(r):
+        f = r["f"]
+        g = lambda k: fmt(f.get(k, (0, None))[1])
+        return ("seq=%s type=%s far=%s upc=%s thr=%s frame_ok=%s user=%s" % (
+            g("seq"), g("type"), g("far"), g("upc"), g("thr"), g("frame_ok"), g("user")))
+    for r in recs[:6]:
+        say("OBS", "  @:%d %s" % (r["ln"], row(r)))
+    if len(recs) > 12:
+        say("OBS", "  ... (%d records) ..." % (len(recs) - 12))
+    for r in recs[-6:]:
+        say("OBS", "  @:%d %s" % (r["ln"], row(r)))
+
+    # ---- the `far` walk classification.
+    fars = [_u32(r["f"].get("far", (0, None))[1]) for r in recs]
+    upcs = [_u32(r["f"].get("upc", (0, None))[1]) for r in recs]
+    types = [_u32(r["f"].get("type", (0, None))[1]) for r in recs]
+    n_pf = sum(1 for t in types if t == ABT_PREFETCH)
+    n_da = sum(1 for t in types if t == ABT_DATA)
+    prev = []
+    walk = loop = flat = 0
+    repeats = []
+    for i, far in enumerate(fars):
+        if far is None or i == 0 or fars[i - 1] is None:
+            prev.append(far)
+            continue
+        if far in prev[-REPEAT_WINDOW:]:
+            loop += 1
+            repeats.append(i)
+        elif far > fars[i - 1]:
+            walk += 1
+        else:
+            flat += 1
+        prev.append(far)
+    say("OBS", "far classification: ADVANCE x%d, REPEAT(past-%d) x%d, other x%d (type: prefetch-abort "
+               "x%d, data-abort x%d)" % (walk, REPEAT_WINDOW, loop, flat, n_pf, n_da))
+    # ---- frame_ok self-check: the frame fields (fsr_frame/far_frame) DE-SLIDE onto fsr/far.
+    fok = [r["f"].get("frame_ok", (0, None))[1] for r in recs if "frame_ok" in r["f"]]
+    if fok and all(v == 0 for v in fok):
+        hard("EVERY detailed record carries `_frame_ok`=0 - the frame fields do NOT agree with the "
+             "fault pair: the saved-state offsets (STAGE90_SS_*) or the record shape are WRONG. This "
+             "is a MEASUREMENT defect - adjudicate against src/entry/entry_saved_state.h",
+             absence_based=False)
+    elif fok:
+        n_ok = sum(1 for v in fok if v)
+        say("PASS", "`_frame_ok`=1 on %d/%d detailed records - the frame read agrees with the fault "
+                    "pair (the instrument checks itself)" % (n_ok, len(fok)))
+
+    # ---- the VERDICT: LOOP vs WALK, and the frontier (the LAST abort's far/upc).
+    verdict = ("WALK - the `far` addresses advance (dyld paging the shared cache forward: slow, not "
+               "stuck)" if walk > loop else
+               "LOOP - consecutive `far` values REPEAT within a %d-window (the same page re-faulting: "
+               "a validation-style cycle)" % REPEAT_WINDOW if loop > 0 else
+               "NO-WALK - fewer than two comparable `far` values (the trace is too short to classify)")
+    say("VERDICT", verdict)
+    if repeats:
+        say("OBS", "the repeat positions (0-based record idx): %s" % ",".join(str(i) for i in repeats[:24]))
+    last = recs[-1]
+    lf = last["f"]
+    say("READING", "THE FRONTIER = the LAST abort @:%d seq=%s type=%s far=%s upc=%s thr=%s "
+                   "frame_ok=%s user=%s" % (
+        last["ln"], fmt(lf.get("seq", (0, None))[1]), fmt(lf.get("type", (0, None))[1]),
+        fmt(lf.get("far", (0, None))[1]), fmt(lf.get("upc", (0, None))[1]),
+        fmt(lf.get("thr", (0, None))[1]), fmt(lf.get("frame_ok", (0, None))[1]),
+        fmt(lf.get("user", (0, None))[1])))
+    say("OBS", "records that carry the FRAME band (pc/lr/sp/cpsr/frame_ok/user): x%d of x%d (the "
+               "pre-1004 `SLEH_LIVE_MAX` hid all but the first %d); the running `_seen` count x%d" % (
+        n_frame, len(recs), SLEH_OLD_MAX, n_seen))
     say("OBS", "this is a MEASUREMENT section: the stall is the EXPECTED outcome of this rung (1004 "
                "changes no kernel behaviour) - the classification above IS the 1004 finding")
 
@@ -714,23 +754,23 @@ def s6_guards(cap):
 
 
 def s7_falsifiers(cap):
-    """The frozen 1004 pre-reg (8)(a)-(d).  1004-TODO: the wording tracks 1003's; the team-lead's
-    frozen block is the authority."""
+    """The frozen 1004 pre-reg (8)(a)-(d).  The wording tracks 1003's; the team-lead's frozen block is
+    the authority."""
     print("\n== [7] FALSIFIERS (frozen 1004 (8)(a)-(d)) ==")
     say("OBS", "(8)(a) the 1004 change's by-value reading is IMAGE-side (scripts/press_1004.sh step "
-               "2-0): the recorder symbol + the 4 `xnu_live_user_pc*` literals in "
+               "2-0): the `xnu_live_sleh_upc` literal + the raised caps (512) in "
                "out/stage90/xnu_arm_entry.elf - not derivable from this capture")
     n_abort = len(cap.abort_hits())
     say("OBS", "(8)(b) `%s` x%d => %s" % (ABORT_LIT, n_abort,
         "1002-FIX REGRESSION - adjudicated in [R]" if n_abort else "the 1002 r3-save fix holds"))
-    upc = cap.family_count("xnu_live_user_pc")
-    say("OBS", "(8)(c) the 1004 instrument: `xnu_live_user_pc*` tokens x%d => %s" % (
-        upc, "EXPECTED (the instrument reached the image)" if upc else
+    upc = cap.family_count(SLEH_UPC_KEY)
+    say("OBS", "(8)(c) the 1004 instrument: `%s` tokens x%d => %s" % (
+        SLEH_UPC_KEY, upc, "EXPECTED (the instrument reached the image)" if upc else
         "the instrument did NOT reach the image - the (8)(a) rebuild signal"))
     ph = cap.panic_hits()
     tail = [l for l in cap.lines[-6:] if l.strip()]
     say("OBS", "(8)(d) the capture's last lines: %s" % " | ".join(clip(l.strip(), 90) for l in tail))
-    for fam in ("xnu_live_user_pc", "xnu_live_usvc_", "xnu_live_wdt_pet_"):
+    for fam in (SLEH_UPC_KEY, "xnu_live_sleh_", "xnu_live_usvc_", "xnu_live_wdt_pet_"):
         t = next((x for x in reversed(cap.toks) if x[1].startswith(fam)), None)
         say("OBS" if t else "---", "(8)(d) last DIRECT key of %s: %s" % (
             fam, ("%s=%s @:%d" % (t[1], t[2], t[0])) if t else "(none)"))
@@ -747,9 +787,9 @@ def main():
     auth, frozen = authority_line()
     print(auth)
     print("spec read here: 1003's switch set VERBATIM (STALL=1, USVC=1, SUBMAP_PMAP_SKIP=1) + the ONE "
-          "new 1004 switch STAGE90_XNU_USER_PC (the pid-1 frame sampler, section [U]); the tolerated "
-          "wall `%s` is NOT the frontier; the 1002 regression is ZERO `%s` after `%s`" % (
-              CS_INVALID_LIT, ABORT_LIT, CHECK_NP_LIT))
+          "new 1004 switch STAGE90_XNU_ABORT_TRACE (the abort trace: raised sleh caps + `%s`, section "
+          "[A]); the tolerated wall `%s` is NOT the frontier; the 1002 regression is ZERO `%s` after "
+          "`%s`" % (SLEH_UPC_KEY, CS_INVALID_LIT, ABORT_LIT, CHECK_NP_LIT))
     s0_gate(cap)
     s_identity(cap)
     s1_tick(cap)
@@ -758,7 +798,7 @@ def main():
     s4_usvc(cap)
     s5_context(cap)
     s_rung(cap)
-    s_userpc(cap)
+    s_abort(cap)
     s_stall(cap)
     s_f(cap)
     s6_guards(cap)
@@ -771,8 +811,6 @@ def main():
     print("HARD ANOMALIES: %d" % len(FAILURES))
     for f in FAILURES:
         print("    - " + f)
-    print("  !! 1004 SKELETON: section [U]'s SPIN/ASLEEP and pc-domain VERDICT blocks are 1004-TODO "
-           "PLACEHOLDERS - complete them before this rung is pressed (see scripts/build_1004.sh).")
     if not frozen:
         print("  !! NO FROZEN 1004 PRE-REGISTRATION was found at run time - the expectations above are "
               "the task's; a deviation here is to REPORT")

@@ -1680,9 +1680,41 @@ uint32_t g_sleh_recover;
 uint32_t g_sleh_armed;
 uint32_t g_sleh_redirected;
 
+/*
+ * ------------------------------------------------------- 1004: the abort trace
+ *
+ * The three bands above are sized for a fault that is a *stop* - eight entries past the head is
+ * enough to name the one that ended the run, because a run that ends stops asking. They are sized
+ * wrong for a fault that is *progress*: the 1003 read (`records/1003-press-read.txt`) measured
+ * `xnu_live_sleh_seen` at 40 with `_storm = 9`, i.e. **forty** aborts, all on pid 1's thread
+ * `0xc0bfa000`, each serviced and RETURNED - and the first eight (`SLEH_LIVE_MAX`) are the head,
+ * dyld walking *forward* through its own image (`far` = 0x2be89fe0, 0x2be8c78f, 0x2be8a084, ...).
+ * The tail - the one that matters, the last aborts before the machine went quiet - is exactly what
+ * the cap hides, and the 1003 verdict says so: "the hang is in the tail we cannot see".
+ *
+ * `STAGE90_XNU_ABORT_TRACE` is the switch that publishes the tail. It is a pure MEASUREMENT switch:
+ * when it is 0 the three constants are the numbers above, byte for byte, and the image is the one
+ * every prior rung built. When it is 1 they widen so that ALL the aborts of a run this size are
+ * recorded, and the per-entry frame record grows one word - the frame's user `pc`, which is the
+ * instruction the fault *returned to*. Consecutive `(far, upc)` pairs are what answer the question
+ * the 1003 read left open: a `far` that repeats within a small window is the SAME page re-faulting
+ * (a validation loop), while a `far` that strictly advances is dyld walking forward (merely slow).
+ *
+ * The switch is spelled as a `#if` guard around the three definitions - NOT as a widened constant -
+ * because `STAGE90_XNU_ABORT_TRACE` is a **0/1 switch like every other in this tree** and an "off"
+ * option has two spellings (`#define X 0` is not "off" to `#ifdef X`): with the guard OFF the three
+ * lines below are the exact tokens that were here before, so the preprocessor output is identical
+ * and the linked image does not move.
+ */
+#if defined(STAGE90_XNU_ABORT_TRACE) && STAGE90_XNU_ABORT_TRACE
+#define SLEH_LIVE_MAX 512u
+#define SLEH_LIVE_FRAMES 512u
+#define SLEH_LIVE_SEEN 512u
+#else
 #define SLEH_LIVE_MAX 8u
 #define SLEH_LIVE_FRAMES 16u
 #define SLEH_LIVE_SEEN 64u
+#endif
 
 void entry_live_write(const char *key, uint32_t value);
 uint32_t entry_live_ready(void);
@@ -1791,6 +1823,18 @@ void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread
         entry_live_write("xnu_live_sleh_far_frame", far_frame);
         entry_live_write("xnu_live_sleh_frame_ok", g_sleh_frame_ok);
         entry_live_write("xnu_live_sleh_user", g_sleh_user_mode);
+#if defined(STAGE90_XNU_ABORT_TRACE) && STAGE90_XNU_ABORT_TRACE
+        /*
+         * 1004: the frame's USER pc, published beside the fault pair. `_far`/`_far_frame` say WHERE
+         * the fault is; this says WHERE IT CAME FROM - the instruction the abort was taken on. On a
+         * user-mode abort the frame's `pc` is a user VA (the abort vector saved it with its own
+         * `sub lr, lr, #8`), so a reader that pairs it with `far` gets the `(fault, return)` tuple
+         * that separates a re-fault loop from a forward walk without needing a second run. Recorded
+         * in the same band as the other frame fields, and gated with the caps above so the switch
+         * OFF is the image every prior rung built to the byte.
+         */
+        entry_live_write("xnu_live_sleh_upc", pc);
+#endif
     }
 
     /*

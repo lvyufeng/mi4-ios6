@@ -1,29 +1,24 @@
 #!/usr/bin/env bash
 # ====================================================================================================
-# SKELETON - press_1004.sh.  MODELLED BYTE-STRUCTURALLY ON scripts/press_1003.sh.
+# press_1004.sh.  MODELLED BYTE-STRUCTURALLY ON scripts/press_1003.sh.
 #
 # Run this WHEN YOU ARE BACK AT THE DEVICE.  1004 = 1003's switch set VERBATIM (all checker/witness/
 # USB-ladder switches, RESIDENT, USVC, SUBMAP_PMAP_SKIP and STALL stay 1) plus ONE new switch
-# STAGE90_XNU_USER_PC.  1004 is a MEASUREMENT rung (no kernel behaviour change): it samples the
-# interrupted pid-1 FRAME (user pc + cpsr + frame word count) per tick, generalising 1003's sampler,
-# so SPIN-vs-ASLEEP can be read as a CHANGING user pc (naming a function) vs a KERNEL cpsr.
+# STAGE90_XNU_ABORT_TRACE.  1004 is a MEASUREMENT rung (no kernel behaviour change): it WIDENS the sleh
+# (second-level abort) detail caps so that EVERY abort of a run publishes its full tuple, and publishes
+# the faulting frame's USER pc (`xnu_live_sleh_upc`) beside the fault pair - so the `far` walk can be
+# classified LOOP (same page re-faulting) vs WALK (dyld paging forward, merely slow).
 #
-# WHY (1003's rung, the baseline).  1003's stall sampler published `xnu_live_stall_*` on the tick's
-# powers-of-two ladder to settle the question the 1002 press read left open: after `IOS7SHREG
-# check_np ret=12` the boot printed `map_slide`, ran 22 user SVCs (the last three num=-3 =
-# mach_absolute_time from pc 0x2be97328), then made NO further syscall while the kernel stayed alive
-# ~23 min.  cs_invalid_page(0x2f7f6000) is a TOLERATED warning (retval 0), NOT the frontier.
-# 1004 GENERALISES the frame sample into a pid-1 instrument: the two candidate call sites (both
-# currently UNWRITTEN - 1004-TODO) are
-#   (D) src/entry/entry_trace.c near the Idle_load_context wrapper (~l.3040-3080), on the idle
-#       pass-count ladder, reading the raw interrupted frame (safe, always-run);
-#   (B) src/platform/darwin13/pe_msm8974.c in the tick handler, gated on the thread being pid 1,
-#       reading the syscall frame's user pc/cpsr.
-#
-# 1004-TODO: THE PRE-REGISTRATION BLOCK BELOW IS A PLACEHOLDER.  The team-lead writes the real one
-# (the switch set / THE POINTS / failure signatures / regression guards) before the press.  The
-# switch set, the record check (step 2), the byte-structural press flow (steps 2a/2b/3/4) and the
-# recovery are real; the POINTS and the by-value image reads for the NEW instrument are placeholders.
+# WHY (1003's rung, the baseline).  1003's per-tick frame sampler settled that pid 1 is NOT a user spin
+# and NOT a passive sleep: its thread 0xc0bfa000 is in the kernel's DATA-ABORT RETURN path (pc=0x8001b1fd,
+# sp=0xcfdbbf00, lr=sleh_abort+0x468), taking repeated aborts on dyld pages and returning from each.  The
+# run reached 40 abort entries (`xnu_live_sleh_seen`=40, `_storm`=9) but the caps published only the
+# FIRST 8, and those 8 name DIFFERENT `far` values (dyld walking forward).  The hanging iteration is in
+# the TAIL the cap hid.  1004 raises the caps (under the switch) so the WHOLE sequence is published.
+# The 1004 change is SOURCE-ONLY, inside ONE existing instrumentation block: THREE guards on the caps in
+# src/entry/entry_stubs.c (SLEH_LIVE_MAX / SLEH_LIVE_FRAMES / SLEH_LIVE_SEEN) plus ONE gated
+# `entry_live_write("xnu_live_sleh_upc", pc)` in entry_note_sleh's FRAMES band - NO tree edit, NO stage
+# driver.
 #
 # THE BASE IS NEVER WRITTEN (CARD_COW=1, HDD_WRITE=0) - fully reversible.  RESIDENT rung
 # (POST_END_TICKS=0): the primary channel is /proc/last_kmsg, read by scripts/recover_last_kmsg.sh
@@ -38,42 +33,42 @@ cd "$(dirname "$0")/.."
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 
 # ====================================================================================================
-# 1004 PRESS PRE-REGISTRATION (SKELETON - TO BE REPLACED BY THE TEAM-LEAD)
-# 1004-SKELETON  <-- the team-lead REMOVES this sentinel line when the real block lands; its presence
-#                    makes the guard below REFUSE the press (the POINTS are placeholders).
+# 1004 PRESS PRE-REGISTRATION
 # ====================================================================================================
-# 1004-TODO: The POINTS (0)-(8) below are the 1003 block's SHAPE, carried over with STALL -> USER_PC
-# substitutions so the skeleton is structurally complete.  The team-lead replaces the wording, the
-# by-value quantities and the key names before this rung is pressed.  Do NOT press this skeleton as
-# the frozen pre-registration.
-#
 # SWITCH SET.  1003's verbatim (STAGE90_XNU_STALL=1, STAGE90_XNU_DYLD_WITNESS=1,
 # STAGE90_XNU_SHREG_PROBE=1, STAGE90_XNU_SHREG_WIRE=1, STAGE90_XNU_SHREG_GEOM=1,
 # STAGE90_XNU_RESIDENT=1, STAGE90_XNU_USVC=1, STAGE90_XNU_SUBMAP_PMAP_SKIP=1, USB ladder
 # PROBE/DEV/ENUM/STREAM=1); CARD_COW=1, HDD_WRITE=0; RESIDENT rung (POST_END_TICKS=0).
-# NEW switch STAGE90_XNU_USER_PC=1 (the pid-1 frame instrument).  STALL=1, USVC=1, SUBMAP_PMAP_SKIP=1
-# AND STAGE90_XNU_USER_PC=1 must ALL be in the record (grepped below).
+# NEW switch STAGE90_XNU_ABORT_TRACE=1 (the abort trace).  STALL=1, USVC=1, SUBMAP_PMAP_SKIP=1
+# AND STAGE90_XNU_ABORT_TRACE=1 must ALL be in the record (grepped below).
 #
-# (0) THE 1004 CHANGE IS IN THE IMAGE - READ IT BEFORE ANY JUDGEMENT.  By value: the recorder symbol
-#     (1004-TODO: `entry_note_user_pc` PROVISIONAL) present (T) in out/stage90/xnu_arm_entry.elf AND
-#     the 4 `xnu_live_user_pc*` key literals embedded, exactly as build_1004.sh's delta clause and
-#     scripts/park_1004.sh assert.  If the instrument is NOT in the image, NOTHING below may be read
-#     as a test - rebuild.  (Step 2-0 below reads it before the press.)
+# (0) THE 1004 CHANGE IS IN THE IMAGE - READ IT BEFORE ANY JUDGEMENT.  By value: the
+#     `xnu_live_sleh_upc` key literal embedded x1 in out/stage90/xnu_arm_entry.elf AND
+#     `entry_note_sleh`'s body comparing against the RAISED caps (#512 x>=3) rather than the legacy
+#     8/16/64 (x0), exactly as build_1004.sh's delta clause and scripts/park_1004.sh assert.  If the
+#     change is NOT in the image, NOTHING below may be read as a test - rebuild.  (Step 2-0 below
+#     reads it before the press.)
 # (0b) THE 1003 STALL INSTRUMENT IS A REGRESSION: entry_note_stall_sample (T) + the 7
 #     `xnu_live_stall_*` literals must STILL be in the image (1004's set is 1003's verbatim).
 # (0c) THE 1002 r3-SAVE FIX IS A REGRESSION: locore_fleh_swi's prologue must STILL be the six-word
 #     window `push {r0, r1, r2, r3, r8, lr}` / `bl <entry_note_user_svc>` / `pop {r0, r1, r2, r3, r8,
 #     lr}`.  A FOUR-word window means the fix regressed - rebuild.
-# (F) THE FRONTIER UNDER TEST - THE PID-1 USER-SPACE STALL, AND THE pid-1 FRAME SAMPLE IS THE READING.
-#     1004-TODO: THE READING (the keys xnu_live_user_pc / _n / _nz / _cpsr):
-#       * a USER cpsr (low 5 bits = 0x10) with a CHANGING pc across samples = pid 1 is SPINNING in
-#         user space, and the pc value NAMES THE FUNCTION (dyld's image, the shared region, ...);
-#       * a USER cpsr with the SAME pc = wedged at one instruction;
-#       * every sample a KERNEL cpsr = pid 1 is ASLEEP/blocked.
-#     Either way this is a pure MEASUREMENT: the run is EXPECTED to still stall (1004 changes no kernel
-#     behaviour).  FALSIFIER: no `xnu_live_user_pc*` keys at all => the instrument did not reach the
-#     image (rebuild); the samples carry nz=0 => the frame reader read the wrong struct (a MEASUREMENT
-#     defect - adjudicate the offset against entry_saved_state.h).
+# (F) THE FRONTIER UNDER TEST - THE PID-1 DATA-ABORT RETURN PATH, AND THE ABORT TRACE IS THE READING.
+#     records/1003-press-read.txt: after the 1002 r3 fix, pid 1's thread 0xc0bfa000 is in the kernel's
+#     data-abort RETURN path (pc=0x8001b1fd, sp=0xcfdbbf00, lr=sleh_abort+0x468); the run reached 40
+#     abort entries (`xnu_live_sleh_seen`=40, `_storm`=9) all on that thread, but the caps published
+#     only the FIRST 8 - and those 8 name DIFFERENT `far` values (dyld walking forward).  The hanging
+#     iteration is in the TAIL the cap hid.  THE READING (keys xnu_live_sleh_seq / _type / _fsr / _far
+#     / _thr / _upc, now published for EVERY abort up to 512):
+#       * consecutive `far` values that REPEAT within a small window = LOOP - the same page re-faulting
+#         (a validation / cs_validated-style cycle);
+#       * `far` values that strictly ADVANCE = WALK - dyld paging the shared cache forward (slow, not
+#         stuck).
+#     The LAST abort's `far` / `upc` is the frontier.  This is a pure MEASUREMENT: the run is EXPECTED
+#     to still stall (1004 changes no kernel behaviour).  FALSIFIER: no `xnu_live_sleh_upc` keys at all
+#     => the switch did not reach the image (rebuild); every detailed record `_frame_ok`=0 => the frame
+#     fields do not agree with the fault pair - the saved-state offset is wrong (a MEASUREMENT defect,
+#     adjudicate against entry_saved_state.h).
 # (1) THE 1002 SELF-TEST STILL HOLDS - THE 230x ABORT DOES NOT RECUR.  After `IOS7SHREG check_np
 #     ret=12`, the count of `launchd[1]: usermode data abort, EXC_BAD_ACCESS at 0x00000004` in the
 #     whole capture must STILL be 0 (1002 confirmed it; a recurrence is a REGRESSION - rebuild).
@@ -85,26 +80,28 @@ SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 #     + its five probe keys + records after the exec-returned point.
 # (5) THE USER-SVC FRONTIER continues (keys xnu_live_usvc_n / _num / _pid / _thr / _pc / _lr / _cpsr
 #     / _r0; first 64 in FULL then a powers-of-two ladder).  `_pid` = 1; `_pc` a user VA; `_cpsr` a
-#     USER-mode CPSR.  Read by value against 1003's count.
+#     USER-mode CPSR.  Read by value against 1003's count (22, last three num=-3).
 # (6) THE PET.  The feed gate is `count >= bark/2` = 14.5 s.  If 1004 lives past ~14.5 s with the read
 #     door in use (`xnu_live_storage_rd_ordinal` climbing), `xnu_live_wdt_pet_n` MUST appear.
 # (7) THE CAP AND THE TICK (frozen; neither may be read as new).  Cap stays 24576; the read-dump
-#     thinning ordinal stays 64.  A `xnu_live_capped=0x6000` tombstone is NOT a regression.
+#     thinning ordinal stays 64.  A `xnu_live_capped=0x6000` tombstone is NOT a regression.  NOTE: the
+#     sleh caps (SLEH_LIVE_MAX/FRAMES/SEEN) are RAISED to 512 under this switch - that is the 1004
+#     change, NOT the read-dump cap: the read-dump cap stays 24576.
 # (8) WHAT WOULD MAKE THIS RUNG WRONG (falsifiers, frozen): (a) the (0) change is NOT in the image =>
 #     REBUILD; (b) the 230x `usermode data abort at 0x4` recurs past `check_np ret=12` => the 1002
-#     r3-save fix REGRESSED - rebuild; (c) the boot does NOT stall and instead advances - record the
-#     new wall by value; a stall that reproduces EXACTLY is the EXPECTED outcome; (d) death ELSEWHERE,
-#     later => the frontier ADVANCED - record by value.  The FROZEN REGRESSION GUARDS - the geometry
-#     line exactly once, `IOS7LAB cache mapping` x4, the shared region x1, `check_np ret=12` x1,
-#     `IOS7SHREG map_file kr=0`, `IOS7SHREG map_slide ret=0` - are re-verified only under the gate (4).
+#     r3-save fix REGRESSED - rebuild; (c) `xnu_live_sleh_upc` x0 in the capture => the switch did not
+#     reach the image (the (0) rebuild signal); (d) death ELSEWHERE, later => the frontier ADVANCED -
+#     record by value.  The FROZEN REGRESSION GUARDS - the geometry line exactly once, `IOS7LAB cache
+#     mapping` x4, the shared region x1, `check_np ret=12` x1, `IOS7SHREG map_file kr=0`, `IOS7SHREG
+#     map_slide ret=0` - are re-verified only under the gate (4).
 #
 # FAILURE SIGNATURES, distinguishable: (a) any NEW panic = stop, report verbatim; (b) the text channel
 # ends in SUBMAPSKIP itself or in vm_map_enter = the skip branch is not transparent - read the
 # skipped-block shape IN THE IMAGE before any judgement; (c) the log ends with a capped key and no
 # direct key after it = rebuild; (d) the log ends in a direct record = that record's moment IS the
-# frontier finding this rung was built to produce - read the last direct keys (user_pc last, then
-# usvc, then pet) as the frontier; (e) the (0) change is not in the image = the fix is not in the
-# image - rebuild, nothing else is a test.
+# frontier finding this rung was built to produce - read the last direct keys (sleh last, then usvc,
+# then pet) as the frontier, and classify the `far` walk (repeat=LOOP, advance=WALK); (e) the (0)
+# change is not in the image = the fix is not in the image - rebuild, nothing else is a test.
 # ====================================================================================================
 if ! grep -q '^# 1004 PRESS PRE-REGISTRATION' "$SELF"; then
   echo "REFUSING: the 1004 pre-registration block is NOT embedded in this script yet."
@@ -113,19 +110,12 @@ if ! grep -q '^# 1004 PRESS PRE-REGISTRATION' "$SELF"; then
   echo "          scripts/build_1004.sh + scripts/park_1004.sh + the 1004 clause in build_entry.sh."
   exit 1
 fi
-# The SKELETON carries a sentinel; the team-lead removes it when the real block lands. A skeleton
-# pre-registration (placeholder POINTS) must NOT be pressed.
-if grep -q '^# 1004-SKELETON' "$SELF"; then
-  echo "REFUSING: this is the 1004 SKELETON pre-registration - the (0)-(8) POINTS above are 1003's SHAPE,"
-  echo "          not the frozen 1004 block. The team-lead replaces the block (removing the 1004-SKELETON"
-  echo "          sentinel) before the press. This refusal is BY DESIGN."
-  exit 1
-fi
 
 # The arm name IS the entry bin's sha8 (the project's rule). Derive it, and refuse the known arms.
 EXPECT_ARM=armed-d13-$(sha256sum out/stage90/xnu_arm_entry.bin | cut -c1-8)
 [[ $EXPECT_ARM == armed-d13-7669309b ]] && {
-  echo "REFUSING: out/stage90 holds 1003's arm (7669309b) - the predecessor (the per-tick stall sampler)."
+  echo "REFUSING: out/stage90 holds 1003's arm (7669309b) - the PRESSED predecessor (pid 1 in the"
+  echo "kernel's data-abort return path; adjudicated in records/1003-press-read.txt)."
   echo "Build 1004 (scripts/build_1004.sh) first."; exit 1; }
 [[ $EXPECT_ARM == armed-d13-b04976fe ]] && {
   echo "REFUSING: out/stage90 holds 1002's arm (b04976fe) - already pressed 2026-10-13 (the r3 fix"
@@ -168,7 +158,7 @@ echo "== 1. device present? =="
 adb devices | grep -q 4a2fe00b || { echo "NO DEVICE - hold Power ~10-15s to boot it back, then re-run"; exit 1; }
 fastboot devices | grep -q 33e80afe && { echo "33e80afe (the OTHER phone) is present - unplug it first (hardware gate)"; exit 1; }
 
-echo "== 2. the arm carries the ladder, the probes, the resident gate, the geometry, the USVC switch (the fix), the submap skip AND 1003's stall + 1004's user_pc instrument =="
+echo "== 2. the arm carries the ladder, the probes, the resident gate, the geometry, the USVC switch (the fix), the submap skip AND 1003's stall + 1004's abort-trace instrument =="
 while read -r key why; do
   grep -q "^${key}=1" out/stage90/xnu_arm_entry-config.txt || {
     echo "REFUSING: record has no ${key}=1 - ${why}"; exit 1; }
@@ -185,18 +175,23 @@ STAGE90_XNU_RESIDENT the WDT door feed's gate AND the tick probes (999's, kept)
 STAGE90_XNU_USVC the SVC frontier hook - 1002's r3-save fix lives INSIDE it (must stay on)
 STAGE90_XNU_SUBMAP_PMAP_SKIP the is_submap guard in vm_map_enter's tail (1001's; kept)
 STAGE90_XNU_STALL the per-tick stall sampler (1003's; kept verbatim in 1004)
-STAGE90_XNU_USER_PC the per-tick pid-1 frame instrument (1004's; a pure measurement rung)
+STAGE90_XNU_ABORT_TRACE the abort trace - raised sleh caps + the frame's user pc (1004's; a pure measurement rung)
 EOF
-echo "   (record carries the 1003 verbatim switch set PLUS the new STAGE90_XNU_USER_PC; USVC, SUBMAP_PMAP_SKIP and STALL all on)"
+echo "   (record carries the 1003 verbatim switch set PLUS the new STAGE90_XNU_ABORT_TRACE; USVC, SUBMAP_PMAP_SKIP and STALL all on)"
 
-echo "== 2-0. the 1004 pid-1 frame instrument in the image (read by value BEFORE the press) + the 1003 stall instrument + the 1002 r3-save fix as regressions =="
-# (0) THE 1004 CHANGE IS IN THE IMAGE: the recorder symbol present AND the 4 `xnu_live_user_pc*` key
-#     literals embedded.  1004-TODO: the symbol name `entry_note_user_pc` is PROVISIONAL.
-_d4_sym=$(arm-none-eabi-nm out/stage90/xnu_arm_entry.elf | grep -cE '^[0-9a-f]+ [Tt] entry_note_user_pc$' || true)
-_d4_keys=$(strings out/stage90/xnu_arm_entry.elf | grep -c 'xnu_live_user_pc' || true)
-echo "   (0) entry_note_user_pc x$_d4_sym (want 1), xnu_live_user_pc* literals x$_d4_keys (want 4)"
-[[ "$_d4_sym" == 1 && "$_d4_keys" == 4 ]] || {
-  echo "REFUSING: the 1004 pid-1 frame instrument is NOT in the image (sym x$_d4_sym want 1, keys x$_d4_keys want 4) - rebuild"; exit 1; }
+echo "== 2-0. the 1004 abort trace in the image (read by value BEFORE the press) + the 1003 stall instrument + the 1002 r3-save fix as regressions =="
+# (0) THE 1004 CHANGE IS IN THE IMAGE: the `xnu_live_sleh_upc` key literal embedded AND
+#     entry_note_sleh's body comparing against the RAISED caps (#512) rather than the legacy 8/16/64.
+_d4_keys=$(strings out/stage90/xnu_arm_entry.elf | grep -c '^xnu_live_sleh_upc$' || true)
+_sleh=$(arm-none-eabi-nm out/stage90/xnu_arm_entry.elf | awk '$3=="entry_note_sleh"{print "0x" $1; found=1} END{exit(found?0:1)}') || {
+  echo "REFUSING: entry_note_sleh is not in the image - the sleh instrument's body is gone"; exit 1; }
+_slehx=$(arm-none-eabi-nm -n out/stage90/xnu_arm_entry.elf | awk -v s="${_sleh#0x}" 'BEGIN{sv=strtonum("0x" s)}{a=strtonum("0x" $1)} a>sv && $2=="T"{if(!d){print "0x" $1; d=1}}')
+_slehb=$(arm-none-eabi-objdump -d out/stage90/xnu_arm_entry.elf --start-address="$_sleh" --stop-address="${_slehx:-0xffffffff}")
+_cap512=$(grep -cE 'cmp[[:space:]]+r[0-9]+, #(512|0x200)\b|movw[[:space:]]+r[0-9]+, #(512|0x200)\b' <<<"$_slehb" || true)
+_capold=$(grep -cE 'cmp[[:space:]]+r[0-9]+, #(8|16|64)\b' <<<"$_slehb" || true)
+echo "   (0) xnu_live_sleh_upc literal x$_d4_keys (want 1), entry_note_sleh ($_sleh..${_slehx:-end}) raised caps #512 x$_cap512 (want >= 3), legacy 8/16/64 x$_capold (want 0)"
+[[ "$_d4_keys" == 1 && "$_cap512" -ge 3 && "$_capold" == 0 ]] || {
+  echo "REFUSING: the 1004 abort trace is NOT in the image (upc x$_d4_keys want 1, #512 x$_cap512 want >=3, legacy x$_capold want 0) - rebuild"; exit 1; }
 # (0b) THE 1003 STALL INSTRUMENT IS A REGRESSION.
 _d3_sym=$(arm-none-eabi-nm out/stage90/xnu_arm_entry.elf | grep -cE '^[0-9a-f]+ [Tt] entry_note_stall_sample$' || true)
 _d3_keys=$(strings out/stage90/xnu_arm_entry.elf | grep -c 'xnu_live_stall_' || true)
