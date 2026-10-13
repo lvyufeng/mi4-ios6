@@ -39,9 +39,10 @@ HOW TO RE-READ: tools/check_999_capture.py out/stage90/captures/recovered-unknow
 ## [2] exec-done trio + probe - BYTE-CLOSED, ZERO RESIDUAL
 
 - trio :28715-17: seq=1 / who=1 / current=1.
-- probe :28718-22: sig=0x43474244 ("GBDB"), size=0x0015735c=1,405,788,
+- probe :28718-22: sig=0x43474244 ("DBGC" little-endian = RAM_CONSOLE_SIG, entry_stubs.c:75),
+  size=0x0015735c=1,405,788,
   records=0x0000739e=29,598, state=1.
-- Independent recompute (re-measured 2026-10-13): off(:28715)=1,405,679 (1-based byte position of
+- Independent recompute (re-measured 2026-10-13): off(:28715)=1,405,679 (0-based byte offset of
   its first char); the trio occupies exactly 109 bytes - line lengths 34+34+38 (each line carries
   the channel's leading space) plus 3 newlines. So :28718 begins at byte 1,405,788 = probe `_size`;
   zero residual. File tail: 1,406,550-1,405,788 = 762 B = 82 (:28718-19: 40+40+2) + 680 (:28720-39).
@@ -60,7 +61,7 @@ HOW TO RE-READ: tools/check_999_capture.py out/stage90/captures/recovered-unknow
   `hw_watchdog_bite_ticks_written=0x000fffa0` (the frozen value).
 - install :7447-52: map=1 slot_before=0 desc=0xf9010402 base=0xf9017000 bark=0x000e7fa9 via=1.
 - samples :8017-19 / :9508-10 / :12427-29 / :20434-36: countdown 0x10d66/0x1396e/0x1918f/0x244a3
-  = 2.105 / 2.449 / 3.138 / 4.537 s (WDT clock 32,765 Hz), `pets=0` at all four samples.
+  = 2.105 / 2.449 / 3.137 / 4.537 s (WDT clock 32,765 Hz), `pets=0` at all four samples.
 - Door semantics BY VALUE (entry_trace.c:2160-2231): count=(STS>>1)&0xfffff rises since the last
   feed; the feed gate is count >= bark/2 = 475,092 = 14.5 s. All four samples are < 14.5 s, so
   pets=0 is consistent, not a defect. The first feedable moment (~14.5 s) lies past the cap

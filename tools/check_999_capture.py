@@ -86,15 +86,23 @@ def say(tag, msg=""):
 
 class Capture:
     def __init__(self, path):
-        with open(path, "r", errors="replace") as fh:
+        # `newline=""` + `split("\n")`: NO universal-newline translation, and no splitlines()
+        # (which also breaks on a lone CR). The captures carry lone CR bytes (999: 67), and a
+        # text-mode read inflates every `@:` by their count (the 999 tombstone read @:28781
+        # against the record's :28714). Line numbers are the reader's property (m997): this
+        # reader matches `grep -n` / `wc -l` on the file, which is what the record cites.
+        with open(path, "r", errors="replace", newline="") as fh:
             self.text = fh.read()
         self.nbytes = len(self.text)
+        self.lines = self.text.split("\n")
+        if self.lines and self.lines[-1] == "":
+            self.lines.pop()  # a trailing newline is not a line
         self.toks = []  # (line_no, key, raw, value_int|None) in stream order
-        for line_no, line in enumerate(self.text.splitlines(), 1):
+        for line_no, line in enumerate(self.lines, 1):
             for m in KV_RE.finditer(line):
                 self.toks.append((line_no, m.group(1), m.group(2), to_int(m.group(2))))
         self.lit = {}  # literal -> [count, first_line, last_line, sample]
-        for line_no, line in enumerate(self.text.splitlines(), 1):
+        for line_no, line in enumerate(self.lines, 1):
             for lit, _why in LADDER_LITERALS:
                 if lit in line:
                     e = self.lit.setdefault(lit, [0, line_no, line_no, clip(line.strip())])
@@ -281,8 +289,14 @@ def s4_slide(cap, is_999):
         for m in re.finditer(r'IOS7SHREG slide_copyin kr=(-?\d+)', cap.text):
             last_kr = int(m.group(1))
         if last_kr == 0:
-            rd("slide_copyin kr=0 printed - stop in sanity :1541 (its SUCCESS prints "
-               "NOTHING, DEBUG=0); the absent `map_slide ret=` is the locator")
+            if ret:
+                rd("slide_copyin kr=0 and `map_slide ret=` PRINTED (438's own exit :1654) - the "
+                   "slide stage COMPLETED and the hang moved into dyld's load/link path (the "
+                   "frozen last sentence); the :1541 sanity-stop reading needs the ABSENCE of "
+                   "ret= as its locator and does not obtain here")
+            else:
+                rd("slide_copyin kr=0 printed and no `map_slide ret=` - stop in sanity :1541 "
+                   "(its SUCCESS prints NOTHING, DEBUG=0); the absent ret= is the locator")
         else:
             rd("slide_copyin kr!=0 (%s) - real EFAULT; map_slide ret=14 must follow" %
                last_kr)
