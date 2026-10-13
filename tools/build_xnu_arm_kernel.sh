@@ -779,6 +779,16 @@ DEFINES=(
 # the kext guard and the alignment switch, not to `EXTRA_DEFINES` (`tools/stage_d13_vmhint_guard.sh`).
 [[ ${STAGE90_XNU_VMHINT_GUARD:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_VMHINT_GUARD=1)
 
+# 1001's submap pmap-enter skip (`osfmk/vm/vm_map.c`: `vm_map_enter`'s pmap-enter tail is wrapped
+# `if (!is_submap) { ... } else { bounded SUBMAPSKIP kprintf }`, keeping `pmap_empty = FALSE`). On a
+# SUBMAP enter the `object` parameter IS the submap (`~:2063`), a vm_map-zone element, and the
+# unguarded call locked/probed it as if it were a vm_object: 1000's press died at
+# `hw_lock_lock(): PANIC: Lock 0xc0005b50 = 0xffb5be0b` on the FREED vm_map-zone element 0xc0005b48
+# (w04 = 0xbaddecaf) - 990 died one field over (+0x18). `vm_map.c` is a kernel-pool file, so the
+# switch goes to the SAME array as the kext/login guard, the alignment switch and the memq_hint
+# guard, not to `EXTRA_DEFINES` (`tools/stage_d13_submap_pmap_skip.sh`).
+[[ ${STAGE90_XNU_SUBMAP_PMAP_SKIP:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_SUBMAP_PMAP_SKIP=1)
+
 # 992's iOS 7 commpage alias (`osfmk/arm/pmap.c` + `osfmk/arm/commpage/commpage.c`: the six dormant
 # IOS7LAB board gates open, so `pmap_create_sharedpage` maps the commpage page a second time at
 # 0xFFFF4000 - user read-only, XN - and `commpage_populate` fills the iOS 7 count bytes at

@@ -742,7 +742,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_SHREG_PROBE
                 STAGE90_XNU_SHREG_WIRE
                 STAGE90_XNU_SHREG_GEOM
-                STAGE90_XNU_USVC)
+                STAGE90_XNU_USVC
+                STAGE90_XNU_SUBMAP_PMAP_SKIP)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this
@@ -1117,6 +1118,17 @@ do
   # switch at its own assignment (0/1 only) and emits the line unconditionally.
   if [[ -z $_v && $_k == STAGE90_XNU_USVC ]]; then
     printf '  %s=(absent, and a record that does not name the user-SVC frontier hook is a pre-1000 arm - the only value any pre-1000 build could have written)\n' "$_k"
+    continue
+  fi
+  # **1001's one new switch: absent names the pre-submap-skip arm.** `STAGE90_XNU_SUBMAP_PMAP_SKIP`
+  # reached the record only in 1001; every arm parked before it was built from a tree whose
+  # `vm_map_enter` tail carried no `is_submap` guard and whose pool was compiled without the switch,
+  # so an absent key is not a missing value but the value. Demanding the key would make every
+  # pre-1001 park unpressable (882's defect, twenty times repaired now). A post-1001 record can never
+  # reach this branch: `build_entry.sh` validates the switch at its own assignment (0/1 only) and
+  # emits the line unconditionally.
+  if [[ -z $_v && $_k == STAGE90_XNU_SUBMAP_PMAP_SKIP ]]; then
+    printf '  %s=(absent, and a record that does not name the submap pmap-enter skip is a pre-1001 arm - the only value any pre-1001 build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \

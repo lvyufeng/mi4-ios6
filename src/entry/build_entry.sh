@@ -1093,6 +1093,23 @@ case "$VMHINT_GUARD" in
     *) echo "REFUSING: STAGE90_XNU_VMHINT_GUARD='$VMHINT_GUARD' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **1001: the pool's submap pmap-enter skip, recorded the same way and for the same reason.** With
+# `STAGE90_XNU_SUBMAP_PMAP_SKIP=1`, `osfmk/vm/vm_map.c`'s `vm_map_enter` SKIPS `vm_map_pmap_enter`
+# when `is_submap`: on a submap enter the `object` parameter IS the submap (`vm_map.c:~2063`), a
+# vm_map-zone element, and the tail call used to lock/probe it as if it were a vm_object. `pmap_empty`
+# stays FALSE and a bounded kprintf beginning `SUBMAPSKIP:` records obj/start/end/size/lr in the skip
+# branch. 1000's press died exactly there: `hw_lock_lock(): PANIC: Lock 0xc0005b50 = 0xffb5be0b` on
+# the FREED vm_map-zone element 0xc0005b48 (w04 = 0xbaddecaf), 10.31 s in, right after `attempting to
+# start init of /sbin/launchd`. The edit is compiled by `tools/build_xnu_arm_kernel.sh` (DEFINES,
+# from the same-named environment variable), so the two spellings must carry the SAME value
+# (`mi4-one-value-two-definitions`), and the by-value clause at the 1001 site below refuses a linked
+# image whose vm_map_enter does not carry the skip.
+SUBMAP_PMAP_SKIP=${STAGE90_XNU_SUBMAP_PMAP_SKIP:-0}
+case "$SUBMAP_PMAP_SKIP" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_SUBMAP_PMAP_SKIP='$SUBMAP_PMAP_SKIP' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
 # commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
@@ -1600,6 +1617,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_KEXTB_LOGIN
                 STAGE90_XNU_SP_ALIGN
                 STAGE90_XNU_VMHINT_GUARD
+                STAGE90_XNU_SUBMAP_PMAP_SKIP
                 STAGE90_XNU_COMMPAGE_ALIAS
                 STAGE90_XNU_IOS7_TRAPS
                 STAGE90_XNU_DYLD_WITNESS
@@ -1766,6 +1784,14 @@ do
         # of this switch (`mi4-one-value-two-definitions`). The 991 clause at the link site below
         # refuses a link whose vm_page_lookup does not carry the guard.
         STAGE90_XNU_VMHINT_GUARD)     _v=$VMHINT_GUARD ;;
+        # 1001: whether the tree's submap pmap-enter skip (`tools/stage_d13_submap_pmap_skip.sh`) was
+        # compiled into this image's pool. Read from `$SUBMAP_PMAP_SKIP`, validated 0/1 at its own
+        # assignment far above this loop, so the record and the pool's `DEFINES` cannot be built from
+        # two spellings of this switch ([[mi4-one-value-two-definitions]]). `vm_map.c` is a POOL file:
+        # the linked image only LINKS `out/xnu_kernel_obj_d13/osfmk_vm_vm_map.o`, which is why the
+        # 1001 clause at the link site below reads the linked image's own `SUBMAPSKIP:` literal and
+        # refuses a link whose skip is absent.
+        STAGE90_XNU_SUBMAP_PMAP_SKIP) _v=$SUBMAP_PMAP_SKIP ;;
         # 992: whether the tree's commpage alias (`tools/stage_d13_commpage_alias.sh`) was compiled
         # into this image's pool. Read from `$COMMPAGE_ALIAS`, validated 0/1 at its own assignment far
         # above this loop, so the record and the pool's `DEFINES` cannot be built from two spellings
@@ -30711,6 +30737,33 @@ verify_trace_symbols() {
         fi
         say "  xnu_entry_991: the linked image treats an implausible memq_hint as absent inside vm_page_lookup (the VMHINT991 report is referenced from the lookup's own body) - $vh_out"
     fi
+    # **1001: a submap enter must NOT hand its vm_map to `vm_map_pmap_enter` as if it were a
+    # vm_object.** 1000's press (arm armed-d13-bbdf41bc, record records/1000-press-read.txt, capture
+    # out/stage90/captures/recovered-unknown-arm-20261013-072537-last_kmsg.txt) died at XNU time
+    # 10.31 s, right after `attempting to start init of /sbin/launchd`:
+    # `panic(cpu 0 caller 0x80498058): hw_lock_lock(): PANIC: Lock 0xc0005b50 = 0xffb5be0b` -
+    # `hw_lock_lock` = 0x80498020 (caller = +0x38), `vm_map_pmap_enter` = 0x8003d894, and the
+    # "object" it locked = 0xc0005b48 = a FREED vm_map-zone element (w04 = 0xbaddecaf = zalloc's
+    # ZP_NOT_POISONED; 999's VMHINT991 records name the same two elements, and 990 died on the same
+    # one at +0x18). Root cause: in `vm_map_enter`, a SUBMAP enter's `object` parameter IS the submap
+    # (`vm_map.c:~2063 submap = (vm_map_t) object;`), and the pmap-enter tail carried NO `is_submap`
+    # guard - the same function guards the same parameter 30 lines later (`:2192`). The fix is
+    # `tools/stage_d13_submap_pmap_skip.sh` + STAGE90_XNU_SUBMAP_PMAP_SKIP=1: inside the tail block,
+    # `if (!is_submap)` keeps the ordinary path (`pmap_empty = FALSE` stays), and the submap branch
+    # reports a bounded kprintf beginning `SUBMAPSKIP:`. The property is read BY VALUE off THIS
+    # linked image by `tools/check_submap_pmap_skip.py` (the `SUBMAPSKIP:` string referenced from
+    # vm_map_enter's own body or one branch of it, a kprintf call in the same body, and the
+    # still-present `vm_map_pmap_enter` call for the non-submap path); the checker REFUSES the 1000
+    # image, so a build whose switch never reached the pool cannot pass. Gated on the switch: with
+    # SUBMAP_PMAP_SKIP=0 the tree's original text is compiled on purpose and there is nothing to
+    # assert.
+    if [[ $SUBMAP_PMAP_SKIP -eq 1 ]]; then
+        if ! ss_out=$(python3 "$REPO_ROOT/tools/check_submap_pmap_skip.py" "$OUT/xnu_arm_entry.elf" 2>&1); then
+            printf '%s\n' "$ss_out" >&2
+            layout_fail "the linked image does not skip vm_map_pmap_enter on submap enters even though STAGE90_XNU_SUBMAP_PMAP_SKIP=1 was requested: vm_map_enter carries no SUBMAPSKIP:-referencing skip body (the pool was built without -DSTAGE90_XNU_SUBMAP_PMAP_SKIP=1 - run tools/stage_d13_submap_pmap_skip.sh and rebuild the pool with the switch exported - or the tail moved). 1000 died exactly there (hw_lock_lock: PANIC: Lock 0xc0005b50 = 0xffb5be0b, object = 0xc0005b48, a FREED vm_map-zone element, lr = vm_map_pmap_enter)"
+        fi
+        say "  xnu_entry_1001: the linked image skips vm_map_pmap_enter when is_submap (the SUBMAPSKIP report is referenced from vm_map_enter's own body and the non-submap call is still there) - $ss_out"
+    fi
     # **992: the iOS 7 commpage must be mapped where the real dyld reads it, 0xFFFF4000.** 991's press
     # (arm armed-d13-13355bf0, commit af099f4, evidence /tmp/cancro-last_kmsg-991.txt) is a
     # READ-CONFIRMED SUCCESS in the pre-registered sense: the VMHINT991 guard fired exactly twice
@@ -39306,6 +39359,10 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # DEFINES takes this value, and the by-value clause at the 991 site above refuses a linked image
     # that did not get it).
     echo "STAGE90_XNU_VMHINT_GUARD=${STAGE90_XNU_VMHINT_GUARD:-0}"
+    # 1001's switch, read the same way and for the same reason (one value, two definitions: the pool's
+    # DEFINES takes this value, and the by-value clause at the 1001 site above refuses a linked image
+    # that did not get it).
+    echo "STAGE90_XNU_SUBMAP_PMAP_SKIP=${STAGE90_XNU_SUBMAP_PMAP_SKIP:-0}"
     # 992's switch, read the same way and for the same reason (one value, two definitions: the pool's
     # DEFINES takes this value, and the by-value clause at the 992 site above refuses a linked image
     # that did not get it; this echo line is what the record self-check at the end of this file reads,
