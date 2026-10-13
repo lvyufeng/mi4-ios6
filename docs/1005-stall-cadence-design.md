@@ -317,6 +317,12 @@ All in `build_1005.sh`, each an `exit 1` on failure.
   the object shows `bl __atomic_fetch_add_4`, the primary edit is a libcall the freestanding link may
   not resolve ⇒ **fail the build** and take the fallback.
 
+**(b3-verified, 2026-10-13).** Settled EMPIRICALLY with the build's own flag set
+(`arm-none-eabi-gcc -mcpu=cortex-a15 -marm -O2`): `__atomic_fetch_add(&g,1u,__ATOMIC_RELAXED)`
+emits INLINE `ldrex r2,[r3]; add; strex; cmp/bne` with **no undefined symbols** (`nm … | grep ' U '`
+empty). The §4 PRIMARY edit is safe; the §4 fallback is **not needed**. (b3) stays in the build to
+guard against a future flag change re-introducing a libcall.
+
 **(c) OFF is byte-identical.**
 - Rebuild with `STAGE90_XNU_CADENCE=0` (macro absent) and assert
   `sha256sum out/stage90/xnu_arm_entry.bin | cut -c1-8` == `582a19c8` (the pressed 1004 arm). A
@@ -386,10 +392,9 @@ distinguishable from "the log ended".
 
 ## 9. Could not verify (flagged)
 
-- **Whether GCC lowers `__atomic_fetch_add` to `ldrex/strex` or a `__atomic_fetch_add_4` libcall** on
-  this image's `-march`. If it is a libcall, the freestanding link may not pull it — §6(b3) is the
-  check, and §4's fallback (seq-into-`_back`) is the plan if it fails. I did not read the compile
-  flags for `xnu_arm_entry_stub.o`.
+- **Whether GCC lowers `__atomic_fetch_add` to `ldrex/strex` or a `__atomic_fetch_add_4` libcall** —
+  **RESOLVED 2026-10-13** (see §6 (b3-verified)): with `-mcpu=cortex-a15 -marm -O2` it is INLINE
+  `ldrex/strex`, no libcall, no undefined symbol. The §4 primary edit is safe.
 - **The exact disassembly shape** of the USVC call site in the linked image (I read the source:
   `n = ++g_usvc_n;` at `entry_stubs.c:5284`); the call-site falsifier (§6b) reads it by value at build
   time rather than asserting a spelling here.
