@@ -497,7 +497,45 @@ runner's "the load did not return / look for the panic" verdict is contradicted 
 console line.
 
 **Rung order, updated.** §8 items 1–3 DONE (997 = G3, 998 = G1; the geometry no longer blocks).
-Next rung's givens: (a) raise `ENTRY_LIVE_CAP` past the dyld era (the capture is ~1.07 MB of 2 MiB
-minus the 128 KB os-block ⇒ ~24576-28672 fits) and/or gate the w0..w127 read dumps that dominate the
-channel; (b) decide the watchdog policy — the pet fires only on idle, so a boot that never idles
-ends at the SoC's ~28 s whatever else it does; (c) fix the exec_done record loss (build side).
+Next rung's givens — **(a) revised by measurement (2026-10-13)`:** the record stream costs **46.9 B/line**
+(16,426 lines / 770,699 B); console bound 0x200000−12 = 2,097,140 B, 998 used 1,072,335 ⇒ headroom
+1,024,805. But the useful unit is reads, not records: **one storage read = 69 `storage_rd_*` records
+(all 69 keys exactly 129×) + ~20 driver/other ≈ 89 lines ≈ 4.2 KB**, and 998's whole run logged only
+129 reads (mount + launchd's first pages). A cap raise alone (16384→24576) buys just **+92 reads**.
+The multiplier is **thinning the per-read dump after `rd_ordinal > 256`** (keep
+`calls/ordinal/lba/op/err/complete` ≈ 280 B/read ⇒ cap 24576 reaches ≈ 2,300 reads). Recommendation to
+buildplumb: cap 24576 **and** thin-after-256. (b) decide the watchdog policy — WDT_HZ 32765, armed
+25 s bark + 3 s bite (payload `STAGE90_HW_WATCHDOG_TIMEOUT_S`=25); the pet fires only on idle, so a
+boot that never idles ends at the SoC's ~28 s whatever else it does. (c) the exec_done fix — **two
+candidates falsified 2026-10-13 by disassembling the frozen 998 elf** (`out/stage90/frozen/
+armed-d13-dee822b0/xnu_arm_entry.elf`): the call executes (0x8049de98 `bl entry_note_exec_returned`,
+unconditional, before the printf tail-call; key pointers correct, `.rodata` 0x4b3368/380/398), and
+refusal-by-state is impossible (`g_live_state` is monotone — set 2 only at `entry_stubs.c:2091`, 1
+only at `:2396`, `entry_live_init` runs only at 0 — and the 1,128 records after the done point,
+starting with the `sleh` emitter at `:1740`, prove state 1). Cap is also impossible (done point =
+ordinal 15,299; cap marker = 16,423). The loss is inside the console write path at that instant (or a
+same-instant overwrite); 999 should probe it by reading back `*sig`/`*size_p` after the done call,
+stashing in `.bss`, and publishing from the next known-good writer.
+
+## §10c — the timer chain stops at tick 64 in EVERY run (measured 2026-10-13)
+
+**(d) the timer dies early — measured across all six captures (987, 994-998).** `xnu_live_tick_irq`
+(published on powers of two from `msm8974_handle_interrupt`, `pe_msm8974.c:369`) reaches **max 0x40 =
+64 and never 128** in every capture, so fewer than 128 timer-PPI deliveries ever occur in a whole
+boot. The whole family stops together at 998 `:5475` — `tmr_enter_seq` 0x40, `tmr_qexp_seq` 0xc,
+`tmr_enter_over` 0x8, `setpop_count` 0x40 — and no timer record of any kind appears again through
+exec (`:19374`) and 1,128 dyld-era records to the cap (`:20502`). The last healthy window is the
+storage power spin `st_pwr_wait` (`src/entry/entry_storage.c:1920-2065`): premise
+`_pwr_wait_cpsr=0x80000113` (I=0) at `:5416`; ticks 8/16/32/64 publish during it (`:5415-:5463`);
+tail at `:5475-5483` = `_cpsr_after=0x20000193` (I=1), `_polls=0x67400`, `_ticks=0x1d5767` (100 ms
+CNTV), `_timeout=1`. Two models remain open — (A) the PPI/countdown is killed at the spin tail; (B)
+the machine returns to I=1 and never unmasks again (post-exec `sleh_cpsr` records all read
+`0x20000193`, the same masked value). Either way, **nothing driven by `rtclock_intr` runs after ~4.8 s
+of mach time**, which (i) rules out the tick ISR as a watchdog pet site (a pet there stops petting
+after ≤64 deliveries — wdt-policy and buildplumb informed 2026-10-13; the pet belongs in the
+storage-read ladder, 129 reads ran post-freeze, plus the idle site), and (ii) is a candidate
+mechanism for this section's own frontier: after `map_file kr=0` the SECOND
+`vm_shared_region_map_file` call never returned (`vm_unix.c:1425`-`:1438` — the print fires only on
+return), so a deadline-based park inside call #2 would now be unresolvable. Two forensics agents
+(timer-freeze, shreg-hang) are discriminating the models and locating call #2's first blocking
+point; the 999 probe set gains a model-discriminator observable once they report.
