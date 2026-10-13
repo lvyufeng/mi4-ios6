@@ -478,7 +478,8 @@ holds 16,795 `xnu_live_` lines = 16,384 counted + 411 direct; 998's 16,426 = 16,
 **The two walls that bound this reading.**
 1. **The live-record channel capped at 16384 in the dyld era.** `xnu_live_capped=0x00004000`
    (`:20502`); the exec pair is live-record ~15295 (`:19374-19377`). What stays visible
-   (`:19378-20501`) is the common prefix: 8 `sleh` user-fault events (thread `0xc0bfa000`) + storage
+   (`:19378-20501`) is the common prefix: 3 `sleh` events, seq 1-3, ALL KERNEL-mode (`sleh_user=0`; the "8" was
+   `SLEH_LIVE_MAX`, the recording cap — §11 audit; thread `0xc0bfa000`) + storage
    reads + the late slot/rootmedia cluster. **997's record tail is name-for-name and LBA-for-LBA
    identical (last `drv_lba=0x00422963`)** — the kr=1-vs-kr=0 divergence never reaches the record
    channel; it lives only in the text block.
@@ -549,8 +550,8 @@ storage power spin `st_pwr_wait` (`src/entry/entry_storage.c:1920-2065`): premis
 `_pwr_wait_cpsr=0x80000113` (I=0) at `:5416`; ticks 8/16/32/64 publish during it (`:5415-:5463`);
 tail at `:5475-5483` = `_cpsr_after=0x20000193` (I=1), `_polls=0x67400`, `_ticks=0x1d5767` (100 ms
 CNTV), `_timeout=1`. Two models remain open — (A) the PPI/countdown is killed at the spin tail; (B)
-the machine returns to I=1 and never unmasks again (post-exec `sleh_cpsr` records all read
-`0x20000193`, the same masked value). **timer-freeze (2026-10-13): the captures do NOT cleanly
+the machine returns to I=1 and never unmasks again (post-exec `sleh_cpsr` reads `0x20000193` in 2 of 3 frames — e3 reads `0x60000193`, same I=1
+mask, different condition flags; §11). **timer-freeze (2026-10-13): the captures do NOT cleanly
 separate them; the tape favors (B)** (no `cpsie i`, `splx(0)`, or user-CPSR-restore site
 demonstrably executes before the cap), **but one measured (A) fact survives — the tick line's
 distributor bit (ISENABLER0 bit 20) reads CLEAR at the pre-jump disarm (`:3922`, 0xc7fff, before
@@ -590,8 +591,9 @@ the edge + the raw tick-delivery counter. Reading: **no edge record ⇒ (B)** (n
 `IOS7SHREG` text lines exist — the `check_np` pair `:4102-4103`, one entry probe `:4104`, one
 `map_file kr=0` `:4109`; the entry print (`vm_unix.c:1578`) and every return print
 (`:1630`/`:1646`/`:1654`) share one `static … < 4` flag, and the frozen elf carries every format
-string. (ii) The console channel CANNOT drop: the 128 KB os-block is space-filled at reserve
-(`entry_stubs.c:2506`, `:2692-2698`), `xnu_live_ostext_total` ends at `0x17ee` = 6,126 B,
+string (FIVE distinct `IOS7SHREG` strings — the three exits share one `map_slide ret=%d`, so no
+binary position can identify which exit fired; §11). (ii) The console channel CANNOT drop: the 128 KB os-block is space-filled at reserve
+(`entry_stubs.c:2510`; the fill loop is `:2738-2739` — §11 corrected the old `:2692-2698` cite), `xnu_live_ostext_total` ends at `0x17ee` = 6,126 B,
 `xnu_live_ostext_limited` never published, and capture `:4110` is untouched fill — so §10c's
 "text-side loss" caveat is a non-candidate. (iii) dyld's own disassembly: `mapSharedCache`
 (0x2be04fa0) → `check_np` once (ret=12) → `openSharedCacheFile` → 8,192-B header read → build the
@@ -599,12 +601,12 @@ string. (ii) The console channel CANNOT drop: the 128 KB os-block is space-fille
 `link`; the next blocking-capable work is cache page-ins while loading libs.
 
 **Where it can wait** (all wakeup-only; the timer is frozen per §10c, so no deadline can expire):
-the `_shared_region_map` tail — atime `vnode_setattr` (`vm_unix.c:1479`; DISPUTED — the lead
-reads the atime-only fast path `hfs_vnop_setattr` hfs_vnops.c:1236-1239 `c_touch_acctime=TRUE;
-goto out`, no disk write, with decmpfs_update_attributes `:1134` (xattr reads) and the cnode
-lock `:1224` as the only prior I/O-capable steps; shreg-hang report #2 reads it as the tail's
-ONLY I/O, a metadata write delivered by the CNTVCT-polled ladder `entry_storage.c:8942`;
-shreg-g1 arbitrates by value) and put/drop/deallocate (`:1493-1503`, no
+the `_shared_region_map` tail — atime `vnode_setattr` (`vm_unix.c:1479`; RESOLVED by §11 — the lead wins, hardened:
+`hfs_update` hfs_vnops.c:1352 is the ONLY catalog-write call and the atime-only fast path
+`hfs_vnop_setattr` :1236-1239 jumps over it (`c_touch_acctime=TRUE; goto out`), with
+decmpfs_update_attributes `:1134` (xattr reads) and the cnode lock `:1224` the only prior
+I/O-capable steps; report #2's `entry_storage.c:8942` is right as a LINE — `dr_ticks` inside
+`st_data_reset` (999 moves it to `:8984`) — but wrong as a ROLE: no delivery path) and put/drop/deallocate (`:1493-1503`, no
 I/O) — then `_shared_region_slide` (`:1513`): `slide_init` (`:1524`; object lock
 `vm_shared_region.c:1458`, `kmem_alloc` `:1502`), `copyin(0x3dc32000, 0x89000)` (`:1533-1535`) =
 137 cache-file pages, the only mass-I/O step (m2 tail, file offset 0x101aa000, card LBA
@@ -614,7 +616,7 @@ I/O) — then `_shared_region_slide` (`:1513`): `slide_init` (`:1524`; object lo
 0x1E92D000 leaf / 0x2404000 header), the partition's first block (HFSX VH at +0x400), then
 `/sbin/launchd` page 0 (LBA 0x422838 = vol 0x4507000) and its last page (LBA 0x422960-62) —
 truncated mid-read by the cap. NONE of the 129 lies in the cache file's block span [LBA 0x422AE8
-(vol 0x455d000) .. 0x4B9550]: dyld's 8,192-B header read fell after the cap.
+(vol 0x455d000) .. 0x4B956F (§11 by value; report #2's 0x4B9550 was off a stale fileSize)]: dyld's 8,192-B header read fell after the cap.
 
 **The 999 probe ladder** (three prints — shreg-hang report #2, 2026-10-13; same gate as the
 existing `IOS7SHREG` probes, each with its own `static … < 4`): **(a)**
@@ -624,14 +626,18 @@ brace and the `:1529` assignment; fires only when `slide_init` SUCCEEDED — its
 `:1525` would otherwise have appeared; `entry=%p` is necessarily NULL there and serves as a
 presence marker only); **(c)** `IOS7SHREG slide_copyin kr=%d` between `:1536` and `:1537`
 (before the error test, so BOTH outcomes print). Reading: none ⇒ stop in the map tail (atime
-`:1479` DISPUTED, above; put/drop/deallocate `:1493-1503` no-I/O); (a) only ⇒ stop inside
+`:1479` RULED OUT by §11 — the fast path never writes; put/drop/deallocate `:1493-1503` no-I/O); (a) only ⇒ stop inside
 `slide_init` (object lock `vm_shared_region.c:1458` / `kmem_alloc` `:1502`); +(b) ⇒ stop inside
-the copyin or its page delivery; +(c) kr=0 ⇒ stop in sanity (`:1541`); (c) kr≠0 ⇒ a real
+the copyin or its page delivery; +(c) kr=0 ⇒ stop in sanity (`:1541`; its SUCCESS prints
+NOTHING — `Succesfully init` absent from the frozen elf, DEBUG=0 — so the absent `map_slide ret=`
+at `:1654` is the locator); (c) kr≠0 ⇒ a real
 EFAULT — and `map_slide ret=14` (`:1646`) must follow. No deadline anywhere on these paths; the
 frozen timer enters them only via an empty page pool (a 137-page `kmem_alloc` does not reach
 that — vm_resident.c:4574/:4737). Record-channel prediction (cap 24576 + thinning): the 8,192-B
 cache-header read (16 sectors at LBA 0x422AE8+) becomes visible; if the copyin's page-ins run,
 `dr_lba` enters [0x4a3838, 0x4a3c80] (137 pages); if the new capped key's last `dr_lba` is still
 in the launchd/cache-header range, the stop is before the copyin. Exit `:1654` printed ⇒ the
-slide stage completed and the hang moved into dyld's load/link path. shreg-g1 audits this ladder
-by value (every cited line against the staged tree).
+slide stage completed and the hang moved into dyld's load/link path. shreg-g1 AUDITED this ladder by value (§11, commit `6d4e67f`): probes (a)-(c) confirmed,
+one falsifier each; (b) is a presence marker by necessity (`slide_info_entry` NULL there,
+non-NULL guaranteed after success — `vm_shared_region.c:1502-1504`); counts close by multiset —
+rd 129 = 119 door + 10 direct, drv 120 calls (the 120th head-only, cut after `dr_timeout` `:20501`).
