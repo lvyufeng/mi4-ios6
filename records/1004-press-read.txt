@@ -113,23 +113,38 @@ handful of kernel-mode faults. **So 1005 branch (a) (CS-validation LOOP,
    **shared-region slide page** (`map_slide` slide_start) — the first touch of the 301 MiB shared
    cache. seq 37/39 are likewise kernel-mode (stack region below dyld; dyld `__cstring`). The
    walk crosses from dyld's own image to the shared cache at the frontier.
-3. After seq 40, NO more aborts and NO more syscalls; the machine keeps running (storage, ticks,
+3. **ABORT #40 NEVER RETURNED.** `xnu_live_sleh_back` (the wrapper's post-`sleh_abort` note) is
+   recorded **39** times — values 0x01…0x27, consecutive — for **40** aborts (`sleh_seq` 0x01…0x28).
+   The 40th abort (`seq=0x28`, `far=0x3e8dd000`) has NO matching `sleh_back`: the kernel entered
+   `sleh_abort` for the first shared-cache page fault and **never reached the end of it**. This is
+   the death episode, measured, not inferred.
+4. After seq 40, NO more aborts and NO more syscalls; the machine keeps running (storage, ticks,
    wdt pets) to the operator's power press. **Crucially, the kernel was still PAGING**: the
    root-media reads after the 40th abort ADVANCE forward (`storage_rd_ordinal` 0x1f8→0x207,
    `storage_rd_lba` 0x4a3821→0x4a3830, `rootmedia card_off` →0x14706000), i.e. the 40th fault's
-   backing read COMPLETES (one more page read from the card). Then every channel — aborts,
-   syscalls, AND storage — stops together. So the fault's data read succeeds but the page does
-   not (or the fault never returns); the wall is AFTER the read and BEFORE the mapping.
+   backing read COMPLETES (the page is read from the card). Then every channel — aborts,
+   syscalls, AND storage — stops together.
+5. The frozen pc (0x8001b1fd) is in `sleh_abort`'s **post-`vm_fault` RETURN path** (via
+   `ml_set_interrupts_enabled(1)` → `astloop`/`enable_interrupts`). Taken with (3): **`vm_fault`
+   for abort #40 RETURNED (the page read completed), and the kernel then hung in the
+   interrupt-enable / AST-check path on the way back to user mode — `sleh_abort` never
+   completed.** The wall is not the fault or its read; it is the *return path* out of `sleh_abort`.
 
-**What is NOT proven (and 1005 must settle):** whether the machine BLOCKS at, or merely STOPS
-AT, the shared-cache page-in.
-  (b1) **Blocked in the shared-cache page-in** — the seq-40 kernel fault's page never arrives, so
-       the faulting thread sleeps in `vm_fault`'s wait; the frozen `sleh`-return frame is where
-       the tick sampler lands each time. The stall is a page that never completes.
-  (b2) **A frame artifact, not a live dwell** — `0x8001b1fd` is a high-frequency pc (every
-       `ml_set_interrupts_enabled(1)` passes it) and its parity/position are anomalous, so the
-       six identical samples may be one common pc, not evidence of a 24-min dwell. Under this
-       reading the real state is invisible to 1003's sampler and 1005 needs a different witness.
+**What is NOT proven — WHERE in the return path.** Abort #40 did not return (fact 3), and the
+frozen pc is in the return path (fact 5), so the hang is in returning from `sleh_abort` #40.
+Within that, two readings the trace cannot yet separate:
+  (b1) **Hangs in `ml_set_interrupts_enabled`/`astloop`** — the `bl ml_set_interrupts_enabled(1)`
+       at 0x8046b928 is unbounded: `astloop` re-tests `thread->ast & 4` every iteration, and a
+       continuously-re-armed AST would spin there forever. This is a kernel AST spin.
+  (b2) **Hangs deeper in `vm_ipc_kmsg_copyout`/`vm_map_enter`** — a post-`copyin-add` kernel fault
+       (the next page-in, e.g. 0x3e8de000) that itself never resolves, so the inner `sleh_abort`
+       never returns and the outer frame only *appears* to be in the return path. The frozen
+       pc being a HIGH-FREQUENCY pass-through (every `ml_set_interrupts_enabled(1)`) makes this
+       reading live: the sampler may be catching a common pc, not a dwell.
+  The tiebreaker (1005): does a tick sample ADVANCE off 0x8001b1fd, and does the kernel publish
+  any record from the return path (e.g. a post-`sleh_abort`-back note for abort 41+, or an
+  AST/spin witness). The `sleh_back` count already says no abort #41 occurred, so if the pc
+  advances within `astloop` it is (b1); if the pc stays put across advancing ticks it is a dwell.
 
 **1005 = branch (b)**, but SHARPENED: the decisive instrument is not "fault rate" alone — it is
 (a) **does a tick sample ever ADVANCE off 0x8001b1fd, and does the sample pc carry the E bit

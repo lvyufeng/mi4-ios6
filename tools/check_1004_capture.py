@@ -732,6 +732,20 @@ def s_abort(cap):
     say("OBS", "records that carry the FRAME band (pc/lr/sp/cpsr/frame_ok/user): x%d of x%d (the "
                "pre-1004 `SLEH_LIVE_MAX` hid all but the first %d); the running `_seen` count x%d" % (
         n_frame, len(recs), SLEH_OLD_MAX, n_seen))
+    # ---- DID EVERY ABORT RETURN?  `xnu_live_sleh_back` is the wrapper's post-`sleh_abort` note,
+    # written for every abort <= the FRAMES band (512 here). An abort with a `_seq` but NO
+    # corresponding `_back` entered `sleh_abort` and never completed it - the death episode,
+    # measured.  Counted over the same band so a >512 abort is not miscounted.
+    n_back = cap.family_count("xnu_live_sleh_back")
+    if n_back and n_back < len(recs):
+        say("READING", "ABORTS THAT NEVER RETURNED: x%d - `xnu_live_sleh_back` x%d for x%d abort "
+                       "records. The LAST abort (seq @:%d, far=%s, user=%s) entered `sleh_abort` and "
+                       "never reached its end = THE FRONTIER (the fault the kernel died on)."
+            % (len(recs) - n_back, n_back, len(recs), _last_ln,
+               fmt(recs[-1]["f"].get("far", (0, None))[1]), fmt(recs[-1]["f"].get("user", (0, None))[1])))
+    elif n_back:
+        say("PASS", "every abort returned (`xnu_live_sleh_back` x%d == `_seq` x%d) - no single abort "
+                    "is the frontier by non-return" % (n_back, len(recs)))
     say("OBS", "this is a MEASUREMENT section: the stall is the EXPECTED outcome of this rung (1004 "
                "changes no kernel behaviour) - the classification above IS the 1004 finding")
 
