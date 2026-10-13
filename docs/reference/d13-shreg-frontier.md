@@ -520,7 +520,9 @@ were silent**, which retires the console-write-path-loss reading. The earlier or
 records (`:19374-77` = the entry to `load_init_program`); the missing premise was where the return
 sits in the stream. Strongest reading: the tombstone IS the displaced `xnu_live_exec_done_seq` — the
 one-time marker is a DIRECT write and survived; the counted trio did not (`done_who`/`done_current`
-are the two silent counted calls after it). Certain either way: mechanism = the cap; all three
+are the two silent counted calls after it; by value the trailing group's 84-vs-90 record shape
+equally reads as the driver tail's first missing key — `storage_dr_ps_after` — so the capture
+cannot separate the two readings, shreg-g1 audit §10). Certain either way: mechanism = the cap; all three
 records were lost at/after counter 16,384. The frozen-elf disassembly results stand as far as they
 go (the call executes: 0x8049de98 `bl entry_note_exec_returned`; `g_live_state` is monotone) —
 necessary conditions, not exclusions. 999's fix: the trio becomes direct/cap-exempt at
