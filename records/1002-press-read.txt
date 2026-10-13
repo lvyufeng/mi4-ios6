@@ -1,0 +1,154 @@
+# 1002 press read - adjudication of armed-d13-b04976fe (2026-10-13)
+
+WHO WRITES THIS: by hand, in the step that measured it, never by the build.
+WHY: the capture lives under `out/stage90/captures/`, and `out/` is not tracked - this file IS the
+run's identity: the sha256 below is the only copy of the evidence that outlives the working tree.
+The mechanical half is `tools/check_1002_capture.py` (EXIT=0 on this capture: 0 hard anomalies, every
+read PASS or OBS - the inversion of 1001's EXIT=1). What this file adds is the adjudication against
+the FROZEN pre-registration block embedded in `scripts/press_1002.sh`, and the deviations reported
+rather than reinterpreted.
+HOW TO RE-READ: `python3 -I tools/check_1002_capture.py out/stage90/captures/recovered-unknown-arm-20261013-110813-last_kmsg.txt`
+-> exit 0.
+READER NOTE: every `@:` number is that capture's own line number (29,042 lines). The capture is a
+MEMORY-order rendering, not time-order: a 128 KiB OS-text block is reserved early and filled in
+place, so the `cs_invalid_page` frontier sits @:4114 while the live-key records that FOLLOW it in
+time appear @:23042+ and the death stanza is the capture's last lines. Read position, not sequence,
+as time. NOTE the contrast with 1001: 1001's text block was FILLED by the 230x abort storm so the
+frontier's record position was pushed late; 1002's block has NO storm, so the single frontier line
+sits wherever it was written.
+
+## Identity
+
+- capture: out/stage90/captures/recovered-unknown-arm-20261013-110813-last_kmsg.txt
+    sha256 f3e8bcdf77e19ac58aa24034bcab8440e056427c0c843d9f68d7f674c6c39533
+    1,393,467 bytes / 29,042 lines
+  carrier: /proc/last_kmsg of the FLASHED ROM via `scripts/recover_last_kmsg.sh --read-only`,
+  read while the self-recovered Android was up. NOT a fastboot-boot read (that burns the single-slot
+  record). The trailing `No errors detected` line is the CARRIER's fixed tail (present on every
+  capture incl. stock Android rungs) - not this run's reading.
+- arm: armed-d13-b04976fe - 1001's switch set VERBATIM (USVC=1, SUBMAP_PMAP_SKIP=1, RESIDENT=1,
+  SHREG_PROBE/WIRE/GEOM=1, DYLD_WITNESS=1, USB ladder PROBE/DEV/ENUM/STREAM=1; CARD_COW=1,
+  HDD_WRITE=0) with NO new switch; the ONE change is INSIDE the USVC hook (r3 added to the save set).
+  parked in out/stage90/frozen/ (12 members); records/revert-set.txt carries the
+  `role=1002-usvc-hook-saves-r3` lines. commits ef3886a / 49f176b (build+fix).
+  ENTRY sha256 b04976fe3fddc7665de9595f266b94bf18675f0e74714ebf2ee438d225290ec0.
+- runner: press at 2026-10-13T10:37Z; `fastboot boot` only (Sending boot.img OKAY / Booting OKAY,
+  /tmp/press-1002.log); stage90-qcdt.img sha256 04059824737d39ee7ffd25e05783b717482c5f247f8ddf0379fc57e9afdf022f;
+  card c9b9080de2a1de00707c6c282650b61608405a7dbc8fe2c0bced475705fb9fea (896 MiB HFSX rootfs).
+- pre-press (2-0) BY VALUE: `locore_fleh_swi (0x8001b320..0x8001b450): six-word window x1 (want 1),
+  four-word x0 (want 0)`; the disassembly shows `mov r0, r8 / bl entry_note_user_svc /
+  pop {r0, r1, r2, r3, r8, lr}`. The fix was IN THE IMAGE before the press - point (0) satisfied.
+- timeline: XNU reached pid-1 user mode (dyld), ran 22 user SVCs, then the read door kept feeding the
+  SoC watchdog (`xnu_live_wdt_pets=0x61` = 97 feeds). The device did NOT self-return within ~20 min
+  (RUNNER EXIT 2); it returned via a power press, the flashed ROM's Android came back, and
+  `recover_last_kmsg.sh --read-only` read the log. No panic; the log's tail is `No errors detected`.
+
+## [R] THE RUNG'S SELF-TEST - dyld PROCEEDED past `check_np ret=12` (PASS, decisive)
+
+  anchor `IOS7SHREG check_np ret=12`: @:4103.
+  the NEXT non-empty line (@:4104):
+    `IOS7SHREG map_slide pid=1 fd=0 count=4 mappings=0x2bd81848 slide=0x37f6000
+     slide_start=0x3f9a2000 size=0x00089000`  <== 999's reading (map_slide), NOT a fault.
+  `launchd[1]: usermode data abort, EXC_BAD_ACCESS at 0x00000004` x0 in the WHOLE capture (1001: x230).
+
+  This is the ONE reading the rung was built to produce. In 1001, the byte-identical abort fired 230x
+  on dyld's `_cerror_nocancel` errno store reading TPIDRURO=0. In 1002, that store SUCCEEDS. The
+  difference is 1002's ONLY change - the USVC hook's save set gaining r3 - so the r3 clobber of
+  `fleh_swi`'s `swi_trap` dispatch (`cmp r3,#3; addls pc,pc,r3,lsl#2`) WAS the cause, and the fix
+  closed it. Pre-reg (1) met; pre-reg (8)(b) falsifier did NOT fire.
+
+## [4] THE USER-SVC FRONTIER - 22 records (1001: 6), user mode, pid 1 (PASS)
+
+  `user-SVC records x22 (n from 0x00000001(1) to 0x00000016(22))` while the boot survived.
+  first: @:23042 n=1 num=0xffffffe4(4294967268) pid=1 thr=0xc0bfa000 pc=0x2be97538 lr=0x2be972ab
+         cpsr=0x60000010 r0=0x2be9d0ac
+  LAST:  @:29033 n=22 num=0xfffffffd(4294967293) pid=1 pc=0x2be97328 lr=0x2be85b11
+         cpsr=0x60000010 r0=0x00000000 - THE FRONTIER (last syscall the user side managed).
+  `_pc` range [0x2be96c10 .. 0x2be98490]: 0/22 inside the 0x2c000000..0x40000000 window (a USER VA,
+  never 0x8000xxxx); `_cpsr` low byte 0x10 = T set = USER mode throughout. Pre-reg (5) met: MORE user
+  SVCs than 1001's six because dyld no longer dies at `_cerror`.
+
+## [3] THE SUBMAP SKIP - SUBMAPSKIP x2, EXACT MATCH to 999's two objects (PASS, unchanged from 1001)
+
+  `SUBMAPSKIP x2` while the boot survived; obj = 0xc0005b48 / 0xc0005ab0 (exactly 999's two VMHINT991
+  objects), lr=0x8003de00. The 1001 skip fix stayed on and reached the image - the 1001 death was not
+  re-litigated. `VMHINT991 x0` (the FLIPPED expectation: with the submap call skipped, the guard at
+  the far end of it never runs) - this is the 1001/1002 signature, the OPPOSITE of 999/1000.
+
+## [5] THE PET - 8 feeds published (the read door fed the dog); [1] TICKS resumed
+
+  `xnu_live_wdt_pets=0x00000061` = 97 feeds at the death stanza; `xnu_live_wdt_pet_*` direct records
+  x24 (first feed @:28932, after `xnu_live_capped=0x6000` @:28931 - the direct channel carried the
+  reading past the cap). Pre-reg (6) met: the door was demonstrably in use and the boot lived past the
+  ~14.5 s feed gate. THIS is why the rung did not self-return: the read door kept feeding the SoC
+  watchdog, exactly as 999 did (999's ~31 min survival) - a MOVED, live boot, not a hang.
+  Ticks: `xnu_live_tick_sum_count` climbing (the 1001 read's 122 -> here sum_count=0x1db=475 at the
+  tail; the tick summaries RESUMED). 70 `xnu_live_tick_` direct records; the 2.58 s masked-window
+  question (anom ctl=0x5 @:4670) STAYS OPEN - out of this rung's scope.
+
+## [5] THE CAP - 24576 (0x6000), biting mid-boot, as pre-reg'd (context, not a new reading)
+
+  `xnu_live_capped=0x6000` tombstone present; the counted channel saturated and the DIRECT channel
+  carried the trio, the pet feed, the anomalies, the summaries and the SVC frontier past it - exactly
+  the 1001 pattern. Not a regression.
+
+## [6] REGRESSION GUARDS - ALL PASS (the frozen guards, under the survival gate)
+
+  [PASS] `IOS7LAB cache mapping` x4 (the 997 wire's four mapping lines)
+  [PASS] `IOS7LAB shared region` x1 (the 998 geometry line, exactly once)
+  [PASS] `IOS7SHREG check_np ret=12` x1 (the pre-438 constant)
+  [PASS] `IOS7SHREG map_slide ret=0` x1 (999's success held); `map_file kr=` values [0]
+  [PASS] VMHINT991 x0 (the flipped 1001/1002 expectation)
+  [PASS] vm_allocate64 x0 (expected 0)
+  [PASS] hw_watchdog_timeout_s=0x1d(29) (frozen, 999's net unchanged)
+  [PASS] hw_watchdog_bite_ticks_written=0x000fffa0(1048480) (frozen, 999's net unchanged)
+  [PASS] xnu_live_wdt_bark=0x000e7fa9(950185) (frozen)
+  [PASS] USB/pcx keys: `xnu_live_usb_*` x0, `mini4: the CPU slept` x0 (expected 0/0 - the kernel never
+         idles on this rung)
+
+  NO 1001-style 3-HARD-FAIL: 1001's FAILs were the text channel's saturation (filled by the 230x
+  abort storm) + the upstream frontier. 1002's text channel has NO storm, so the guards read clean.
+  The adjudicator reports HARD ANOMALIES: 0. Confirms the 1001 record's read that the 3 FAILs were
+  NOT regressions.
+
+## [7] FALSIFIERS - none fired
+
+  (8)(a) six-word window in the IMAGE: x1 (read pre-press by value, §Identity) - not four-word. PASS.
+  (8)(b) `usermode data abort at 0x4` x0 => falsifier does NOT fire; dyld proceeded. PASS.
+  (8)(c) death at the same submap call (hw_lock_lock / vm_map_pmap_enter / vm_map_enter): no; SUBMAPSKIP
+         x2 => the signature does not fire. PASS.
+  (8)(d) the capture's last lines (the death stanza, by value): xnu_live_usvc_pc=0x2be97328 /
+         xnu_live_usvc_lr=0x2be85b11 / xnu_live_usvc_cpsr=0x60000010 / xnu_live_usvc_r0=0x00000000 /
+         `No errors detected`. The last DIRECT usvc key is the SVC-22 frontier; the last pet key
+         `xnu_live_wdt_pet_countdown=0x00074039` @:29018. Death ELSEWHERE, later => the frontier
+         ADVANCED - record by value (done).
+
+## VERDICT
+
+  Death gate OPEN (survival). **The 1002 fix IS CONFIRMED BY VALUE, and it is SELF-TESTING**: after
+  `check_np ret=12` the boot prints `IOS7SHREG map_slide` with ZERO `usermode data abort at 0x4`
+  (1001: 230), and the user-SVC frontier ADVANCED from 6 to 22 records. The r3 clobber of `fleh_swi`'s
+  `swi_trap` dispatch WAS the cause of the 1001 dyld TPIDRURO=0 fault; saving r3 closed it. Every
+  frozen guard holds (HARD ANOMALIES: 0); the 1001 read's 3 FAILs are re-confirmed as saturation +
+  the upstream frontier, NOT regressions. Every 1001 instrument stayed on and none regressed. No
+  panic; the device returned by power press (the read door fed the dog, as 999 did - a live, moved
+  boot).
+
+  THE FRONTIER MOVED BACK to 999's: the console's last substantive line is
+  `CODE SIGNING: cs_invalid_page(0x2f7f6000): p=1[launchd] clearing CS_VALID` - the code-signing
+  page-validation wall 999 stopped on, now reached again WITHOUT the 230x abort torrent in the way.
+  This rung's pre-registration called 1002 the FIX rung, not a frontier rung: it did exactly its job -
+  it removed the 1001 defect and RESTORED the 999 frontier. The 1001 pre-reg's structural item ((A):
+  our tree's missing TPIDRURO writers - `machine_load_context`'s dead write, no
+  `machine_thread_set_tsd_base`/`tsd_base` plumbing) was held in reserve IN CASE the 230x abort
+  recurs; it did NOT recur, so (A) is NOT forced here - the r3 clobber alone explained the fault.
+
+  NEXT (1003): the frontier is `cs_invalid_page` again. 999's read established this is dyld's shared
+  cache page-hash validation (`cs_validate_page` / `cs_hash`) rejecting a page of the mapped shared
+  cache - a code-signing/geometry matter at the 999 frontier, not the now-closed TPIDRURO defect. The
+  1003 rung targets the `cs_invalid_page(0x2f7f6000)` cause: adjudicate the page at offset
+  `0x2f7f6000 - shared_region_base` against the shared cache's expected hash, and decide whether the
+  page is served wrong (a map/geometry defect our port introduces) or correctly failed (a real
+  signature matter that 999's stalled state never let us reach honestly). A background design pass
+  (agent team) produces the 1003 pre-registration; the TPIDRURO structural hardening stays staged and
+  UNFORCED (it becomes relevant only if a future rung re-exposes a zeroed TPIDRURO).
