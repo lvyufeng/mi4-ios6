@@ -741,7 +741,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_DYLD_WITNESS
                 STAGE90_XNU_SHREG_PROBE
                 STAGE90_XNU_SHREG_WIRE
-                STAGE90_XNU_SHREG_GEOM)
+                STAGE90_XNU_SHREG_GEOM
+                STAGE90_XNU_USVC)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this
@@ -1106,6 +1107,16 @@ do
   # the branch above does not fire for it.
   if [[ -z $_v && $_k == STAGE90_XNU_SHREG_GEOM ]]; then
     printf '  %s=(absent, and a record that does not name the shared-region geometry is one built before 998 - the window was 0x30000000/0x10000000 and the stack top 0x2FE00000, the only value a pre-998 build could have written)\n' "$_k"
+    continue
+  fi
+  # **1000's one new switch: absent names the pre-USVC arm.** `STAGE90_XNU_USVC` reached the record
+  # only in 1000; every arm parked before it was built from a tree whose `traps_lo.s` had no hook and
+  # whose image defined no `entry_note_user_svc`, so an absent key is not a missing value but the
+  # value. Demanding the key would make every pre-1000 park unpressable (882's defect, nineteen times
+  # repaired now). A post-1000 record can never reach this branch: `build_entry.sh` validates the
+  # switch at its own assignment (0/1 only) and emits the line unconditionally.
+  if [[ -z $_v && $_k == STAGE90_XNU_USVC ]]; then
+    printf '  %s=(absent, and a record that does not name the user-SVC frontier hook is a pre-1000 arm - the only value any pre-1000 build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \
