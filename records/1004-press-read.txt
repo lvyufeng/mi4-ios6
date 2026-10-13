@@ -1,0 +1,163 @@
+# 1004 press read — the abort trace (armed-d13-582a19c8)
+
+Capture: `out/stage90/captures/recovered-unknown-arm-20261013-160126-last_kmsg.txt`
+(1,392,644 B, 29,163 lines; recovered after the operator's power press — the run did not
+self-return, exit 2, exactly as 1001/1002/1003 for a resident rung).
+Adjudicator: `tools/check_1004_capture.py` → **0 HARD ANOMALIES, DEATH GATE OPEN**, exit 0.
+
+THE PRESS. First attempt REFUSED at preflight (step 1): the gate's `ENTRY_CFG_KEYS` did not
+print `STAGE90_XNU_ABORT_TRACE`, so the converse check fired. Fixed (`b3fb2e1`, the key added
+with a pre-1004 absent-value branch); re-run clean. `fastboot boot` OKAY (sha256 167c6b4a…,
+unchanged across the send, never flashed). Device dark after the boot; the operator
+power-pressed; the watcher recovered the log.
+
+WHAT 1004 WAS BUILT TO ANSWER. 1003 showed pid 1 stuck in the KERNEL's data-abort RETURN path
+(`lr=0x8046b92c` = `sleh_abort+0x468`, one frame held for n=9..15, `xnu_live_sleh_seen`=40) but
+the sleh caps (8/16/64) hid all but the first 8 of the 40 aborts. 1004 widened the caps to 512
+and added `xnu_live_sleh_upc` (the faulting frame's user pc) so EVERY abort's (far, upc) is
+recorded. The branch it discriminates: (a) LOOP — the same page re-faults (a validation cycle);
+(b) WALK — dyld pages the shared cache forward (slow, not stuck).
+
+## The trace is COMPLETE, and it is a WALK — the LOOP hypothesis is REFUTED
+
+`xnu_live_sleh_seq` ×40 (the whole abort set; the pre-1004 caps would have shown 8).
+`xnu_live_sleh_upc` ×40. `_frame_ok`=1 on 40/40 (the instrument checks itself — the frame read
+agrees with the fault pair). `xnu_live_sleh_seen`=0x28 (40), `xnu_live_sleh_storm` **absent** —
+the abort count never exceeded the detailed band, so all 40 are recorded.
+
+**The channel cap (`xnu_live_capped` @:29006) is AFTER the last abort (@:28020), so the abort
+trace is NOT truncated by it** — the cap tombstone truncated only later records. (The adjudicator
+was hardened to read this POSITIONALLY, not by bare presence; a bare-presence reading wrongly
+flags a complete trace as truncated.)
+
+**far classification: ADVANCE ×21, REPEAT ×0, other ×18 — by BOTH the word-granular and the
+page-granular (`far & ~0xfff`) counts.** Zero repeats in a 4-window. **VERDICT: WALK.** The 1003
+"same page re-faulting" / CS-validation-loop reading is REFUTED: consecutive `far` pages do not
+repeat; the tail is not page-frozen (`x8 distinct word / x8 distinct page`).
+
+## What dyld is doing: faulting in ~30 of its own pages, then one shared-region page
+
+dyld slide this boot = **0xFF000** (`the OS starts the process at 0x2bf00028` @:4115 = `__dyld_start`
+link `0x2be01028`). The 40 aborts, de-slid, are dyld walking down its own image:
+
+| seq | type | far (runtime) | far page | de-slid / identity | user |
+|-----|------|---------------|----------|--------------------|------|
+| 1–4 | 4 | 0x1000 / 0xcfdbd000 / 0xcfdfe000 / 0x2bd00f7c | — | (kernel / stack, pre-exec) | 0 |
+| 5–36 | 3,4 | 0x2bf0….–0x2bf4… | ~24 pages | 0x2be0….–0x2be4… = dyld `__TEXT`/`__LINKEDIT` (e.g. `_strcmp`+0, `_strlen`+0, `dyld::addImage`+0, `_arc4_fetch`+0, `__cstring` literals) | 1 |
+| 37 | 4 | 0x2bcff000 | 0x2bcff000 | **BELOW dyld base** (de-slid 0x2bc00000) = the process's stack region, not dyld | **0** |
+| 38 | 3 | 0x2bf15058 | 0x2bf15000 | dyld `_arc4_fetch`+0 | 1 |
+| 39 | 4 | 0x2bf1eb27 | 0x2bf1e000 | dyld `__cstring` (`"/dev/random"`) | **0** |
+| 40 | 4 | 0x3e8dd000 | 0x3e8dd000 | **= `map_slide` slide_start** (shared-region code page) | **0** |
+
+De-slide by value (extracted `/usr/lib/dyld` from the card image: Mach-O, `__TEXT` vmaddr
+0x2be00000; slide 0xFF000): the USER-mode aborts (seq 5–36) are dyld paging in **its own code and
+data** — `_strcmp`, `_strlen`, `dyld::addImage`, `_arc4_fetch`, its `__cstring` literals — i.e.
+**dyld is in `ImageLoader::link`, linking images** and first-touching each page. That is normal
+cold-image faulting: forward, one page at a time, slow — WALK, not a loop.
+
+**seq 40 `far=0x3e8dd000` is exactly the `IOS7SHREG map_slide … slide_start=0x3e8dd000` page
+(@:4120)** — the shared-region code page `map_slide` slid in (mapping-0 of the shared cache, base
+0x2c000000 + slide). seq 37/39/40 are KERNEL-mode faults (`user=0`): the kernel touching the
+stack region (0x2bcff000, below dyld's base) and the shared-cache slide page on the process's
+behalf. `cs_invalid_page(0x2e731000)` @:4130 = `0x2c000000 + 0x2731000` (the same shared-region
+slide) is the EARLY tolerated event, NOT the frontier (1003).
+
+## The frontier: the kernel's first kernel-mode page-in of the shared-region slide page
+
+After the 40th abort the kernel **does not crash** (no panic, death gate OPEN). Stated as
+measured facts: after @:28020 (the 40th abort), the run publishes NO further abort
+and NO further system call (`xnu_live_usvc` ×0 in the post-abort window), yet KEEPS RUNNING:
+storage reads served, the tick climbs, the wdt pet lands. The last three syscalls before the
+freeze are `xnu_live_usvc_num=0xfffffffd` ×3 = **`mach_absolute_time`**, at dyld link
+`0x2be1b328` = the `bx lr` right after `svc #128` in dyld's **`_mach_absolute_time`** wrapper
+(the **commpage-timebase-invalid fallback** path — the wrapper checks commpage byte
+`0xffff4090` at `[r12,#8]`, finds it 0, and takes the `svc`). The wrapper is reached from
+**`ImageLoader::link`** — dyld is inside the image-linking phase, snapshotting absolute time.
+
+The interrupted frame at every late tick sample (n=9..15, pc=0x8001b1fd, `cpsr=0x60000113` SVC
+mode, `sp=0xcfdbbf00`, `lr=0x8046b92c`) DECODES, by disassembly, as the CPU inside **`sleh_abort`'s
+data-abort RETURN path**: `sleh_abort+0x468` (`bl ml_set_interrupts_enabled`, taken when `vm_fault`
+returned success) → `ml_set_interrupts_enabled`(1) falls through into `astloop`/`enable_interrupts`
+(0x8001b1ac AST check → `bl ast_taken`; 0x8001b1f8 `cpsie i`; 0x8001b1fc `push {r0,r1,r2,r7,r8,lr}`).
+`pc=0x8001b1fd` is **byte 2 of that `push`** — a transient pass-through in the prologue, NOT a
+spin word (`astloop`'s only backward branch is `b 0x8001b1ac` at 0x8001b1f4; nothing branches to
+0x8001b1fd). The saved `I`-bit=1 is correct: `sleh` runs the fault with IRQ masked, and the
+interrupted state is captured before `cpsie i`. One EARLIER sample (n=8, @:27345) is USER mode
+(`cpsr=0x40000010`) at dyld `0x2be1aecc` = `_open`+0x8 (`svc #5`) — proof the sampler reads a real
+user frame and that pid 1 RAN in user mode before the freeze onset (the switch is between tick 256
+and 512).
+
+**CAUTION — the frozen frame may be a MEASUREMENT artifact, not the machine's true state.** Three
+facts: (i) `pc=0x8001b1fd` is ODD, while every other sampled pc is even (Thumb/ARM interworking
+clears bit 0); (ii) it sits two bytes into a `push`, a pc nothing branches to; (iii) the sample's
+`_nz` (frame occupancy) changes between n=10 and n=11 (0x0e→0x0f) — **the channel is still being
+written while pc/sp/lr/cpsr are held**, so the six identical samples are one held frame, not six
+independent confirmations. `enable_interrupts` is a HIGH-FREQUENCY pc (every `ml_set_interrupts_
+enabled(1)` falls through it, and the 999/1004 hook `entry_timer_edge_probe` now sits inside it at
+0x8001b208), so a sampler that catches the CPU there repeatedly may be reading a common pc, not a
+dwell. **Whether the CPU is genuinely frozen here for ~24 min, versus this being the last frame the
+sampler captured, is UNRESOLVED from the static image** ([[mi4-measurement-defects]]): the
+conclusive test is the live advance-vs-hold plus whether `far=0x3e8dd000` is ever mapped.
+
+## Reading (honest scope)
+
+**1004 REFUTES the 1003 candidate (a) "the same page re-faults".** The abort set is a clean
+forward walk — zero repeats at both word and page granularity — over dyld's own ~24 pages, then a
+handful of kernel-mode faults. **So 1005 branch (a) (CS-validation LOOP,
+`STAGE90_XNU_CS_TAINT_TRACE`) is NOT the branch the evidence selects.**
+
+**What is proven:**
+1. pid 1 executed dyld's user code (`ImageLoader::link` linking images) and faulted in its own
+   pages forward, one page at a time, to the very end of the trace.
+2. The LAST abort (seq 40, @:28020) is a KERNEL-mode fault on `far=0x3e8dd000` = the
+   **shared-region slide page** (`map_slide` slide_start) — the first touch of the 301 MiB shared
+   cache. seq 37/39 are likewise kernel-mode (stack region below dyld; dyld `__cstring`). The
+   walk crosses from dyld's own image to the shared cache at the frontier.
+3. After seq 40, NO more aborts and NO more syscalls; the machine keeps running (storage, ticks,
+   wdt pets) to the operator's power press.
+
+**What is NOT proven (and 1005 must settle):** whether the machine BLOCKS at, or merely STOPS
+AT, the shared-cache page-in.
+  (b1) **Blocked in the shared-cache page-in** — the seq-40 kernel fault's page never arrives, so
+       the faulting thread sleeps in `vm_fault`'s wait; the frozen `sleh`-return frame is where
+       the tick sampler lands each time. The stall is a page that never completes.
+  (b2) **A frame artifact, not a live dwell** — `0x8001b1fd` is a high-frequency pc (every
+       `ml_set_interrupts_enabled(1)` passes it) and its parity/position are anomalous, so the
+       six identical samples may be one common pc, not evidence of a 24-min dwell. Under this
+       reading the real state is invisible to 1003's sampler and 1005 needs a different witness.
+
+**1005 = branch (b)**, but SHARPENED: the decisive instrument is not "fault rate" alone — it is
+(a) **does a tick sample ever ADVANCE off 0x8001b1fd, and does the sample pc carry the E bit
+correctly** (kill the artifact question — v0.1 `stage90_sample_sanitize`), and (b) **what does the
+seq-40 shared-cache page-in do — does `vm_fault(0x3e8dd000)` return, and is the page ever
+mapped**. That separates "blocked page-in" from "sampler artifact". A `STAGE90_XNU_FAULT_RATE`
+timing (1005 draft branch (b)) is still useful to date the 40th abort, but the mapping witness is
+the one that answers the frontier.
+
+**Why it matters:** dyld paged in ~24 of its own pages and then demanded the first shared-cache
+page — the wall 969 named ("launchd links a 301 MiB dyld cache"). The frontier is the kernel
+handling (or failing to complete) that first shared-cache fault. Most of dyld's `ImageLoader::link`
+work — and the entire shared cache — still lies beyond it.
+
+## Falsifiers checked (all pass)
+
+- Instrument reached the image: YES (`xnu_live_sleh_upc` ×40, `_frame_ok`=1 ×40).
+- The trace is complete (not cap-truncated): YES (cap @:29006 is AFTER the last abort @:28020).
+- Cap-not-exceeded: YES (`xnu_live_sleh_storm` absent).
+- No panic: `HARD ANOMALIES 0`; death gate OPEN; the machine ran to the end (wdt pets, ticks).
+- 1002 r3-save regression: absent.
+- 1003 stall frame reproduction: EXACT (pc/cpsr/sp/lr identical).
+
+## 1005 input
+
+Branch **(b)**, sharpened. The frontier is the kernel's first kernel-mode page-in of the
+**shared-cache slide page `0x3e8dd000`** — not a dyld self-page loop. Two instruments:
+1. **Shared-cache page-in witness** — instrument `vm_fault` (or the shared-cache pager) for
+   `far=0x3e8dd000`: does the fault return? is the page ever mapped/`cs_validated`? Locates the
+   wall precisely.
+2. **Sample-sanitize** — record the interrupted cpsr's T-bit and the raw interrupted pc, and
+   re-sample at finer granularity after the last abort, to kill (or confirm) the `0x8001b1fd`
+   artifact. If the pc advances off the sleh-return path, it is a live dwell; if the samples are
+   one common pc, the frontier is elsewhere.
+See `docs/1005-branch-decision-draft.md` branch (b) (`STAGE90_XNU_FAULT_RATE`) and the caveat
+above.
