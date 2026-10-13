@@ -2098,6 +2098,18 @@ void __real_machine_idle(void);
  * the published `xnu_live_wdt_countdown` is seen to RISE and then DROP at each pet, and a count that
  * reached the bark with no reset would be the falsifier. The base and its offsets are 909's, resolved
  * from `hw_watchdog.c`'s own file (not re-typed): the build's clause below reads them back by value.
+ *
+ * **1000: every record in here is DIRECT now, and the FEED is itself a record.** 999's [3] physics
+ * proved the dog was fed for ~30 min, but every pet record rode the counted channel whose cap had
+ * saturated before pid 1 ran - so the feed's own evidence was structurally invisible, the one reading
+ * that run could not make. Each publish below moved to `entry_write_kv` (uncounted, the tombstone's
+ * own writer) so absence is evidence again ([[mi4-998-g1-confirmed-map-file-kr0]]'s law), and the
+ * per-feed record is bounded by a rule instead of by the cap: feeds 1-4 publish `_n`/`_calls`/
+ * `_countdown` in full, then the feed ladder follows powers of two of `_n` - so a boot that lived to
+ * the 64th feed (~15 min of I/O) says so, and the first feed's `_countdown` (>= bark/2 by
+ * construction) is what shows the threshold was the gate that opened. The top-of-call samples keep
+ * their powers-of-two rule on `calls`, which stays the negative cell: countdown rising with pets=0
+ * reads "the threshold had not opened yet", not "the pet is broken".
  */
 #define STAGE90_WDT_BASE      0xf9017000u
 #define STAGE90_WDT_REG_RST   0x04u
@@ -2115,6 +2127,13 @@ extern void entry_live_write(const char *key, uint32_t value);
 extern uint32_t entry_live_ready(void);
 extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_before_out,
                                    uint32_t *desc_out);
+/* **1000: the pet's publishes moved to the DIRECT channel, and the timer's aggregates ride the pet's
+ * sparse gate.** `entry_write_kv` is the uncounted writer (the tombstone's own - `entry_stubs.c`,
+ * same final link); `entry_tick_summary` is the board PE's aggregate dump (`pe_msm8974.c`, beside the
+ * tick counters). Declared here for the reason the three above are: this file's order puts the
+ * wrapper above the seam's own declarations, and there is no header both sides share. */
+extern void entry_write_kv(const char *key, uint32_t value);
+extern void entry_tick_summary(void);
 
 static uint32_t g_wdt_installed;      /* the pet has a mapping it can vouch for */
 static uint32_t g_wdt_pets;
@@ -2190,12 +2209,12 @@ __attribute__((noinline)) void entry_wdt_pet(uint32_t calls)
         uint32_t mapped = entry_mmio_section(STAGE90_WDT_BASE, STAGE90_WDT_BASE,
                                              &slot_before, &desc);
         if (entry_live_ready() != 0u) {
-            entry_live_write("xnu_live_wdt_map", mapped);
+            entry_write_kv("xnu_live_wdt_map", mapped);
             /* The install's own two readings: what the L1 slot held before (`slot_before`) and the
              * descriptor written (`desc`). Arm 2 published `_map=0` and nothing else; `slot_before`
              * is what the fallback below reads, so it is published unconditionally. */
-            entry_live_write("xnu_live_wdt_slot_before", slot_before);
-            entry_live_write("xnu_live_wdt_desc", desc);
+            entry_write_kv("xnu_live_wdt_slot_before", slot_before);
+            entry_write_kv("xnu_live_wdt_desc", desc);
         }
         if (mapped != 0u)
             g_wdt_via = STAGE90_WDT_VIA_OWN;
@@ -2206,9 +2225,9 @@ __attribute__((noinline)) void entry_wdt_pet(uint32_t calls)
         g_wdt_installed = 1u;
         g_wdt_bark_ticks = wdt_read(STAGE90_WDT_BARK) & 0xfffffu;
         if (entry_live_ready() != 0u) {
-            entry_live_write("xnu_live_wdt_base", STAGE90_WDT_BASE);
-            entry_live_write("xnu_live_wdt_bark", g_wdt_bark_ticks);
-            entry_live_write("xnu_live_wdt_via", g_wdt_via);
+            entry_write_kv("xnu_live_wdt_base", STAGE90_WDT_BASE);
+            entry_write_kv("xnu_live_wdt_bark", g_wdt_bark_ticks);
+            entry_write_kv("xnu_live_wdt_via", g_wdt_via);
         }
     }
 
@@ -2216,9 +2235,14 @@ __attribute__((noinline)) void entry_wdt_pet(uint32_t calls)
     /* Publish on the powers of two of the pass count, so a run that died between pets still says how far
      * the count had climbed - the negative cell, and the reason the reading is separate from the pet. */
     if (entry_live_ready() != 0u && (calls & (calls - 1u)) == 0u) {
-        entry_live_write("xnu_live_wdt_sts", wdt_read(STAGE90_WDT_REG_STS));
-        entry_live_write("xnu_live_wdt_countdown", count);
-        entry_live_write("xnu_live_wdt_pets", g_wdt_pets);
+        entry_write_kv("xnu_live_wdt_sts", wdt_read(STAGE90_WDT_REG_STS));
+        entry_write_kv("xnu_live_wdt_countdown", count);
+        entry_write_kv("xnu_live_wdt_pets", g_wdt_pets);
+        /* **1000: the timer's aggregates ride this same sparse gate.** The gate fires across the
+         * whole run (the read door passes the read count), so `_tick_sum_*` gets post-exec snapshots
+         * at moments the cap cannot swallow - 999 could see the tick only through edge probes, and
+         * the collapse's aggregate was unreadable after the exec. */
+        entry_tick_summary();
     }
 
     /* Pet only when the count has passed half the bark. `g_wdt_bark_ticks == 0` (a bark register that did
@@ -2226,8 +2250,16 @@ __attribute__((noinline)) void entry_wdt_pet(uint32_t calls)
     if (g_wdt_bark_ticks == 0u || count >= (g_wdt_bark_ticks / 2u)) {
         *(volatile uint32_t *)(uintptr_t)(STAGE90_WDT_BASE + STAGE90_WDT_REG_RST) = 1u;
         g_wdt_pets++;
-        if (entry_live_ready() != 0u)
-            entry_live_write("xnu_live_wdt_pet_calls", calls);
+        /* The feed record, DIRECT and rule-bounded: the first four feeds in full (`_n` ordinal, the
+         * caller's count, and the count that opened the gate - >= bark/2 by construction), then the
+         * feed ladder on powers of two of `_n`, so "fed once and stopped" and "still feeding at the
+         * 64th feed" are different logs. */
+        if (entry_live_ready() != 0u &&
+            (g_wdt_pets <= 4u || (g_wdt_pets & (g_wdt_pets - 1u)) == 0u)) {
+            entry_write_kv("xnu_live_wdt_pet_n", g_wdt_pets);
+            entry_write_kv("xnu_live_wdt_pet_calls", calls);
+            entry_write_kv("xnu_live_wdt_pet_countdown", count);
+        }
     }
 }
 #endif /* STAGE90_XNU_RESIDENT */

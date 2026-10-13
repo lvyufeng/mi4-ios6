@@ -223,7 +223,7 @@ fi
 echo "   (by design: the ONLY failing clause is the frozen 20 B straddle one)"
 echo "-- by value: the SAME frozen checker against its OWN 996 image, with the FROZEN 994 image as a NEGATIVE CONTROL (on must FAIL, off must PASS) - the checker must still PASS its home image: 997/998 do not weaken it --"
 python3 tools/check_d13_shreg_probe.py out/stage90/frozen/armed-d13-cea0c1c2/xnu_arm_entry.elf --expect on --control out/stage90/captures/994-xnu_arm_entry.elf
-echo "-- by value: the 997 shreg-WIRE CHECKER (switch ON: the IOS7LAB cache mapping literal in shared_region_copyin_mappings reaching a printf; count*32 (`lsl #5` + `add rX,rX,#32`); the 20 B `count*5<<2` pair ABSENT; 294's copyout r2=8 for the full uint64; no stray literal) + the SOURCE-side gate check --tree (3 gated #if lines + 1 body gate; the mapping printf INSIDE a gate region; NOTE: --tree takes the FILE, not the tree root - measured) --"
+echo "-- by value: the 997 shreg-WIRE CHECKER (switch ON: the IOS7LAB cache mapping literal in shared_region_copyin_mappings reaching a printf; count*32 (\`lsl #5\` + \`add rX,rX,#32\`); the 20 B \`count*5<<2\` pair ABSENT; 294's copyout r2=8 for the full uint64; no stray literal) + the SOURCE-side gate check --tree (3 gated #if lines + 1 body gate; the mapping printf INSIDE a gate region; NOTE: --tree takes the FILE, not the tree root - measured) --"
 python3 tools/check_d13_shreg_wire.py out/stage90/xnu_arm_entry.elf --expect on --tree external/xnu-hd2-darwin13/xnu/bsd/vm/vm_unix.c
 echo "-- by value: the same wire checker against the FROZEN 996 image as a NEGATIVE CONTROL (it must FAIL ON and PASS OFF - the 996 elf carries the probe but the wire is still 20 B) and the 994 capture as a second --"
 python3 tools/check_d13_shreg_wire.py out/stage90/xnu_arm_entry.elf --expect on --control out/stage90/frozen/armed-d13-cea0c1c2/xnu_arm_entry.elf --control out/stage90/captures/994-xnu_arm_entry.elf
@@ -235,7 +235,7 @@ set +e
 python3 tools/check_d13_shreg_wire.py out/stage90/xnu_arm_entry.elf --expect off
 echo "   (--off exit $? - rehearsal, not a criterion; the ON run above is)"
 set -e
-echo "-- by value: the 998 shreg-GEOM CHECKER, SOURCE side (the vmabi-recon lane's; NOTE: --tree takes the TREE ROOT here, unlike the wire/probe checkers' FILE argument - measured): the three files all in the staged shape (0 bare `#if IOS7_COMPAT_PLATFORM` in both .c files, 1 gated each, the helper called 2x / defined 1x), the ABI constants intact in BOTH states (base_address = 0x2C000000U;, size = 0x14000000U;, the IOS7LAB printf, status.c's 0x2BE00000U + USRSTACK 0x2FE00000), no v1 inline-#if wrap --"
+echo "-- by value: the 998 shreg-GEOM CHECKER, SOURCE side (the vmabi-recon lane's; NOTE: --tree takes the TREE ROOT here, unlike the wire/probe checkers' FILE argument - measured): the three files all in the staged shape (0 bare \`#if IOS7_COMPAT_PLATFORM\` in both .c files, 1 gated each, the helper called 2x / defined 1x), the ABI constants intact in BOTH states (base_address = 0x2C000000U;, size = 0x14000000U;, the IOS7LAB printf, status.c's 0x2BE00000U + USRSTACK 0x2FE00000), no v1 inline-#if wrap --"
 python3 tools/check_d13_shreg_geom.py --tree external/xnu-hd2-darwin13/xnu --expect staged
 # Rehearsal ONLY: the tree IS staged, so `--expect pre` is EXPECTED to be refused (rc 1). The scratch
 # rehearsal already proved the checker's pre/staged/mixed tri-state; this is the on-tree reminder.

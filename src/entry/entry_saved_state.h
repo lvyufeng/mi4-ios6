@@ -86,6 +86,16 @@
 
 #define STAGE90_SS_SIZE    76
 
+/* **1000: the two words of the `r[13]` span a syscall frame is read at.** `traps_lo.s`'s
+ * `fleh_swi` consumes the syscall number in r12 (`mov r11, r12` :135; the LEO sibling reads the
+ * same word at `[r8, #48]`), and r0 is the syscall's first argument - the user-SVC frontier
+ * record publishes both. Derived, not transcribed: `tools/check_saved_state_offsets.py` compares
+ * them against the selected tree's parsed `r[]` span (its first word, and its last from the
+ * span's own width), and on 4570 the generated `assym.s`'s `SS_R0 #0`/`SS_R12 #48` are a third
+ * source for the same two words. */
+#define STAGE90_SS_R0      0
+#define STAGE90_SS_R12     48
+
 /* D13: `offsetof(thread_t, map)`, `offsetof(vm_map_t, pmap)`, `offsetof(thread_t, recover)`,
  * `offsetof(thread_t, machine.uss)` (the machine block is first in D13's `struct thread`, so
  * `machine.uss` is the 12-member `arm_saved_state_t`'s pointer, not `PcbData`). */
@@ -106,6 +116,16 @@
 
 /* `sizeof(struct arm_saved_state)` (`SS_SIZE`), for the word count the frame is indexed in. */
 #define STAGE90_SS_SIZE    80
+
+/* **1000: the two words of the `r[13]` span a syscall frame is read at.** `traps_lo.s`'s
+ * `fleh_swi` consumes the syscall number in r12 (`mov r11, r12` :135; the LEO sibling reads the
+ * same word at `[r8, #48]`), and r0 is the syscall's first argument - the user-SVC frontier
+ * record publishes both. Derived, not transcribed: `tools/check_saved_state_offsets.py` compares
+ * them against the selected tree's parsed `r[]` span (its first word, and its last from the
+ * span's own width), and on 4570 the generated `assym.s`'s `SS_R0 #0`/`SS_R12 #48` are a third
+ * source for the same two words. */
+#define STAGE90_SS_R0      0
+#define STAGE90_SS_R12     48
 
 #define STAGE90_ACT_MAP        692
 #define STAGE90_MAP_PMAP       40

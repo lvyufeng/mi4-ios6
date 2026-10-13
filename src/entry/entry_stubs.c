@@ -5042,6 +5042,14 @@ void entry_note_wait_returned(uint32_t seq, uint32_t error, uint32_t ret, uint32
  */
 uint32_t g_exec_calls;
 
+/* **1000: the timer's aggregate summary, asked for at the exec-done point below.** Defined in the
+ * board PE (`pe_msm8974.c`, beside the tick's own counters) - in this image's final link, and in
+ * pass 1's `LINK_OBJS` too (`build_entry.sh`'s big append), so this strong reference resolves where
+ * its own definition lives instead of growing a generated stand-in (the `entry_wdt_pet` family trap,
+ * documented at `entry_storage.c`'s weak declaration). Declared at use, like every other cross-file
+ * name in this image. */
+extern void entry_tick_summary(void);
+
 uint32_t entry_note_exec(uint32_t caller, uint32_t who, uint32_t proc)
 {
     uint32_t seq = g_exec_calls + 1u;
@@ -5075,6 +5083,103 @@ void entry_note_exec_returned(uint32_t seq, uint32_t who, uint32_t after_who)
     g_exec_probe_records = g_live_records;
     g_exec_probe_state = g_live_state;
     g_exec_probe_pending = 1u;
+
+    /* **1000: the timer's exec-time summary, riding the done point.** The counted channel saturated
+     * here in 999, so the tick's health has to be asked for by name, not inferred from what the cap
+     * left behind. This call's first `entry_write_kv` is also what flushes the probe stashed just
+     * above (ANY later direct write does), so the stashed readback lands immediately before the
+     * summary's three keys. */
+    entry_tick_summary();
+}
+
+/* ------------------------------ the user side's syscalls (1000) */
+/*
+ * **1000: the user SVC frontier - 999's given (c).** 999's tail read: the exec trio (above), the
+ * `texr` edge with cpsr 0x10 (user mode reached), `cs_invalid_page` for launchd's dyld shared
+ * cache - and then the *counted* channel fell silent while the machine stayed alive for 30
+ * minutes. Silence there is not a reading. The counted channel's cap sits mid-boot (its tombstone
+ * is `xnu_live_capped`), so "no further records" cannot distinguish "pid 1 stopped here" from
+ * "the cap ate everything after here" - the defect class given (b) names. This recorder makes the
+ * distinction by construction: every SVC that arrives at `fleh_swi` is written to the DIRECT
+ * (cap-exempt) channel, so the LAST record in the log is, by construction, the last syscall the
+ * user side managed - and the frontier question ("where does pid 1 stop now, with the 438 slide
+ * repaired") is read off the tail instead of inferred from silence.
+ *
+ * **The hook, by value.** `tools/patch_d13_usvc.py` inserts into `osfmk/arm/traps_lo.s`'s
+ * `fleh_swi` - the file's ONE SVC entry (`EnterARM(fleh_swi)` :115; no thumb sibling exists) -
+ * right after `cpsie i` :136: `stmfd sp!, {r0,r1,r8,lr}` / `mov r0, r8` /
+ * `bl _entry_note_user_svc` / `ldmfd sp!, {r0,r1,r8,lr}`. r8 is the saved frame (`mov r8, sp`
+ * :130) and is read by every path below (`swi_mach`/`swi_exit`/`swi_unix` all `mov r0, r8`);
+ * r11 - the number `mov r11, r12` :135 just made - survives the call by AAPCS (r4-r11 are
+ * callee-saved), and r0/r1 are saved because the -3 timebase path below preserves them. Four
+ * saved words keep sp 8-aligned at the `bl` - 990's lesson, where a 4-mod-8 frame killed the
+ * callee's `vld1.32`. The gate is `STAGE90_XNU_USVC` (ASFLAGS via `tools/assemble_arm_layer.sh`);
+ * off, the tree's own bytes assemble unchanged.
+ *
+ * **The window, and why 64.** The first 64 SVCs publish all eight fields - `_n`, `_num`, `_pid`,
+ * `_thr`, `_pc`, `_lr`, `_cpsr`, `_r0` - because the frontier is inside them: launchd makes its
+ * first syscalls immediately after the exec, so 999's stop point (cs_invalid_page, then silence)
+ * has every candidate fully described. Past 64, a powers-of-two ladder publishes `_n`/`_num`
+ * only - the log still says how many calls followed and what the last numbered one was, at two
+ * records per doubling instead of eight per call (the `entry_timer_edge_probe` publish rule,
+ * re-used). The counter is incremented BEFORE the first write (the sleh recorder's rule): a
+ * record that is present names the call it is. A NULL `state` - which the hook cannot produce,
+ * and which would mean the vector changed shape (269) - still publishes `_n` alone, never
+ * nothing.
+ *
+ * **The fields, by value.** `_num` is the frame's r12 (`STAGE90_SS_R12`): the LEO sibling reads
+ * the same word at `[r8, #48]` to classify mach traps, and our dispatch reads r11, which is that
+ * word. `_pc`/`_lr`/`_cpsr` are the table's words, so `_pc` is where the call will return and
+ * `_cpsr` says the mode; `_r0` (`STAGE90_SS_R0`) is the syscall's first argument - the fd, the
+ * path pointer. `_pid` is `proc_pid(current_proc())`, guarded: 507 measured that without BSD
+ * info `current_proc()` answers `kernproc` and never NULL, so the sentinel describes the case
+ * the guard is written for rather than one this path is expected to take (504: `proc_pid(0)` is
+ * a null dereference). `_thr` is TPIDRPRW (`:650`) - this file's one-instruction
+ * `current_thread()`. No pid filter: the window is the first 64 SVCs whatever their source, and
+ * `_pid` says who they were.
+ */
+uint32_t g_usvc_n;
+
+#define USVC_FULL_N 64u      /* the full-field window; past it the ladder writes `_n`/`_num` only */
+
+/* `int proc_pid(proc_t)` and `proc_t current_proc(void)` in this file's `void *` spelling of a XNU
+ * pointer type - the spelling `entry_trace.c`'s declarations introduced and explained. `proc_pid`
+ * is a real function of the image: `bsd_kern_kern_proc.o` is `require`d and sits in `LINK_OBJS`
+ * before pass 1 runs (the 505 clause), so the call resolves in pass 1 and grows no stand-in. */
+extern int proc_pid(void *proc);
+extern void *current_proc(void);
+
+void
+entry_note_user_svc(const uint32_t *state)
+{
+    uint32_t n;
+    uint32_t num;
+    void *me;
+
+    if (entry_live_ready() == 0u)
+        return;
+    n = ++g_usvc_n;
+
+    if (state == 0) {
+        entry_write_kv("xnu_live_usvc_n", n);
+        return;
+    }
+    num = state[STAGE90_SS_R12 / 4];
+
+    if (n <= USVC_FULL_N) {
+        me = current_proc();
+        entry_write_kv("xnu_live_usvc_n", n);
+        entry_write_kv("xnu_live_usvc_num", num);
+        entry_write_kv("xnu_live_usvc_pid", (me != 0) ? (uint32_t)proc_pid(me) : 0xFFFFFFFFu);
+        entry_write_kv("xnu_live_usvc_thr", entry_stubs_thread_pointer());
+        entry_write_kv("xnu_live_usvc_pc", state[STAGE90_SS_PC / 4]);
+        entry_write_kv("xnu_live_usvc_lr", state[STAGE90_SS_LR / 4]);
+        entry_write_kv("xnu_live_usvc_cpsr", state[STAGE90_SS_CPSR / 4]);
+        entry_write_kv("xnu_live_usvc_r0", state[STAGE90_SS_R0 / 4]);
+    } else if ((n & (n - 1u)) == 0u) {
+        entry_write_kv("xnu_live_usvc_n", n);
+        entry_write_kv("xnu_live_usvc_num", num);
+    }
 }
 
 /* ------------------------------ where the OS starts the process it just loaded (510) */

@@ -182,6 +182,16 @@ check:
 	@tools/check_response_word_order.py
 	@tools/check_hfs_staged.sh
 	@tools/check_d13_board_staged.sh
+# 1000: the saved-state frame table `entry_saved_state.h` writes must agree with the tree's own
+# assym tables - the USVC recorder (`entry_stubs.c`'s `entry_note_user_svc`) reads R0/R12/PC/LR/CPSR
+# out of the frame by these offsets, and a wrong offset prints a field of the WRONG frame word with
+# the right name on it (the one-value-two-definitions class, at the frame level). The tool derives
+# the r_span from the assym source (never restates it), compares the header against BOTH the 4570
+# and the D13 tables, and its selftest mutates an offset in each direction. Source half, no
+# compiler, no device.
+	@tools/check_saved_state_offsets.py --selftest >/dev/null
+	@tools/check_saved_state_offsets.py
+	@XNU_TREE=external/xnu-hd2-darwin13/xnu tools/check_saved_state_offsets.py
 # 968: the COW writable-root arm needs D13's `hfs_mountroot` to mount the root read-write. `tools/
 # hfs_patch_root_rw.py`'s guarded `vfs_clearflags(mp, MNT_RDONLY)` is the one edit that makes it so, and
 # on D13 it is applied by `tools/stage_d13_root_rw.sh`. `check_d13_root_rw_staged.sh` re-derives the

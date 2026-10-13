@@ -1306,6 +1306,32 @@ case "$RESIDENT" in
     *) echo "REFUSING: STAGE90_XNU_RESIDENT='$RESIDENT' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **1000's switch: the user-SVC frontier hook (`tools/stage_d13_usvc.sh` -> `traps_lo.s`'s
+# `fleh_swi`, the file's one SVC entry).** It gates ONE piece of asm text - the
+# `stmfd/mov/bl/ldmfd` block right after `cpsie i` that calls `entry_note_user_svc` - and it is
+# an ASSEMBLY-layer switch: `tools/assemble_arm_layer.sh` reads the environment variable of the
+# same name and appends `-DSTAGE90_XNU_USVC=$USVC` to each asm file's ASFLAGS, so it must be
+# EXPORTED before that script runs; build_entry.sh itself only LINKS
+# `out/xnu_asm_obj_d13/traps_lo.o` (933/990's trap - a stale object links hook-free bytes and
+# the run reports zero SVCs that says nothing). The C half (`entry_note_user_svc`) is entry-side
+# and compiles under the EXISTING `STAGE90_ENTRY_TRACE`, so this switch changes no C object.
+# Validated 0/1 here so the record, the asm layer's ASFLAGS and the 1000 clause below cannot be
+# built from two spellings of this switch ([[mi4-one-value-two-definitions]]).
+USVC=${STAGE90_XNU_USVC:-0}
+case "$USVC" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_USVC='$USVC' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $USVC -eq 1 && $ENTRY_TRACE -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_USVC=1 with STAGE90_ENTRY_TRACE=$ENTRY_TRACE." >&2
+    echo "          The hook's C half (\`entry_note_user_svc\`) lives inside entry_stubs.c's" >&2
+    echo "          ENTRY_TRACE region, so without the trace the \`bl\` in traps_lo.s would" >&2
+    echo "          reference an undefined name and pass 1 would emit a stand-in that ends the" >&2
+    echo "          run at the first user SVC (the entry_wdt_pet family trap, inverted: that one" >&2
+    echo "          at least died at link). Build with ENTRY_TRACE=1 or USVC=0." >&2
+    exit 1
+fi
 if [[ $RESIDENT -eq 1 && $SEAM_POST_END_TICKS -ne 0 ]]; then
     echo "REFUSING: STAGE90_XNU_RESIDENT=1 with STAGE90_XNU_POST_END_TICKS=$SEAM_POST_END_TICKS." >&2
     echo "          The residence arm's whole point is that the image carries NO ending; a nonzero" >&2
@@ -1559,6 +1585,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_FULL_EXTENT
                 STAGE90_XNU_CARD_COW
                 STAGE90_XNU_RESIDENT
+                STAGE90_XNU_USVC
                 STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_XNU_IDLE_NO_SLEEP
                 STAGE90_XNU_USB_PROBE
@@ -1684,6 +1711,15 @@ do
         STAGE90_XNU_FULL_EXTENT)      _v=$FULL_EXTENT ;;
         STAGE90_XNU_CARD_COW)         _v=$CARD_COW ;;
         STAGE90_XNU_RESIDENT)         _v=$RESIDENT ;;
+        # 1000: whether the tree's user-SVC frontier hook (`tools/stage_d13_usvc.sh`) was compiled
+        # into the ASSEMBLY layer. Read from `$USVC`, validated 0/1 at its own assignment above this
+        # loop, so the record and the asm layer's ASFLAGS cannot be built from two spellings of this
+        # switch ([[mi4-one-value-two-definitions]]). `traps_lo.s` is an ASSEMBLY-layer file, and
+        # build_entry.sh only LINKS its object (with the six `fleh_*` names dressed as `locore_*`) -
+        # which is why the 1000 clause at the link site below reads the object's own
+        # `U entry_note_user_svc` AND the linked `locore_fleh_swi` body, and refuses either half's
+        # absence.
+        STAGE90_XNU_USVC)             _v=$USVC ;;
         STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_XNU_USB_PROBE)        _v=$USB_PROBE ;;
@@ -29124,7 +29160,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         -o "$OUT/xnu_arm_entry_pass1.elf" "${LINK_OBJS[@]}" \
         --start-group "$LIBGCC" --end-group 2> "$OUT/xnu_arm_entry_pass1.err" || true
     grep -o "undefined reference to \`[^']*'" "$OUT/xnu_arm_entry_pass1.err" |
-        sed "s/.*\`//; s/'//" | sort -u > "$OUT/xnu_arm_entry_undef.txt"
+        sed "s/.*\`//; s/'//" | sort -u > "$OUT/xnu_arm_entry_undef.txt" || true
     undef=$(wc -l < "$OUT/xnu_arm_entry_undef.txt")
     if (( undef == 0 )); then
         say "  XNU's own objects link with nothing missing - no stubs needed"
@@ -30260,7 +30296,7 @@ verify_trace_symbols() {
     # silently incomplete, so the property is checked here from the sources: exactly one file in the
     # tree mentions the name.
     local pe_files
-    pe_files=$(grep -rl "proc_prepareexit" "$XNU/bsd" --include=*.c --include=*.h | sed "s|$XNU/||" | sort -u | tr '\n' ' ')
+    pe_files=$(grep -rl "proc_prepareexit" "$XNU/bsd" --include=*.c --include=*.h | sed "s|$XNU/||" | sort -u | tr '\n' ' ' || true)
     [[ "$pe_files" == "bsd/kern/kern_exit.c " ]] ||
         layout_fail "the name proc_prepareexit appears in [${pe_files}] and this step's instrument assumes it appears only in bsd/kern/kern_exit.c - if a caller in another object exists then \`--wrap=proc_prepareexit\` becomes possible and 505's SIGCHLD record is no longer the only reading of the non-init arm"
     say "  xnu_entry_505: proc_prepareexit is named in bsd/kern/kern_exit.c and nowhere else, so its initproc branch is unreachable by --wrap and the step's reading of that arm is the SIGCHLD that only the other arm reaches"
@@ -30541,10 +30577,10 @@ verify_trace_symbols() {
             awk '/<entry_probe_dt_children>:/ { f = 1; next } f && /^[0-9a-f]+ </ { f = 0 } f { print }')
         gcr_walk_body=$(printf '%s\n' "$gcr_dump" |
             awk -v lab="$gcr_walk_label" 'index($0, "<" lab ">:") { f = 1; next } f && /^[0-9a-f]+ </ { f = 0 } f { print }')
-        gcr_probe_refs=$(printf '%s\n' "$gcr_probe_body" | grep -c "<$gcr_name>")
+        gcr_probe_refs=$(printf '%s\n' "$gcr_probe_body" | grep -c "<$gcr_name>" || true)
         [[ $gcr_probe_refs -eq 2 ]] ||
             layout_fail "entry_probe_dt_children calls getChildSetReference $gcr_probe_refs times and not 2: the tree root's child-count and child-set are the only walks left in the probe, so a third (or a fourth) means the recorded address is being walked in the probe itself, unguarded - 988's abort (pc=0x800c41c0, lr=0x8049e1c0 = the return of the getChildSetReference at 0x8049e1bc). Move that walk into $gcr_walk_label behind the vptr check"
-        gcr_walk_refs=$(printf '%s\n' "$gcr_walk_body" | grep -c "<$gcr_name>")
+        gcr_walk_refs=$(printf '%s\n' "$gcr_walk_body" | grep -c "<$gcr_name>" || true)
         [[ $gcr_walk_refs -eq 2 ]] ||
             layout_fail "$gcr_walk_label calls getChildSetReference $gcr_walk_refs times and not 2: the guarded half is the recorded address' child-count and child-set, one call each - a different count means the walks were not the ones this clause is about"
         # The identity the helper compares against is the recorded address' FIRST WORD AS MEASURED, taken
@@ -31105,6 +31141,168 @@ verify_trace_symbols() {
                 layout_fail "the .text binary carries $n9_n literal(s) equal to '$n9_key' (want exactly 1): each site's records carry its own raw tick count and the CPSR of its edge, and the press-side pre-registration greps these six keys verbatim"
         done
         say "  xnu_entry_999: RESIDENT=1 - entry_wdt_pet is global, null-guarded and called exactly once from the read door's body, entry_timer_edge_probe is called exactly once from each of ml_set_interrupts_enabled and thread_exception_return, and all six xnu_live_edge_* keys are in the image's .text once"
+    fi
+    # **1000: the tick's own collapse, and every record whose absence is evidence moves DIRECT.**
+    # 999's rung measured the tick collapse (122 deliveries, then +24 over >= 2.4 s) through the
+    # edge probes, but its tail read was still bounded by a channel that sounds one note at a time:
+    # (a) `xnu_live_tick_sum_*` - the aggregates (every delivery `_count`, the late ones `_anom`,
+    #     the worst delta `_maxd`) published ON REQUEST by `entry_tick_summary` (pe_msm8974.c,
+    #     beside the counters). Two call sites, both places the counted channel had gone quiet in
+    #     999: the exec-done point (`entry_note_exec_returned`; the cap tombstone sat beside it)
+    #     and the wdt pet's sparse gate (the post-cap live path - the gate fires all run long
+    #     because the read door passes the read count through it).
+    # (b) `xnu_live_tick_anom_*` - the first four deliveries later than a full period, each with the
+    #     RAW `CNTV_TVAL`/`CNTV_CTL` read back AT the entry: 999 could say "rate collapsed" but not
+    #     WHY, and the two candidate causes (a second writer arming TVAL vs the delivery masked)
+    #     are separated by exactly those two words. `msm8974_tick_sample` (noinline, ONE call in
+    #     the timer branch of `msm8974_handle_interrupt`, before its EOI) is the sampler - the
+    #     m168 rule: this clause reads the CALL out of the handler's own disassembly.
+    # (c) every publish in the watchdog pet is DIRECT now, and the FEED itself is recorded (first
+    #     four in full - `_n`/`_calls`/`_countdown` - then the powers-of-two ladder on the feed
+    #     ordinal). 999's [3] physics proved the dog was fed for ~30 min, but every pet record rode
+    #     the counted channel whose cap had saturated before pid 1 ran: the feed's own evidence was
+    #     structurally invisible, the one reading that run could not make.
+    # Next symbol of ANY class: `msm8974_handle_interrupt` is a static (local 't' in the image), so
+    # the next global T can sit far past the function while the next symbol by address is its own
+    # end. Same no-early-exit awk as n9_nextT (998's measured SIGPIPE/141 defect under pipefail).
+    u10_nxt() { arm-none-eabi-nm -n "$OUT/xnu_arm_entry.elf" | awk -v s="${1#0x}" '
+        BEGIN { sv = strtonum("0x" s) }
+        { a = strtonum("0x" $1) }
+        a > sv { if (!d) { print "0x" $1; d = 1 } }'; }
+    if [[ $ENTRY_TRACE -eq 1 ]]; then
+        u10_ets=$(n9_nm1 entry_tick_summary) ||
+            layout_fail "entry_tick_summary is not in the linked image - pe_msm8974.c's aggregate dump did not link, and both of 1000's summary call sites (the exec-done point and the pet's gate) would run no aggregate at the moments the reading is taken"
+        u10_edn=$(n9_nm1 entry_note_exec_returned) ||
+            layout_fail "entry_note_exec_returned is not in the linked image - the exec-done point is one of the two sites entry_tick_summary is called from (999's cap tombstone sat beside it)"
+        u10_ednx=$(n9_nextT "$u10_edn")
+        [[ -n $u10_ednx ]] ||
+            layout_fail "no symbol follows entry_note_exec_returned in the image, so its instruction range cannot be read"
+        u10_edn_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$u10_edn" --stop-address="$u10_ednx")
+        # The branch to the summary is read as `b` OR `bl`: `entry_tick_summary();` is the LAST
+        # statement of `entry_note_exec_returned`, so clang tail-call-optimizes it - the measured
+        # 1000 image carries `800066e0: ea069f01  b  801ae2ec <entry_tick_summary>` (run 2 of
+        # build_1000.sh died on a `bl`-only reader here; the structure is one direct branch, the
+        # spelling is the compiler's - m168's lesson read the other way).
+        u10_ets_c=$(grep -cE '[[:space:]](b|bl)[[:space:]]+[0-9a-f]+ <entry_tick_summary>' <<<"$u10_edn_body" || true)
+        [[ "$u10_ets_c" == 1 ]] ||
+            layout_fail "entry_note_exec_returned ($u10_edn..$u10_ednx) calls entry_tick_summary $u10_ets_c time(s) (want exactly 1): the exec-done point is where the counted channel went silent in 999, so the tick's aggregates must be asked for THERE"
+        u10_tss=$(n9_nm1 msm8974_tick_sample) ||
+            layout_fail "msm8974_tick_sample is not in the linked image - the tick's own sampler (pe_msm8974.c) did not link, so the anomaly records have no producer"
+        u10_tss_all=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" | grep -cE 'bl[[:space:]]+[0-9a-f]+ <msm8974_tick_sample>' || true)
+        [[ "$u10_tss_all" == 1 ]] ||
+            layout_fail "the image contains $u10_tss_all call site(s) of msm8974_tick_sample (want exactly 1): the sample must sit in ONE place - the timer branch of msm8974_handle_interrupt before its EOI - because a second site changes what the delta the records carry means"
+        u10_hi=$(n9_nm1 msm8974_handle_interrupt) ||
+            layout_fail "msm8974_handle_interrupt is not in the linked image - it is the function whose timer branch owns the one tick-sample call"
+        u10_hix=$(u10_nxt "$u10_hi")
+        [[ -n $u10_hix ]] ||
+            layout_fail "no symbol follows msm8974_handle_interrupt in the image, so its instruction range cannot be read"
+        u10_hi_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$u10_hi" --stop-address="$u10_hix")
+        grep -qE 'bl[[:space:]]+[0-9a-f]+ <msm8974_tick_sample>' <<<"$u10_hi_body" ||
+            layout_fail "msm8974_handle_interrupt ($u10_hi..$u10_hix) does not call msm8974_tick_sample - the one call site the image-wide count found is not in the handler, so the reading is taken by code the timer path does not run"
+        for u10_key in xnu_live_tick_sum_count xnu_live_tick_sum_anom xnu_live_tick_sum_maxd \
+                       xnu_live_tick_anom_n xnu_live_tick_anom_d xnu_live_tick_anom_tval xnu_live_tick_anom_ctl; do
+            u10_n=$(n9_lit_n "$u10_key")
+            [[ "$u10_n" == 1 ]] ||
+                layout_fail "the .text binary carries $u10_n literal(s) equal to '$u10_key' (want exactly 1): the press-side pre-registration greps these seven keys verbatim"
+        done
+        if [[ $RESIDENT -eq 1 ]]; then
+            u10_pet=$(n9_nm1 entry_wdt_pet) ||
+                layout_fail "entry_wdt_pet is not in the linked image - RESIDENT=1's pet is where the feed's own record lives now"
+            u10_petx=$(n9_nextT "$u10_pet")
+            [[ -n $u10_petx ]] ||
+                layout_fail "no symbol follows entry_wdt_pet in the image, so its instruction range cannot be read"
+            u10_pet_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$u10_pet" --stop-address="$u10_petx")
+            u10_pet_lw=$(grep -c '<entry_live_write>' <<<"$u10_pet_body" || true)
+            [[ "$u10_pet_lw" == 0 ]] ||
+                layout_fail "entry_wdt_pet ($u10_pet..$u10_petx) still branches to the counted entry_live_write $u10_pet_lw time(s): 999's pet records rode the channel whose cap saturated before pid 1 ran, so the feed's own evidence was structurally invisible - every publish in the pet must be DIRECT (entry_write_kv) so absence is evidence again"
+            u10_ets_p=$(grep -cE '[[:space:]](b|bl)[[:space:]]+[0-9a-f]+ <entry_tick_summary>' <<<"$u10_pet_body" || true)
+            [[ "$u10_ets_p" == 1 ]] ||
+                layout_fail "entry_wdt_pet ($u10_pet..$u10_petx) calls entry_tick_summary $u10_ets_p time(s) (want exactly 1): the pet's sparse gate is the post-cap live path the tick's aggregates ride"
+            for u10_key in xnu_live_wdt_pet_n xnu_live_wdt_pet_calls xnu_live_wdt_pet_countdown; do
+                u10_n=$(n9_lit_n "$u10_key")
+                [[ "$u10_n" == 1 ]] ||
+                    layout_fail "the .text binary carries $u10_n literal(s) equal to '$u10_key' (want exactly 1): the feed's record (first four in full, then the ladder) is what says the dog was fed past the cap"
+            done
+        fi
+        say "  xnu_entry_1000: the tick's aggregates are asked for by name at the exec-done point and the pet's gate (entry_tick_summary called exactly once from each body), msm8974_tick_sample has exactly one call site and it is inside msm8974_handle_interrupt, the seven tick keys are in the image's .text once${RESIDENT:+, the three feed keys of the pet are in once and the pet carries no counted write}"
+    fi
+    # **1000: the user-SVC frontier (999's given (c)).** 999's tail read ended at
+    # `cs_invalid_page` -> silence on the COUNTED channel, whose cap sat mid-boot (its tombstone
+    # `xnu_live_capped` proves it) - so the silence could not distinguish "pid 1 stopped" from "the
+    # cap ate everything after". 1000's answer is structural: the user side's SVCs are recorded on
+    # the DIRECT (cap-exempt) channel from the SVC entry itself, so the last record in a log IS the
+    # last syscall the user side managed.
+    #
+    # The hook, by value: ONE `bl entry_note_user_svc` in the SVC entry's prologue, right after
+    # `cpsie i` in traps_lo.s. On D13 that body reaches the image RENAMED: traps_lo.o's six
+    # colliding `fleh_*` names are dressed `locore_*` at link (the entry image defines `fleh_*`
+    # itself - the rename block above), so the body to read is `locore_fleh_swi`. The T `fleh_swi`
+    # at the low address is entry_stubs.o's stand-in and NOTHING calls it (the vector page's slot 2
+    # holds the locore copy's address; 467's clause reads that page, this one reads the body it
+    # points at). The prologue is straight-line up to the first branch, so the hook must BE the
+    # body's first branch - it runs before the `cmn r11,#3` -3 path and every dispatch branch, on
+    # every user SVC, and four saved words keep sp 8-aligned at the `bl` (990's lesson).
+    #
+    # The C half, by value: entry_note_user_svc's writes are ALL DIRECT (0 branches to the counted
+    # entry_live_write), >= 8 of them for the full window (the compiled body measured 9 line sites
+    # - 8 `bl` plus the shared tail `b`), and the body compares against #64 - USVC_FULL_N, the
+    # full-field window the press-side pre-registration greps.
+    if [[ $USVC -eq 1 ]]; then
+        u10_svc=$(n9_nm1 entry_note_user_svc) ||
+            layout_fail "STAGE90_XNU_USVC=1 but the linked image defines no entry_note_user_svc - the C half (entry_stubs.c, inside the ENTRY_TRACE region) did not compile in or did not link, so the hook's \`bl\` would sit on a generated stand-in and the first user SVC would end the run"
+        u10_u=$(arm-none-eabi-nm "$XNU_ASM_OBJ_OUT/traps_lo.o" 2>/dev/null | grep -c '^[[:space:]]*U entry_note_user_svc$' || true)
+        [[ "$u10_u" == 1 ]] ||
+            layout_fail "out/xnu_asm_obj_d13/traps_lo.o references entry_note_user_svc $u10_u time(s) (want exactly 1): the ASFLAGS half did not reach this object - export STAGE90_XNU_USVC=1 before tools/assemble_arm_layer.sh (933/990's trap: build_entry.sh only LINKS this object, so a stale one links hook-free bytes and a run reports zero SVCs that says nothing)"
+        u10_ls=$(n9_nm1 locore_fleh_swi) ||
+            layout_fail "locore_fleh_swi is not in the linked image - it is traps_lo.o's fleh_swi body under the link's own rename of the six colliding names, and it is the ONE body the USVC hook is inserted at"
+        u10_lsx=$(n9_nextT "$u10_ls")
+        [[ -n $u10_lsx ]] ||
+            layout_fail "no symbol follows locore_fleh_swi in the image, so its instruction range cannot be read"
+        u10_ls_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$u10_ls" --stop-address="$u10_lsx")
+        u10_calls=$(grep -cE 'bl[[:space:]]+[0-9a-f]+ <entry_note_user_svc>' <<<"$u10_ls_body" || true)
+        [[ "$u10_calls" == 1 ]] ||
+            layout_fail "locore_fleh_swi ($u10_ls..$u10_lsx) calls entry_note_user_svc $u10_calls time(s) (want exactly 1): 0 = the assembly layer was not rebuilt with STAGE90_XNU_USVC=1 EXPORTED; >1 = the body moved"
+        u10_all=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" | grep -cE 'bl[[:space:]]+[0-9a-f]+ <entry_note_user_svc>' || true)
+        [[ "$u10_all" == 1 ]] ||
+            layout_fail "the image contains $u10_all call site(s) of entry_note_user_svc (want exactly 1 - the SVC entry's own): a second site means the hook is taken on a path that is not the user SVC entry, and the first-64 window would count calls the frontier is not about"
+        # Two measured traps in this pair of readers (run 3 of build_1000.sh died SILENTLY here - rc 1,
+        # no FAIL line - and build_1000.sh's tail carries the same twin):
+        # (a) `\t` is NOT a tab to the BUILD's grep. The clause runs under `env -i`, which strips shell
+        #     functions, so `grep` here is GNU grep 3.7 - and `\t` inside its ERE matched 0 lines of a
+        #     body that demonstrably contains real tabs (measured 2026-10-13 by value: the same pattern
+        #     driven through the interactive shell's ugrep-backed `grep` function matched 3, which is
+        #     how a dead reader got "verified" - the MEASUREMENT was the thing that was wrong, m997's
+        #     class). `[[:space:]]` is the spelling the neighbouring readers already use.
+        # (b) `| head -1 |` under `set -o pipefail`: grep|head can race SIGPIPE (998's 141 defect).
+        #     `-m1` lets grep stop itself, and the trailing `|| true` makes a genuine no-match fall
+        #     THROUGH to the check below - which prints both line numbers - never a bare exit 1.
+        u10_hookline=$(grep -n -m1 '<entry_note_user_svc>' <<<"$u10_ls_body" | cut -d: -f1 || true)
+        u10_brline=$(grep -nE -m1 '[[:space:]](b|bl|bx|blx|b(eq|ne|cs|cc|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al))(\.[a-z]+)?[[:space:]]' <<<"$u10_ls_body" | cut -d: -f1 || true)
+        [[ -n "$u10_hookline" && "$u10_hookline" == "$u10_brline" ]] ||
+            layout_fail "the USVC hook is not the body's first branch (hook at line ${u10_hookline:-none}, first branch at line ${u10_brline:-none}): the block sits right after \`cpsie i\` in traps_lo.s, BEFORE the -3 timebase fast path and every dispatch branch - a site after any of them misses SVCs and the frontier reading is about a subset of the calls"
+        u10_win=$(grep -B2 -A2 'bl.*<entry_note_user_svc>' <<<"$u10_ls_body" || true)
+        u10_push=$(grep -cE 'push[[:space:]]+\{r0, r1, r8, lr\}|stm(db|fd|ea|ed)[[:space:]]+sp!,[[:space:]]*\{r0, r1, r8, lr\}' <<<"$u10_win" || true)
+        u10_mov=$(grep -cE 'mov[[:space:]]+r0, r8' <<<"$u10_win" || true)
+        u10_pop=$(grep -cE 'pop[[:space:]]+\{r0, r1, r8, lr\}|ldm(ia|fd|db|ed)[[:space:]]+sp!,[[:space:]]*\{r0, r1, r8, lr\}' <<<"$u10_win" || true)
+        [[ "$u10_push" == 1 && "$u10_mov" == 1 && "$u10_pop" == 1 ]] ||
+            layout_fail "the hook's window in locore_fleh_swi does not carry the 4-word save/restore shape (push=$u10_push mov=$u10_mov pop=$u10_pop around \`bl <entry_note_user_svc>\`): $(printf '%s' "$u10_win" | tr '\n' '|') - traps_lo.s must save {r0,r1,r8,lr} (r8 is the frame every path below reads, r0/r1 the -3 path reserves) and FOUR words keep sp 8-aligned at the bl (990: a 4-mod-8 frame killed ast_taken's vld1.32)"
+        u10_svcx=$(n9_nextT "$u10_svc")
+        [[ -n $u10_svcx ]] ||
+            layout_fail "no symbol follows entry_note_user_svc in the image, so its instruction range cannot be read"
+        u10_svc_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$u10_svc" --stop-address="$u10_svcx")
+        u10_kv=$(grep -c '<entry_write_kv>' <<<"$u10_svc_body" || true)
+        u10_lw=$(grep -c '<entry_live_write>' <<<"$u10_svc_body" || true)
+        [[ "$u10_kv" -ge 8 && "$u10_lw" -eq 0 ]] ||
+            layout_fail "entry_note_user_svc ($u10_svc..$u10_svcx) branches to entry_write_kv $u10_kv time(s) and to the counted entry_live_write $u10_lw time(s): the frontier's records must ALL go DIRECT (>=8 sites for the full window's eight fields, 0 counted) - a record whose ABSENCE is the reading is the one record that may not ride the cap (the law 998's audit closed with the cap arithmetic)"
+        grep -qE 'cmp[[:space:]]+r[0-9]+, #(64|0x40)' <<<"$u10_svc_body" ||
+            layout_fail "entry_note_user_svc does not compare against 64 - USVC_FULL_N is the full-field window and the press-side pre-registration greps the first 64 SVCs in full"
+        for u10_key in xnu_live_usvc_n xnu_live_usvc_num xnu_live_usvc_pid xnu_live_usvc_thr \
+                       xnu_live_usvc_pc xnu_live_usvc_lr xnu_live_usvc_cpsr xnu_live_usvc_r0; do
+            u10_n=$(n9_lit_n "$u10_key")
+            [[ "$u10_n" == 1 ]] ||
+                layout_fail "the .text binary carries $u10_n literal(s) equal to '$u10_key' (want exactly 1): the eight field keys are what the press-side pre-registration greps verbatim and what the tail read is read off"
+        done
+        say "  xnu_entry_1000: USVC=1 - the SVC entry's prologue (locore_fleh_swi, traps_lo.o's fleh_swi under the link's rename) carries exactly ONE bl entry_note_user_svc as the body's first branch inside the 4-word frame, traps_lo.o carries the ASFLAGS switch, and the eight xnu_live_usvc_* keys are in the image's .text once with the body's 8+ direct writes and no counted one"
     fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no
@@ -33892,7 +34090,7 @@ verify_trace_symbols() {
                     layout_fail "st_cmd1_enable_open's device accesses are [$c1o_set] (sorted) and rung 30 says exactly [f9824934:ldr f9824934:str] - INT_ENABLE 0x34 written and read back, and NOTHING ELSE - ONE store and ONE readback, with no read of INT_STATUS 0x30 here that the poll's own entrance read does not already carry"
                 [[ -z "${c1o_img// /}" ]] ||
                     layout_fail "st_cmd1_enable_open's non-device memory accesses are [$c1o_img] at [$c1o_addr] and rung 30's record says that set is EMPTY: this body publishes only through entry_live_write, which is a call"
-                c1o_calls=$(grep -c -- 'bl.*<st_cmd1_enable_open>' <<<"$stb_path_body")
+                c1o_calls=$(grep -c -- 'bl.*<st_cmd1_enable_open>' <<<"$stb_path_body" || true)
                 [[ "$c1o_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $c1o_calls call(s) to st_cmd1_enable_open and rung 30 makes exactly one - the third window's ONE entrance. Zero means the window is never opened; two or more is an entrance the record does not name"
                 c1o_ln=$(awk '/bl.*<st_cmd1_enable_open>/{ printf "%d", NR }' <<<"$stb_path_body")
@@ -33907,7 +34105,7 @@ verify_trace_symbols() {
                     layout_fail "st_cmd1_enable_restore's device accesses are [$c1_set] (sorted) and rung 30 says exactly [f9824934:ldr f9824934:str] - INT_ENABLE 0x34 written back and read, and NOTHING ELSE - ONE store and ONE readback, with no read of INT_STATUS 0x30. A store here to any other address is a rung the record does not name; a MISSING store is a window that is never closed"
                 [[ -z "${c1_img// /}" ]] ||
                     layout_fail "st_cmd1_enable_restore's non-device memory accesses are [$c1_img] at [$c1_imgaddr] and rung 30's record says that set is EMPTY: this body publishes only through entry_live_write, which is a call"
-                c1_calls=$(grep -c -- 'bl.*<st_cmd1_enable_restore>' <<<"$stb_path_body")
+                c1_calls=$(grep -c -- 'bl.*<st_cmd1_enable_restore>' <<<"$stb_path_body" || true)
                 [[ "$c1_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $c1_calls call(s) to st_cmd1_enable_restore and rung 30 makes exactly one - the third window's ONE exit. Zero means INT_ENABLE 0x34 is left carrying the five bits for the rest of the run with nothing writing it back; two or more is an exit the record does not name"
                 c1_ln=$(awk '/bl.*<st_cmd1_enable_restore>/{ printf "%d", NR }' <<<"$stb_path_body")
@@ -33951,7 +34149,7 @@ verify_trace_symbols() {
                 cid_body_next=$(sym_next "$cid_body_addr") ||
                     layout_fail "nothing follows st_all_send_cid in the linked image, so the window this check disassembles has no end. Nothing is rebuilt by this refusal"
                 cid_body=$(arm-none-eabi-objdump -d --start-address="$cid_body_addr" --stop-address="$cid_body_next" "$OUT/xnu_arm_entry.elf")
-                cid_bl_count=$(grep -c -- 'bl.*<st_send_command>' <<<"$cid_body")
+                cid_bl_count=$(grep -c -- 'bl.*<st_send_command>' <<<"$cid_body" || true)
                 [[ "$cid_bl_count" == "1" ]] ||
                     layout_fail "st_all_send_cid makes $cid_bl_count call(s) to st_send_command and rung 16 makes exactly one - CMD2 is one command. Zero means the symbol was reached with an empty window (the scan failed, not the arm); two or more means the flags this clause reads may belong to the wrong call, and a clause reading the wrong call site is worse than no clause. Nothing is rebuilt by this refusal"
                 cid_bl_ln=$(awk '/bl.*<st_send_command>/{ printf "%d", NR }' <<<"$cid_body")
@@ -34021,7 +34219,7 @@ verify_trace_symbols() {
                     layout_fail "st_tout_open's device accesses are [$c2t_set] (sorted) and rung 32 says exactly [f982492e:ldrb f982492e:strb] - TIMEOUT_CONTROL 0x2E read and written AS A BYTE, and NOTHING ELSE. 0x2E is one below SOFTWARE_RESET 0x2F (rung 4 writes it) and one above CLOCK_CONTROL 0x2C (rung 6 writes it), so a body that drifted one offset would write a register with a different meaning entirely. A WORD access here is the same refusal for the same reason: this register is a byte and the vendor writes it with sdhci_writeb. Nothing is rebuilt by this refusal"
                 [[ -z "${c2t_img// /}" ]] ||
                     layout_fail "st_tout_open's non-device memory accesses are [$c2t_img] at [$c2t_addr] and rung 32's record says that set is EMPTY: this body publishes only through entry_live_write, which is a call"
-                c2t_open_calls=$(grep -c -- 'bl.*<st_tout_open>' <<<"$stb_path_body")
+                c2t_open_calls=$(grep -c -- 'bl.*<st_tout_open>' <<<"$stb_path_body" || true)
                 [[ "$c2t_open_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $c2t_open_calls call(s) to st_tout_open and rung 32's SOURCE makes exactly one on a straight line above the gate. Zero means TIMEOUT_CONTROL 0x2E is never raised, the arm is the rung below it wearing a new number, and - because \`_tout_was\`/\`_tout_held\` would read exactly what rung 31 read - it is the one absence the log cannot show. The count is asserted EXACTLY here while the close's is not, and the asymmetry is deliberate: GCC duplicated the CLOSE into the gate's two arms on this very build, and that is the compiler's business; a duplicated OPEN would put the read-and-raise pair at two moments and make \`_tout_was\` unreadable as one value, which is this arm's state rather than a layout detail. Nothing is rebuilt by this refusal"
                 # The VALUE, read out of the INSTRUCTION rather than off a call - and the first build
@@ -34066,7 +34264,7 @@ verify_trace_symbols() {
                 # against what this build measured, and everything the arm actually claims about
                 # the window is asserted below as disassembly ORDER. **The same distinction 787
                 # drew when it asserted the window's interval and not its statement.**
-                c2t_restore_calls=$(grep -c -- 'bl.*<st_tout_restore>' <<<"$stb_path_body")
+                c2t_restore_calls=$(grep -c -- 'bl.*<st_tout_restore>' <<<"$stb_path_body" || true)
                 (( c2t_restore_calls >= 1 )) ||
                     layout_fail "st_cmd_path makes NO call to st_tout_restore and rung 32's window would never close: the raised byte would stand for the rest of the run - a STATE CHANGE this arm's record says it does not make, and one that would also hand CMD3 a longer bound and destroy 795 section 6's independent test. Nothing is rebuilt by this refusal"
                 (( c2t_restore_calls <= 3 )) ||
@@ -34158,7 +34356,7 @@ verify_trace_symbols() {
                 opl_set=$(printf '%s\n' $opl_dev | LC_ALL=C sort | tr '\n' ' ')
                 [[ -z "${opl_set// /}" ]] ||
                     layout_fail "st_op_cond_loop touches device register(s) [$opl_set] and rung 33's record says its device set is EMPTY: the loop's ONLY device act is the command it sends, and that act belongs to st_send_command, whose own set is asserted exactly by its own clause. An access here would be a register this rung never names. Nothing is rebuilt by this refusal"
-                opl_sc=$(grep -c -- 'bl.*<st_send_command>' <<<"$opl_body")
+                opl_sc=$(grep -c -- 'bl.*<st_send_command>' <<<"$opl_body" || true)
                 [[ "$opl_sc" == "1" ]] ||
                     layout_fail "st_op_cond_loop makes $opl_sc call(s) to st_send_command and rung 33 makes exactly ONE - the single call site INSIDE the driver's own loop (mmc_ops.c:145-166 sends in the loop body and tests after each one), which is what makes 'up to 100 sends' a property of one instruction sequence rather than of two. Zero means the loop body is in the image and cannot put a command on the bus; two or more means two call sites, i.e. a loop whose trip count is not this body's. Nothing is rebuilt by this refusal"
                 for _imm in 100 101; do
@@ -34175,11 +34373,11 @@ verify_trace_symbols() {
                 # PURPOSE**: the form is the compiler's, so a build that emits a fourth spelling stops
                 # for a human to read it rather than passing on an assertion that no longer means
                 # anything.
-                opl_sig=$(grep -cE '^[[:space:]]*[0-9a-f]+:[[:space:]]+[0-9a-f]+[[:space:]]+(blt|bmi)[[:space:]]' <<<"$opl_txt")
+                opl_sig=$(grep -cE '^[[:space:]]*[0-9a-f]+:[[:space:]]+[0-9a-f]+[[:space:]]+(blt|bmi)[[:space:]]' <<<"$opl_txt" || true)
                 [[ "$opl_sig" == "1" ]] ||
                     layout_fail "st_op_cond_loop carries $opl_sig sign-conditioned branch(es) and rung 33's exit test is exactly one: \`if ((last & ST_MMC_CARD_BUSY) != 0u) { busy = 1u; break; }\` tests the response's bit 31, which the compiler lowers to a signed comparison against zero. Zero means the loop has no sign test at all - a loop that cannot exit on the card becoming ready, which is the whole act - and more than one means a second sign test this arm's record does not describe. Nothing is rebuilt by this refusal"
-                opa_calls=$(grep -c -- 'bl.*<st_op_cond_arg>' <<<"$stb_path_body")
-                opl_calls=$(grep -c -- 'bl.*<st_op_cond_loop>' <<<"$stb_path_body")
+                opa_calls=$(grep -c -- 'bl.*<st_op_cond_arg>' <<<"$stb_path_body" || true)
+                opl_calls=$(grep -c -- 'bl.*<st_op_cond_loop>' <<<"$stb_path_body" || true)
                 [[ "$opa_calls" == "1" && "$opl_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $opa_calls call(s) to st_op_cond_arg and $opl_calls to st_op_cond_loop, and rung 33 makes exactly one of each in the order ARG then LOOP. Zero for the argument means the loop is sent the probe's own word unchanged, which is the FIRST call again and not the second; zero for the loop means neither body runs; more than one of either means the arm acts twice in one command path, which the record does not describe. Nothing is rebuilt by this refusal"
                 opa_ln=$(awk '/bl.*<st_op_cond_arg>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
@@ -34996,8 +35194,8 @@ verify_trace_symbols() {
                     layout_fail "\`st_read_lba\` is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: rung 50's CMD17 argument is a variable filled by the partition decode, and without the symbol this clause cannot tell that load from any other. Nothing is rebuilt by this refusal"
                 if [[ "$blk43_r1" == *"ldr"* ]]; then
                     blk43_r1_isvar=1
-                    blk43_r1_off=$(grep -oE '#[0-9]+' <<<"$blk43_r1" | tail -1 | tr -d '#')
-                    blk43_r1_reg=$(grep -oE '\[r[0-9]+,' <<<"$blk43_r1" | grep -oE 'r[0-9]+' | head -1)
+                    blk43_r1_off=$(grep -oE '#[0-9]+' <<<"$blk43_r1" | tail -1 | tr -d '#' || true)
+                    blk43_r1_reg=$(grep -oE '\[r[0-9]+,' <<<"$blk43_r1" | grep -oE 'r[0-9]+' | head -1 || true)
                     blk43_r1_w=$(awk -v reg="$blk43_r1_reg" -v n="$blk43_bl_ln" 'NR<n && $0 ~ ("movw[ \t]+"reg", #") {v=$0} END{print v}' <<<"$blk43_body")
                     blk43_r1_t=$(awk -v reg="$blk43_r1_reg" -v n="$blk43_bl_ln" 'NR<n && $0 ~ ("movt[ \t]+"reg", #") {v=$0} END{print v}' <<<"$blk43_body")
                     blk43_r1_lo=$(( $(grep -oE '#[0-9]+' <<<"$blk43_r1_w" | head -1 | tr -d '#') ))
@@ -35044,7 +35242,7 @@ verify_trace_symbols() {
                         # ([[mi4-one-value-two-definitions]]). The frame offset is never asserted by
                         # number - it is a property of this build's allocation - it is only required to
                         # be the SAME on both instructions.
-                        blk43_lba_store=$(grep -E "str[[:space:]]+r[0-9]+, \[$blk43_r1_reg, #$blk43_r1_off\]" <<<"$blk43_body" | tail -1)
+                        blk43_lba_store=$(grep -E "str[[:space:]]+r[0-9]+, \[$blk43_r1_reg, #$blk43_r1_off\]" <<<"$blk43_body" | tail -1 || true)
                         [[ -n "$blk43_lba_store" ]] ||
                             layout_fail "st_read_single_block loads its CMD17 argument from \`[$blk43_r1_reg, #$blk43_r1_off]\` (resolved to \`st_read_lba\`) and its disassembly holds NO \`str rN, [$blk43_r1_reg, #$blk43_r1_off]\` writing that same slot - so the variable this body reads was filled somewhere this clause cannot see. **Rung 51 IS the number stored there** (1, the protective MBR's own target), and a body that only read the slot would carry whatever the previous boot's code left, with every cell still reading as success. Nothing is rebuilt by this refusal"
                         # **THE SINGLE-STORE CHECKS ARE FOR VALUES BELOW 53 AND ONLY THOSE.** At value 53
@@ -35063,7 +35261,7 @@ verify_trace_symbols() {
                         (( blk43_r1_ln > blk43_lba_sln )) ||
                             layout_fail "st_read_single_block loads its CMD17 argument on line $blk43_r1_ln and writes the sector variable on line $blk43_lba_sln - **the load is ABOVE the store**, so the number the command sends is the PREVIOUS value and rung 51's sector never reaches the bus. Rung 51 is exactly \"the store happens before the read\", and a build whose order is inverted publishes \`_rd_arg = 0\` while every other cell reads as at value 50. Nothing is rebuilt by this refusal"
                         blk43_lba_w=$(awk -v reg="$blk43_lba_sreg" -v n="$blk43_lba_sln" 'NR < n && $0 ~ ("(movs?|movw)[ \t]+" reg ", #") { v=$0 } END { print v }' <<<"$blk43_body")
-                        blk43_lba_imm=$(grep -oE '#[0-9]+' <<<"$blk43_lba_w" | head -1 | tr -d '#')
+                        blk43_lba_imm=$(grep -oE '#[0-9]+' <<<"$blk43_lba_w" | head -1 | tr -d '#' || true)
                         [[ -n "$blk43_lba_imm" ]] ||
                             layout_fail "st_read_single_block stores \`$blk43_lba_sreg\` into the sector variable at line $blk43_lba_sln and NO \`mov\`/\`movw\` immediate fills that register above it - the value reaching \`st_read_lba\` comes from a computation this clause cannot read, so it could not tell rung 51's 1 from rung 50's 0. Nothing is rebuilt by this refusal"
                         fi
@@ -35097,8 +35295,8 @@ verify_trace_symbols() {
                             blk43_sel_size=$(sym_size st_sector_for_read) ||
                                 layout_fail "st_sector_for_read has no size in the symbol table (nm -S), so this clause's window has no end. Nothing is rebuilt by this refusal"
                             blk43_sel_body=$(arm-none-eabi-objdump -d --start-address="$blk43_sel_addr" --stop-address="$(printf '0x%x' $(( blk43_sel_addr + blk43_sel_size )))" "$OUT/xnu_arm_entry.elf")
-                            blk43_sel_imm1=$(grep -oE '#1([^0-9]|$)' <<<"$blk43_sel_body" | head -1 | tr -d '#')
-                            blk43_sel_imm2=$(grep -oE '#2([^0-9]|$)' <<<"$blk43_sel_body" | head -1 | tr -d '#')
+                            blk43_sel_imm1=$(grep -oE '#1([^0-9]|$)' <<<"$blk43_sel_body" | head -1 | tr -d '#' || true)
+                            blk43_sel_imm2=$(grep -oE '#2([^0-9]|$)' <<<"$blk43_sel_body" | head -1 | tr -d '#' || true)
                             [[ "$blk43_sel_imm1" == "1" && "$blk43_sel_imm2" == "2" ]] ||
                                 layout_fail "rung 54's sector selector \`st_sector_for_read\` (at $blk43_sel_addr) does not materialize BOTH sector immediates 1 and 2 (found [$blk43_sel_imm1] and [$blk43_sel_imm2]). Rung 54's pair must be **1 = \`ST_GPT_HEADER_SECTOR\`** (the FIRST read - the GPT HEADER, whose bytes the header decode parses) and **2 = \`ST_GPT_ENTRY_ARRAY_SECTOR\`** (the SECOND read - the partition ENTRY ARRAY the rung-52/53 presses measured at \`_gp_entry_lba = 2\`). **A selector that returns only one number is a single-read rung**: if it is 2 the header decode runs on the ARRAY and every header field is zero, exactly as the rung-53 press (854) measured; if it is 1 the entry decode walks the HEADER (\`_ge_hdr_ok = 1\`). Nothing is rebuilt by this refusal"
                             blk43_sel_bl=$(grep -c -- 'bl.*<st_sector_for_read>' <<<"$blk43_body" || true)
@@ -35539,7 +35737,7 @@ verify_trace_symbols() {
                 # would issue the reset AFTER the read it was moved to precede, restoring exactly the
                 # ordering 840 measured as too late - and two calls to one body is an arm whose answer
                 # cannot be read.
-                dr47_calls=$(grep -c -- 'bl.*<st_data_reset>' <<<"$stb_path_body")
+                dr47_calls=$(grep -c -- 'bl.*<st_data_reset>' <<<"$stb_path_body" || true)
                 if [[ $STORAGE_PROBE -ge 54 ]]; then
                     # **RUNG 55 ISSUES THE RESET THREE TIMES - ONE BEFORE EACH OF ITS THREE READS.** Rung
                     # 54 needed two (a second CMD17 runs against the state the first transfer left); rung 55
@@ -36205,7 +36403,7 @@ verify_trace_symbols() {
                 # is refused; the size floor is above the store and is never consulted. This is
                 # [[mi4-linked-code-order-is-not-source-order]]'s lesson applied one level in - the
                 # property is read by register and value, not by position in the listing.
-                mi_st_dst=$(grep -oE 'str[[:space:]]+r[0-9]+, \[r[0-9]+\][[:space:]]*$' <<<"$mi_body" | head -1 | grep -oE 'r[0-9]+' | head -1)
+                mi_st_dst=$(grep -oE 'str[[:space:]]+r[0-9]+, \[r[0-9]+\][[:space:]]*$' <<<"$mi_body" | head -1 | grep -oE 'r[0-9]+' | head -1 || true)
                 [[ -n "$mi_st_dst" ]] ||
                     layout_fail "st_media_memdev_info (at $mi_addr) has no offset-0 store of the form \`str rX, [rY]\`: \`mi_mdev\` is the FIRST field of \`dk_memdev_info_t\` (\`bsd/sys/disk.h:291\`), so rung 60's one word is not being written at all. Nothing is rebuilt by this refusal"
                 mi_wr='(mov|movw|movt|movs|mvn|orr|orn|eor|and|ands|bic|add|adds|sub|subs|rsb|mul|lsl|lsls|lsr|lsrs|asr|asrs|ror|adr|ldr|ldrb|ldrh|ldrd|ldm|pop|uxtb|uxth|sxtb|sxth|ubfx|sbfx|bfi|rev|clz|mla)'
@@ -36578,7 +36776,7 @@ verify_trace_symbols() {
                     layout_fail "st_cmd_enable_restore's device accesses are [$stb_ena_set] (sorted) and rung 14's record says exactly [f9824930:ldr f9824934:ldr f9824934:str] - ONE store to \`INT_ENABLE 0x34\` (the value the gate authorised, written back), ONE read of that register (the block's own copy, which is what makes the restore a store that took rather than an intention), and ONE read of \`INT_STATUS 0x30\` AFTER the disable, which is the cell that separates a status the enable GATES from a status the enable only makes VISIBLE. An absent \`f9824930:ldr\` is 730 section 5's owed reading not taken; an extra \`f9824930:str\` would be a write into the status register this arm is trying to read; and an \`f9824938:\` of any width would be the other half of the pair whose conjunction raises intid 155 - \`SIGNAL_ENABLE\` is not this body's business at any rung. Nothing is rebuilt by this refusal"
                 [[ -z "${stb_ena_img// /}" ]] ||
                     layout_fail "st_cmd_enable_restore's non-device memory accesses are [$stb_ena_img] at [$stb_ena_imgaddr] and rung 14's record says that set is EMPTY - its three cells are written through \`entry_live_write\` (a call, with a \`.rodata\` string) and it keeps no state of its own. A non-empty set here means a symbol this rung never declared or an access the classifier could not resolve. Nothing is rebuilt by this refusal"
-                stb_ena_calls=$(grep -c -- 'bl.*<st_cmd_enable_restore>' <<<"$stb_path_body")
+                stb_ena_calls=$(grep -c -- 'bl.*<st_cmd_enable_restore>' <<<"$stb_path_body" || true)
                 [[ "$stb_ena_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $stb_ena_calls call(s) to st_cmd_enable_restore and rung 14 makes exactly one - the window's ONE exit, on the line after CMD0's publishes (published as \`_ena_restore_seq\` = 1). Two or more is a call site the record does not name, and it is what the first build of this arm had: the window was drawn with two exits and could not be entered at all, and the cell that says so is \`_cmd0_complete\` = 0. Zero means \`INT_ENABLE 0x34\` is set for the rest of the run with nothing writing it back - and \`SIGNAL_ENABLE 0x38\` still reads zero, so it is harmless and every other cell reads correctly, which is exactly what makes it worth a refusal rather than a reading. The call is also what keeps this body in the image at all - an unreferenced static is dropped, so zero calls and an image WITHOUT the symbol would be one build. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_732: st_cmd_enable_restore's device accesses are [$stb_ena_set] with counts [$stb_ena_cnt], its store is the single \`str\` at f9824934, and st_cmd_path calls it 1 time(s); the enable window is \`INT_ENABLE 0x34 <- SDHCI_INT_RESPONSE\` from immediately before CMD0 is put on the bus to the line after its publishes, closed on its ONE unconditional exit - a window opened because 730's press read \`_int_status_after = 0x00000001\` against \`_int_status_before = 0x00000000\` with exactly that one store between them, so \`_cmd_gated = 1\` was the masked poll's answer and not the block's"
@@ -36619,7 +36817,7 @@ verify_trace_symbols() {
                     layout_fail "st_all_send_cid's device accesses IN PROGRAM ORDER, distinct, are [$stb_cid_dev] and rung 16's record says [f9824934:str f9824934:ldr f9824938:ldr f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f982491b:ldrb f9824917:ldrb f9824913:ldrb f9824930:ldr f9824924:ldr] - **the window's store is FIRST, before the command**, because a window opened after CMD2 is 732's first build and 733's press: the poll that has to see the completion runs inside the command, and an enable written after it measures a masked block. Then the enable read back, the signal enable, and the driver's own four words in its own order - word 3 first, descending - each followed by its byte, then the restore and the two readings after it. **This is the half neither the sorted set nor the counts can carry**, and it is the one that makes this rung a 136-bit read rather than a 32-bit one taken four times. Nothing is rebuilt by this refusal"
                 [[ -z "${stb_cid_img// /}" ]] ||
                     layout_fail "st_all_send_cid's non-device memory accesses are [$stb_cid_img] at [$stb_cid_imgaddr] and rung 16's record says that set is EMPTY - the body holds a \`struct st_cmd_result\` and four words on its own stack, both reached through \`sp\` and therefore invisible to the classifier, and publishes through \`entry_live_write\` (a call, with a .rodata string). A symbol here is either one this rung never declared or an access the classifier could not resolve. Nothing is rebuilt by this refusal"
-                stb_cid_calls=$(grep -c -- 'bl.*<st_all_send_cid>' <<<"$stb_path_body")
+                stb_cid_calls=$(grep -c -- 'bl.*<st_all_send_cid>' <<<"$stb_path_body" || true)
                 [[ "$stb_cid_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $stb_cid_calls call(s) to st_all_send_cid and rung 16 makes exactly one. Zero is the whole arm absent - every \`_cid_*\` cell absent with it, and \`_cid_gated\` too, since the gate and the body are one branch; two or more means CMD2 is issued twice and both are published under one name. This is the clause m720 is about: an absent key's three producers must be named before its absence is read. Nothing is rebuilt by this refusal"
                 stb_cid_ln=$(awk '/bl.*<st_all_send_cid>/{ printf "%d ", NR }' <<<"$stb_path_body")
@@ -36691,7 +36889,7 @@ verify_trace_symbols() {
                     layout_fail "st_resp_before's device accesses IN PROGRAM ORDER, distinct, are [$stb_rb_order] and rung 18's record says [f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f982491b:ldrb f9824917:ldrb f9824913:ldrb f9824924:ldr f982490e:ldrh f9824930:ldr f9824934:ldr f9824938:ldr] - the four words in the driver's own order (word 3 FIRST, descending), each followed by the byte the driver takes below it, and then the state registers. **This is the half neither the sorted set nor the counts can carry, and it is the one that makes the four pre-command words comparable with rung 17's four post-CMD2 words**: they are the same arithmetic over the same offsets in the same order, so a value that appears in both is one register read twice rather than two derivations that happen to agree. Nothing is rebuilt by this refusal"
                 [[ -z "${stb_rb_img// /}" ]] ||
                     layout_fail "st_resp_before's non-device memory accesses are [$stb_rb_img] at [$stb_rb_imgaddr] and rung 18's record says that set is EMPTY - the body holds five words on its own stack, reached through \`sp\` and therefore invisible to the classifier, and publishes through \`entry_live_write\` (a call, with a .rodata string). A symbol here is either one this rung never declared or an access the classifier could not resolve. Nothing is rebuilt by this refusal"
-                stb_rb_calls=$(grep -c -- 'bl.*<st_resp_before>' <<<"$stb_body")
+                stb_rb_calls=$(grep -c -- 'bl.*<st_resp_before>' <<<"$stb_body" || true)
                 [[ "$stb_rb_calls" == "1" ]] ||
                     layout_fail "entry_storage_probe makes $stb_rb_calls call(s) to st_resp_before and rung 18 makes exactly one. Zero is the whole arm absent - the body dropped as unreferenced, or a switch no build reads - and every \`_rb_*\` cell absent with it, INCLUDING \`_rb_resp_zero\`, which is this rung's answer; two or more means the register is read twice under one set of names and the first reading is the one a reader would take while the second is the one the second call produced. This is the clause m720 is about: an absent key's three producers must be named before its absence is read. Nothing is rebuilt by this refusal"
                 stb_rb_cmd_ln=$(awk '/bl.*<st_cmd_path>/{ printf "%d ", NR }' <<<"$stb_body")
@@ -36751,7 +36949,7 @@ verify_trace_symbols() {
                     layout_fail "st_dll_census's device accesses IN PROGRAM ORDER, distinct, are [$stb_dll_order] and rung 22's record says [f982493e:ldrh f9824a00:ldr f9824a08:ldr] - HOST_CONTROL2 first, then the DLL's configuration word, then its status word. **The order is the reading's shape and not a style**: \`CORE_DLL_STATUS 0x108\` answers whether the DLL is LOCKED, which is a question about the DLL whose configuration was read one access earlier, and taking the status first would make the pair two readings of two moments with no way to tell which configuration the lock belongs to. Nothing is rebuilt by this refusal"
                 [[ -z "${stb_dll_img// /}" ]] ||
                     layout_fail "st_dll_census's non-device memory accesses are [$stb_dll_img] at [$stb_dll_imgaddr] and rung 22's record says that set is EMPTY - the body holds three words and a counter on its own stack, reached through \`sp\` and therefore invisible to the classifier, and publishes through \`entry_live_write\` (a call, with a .rodata string). A symbol here is either one this rung never declared or an access the classifier could not resolve. Nothing is rebuilt by this refusal"
-                stb_dll_calls=$(grep -c -- 'bl.*<st_dll_census>' <<<"$stb_body")
+                stb_dll_calls=$(grep -c -- 'bl.*<st_dll_census>' <<<"$stb_body" || true)
                 [[ "$stb_dll_calls" == "1" ]] ||
                     layout_fail "entry_storage_probe makes $stb_dll_calls call(s) to st_dll_census and rung 22 makes exactly one. Zero is the whole arm absent - every \`_dll_*\` cell absent with it, and \`_dll_ctrl2_uhs\` too, so 756 section 6's HOST_CONTROL2 half would be read as 'the reset did not clear the field' from a log with no cell for it at all. Two or more means the registers are read twice under one set of names. This is the clause m720 is about: an absent key's three producers must be named before its absence is read. Nothing is rebuilt by this refusal"
                 stb_dll_cmd_ln=$(awk '/bl.*<st_cmd_path>/{ printf "%d ", NR }' <<<"$stb_body")
@@ -36894,7 +37092,7 @@ verify_trace_symbols() {
                         layout_fail "the guard is on line $stb_pad_guard_ln and the store on line $stb_pad_write_ln of $stb_pad_src, with $stb_pad_between \`} else {\` line(s) between them; rung 27 requires the store to come AFTER the guard and in its ELSE arm, i.e. exactly one \`} else {\` between the two. A store above the guard, or between the guard and its own else, is not the conditional this rung's answer space describes - and a store in the guard's THEN arm would make _pad_write_skipped and the store the same branch. Nothing is rebuilt by this refusal"
                     fi
                 fi
-                stb_pad_calls=$(grep -c -- 'bl.*<st_pad_census>' <<<"$stb_body")
+                stb_pad_calls=$(grep -c -- 'bl.*<st_pad_census>' <<<"$stb_body" || true)
                 [[ "$stb_pad_calls" == "1" ]] ||
                     layout_fail "entry_storage_probe makes $stb_pad_calls call(s) to st_pad_census and rung 25 makes exactly one. Zero is the whole arm absent - every \`_pad_*\` cell absent with it, INCLUDING \`_pad_raw\`, which is this rung's answer; and an absent key has three producers (m720: the branch did not run, the channel refused, the cap dropped it) so its absence must be nameable before it is read. Two or more means the register is read twice under one set of names and the fields are decoded twice from two samples of a register nothing changes. Nothing is rebuilt by this refusal"
                 stb_pad_cmd_ln=$(awk '/bl.*<st_cmd_path>/{ printf "%d ", NR }' <<<"$stb_body")
@@ -36981,10 +37179,10 @@ verify_trace_symbols() {
                 # inlined into another is refused by the count that owns it.
                 stb_rca_path_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_path_body")
                 stb_rca_cid_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_cid_body")
-                stb_rca_own_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_rca_body")
+                stb_rca_own_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_rca_body" || true)
                 [[ "$stb_rca_path_calls" == "2" && "$stb_rca_cid_calls" == "1" && "$stb_rca_own_calls" == "1" ]] ||
                     layout_fail "the four command call sites are [st_cmd_path $stb_rca_path_calls, st_all_send_cid $stb_rca_cid_calls, st_set_relative_addr $stb_rca_own_calls] and rung 19's record says exactly [2, 1, 1] - CMD0 and CMD1 from the command path, CMD2 from rung 17's body and CMD3 from this one. A count that is too high is a command class this rung does not name; one that is too low is an arm whose record claims an act its image does not take. Nothing is rebuilt by this refusal"
-                stb_rca_calls=$(grep -c -- 'bl.*<st_set_relative_addr>' <<<"$stb_path_body")
+                stb_rca_calls=$(grep -c -- 'bl.*<st_set_relative_addr>' <<<"$stb_path_body" || true)
                 [[ "$stb_rca_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $stb_rca_calls call(s) to st_set_relative_addr and rung 19 makes exactly one. Zero is the whole arm absent - every \`_rca_*\` cell absent with it, and \`_rca_gated\` too, since the gate and the body are one branch; two or more means CMD3 is issued twice and both are published under one name. This is the clause m720 is about: an absent key's three producers must be named before its absence is read. Nothing is rebuilt by this refusal"
                 stb_rca_ln=$(awk '/bl.*<st_set_relative_addr>/{ printf "%d ", NR }' <<<"$stb_path_body")
@@ -37050,10 +37248,10 @@ verify_trace_symbols() {
 
                 stb_nrsp_path_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_path_body")
                 stb_nrsp_cid_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_cid_body")
-                stb_nrsp_own_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_nrsp_body")
+                stb_nrsp_own_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_nrsp_body" || true)
                 [[ "$stb_nrsp_path_calls" == "2" && "$stb_nrsp_cid_calls" == "1" && "$stb_nrsp_own_calls" == "1" ]] ||
                     layout_fail "the four command call sites are [st_cmd_path $stb_nrsp_path_calls, st_all_send_cid $stb_nrsp_cid_calls, st_cmd3_noresp $stb_nrsp_own_calls] and rung 20 has exactly [2, 1, 1] - this body sends ONE command, the same opcode and the same argument as rung 19's with no response demand, so a fourth call site anywhere is a command this arm did not declare"
-                stb_nrsp_calls=$(grep -c -- 'bl.*<st_cmd3_noresp>' <<<"$stb_path_body")
+                stb_nrsp_calls=$(grep -c -- 'bl.*<st_cmd3_noresp>' <<<"$stb_path_body" || true)
                 [[ "$stb_nrsp_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $stb_nrsp_calls call(s) to st_cmd3_noresp and rung 20 makes exactly one. Zero is an arm whose rung does not exist (this clause's first check names it); two would put this command on the bus twice in one boot, and rung 19's own press measured that its CMD3 left CMD_INHIBIT set at the end of a 1.2 s window, so the second would read the first's in-flight state rather than its own flag word"
                 stb_nrsp_ln=$(awk '/bl.*<st_cmd3_noresp>/{ printf "%d ", NR }' <<<"$stb_path_body")
@@ -37181,10 +37379,10 @@ verify_trace_symbols() {
 
                 stb_nidx_path_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_path_body")
                 stb_nidx_cid_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_cid_body")
-                stb_nidx_own_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_nidx_body")
+                stb_nidx_own_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_nidx_body" || true)
                 [[ "$stb_nidx_path_calls" == "2" && "$stb_nidx_cid_calls" == "1" && "$stb_nidx_own_calls" == "1" ]] ||
                     layout_fail "the four command call sites are [st_cmd_path $stb_nidx_path_calls, st_all_send_cid $stb_nidx_cid_calls, st_cmd3_noidx $stb_nidx_own_calls] and rung 21 has exactly [2, 1, 1] - this body sends ONE command, the same opcode and the same argument as rungs 19 and 20 with the ONE INDEX BIT taken out of its flag word, so a fourth call site anywhere is a command this arm did not declare"
-                stb_nidx_calls=$(grep -c -- 'bl.*<st_cmd3_noidx>' <<<"$stb_path_body")
+                stb_nidx_calls=$(grep -c -- 'bl.*<st_cmd3_noidx>' <<<"$stb_path_body" || true)
                 [[ "$stb_nidx_calls" == "1" ]] ||
                     layout_fail "st_cmd_path makes $stb_nidx_calls call(s) to st_cmd3_noidx and rung 21 makes exactly one. Zero is an arm whose rung does not exist (this clause's first check names it); two would put this command on the bus twice in one boot, and rung 19's own press measured that its CMD3 left CMD_INHIBIT set at the end of a 1.2 s window, so the second would read the first's in-flight state rather than its own flag word"
                 stb_nidx_ln=$(awk '/bl.*<st_cmd3_noidx>/{ printf "%d ", NR }' <<<"$stb_path_body")
@@ -37260,7 +37458,7 @@ verify_trace_symbols() {
                     layout_fail "st_quiet_enable_probe's device accesses IN PROGRAM ORDER, distinct, are [$stb_q_dev] and rung 15's record says [f9824930:ldr f9824934:ldr f9824938:ldr f9824934:str] - the three reads FIRST (the status, the enable the store is derived from, and the signal enable), and the write after all three. This is the half neither the sorted set nor the counts can carry, and it is the one that makes this rung a discrimination rather than a repetition: a body that read \`INT_STATUS\` for the first time AFTER setting the enable would have the same set and the same counts, and \`_quiet_status_before\` would then be a reading of an enabled block. Nothing is rebuilt by this refusal"
                 [[ -z "${stb_q_img// /}" ]] ||
                     layout_fail "st_quiet_enable_probe's non-device memory accesses are [$stb_q_img] at [$stb_q_imgaddr] and rung 15's record says that set is EMPTY - the body holds eight locals, publishes through entry_live_write (a call, with a .rodata string) and owns no .bss word. A symbol here is either one this rung never declared or an access the classifier could not resolve. Nothing is rebuilt by this refusal"
-                stb_q_calls=$(grep -c -- 'bl.*<st_quiet_enable_probe>' <<<"$stb_body")
+                stb_q_calls=$(grep -c -- 'bl.*<st_quiet_enable_probe>' <<<"$stb_body" || true)
                 [[ "$stb_q_calls" == "1" ]] ||
                     layout_fail "entry_storage_probe makes $stb_q_calls call(s) to st_quiet_enable_probe and rung 15 makes exactly one. Zero is the whole arm absent - the body dropped as unreferenced, or a switch no build reads - and every cell it publishes absent with it; two or more means the one-bit enable is set at two moments and both published under one name. This is the clause m720 is about: an absent key's three producers must be named before its absence is read, and here a guaranteed one is a switch that no code path reaches. Nothing is rebuilt by this refusal"
                 stb_q_cmd_ln=$(awk '/bl.*<st_cmd_path>/{ printf "%d ", NR }' <<<"$stb_body")
@@ -37490,11 +37688,11 @@ verify_trace_symbols() {
         got520=$(arm-none-eabi-nm -S "$OUT/xnu_arm_entry.elf" | awk -v s="$sym520" '$4 == s { printf "%d", strtonum("0x" $2) }')
         [[ "${got520:-0}" == "$sz520" ]] ||
             layout_fail "$sym520 is ${got520:-0} bytes in the linked image and 520's key list for that site is $sz520 (=$cnt520 key pointers and three words): the table's size is what makes the key list a fact about the image rather than about a comment, and a key pointer dropped from it would leave the site publishing $((cnt520 - 1)) records while the build stayed green"
-        u520=$(grep -o "xnu_live_slot_${tag520}_[a-z0-9_]*" "$BOOT_DIR/entry_stubs.c" | sort -u | wc -l)
+        u520=$(grep -o "xnu_live_slot_${tag520}_[a-z0-9_]*" "$BOOT_DIR/entry_stubs.c" | sort -u | wc -l || true)
         [[ "${u520:-0}" == "$cnt520" ]] ||
             layout_fail "entry_stubs.c spells ${u520:-0} distinct key(s) beginning xnu_live_slot_${tag520}_ and that site's table has $cnt520 pointer(s): every key the source names has to be one the table publishes, and every pointer the table holds has to be a key the source names - which is the same check 519's clause makes on its six keys, applied to a list this long because 520's readings are the only ones a dying run carries"
     done
-    k520=$(grep -o 'xnu_live_slot_\(pre\|post\|ab\|rtcpre\|rtcab\|tb\|cwe\)_[a-z0-9_]*' "$BOOT_DIR/entry_stubs.c" | sort -u | wc -l)
+    k520=$(grep -o 'xnu_live_slot_\(pre\|post\|ab\|rtcpre\|rtcab\|tb\|cwe\)_[a-z0-9_]*' "$BOOT_DIR/entry_stubs.c" | sort -u | wc -l || true)
     [[ "${k520:-0}" == 44 ]] ||
         layout_fail "the seven key sets spell ${k520:-0} distinct keys and the instrument's own list is 44 (6+6+7+9+9+4+3): the number is asserted here and each key is asserted in the entry image below, because a key that is in the source and not in the image is a record the run cannot read and a key in the image and not in the source is one this clause cannot reason about"
     for k in $(grep -o 'xnu_live_slot_\(pre\|post\|ab\|rtcpre\|rtcab\|tb\|cwe\)_[a-z0-9_]*' "$BOOT_DIR/entry_stubs.c" | sort -u); do
@@ -37557,8 +37755,8 @@ verify_trace_symbols() {
     # sampled away by a rule that is right for a loop and wrong for a rare event. `entry_slot_publish_tail`
     # is that rule, and it is called from exactly one place: a site that quietly went back to the geometric
     # subsample would otherwise only be visible in a run that happened to die on a non-power-of-two abort.
-    ntail_def=$(grep -c '^static uint32_t entry_slot_publish_tail(' "$BOOT_DIR/entry_stubs.c")
-    ntail_call=$(grep -c 'entry_slot_publish_tail(k->calls)' "$BOOT_DIR/entry_stubs.c")
+    ntail_def=$(grep -c '^static uint32_t entry_slot_publish_tail(' "$BOOT_DIR/entry_stubs.c" || true)
+    ntail_call=$(grep -c 'entry_slot_publish_tail(k->calls)' "$BOOT_DIR/entry_stubs.c" || true)
     [[ "${ntail_def:-0}" == 1 && "${ntail_call:-0}" == 1 ]] ||
         layout_fail "entry_stubs.c holds ${ntail_def:-0} definition(s) of entry_slot_publish_tail and ${ntail_call:-0} call(s) of it on a key table's own call count (the abort site's is the one that should have it): a rare-event rule applied at a site that makes thousands of passes would fill the live channel, and a site that quietly went back to the geometric subsample would only be visible in a run that happened to die on an abort that is neither <= 4 nor a power of two - which is exactly what 520's ninth, fatal abort was"
         # ================================================ 522: the idle window's near end, and the D-cache
@@ -38379,7 +38577,7 @@ verify_root_device() {
         words=$(arm-none-eabi-objdump -s --start-address=$tab_va --stop-address=$((tab_va + 0x180)) \
                     "$OUT/xnu_arm_entry.elf" |
                 awk '/^ [0-9a-f]+ / { print $2; print $3; print $4; print $5 }')
-        n=$(printf '%s\n' "$words" | grep -c .)
+        n=$(printf '%s\n' "$words" | grep -c . || true)
         (( n >= 32 )) || layout_fail "the filesystem table read back as $n words, which cannot hold the entries this step needs"
         rev_word() { echo "${1:6:2}${1:4:2}${1:2:2}${1:0:2}"; }
         sym_addr() { arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk -v s="$1" '$3 == s { print $1; found = 1 } END { exit(found ? 0 : 1) }'; }
@@ -39247,6 +39445,15 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # reading an ending image cannot produce. Written as the RESOLVED `$RESIDENT`, not
     # `${STAGE90_XNU_RESIDENT}`, for 882's reason.
     echo "STAGE90_XNU_RESIDENT=$RESIDENT"
+    # **1000's switch, written here for the reason every line in this block states**: this writer is
+    # the one site a name-keyed diff does not visit and the only site the gate ever reads, so a
+    # switch that reached the asm layer's ASFLAGS and the arm-key list but not this line would be a
+    # run whose arm nobody read (the two-way key check after the file is written is what makes
+    # forgetting refuse). It gets its own line rather than riding RESIDENT: OFF, the entry image is
+    # byte-for-byte a hook-free build that CANNOT produce a single `xnu_live_usvc_*` record, and a
+    # record that omitted this key would let that image pass as a frontier arm. Written as the
+    # RESOLVED `$USVC`, not `${STAGE90_XNU_USVC}`, for 882's reason.
+    echo "STAGE90_XNU_USVC=$USVC"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

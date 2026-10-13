@@ -135,6 +135,15 @@ case "$RESIDENT" in
     0|1) ;;
     *) echo "STAGE90_XNU_RESIDENT must be 0 or 1, not [$RESIDENT]" >&2; exit 1 ;;
 esac
+# 1000: the user-SVC frontier hook (`tools/stage_d13_usvc.sh` -> traps_lo.s's `fleh_swi`, right after
+# `cpsie i`). A NEW switch, USVC, default 0. The C half is the entry image's own
+# (`entry_stubs.c`'s `entry_note_user_svc`) - no POOL objects, unlike IOS7_TRAPS above. Default 0:
+# the tree's original text is compiled byte for byte.
+USVC=${STAGE90_XNU_USVC:-0}
+case "$USVC" in
+    0|1) ;;
+    *) echo "STAGE90_XNU_USVC must be 0 or 1, not [$USVC]" >&2; exit 1 ;;
+esac
 PATCH_IDLE_STACK=$TOOLS_DIR/patch_idle_stack.py
 idle_patched=0
 ASSYM=$XNU_ASSYM_OUT/$CONFIG
@@ -221,6 +230,11 @@ ASFLAGS+=("-DSTAGE90_XNU_IOS7_TRAPS=$IOS7_TRAPS")
 # rule as the three lines above. Without this line the `#if STAGE90_XNU_RESIDENT` in the two .s files
 # reads the macro as undefined (= 0) and the hooks silently compile out even when staged.
 ASFLAGS+=("-DSTAGE90_XNU_RESIDENT=$RESIDENT")
+# 1000: the user-SVC frontier hook (`tools/patch_d13_usvc.py`) - same append-after-assignment rule
+# as the four lines above. Without this line the `#if defined(STAGE90_XNU_USVC) && STAGE90_XNU_USVC`
+# in traps_lo.s reads the macro as undefined (= 0) and the hook silently compiles out even when
+# staged.
+ASFLAGS+=("-DSTAGE90_XNU_USVC=$USVC")
 INCLUDES=(
     -I"$ASSYM" -I"$REPO_ROOT/src/entry"
     -I"$OPTION_HEADERS" -I"$DEVICE_HEADERS"

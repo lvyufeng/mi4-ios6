@@ -185,11 +185,32 @@ static unsigned int g_msm8974_tick_ticks;
  * the reading 984 could not make, because the line it would have come from did not exist. */
 static unsigned int g_msm8974_tick_count;
 
+/* **1000: the delivery's own lateness, in the counter the deadline is expressed in.** The arm site
+ * stamps CNTVCT.lo immediately before it programs `CNTV_TVAL`; the handler reads CNTVCT.lo again at
+ * the entry and the delta is "how long after the deadline this delivery arrived" - a reading about
+ * the DELIVERY, independent of handler duration and of wall-clock. A healthy entry is the vector's
+ * own latency (tens to hundreds of ticks); a masked window is a near-whole multiple of the 19,200
+ * tick period. 999 measured the collapse (122 deliveries then +24 over >= 2.4 s) but could only say
+ * "rate collapsed" - the A/B question (a second writer on TVAL vs delivery masked) needs the raw
+ * `CNTV_TVAL`/`CNTV_CTL` readback at the entry, which is what the anomaly records carry. `_max_d`
+ * and `_anom_count` are the aggregates the summaries publish; all three are plain statics written
+ * only from this file's timer paths (single CPU). */
+static uint32_t g_msm8974_tick_arm_cntv;   /* CNTVCT.lo at the last re-arm, before the TVAL store */
+static uint32_t g_msm8974_tick_max_d;      /* worst elapsed seen; the negative-cell aggregate */
+static uint32_t g_msm8974_tick_anom_count; /* deliveries later than one full period */
+
 /* **999's timer discriminator: the count the deliveries FREEZE at.** Both 997 and 998 publish the
  * powers of two up to `xnu_live_tick_irq=0x40` (captures :7344 / :5463) and `0x80` never appears -
  * the last DELIVERED tick is 64 - so an edge at a count below it belongs to the healthy pre-freeze
  * clock and must not burn one of the four per-site slots `entry_timer_edge_probe` publishes in. */
 #define MSM8974_TICK_FROZEN_AT 64u
+
+/* Declared here because the arm site below stamps CNTVCT.lo while the helper's definition sits with
+ * its twins beside `msm8974_read_cntvct` (:307-347). A call before a `static` definition is an
+ * IMPLICIT (non-static) declaration, and the definition then collides with it - the first 1000 build
+ * stopped at exactly that (`static declaration of 'msm8974_read_cntvct_lo' follows non-static
+ * declaration`, out/xnu_platform_obj_d13/pe_msm8974.log). */
+static inline uint32_t msm8974_read_cntvct_lo(void);
 
 /* Arm the countdown: `CNTV_TVAL` = one period, `CNTV_CTL` = ENABLE|unmask. The order is the entry
  * image's own (`src/entry/entry_timebase.c:293,370`): program the value, then unmask - so the shortest
@@ -207,6 +228,11 @@ msm8974_tick_arm(void)
         entry_live_write("xnu_live_tick_ticks", ticks);
         entry_live_write("xnu_live_tick_hz", (uint32_t)gPEClockFrequencyInfo.timebase_frequency_hz);
     }
+
+    /* **1000: the stamp the handler's delta is measured from.** Read as late as possible before the
+     * deadline is programmed, so the delta the handler computes is the period plus the delivery
+     * latency and nothing else - the helper above names the counter pair and why it is CNTVCT's). */
+    g_msm8974_tick_arm_cntv = msm8974_read_cntvct_lo();
 
     __asm__ __volatile__("mcr p15, 0, %0, c14, c3, 0" :: "r"(ticks));   /* CNTV_TVAL */
     __asm__ __volatile__("mcr p15, 0, %0, c14, c3, 1" :: "r"(1u));      /* CNTV_CTL: ENABLE */
@@ -293,6 +319,41 @@ msm8974_read_cntvct(void)
 	return ((unsigned long long)hi << 32) | lo;
 }
 
+/* **1000: the counter the deadline is actually expressed in.** `msm8974_read_cntvct` above is
+ * `mrrc p15, 0` - the ARM ARM's CNTPCT (physical); it equals the virtual counter on this board only
+ * because nothing writes CNTVOFF, and the name/comment above predate that distinction. The tick's
+ * deadline lives in `CNTV_TVAL` and the comparator counts down from **CNTVCT** (`mrrc p15, 1`, the
+ * opc1 the entry image's own timebase read uses, `src/entry/entry_timebase.c:217`), so the handler's
+ * elapsed readback takes its delta from THIS one - a delta against the wrong twin would still be a
+ * number, but not the deadline's own reading ([[mi4-one-value-two-definitions]]). */
+static inline uint32_t
+msm8974_read_cntvct_lo(void)
+{
+	unsigned int lo, hi;
+	__asm__ __volatile__("mrrc p15, 1, %0, %1, c14" : "=r"(lo), "=r"(hi));
+	return (uint32_t)lo;
+}
+
+/* `CNTV_TVAL` (c14, c3, 0) and `CNTV_CTL` (c14, c3, 1), the two registers `msm8974_tick_arm` writes -
+ * read here so an anomaly record says what the deadline and the control word ACTUALLY held at the
+ * entry, rather than what this file believes it wrote. `CNTV_CTL`: bit 0 ENABLE, bit 1 IMASK,
+ * bit 2 ISTATUS. */
+static inline uint32_t
+msm8974_read_cntv_tval(void)
+{
+	uint32_t v;
+	__asm__ __volatile__("mrc p15, 0, %0, c14, c3, 0" : "=r"(v));
+	return v;
+}
+
+static inline uint32_t
+msm8974_read_cntv_ctl(void)
+{
+	uint32_t v;
+	__asm__ __volatile__("mrc p15, 0, %0, c14, c3, 1" : "=r"(v));
+	return v;
+}
+
 static inline void
 msm8974_barrier(void)
 {
@@ -334,6 +395,58 @@ msm8974_interrupt_init(void)
 	/* Intentionally empty: see above. */
 }
 
+/* ---- 1000: the late delivery, recorded direct ---- */
+
+/* The first four deliveries later than a full period, in full. What each key reads:
+ *   _n    the ordinal (incremented BEFORE anything is written - the `entry_timer_edge_probe` shape -
+ *         so a repeated invocation cannot publish the same slot twice);
+ *   _d    elapsed CNTVCT ticks since the last re-arm: ~19,200 healthy, a near-multiple of it masked;
+ *   _tval what `CNTV_TVAL` held AT the entry (consistent with `_d` reads as the countdown running
+ *         through the whole gap = masked delivery; a value it could not have produced = a second
+ *         writer armed the deadline);
+ *   _ctl  `CNTV_CTL` at the entry (bit 1 IMASK set or bit 0 ENABLE clear = the second writer's
+ *         second signature).
+ * DIRECT (`entry_write_kv`, uncounted): 999's counted channel saturated before pid 1 even ran, so an
+ * anomaly record's ABSENCE has to be evidence again ([[mi4-998-g1-confirmed-map-file-kr0]]'s law),
+ * and the collapse's own records have to survive the cap this time. */
+static uint32_t g_msm8974_tick_anom_published;
+
+static void
+msm8974_tick_anom_publish(uint32_t d, uint32_t tval, uint32_t ctl)
+{
+	if (entry_live_ready() == 0u)
+		return;
+	g_msm8974_tick_anom_published++;
+	if (g_msm8974_tick_anom_published > 4u)
+		return;
+	entry_write_kv("xnu_live_tick_anom_n", g_msm8974_tick_anom_published);
+	entry_write_kv("xnu_live_tick_anom_d", d);
+	entry_write_kv("xnu_live_tick_anom_tval", tval);
+	entry_write_kv("xnu_live_tick_anom_ctl", ctl);
+}
+
+/* One delivery's lateness, sampled from the handler's timer branch BEFORE its EOI - so the reading is
+ * about the DELIVERY, not this handler's duration. Healthy: `d` = the 19,200-tick period plus the
+ * vector's own latency (tens to hundreds of ticks), nothing published, cost = one CNTVCT read, a
+ * subtract and two compares. Late by more than one full period: the two raw readings the A/B question
+ * needs - `CNTV_TVAL` and `CNTV_CTL` AT the entry - then the first four events go out in full, while
+ * `_anom_count`/`_max_d` aggregate everything for the summaries. 999's collapse (24 deliveries over
+ * >= 2.4 s) would be a `d` near a whole multiple of 19,200 with `_tval` consistent with it - or not,
+ * which is exactly why both raw words are recorded. `noinline` for the build check's sake: the call
+ * must be a call in the handler's disassembly (the m168 lesson about checks that measure a shape). */
+static __attribute__((noinline)) void
+msm8974_tick_sample(void)
+{
+	uint32_t d = msm8974_read_cntvct_lo() - g_msm8974_tick_arm_cntv;
+
+	if (d > g_msm8974_tick_max_d)
+		g_msm8974_tick_max_d = d;
+	if (g_msm8974_tick_ticks == 0u || d <= 2u * (uint32_t)g_msm8974_tick_ticks)
+		return;
+	g_msm8974_tick_anom_count++;
+	msm8974_tick_anom_publish(d, msm8974_read_cntv_tval(), msm8974_read_cntv_ctl());
+}
+
 static void
 msm8974_handle_interrupt(void *context)
 {
@@ -360,6 +473,12 @@ msm8974_handle_interrupt(void *context)
 	}
 
 	if (id == MSM8974_GIC_TIMER_INTID) {
+		/* **1000: the delivery's lateness, sampled at the entry - before the EOI below, so the
+		 * reading is about the DELIVERY and not this handler's duration.** One call, one CNTVCT
+		 * read and two compares on the healthy path; on an anomalous one it also reads
+		 * `CNTV_TVAL`/`CNTV_CTL` and publishes - see `msm8974_tick_sample`. */
+		msm8974_tick_sample();
+
 		/* **The tick.** EOI *first*, then service - the ordering `src/entry/entry_irq.c:58` chose:
 		 * EOI'ing before the work means a second expiry during it is a line already back in the
 		 * distributor's hands, not one the CPU interface still believes is active. `rtclock_intr`
@@ -447,6 +566,24 @@ entry_timer_edge_probe(uint32_t site, uint32_t cpsr)
         entry_write_kv("xnu_live_edge_texr_cpsr", cpsr);
         entry_write_kv("xnu_live_edge_texr_tick", raw);
     }
+}
+
+/* `entry_tick_summary`: the timer's aggregates, published on request through the DIRECT channel, so a
+ * caller that has to survive the cap can read the tick's health at its own moment instead of at the
+ * next counted record. Two callers, both places the counted channel goes quiet: the exec-done point
+ * (`entry_stubs.c` `entry_note_exec_returned` - 999's cap tombstone sat immediately beside it) and
+ * the wdt pet's sparse publish gate (`entry_trace.c` - the post-cap live path). `_maxd` is the worst
+ * elapsed ever seen (healthy: tens to hundreds of ticks; 999's collapse: near-multiples of 19,200),
+ * `_anom` counts deliveries later than a full period, `_count` is every delivery since boot - the
+ * same number the handler's powers-of-two ladder publishes, read here WITHOUT its sampling rule. */
+void
+entry_tick_summary(void)
+{
+    if (entry_live_ready() == 0u)
+        return;
+    entry_write_kv("xnu_live_tick_sum_count", g_msm8974_tick_count);
+    entry_write_kv("xnu_live_tick_sum_anom", g_msm8974_tick_anom_count);
+    entry_write_kv("xnu_live_tick_sum_maxd", g_msm8974_tick_max_d);
 }
 
 /* ---- timebase ---- */

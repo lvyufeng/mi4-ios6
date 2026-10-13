@@ -83,6 +83,16 @@ a read of one block, and it is the property a per-value comparison cannot see. T
 against is specific to this step: `ml_get_decrementer` and `ml_set_decrementer` `blx`/`bxne` the word
 they load out of `cpu_data`, so an offset a word off does not give a wrong timer reading - it calls a
 data word.
+
+The two syscall-frame words (1000)
+----------------------------------
+The user-SVC frontier record reads the frame's r12 - the syscall number `fleh_swi`'s `mov r11, r12`
+consumes - and r0, the syscall's first argument, so `entry_saved_state.h` names both. They are
+**derived, not transcribed**: the comparison below computes them from the parsed `r[]` span (its
+first word, and its last from the span's own width), so a tree whose `r[]` moved or changed width
+drags them with it. On 4570 the generated `assym.s`'s `SS_R12` is a third source for the same word
+and is compared too; D13 has no generated `SS_*` and the parsed `abort_information_context_t` is the
+only frame source there, exactly as for the six offsets above.
 """
 
 import argparse
@@ -322,6 +332,29 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
         failures.append("STAGE90_SS_SIZE is %d and sizeof(struct %s) is %d"
                         % (local["STAGE90_SS_SIZE"], STRUCT_NAME, size))
 
+    # --- 1000: the two words of the `r[]` span a syscall frame is read at ----------------------
+    # `traps_lo.s`'s `fleh_swi` consumes the syscall number in r12 (`mov r11, r12`; the LEO sibling
+    # reads the same word at `[r8, #48]`) and r0 is the syscall's first argument. The user-SVC
+    # frontier record reads both out of the frame, so both now carry a claim - derived from the
+    # parsed span's own offset and width rather than from the literals 0 and 48, so a tree whose
+    # `r[]` moved or changed width drags these with it.
+    r_span = next(((offset, words) for member, offset, words in members if member == "r"), None)
+    if r_span is None:
+        failures.append("struct %s has no r[] member, so the two words 1000's SVC frontier reads "
+                        "its syscall number and first argument at have no derivation" % STRUCT_NAME)
+    else:
+        r_off, r_words = r_span
+        for key, want, what in (
+                ("STAGE90_SS_R0", r_off, "first (r0, the syscall's argument 0)"),
+                ("STAGE90_SS_R12", r_off + 4 * (r_words - 1),
+                 "last (r12, the syscall number `mov r11, r12` consumes)")):
+            if key not in local:
+                failures.append("entry_saved_state.h defines no %s, so the %s word of the r[] span "
+                                "is unnamed in the image" % (key, what))
+            elif local[key] != want:
+                failures.append("%s is %d and struct %s's r[] span (%d words at %d) puts that word "
+                                "at %d" % (key, local[key], STRUCT_NAME, r_words, r_off, want))
+
     # The mode test the frame's cpsr is read with. **949: D13's `proc_reg.h` has no `PSR_MODE_MASK`/
     # `PSR_USER_MODE` names** - its `sleh_abort` tests the mode with the literal `0x13` and the header
     # keeps 0x1F/0x10 for the record - so there is nothing in this tree to compare the two against.
@@ -421,7 +454,7 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
     assym = read_assym(assym_text)
     assym_names = {"SP": "SS_SP", "LR": "SS_LR", "PC": "SS_PC", "CPSR": "SS_CPSR",
                    "STATUS": "SS_STATUS", "VADDR": "SS_VADDR", "EXC": "SS_EXC", "SIZE": "SS_SIZE",
-                   "R0": "SS_R0"}
+                   "R0": "SS_R0", "R12": "SS_R12"}
     # **949: on D13 the `SS_*` names are not in the generated `assym.s` at all.** D13's `genassym.c`
     # does not `DECLARE` them; the record's six frame offsets come from the *crafted* `ABORT037`
     # frame (`ios7leo_data_abort037.h` asserts the frame is 76 bytes with `fsr` at 68 and `far` at
@@ -449,6 +482,11 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
             if small["R0"] != by_name.get("r", 0):
                 failures.append("assym.s gives SS_R0 %d and struct %s's first member is at %d"
                                 % (small["R0"], STRUCT_NAME, by_name.get("r", 0)))
+            if small["R12"] != local.get("STAGE90_SS_R12", -1):
+                failures.append("assym.s gives SS_R12 %d and entry_saved_state.h says %d - the "
+                                "assembled kernel and the image disagree on where the syscall "
+                                "number sits in the frame"
+                                % (small["R12"], local.get("STAGE90_SS_R12", -1)))
             if small["EXC"] != by_name.get("exception", -1):
                 failures.append("assym.s gives SS_EXC %d and struct %s declares `exception` at %d - a "
                                 "member was added to or removed from the struct"
@@ -531,7 +569,8 @@ def selftest(header_text, assym_text, defines_text, proc_reg_text, boot_assym_te
             return "%s%d%s" % (match.group(1), int(match.group(2), 0) + 4, match.group(3))
         return pattern.sub(bump, text)
 
-    for key in ("STAGE90_SS_PC", "STAGE90_SS_SP", "STAGE90_ACT_MAP", "STAGE90_MAP_PMAP",
+    for key in ("STAGE90_SS_PC", "STAGE90_SS_SP", "STAGE90_SS_R0", "STAGE90_SS_R12",
+                "STAGE90_ACT_MAP", "STAGE90_MAP_PMAP",
                 "STAGE90_TH_RECOVER", "STAGE90_ACT_PCBDATA"):
         mutated = mutate_define(defines_text, key)
         if mutated:
@@ -577,10 +616,15 @@ def selftest(header_text, assym_text, defines_text, proc_reg_text, boot_assym_te
     if mutated != proc_reg_text:
         mutations.append(("proc_reg.h's PSR_MODE_MASK widened", dict(proc_reg_text=mutated)))
 
-    mutated = re.sub(r"^#define\s+SS_SIZE\s+\d+\s*$", "#define SS_SIZE 88", boot_assym_text,
-                     count=1, flags=re.M)
-    if mutated != boot_assym_text:
-        mutations.append(("the hand-written assym.s's SS_SIZE moved", dict(boot_assym_text=mutated)))
+    # D13 passes `boot_assym_text=None` (the `src/entry/assym.s` mirror claim is 4570-only, per
+    # `main()`), so this mutation is constructed only when there is a stand-in to move - the D13
+    # filter below already intends to drop it (`inert`), but it runs after construction, and an
+    # unguarded `re.sub` on `None` was a crash, not a skip.
+    if boot_assym_text is not None:
+        mutated = re.sub(r"^#define\s+SS_SIZE\s+\d+\s*$", "#define SS_SIZE 88", boot_assym_text,
+                         count=1, flags=re.M)
+        if mutated != boot_assym_text:
+            mutations.append(("the hand-written assym.s's SS_SIZE moved", dict(boot_assym_text=mutated)))
 
     # On D13 the assym.s `<name>` mutations and the boot-assym mutation are inert (D13's generated
     # assym.s has no `SS_*` and no `ACT_PCBDATA_PC`; the `src/entry/assym.s` mirror claim is 4570's) -
