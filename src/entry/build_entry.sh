@@ -31334,11 +31334,18 @@ verify_trace_symbols() {
         [[ -n "$u10_hookline" && "$u10_hookline" == "$u10_brline" ]] ||
             layout_fail "the USVC hook is not the body's first branch (hook at line ${u10_hookline:-none}, first branch at line ${u10_brline:-none}): the block sits right after \`cpsie i\` in traps_lo.s, BEFORE the -3 timebase fast path and every dispatch branch - a site after any of them misses SVCs and the frontier reading is about a subset of the calls"
         u10_win=$(grep -B2 -A2 'bl.*<entry_note_user_svc>' <<<"$u10_ls_body" || true)
-        u10_push=$(grep -cE 'push[[:space:]]+\{r0, r1, r8, lr\}|stm(db|fd|ea|ed)[[:space:]]+sp!,[[:space:]]*\{r0, r1, r8, lr\}' <<<"$u10_win" || true)
+        # 1002: the save/restore shape is SIX words {r0-r3,r8,lr}, NOT the 1000/1001 four words
+        # {r0,r1,r8,lr}. The four-word set left r3 un-saved, and `entry_note_user_svc` clobbers r3
+        # while `swi_trap` dispatches the `0x80000000` traps on LIVE r3 (r3=3 = thread_set_cthread,
+        # which writes TPIDRURO) - the defect the 1001 press read diagnosed as the cause of dyld's
+        # 230x `usermode data abort` at 0x4 (records/1001-press-read.txt §[6]). SIX words = 24 B,
+        # still 8-aligned at the bl (990). A tree still at the four-word form fails HERE, by value.
+        u10_push=$(grep -cE 'push[[:space:]]+\{r0, r1, r2, r3, r8, lr\}|stm(db|fd|ea|ed)[[:space:]]+sp!,[[:space:]]*\{r0-r3,r8,lr\}' <<<"$u10_win" || true)
         u10_mov=$(grep -cE 'mov[[:space:]]+r0, r8' <<<"$u10_win" || true)
-        u10_pop=$(grep -cE 'pop[[:space:]]+\{r0, r1, r8, lr\}|ldm(ia|fd|db|ed)[[:space:]]+sp!,[[:space:]]*\{r0, r1, r8, lr\}' <<<"$u10_win" || true)
-        [[ "$u10_push" == 1 && "$u10_mov" == 1 && "$u10_pop" == 1 ]] ||
-            layout_fail "the hook's window in locore_fleh_swi does not carry the 4-word save/restore shape (push=$u10_push mov=$u10_mov pop=$u10_pop around \`bl <entry_note_user_svc>\`): $(printf '%s' "$u10_win" | tr '\n' '|') - traps_lo.s must save {r0,r1,r8,lr} (r8 is the frame every path below reads, r0/r1 the -3 path reserves) and FOUR words keep sp 8-aligned at the bl (990: a 4-mod-8 frame killed ast_taken's vld1.32)"
+        u10_pop=$(grep -cE 'pop[[:space:]]+\{r0, r1, r2, r3, r8, lr\}|ldm(ia|fd|db|ed)[[:space:]]+sp!,[[:space:]]*\{r0-r3,r8,lr\}' <<<"$u10_win" || true)
+        u10_old=$(grep -cE '(push|pop)[[:space:]]+\{r0, r1, r8, lr\}' <<<"$u10_win" || true)
+        [[ "$u10_push" == 1 && "$u10_mov" == 1 && "$u10_pop" == 1 && "$u10_old" == 0 ]] ||
+            layout_fail "the hook's window in locore_fleh_swi does not carry the 1002 6-word save/restore shape (push=$u10_push mov=$u10_mov pop=$u10_pop old4=$u10_old around \`bl <entry_note_user_svc>\`): $(printf '%s' "$u10_win" | tr '\n' '|') - traps_lo.s must save {r0-r3,r8,lr} because r3 is LIVE across the call (the C helper clobbers it and swi_trap dispatches on it - the 1001 r3-clobber defect); SIX words keep sp 8-aligned at the bl (990). A four-word {r0,r1,r8,lr} here is the OLD defect - re-run tools/patch_d13_usvc.py and rebuild the assembly layer"
         u10_svcx=$(n9_nextT "$u10_svc")
         [[ -n $u10_svcx ]] ||
             layout_fail "no symbol follows entry_note_user_svc in the image, so its instruction range cannot be read"
@@ -31355,7 +31362,7 @@ verify_trace_symbols() {
             [[ "$u10_n" == 1 ]] ||
                 layout_fail "the .text binary carries $u10_n literal(s) equal to '$u10_key' (want exactly 1): the eight field keys are what the press-side pre-registration greps verbatim and what the tail read is read off"
         done
-        say "  xnu_entry_1000: USVC=1 - the SVC entry's prologue (locore_fleh_swi, traps_lo.o's fleh_swi under the link's rename) carries exactly ONE bl entry_note_user_svc as the body's first branch inside the 4-word frame, traps_lo.o carries the ASFLAGS switch, and the eight xnu_live_usvc_* keys are in the image's .text once with the body's 8+ direct writes and no counted one"
+        say "  xnu_entry_1000: USVC=1 - the SVC entry's prologue (locore_fleh_swi, traps_lo.o's fleh_swi under the link's rename) carries exactly ONE bl entry_note_user_svc as the body's first branch inside the 1002 6-word frame {r0-r3,r8,lr} (r3 LIVE across the call), traps_lo.o carries the ASFLAGS switch, and the eight xnu_live_usvc_* keys are in the image's .text once with the body's 8+ direct writes and no counted one"
     fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no

@@ -14561,3 +14561,64 @@ set=armed-d13-6ab42af7 sha256=f2bc5836445720b5194e4db1a298c7f966c76e46dd107c0f1b
 set=armed-d13-6ab42af7 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1001-submap-pmap-skip+probe;stage90_fixture.macho
 set=armed-d13-6ab42af7 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1001-submap-pmap-skip+probe;stage90-build-config.txt
 set=armed-d13-6ab42af7 sha256=8def24bd6476e04fd528bf3114a432e16322550cf94cfcd69be3d9adfe1fe727 bytes=560 file=SHA256SUMS.txt role=1001-submap-pmap-skip+probe;SHA256SUMS.txt
+# armed-d13-b04976fe  -  1002: THE USER-SVC HOOK SAVES r3 (`{r0,r1,r8,lr}` -> `{r0-r3,r8,lr}`), SO THE `0x80000000` TRAP DISPATCH IT FEEDS KEEPS ITS LIVE r3 AND dyld STOPPED READING TPIDRURO=0.
+# Switch set is 1001-s VERBATIM (NO new switch: DYLD_WITNESS, SHREG_PROBE, SHREG_WIRE,
+# SHREG_GEOM, RESIDENT, USVC and SUBMAP_PMAP_SKIP all stay 1); the ENTRY BIN moved (6ab42af7 ->
+# b04976fe); the PAYLOAD moves (it embeds the entry blob; the 29 s watchdog constant is 999-s,
+# unchanged); NO POOL object moves (the change is ASSEMBLY-layer only); the TREE moves by ONE
+# staged edit (traps_lo.s-s save set). tools/patch_d13_usvc.py MIGRATES a tree already at the
+# 1000/1001 four-word form in place (and refuses a tree carrying both forms, or neither); the
+# rebuild is TOOLS/ASSEMBLE_ARM_LAYER.SH with STAGE90_XNU_USVC=1 EXPORTED, then relink
+# (build_entry.sh only LINKS traps_lo.o).
+#
+# THE DEFECT, BY VALUE (records/1001-press-read.txt section [6]): traps_lo.s-s 1000 hook saved
+# `{r0,r1,r8,lr}` around `bl _entry_note_user_svc`, but that C helper CLOBBERS r3 (built image:
+# `movw r3,#0xfff8`/`movt r3,#0x8068` on every path, `mov r3,r0` on the n<=64 full path), and
+# `fleh_swi`-s `swi_trap` dispatches the `0x80000000` traps ON LIVE r3 (`cmp r3,#3; addls
+# pc,pc,r3,lsl#2` - r3=3 = thread_set_cthread_trap, which writes TPIDRURO). Saving r0/r1/r8/lr
+# was the wrong set. The LEO sibling block two lines below saves `{r0-r12,lr}` for exactly this
+# reason. FIX: save r3 too - `{r0-r3,r8,lr}`. SIX words = 24 B, still 8-aligned at the `bl`
+# (990).
+#
+# THE 1002 PRESS PRE-REGISTRATION (frozen once embedded; deviations reported, not
+# reinterpreted) is written by the TEAM-LEAD into scripts/press_1002.sh. Expected per the lead:
+# the USVC hook is TRANSPARENT on r3 (the SIX-word window `push {r0,r1,r2,r3,r8,lr} / mov r0,r8
+# / bl <entry_note_user_svc> / pop {r0,r1,r2,r3,r8,lr}` must be read IN THE IMAGE before any
+# judgement - a four-word window means the assembly layer was not rebuilt); dyld proceeds PAST
+# `check_np ret=12` into `IOS7SHREG map_slide` (the 999 reading) with NO recurrence of the 230x
+# `launchd[1]: usermode data abort ... at 0x00000004 ... (Translation fault on page)`; the
+# SUBMAPSKIP probe >= 1 (unchanged from 1001); VMHINT991 stays 0; the SURVIVAL GATE (no panic +
+# the exec-done trio and its five probe keys + records past the exec-return point); the pet-s
+# FIRST feed once the boot passes ~14.5 s with the read door in use; the tick summaries
+# continuing. Falsifiers: the 230x `usermode data abort at 0x4` RECURS => the r3 clobber was NOT
+# the cause and the structural hardness item (our tree-s missing TPIDRURO writers -
+# `machine_load_context`-s dead write, no `machine_thread_set_tsd_base`/`tsd_base` plumbing, no
+# `start.s`/`machine_routines_asm.s`) moves to the front as the 1003 target - the fix is
+# SELF-TESTING; death elsewhere later => the frontier ADVANCED, record by value. The frozen
+# regression guards (geometry exactly once, cache mapping x4, shared region x1, check_np ret=12
+# x1, map_file kr=0, map_slide ret=0) are re-verified only under the survival gate.
+#
+# VERIFIED BY VALUE (build_1002.sh): traps_lo.o AND the linked locore_fleh_swi carry the
+# SIX-word `{r0-r3,r8,lr}` x1 and the four-word `{r0,r1,r8,lr}` x0; the SOURCE edit is the
+# staged shape (one six-word stmfd + one matching ldmfd, no four-word); the payload arm site
+# still passes 29; the FROZEN 1001 elf as the NEGATIVE CONTROL (its locore_fleh_swi carries the
+# four-word x2 and the six-word x0 - a reader that cannot fail certifies nothing). The
+# 996/997/998/999/1000 checkers rerun ON the 1002 image with the FROZEN 1000/999 images as
+# negative controls - the probe checker-s ONE by-design frozen 20 B clause is the only allowed
+# FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-b04976fe sha256=b04976fe3fddc7665de9595f266b94bf18675f0e74714ebf2ee438d225290ec0 bytes=6343764 file=xnu_arm_entry.bin role=1002-usvc-hook-saves-r3;xnu_arm_entry.bin
+set=armed-d13-b04976fe sha256=5c29c258aef271ad94891280c7d2758736a26205bb0f68c72417967d06fca5f6 bytes=7385412 file=xnu_arm_entry.elf role=1002-usvc-hook-saves-r3;xnu_arm_entry.elf
+set=armed-d13-b04976fe sha256=6f96fb39cf379cd7db346c59c31375b71e3463563302ebcc90f602bf9e850bdb bytes=1912 file=xnu_arm_entry.h role=1002-usvc-hook-saves-r3;xnu_arm_entry.h
+set=armed-d13-b04976fe sha256=72863eb249a64de178e0f589fba264d51f45be79fdb0770d6665e18b3a8cdfff bytes=1692 file=xnu_arm_entry-config.txt role=1002-usvc-hook-saves-r3;xnu_arm_entry-config.txt
+set=armed-d13-b04976fe sha256=256f56c500c2a3b82cb09efbc2b1b8d84763d6a6236b6c76741da818163fae3d bytes=3149 file=xnu_arm_entry-sources.txt role=1002-usvc-hook-saves-r3;xnu_arm_entry-sources.txt
+set=armed-d13-b04976fe sha256=a7bc92cd774584809da9653672ee16eb6116c53c7083a8905e05f746d351751f bytes=6839172 file=stage90.bin role=1002-usvc-hook-saves-r3;stage90.bin
+set=armed-d13-b04976fe sha256=6ee6b5d7db7ff81f0f90f8b1284d6b4db7a1df03409fa1eb707de4a45919eea4 bytes=6901244 file=stage90.elf role=1002-usvc-hook-saves-r3;stage90.elf
+set=armed-d13-b04976fe sha256=3c48bec4ad417e31e0cb54447d0421e1b40153f0a83240f3cf2550a59646d3d9 bytes=6842368 file=stage90.img role=1002-usvc-hook-saves-r3;stage90.img
+set=armed-d13-b04976fe sha256=04059824737d39ee7ffd25e05783b717482c5f247f8ddf0379fc57e9afdf022f bytes=9363456 file=stage90-qcdt.img role=1002-usvc-hook-saves-r3;stage90-qcdt.img
+set=armed-d13-b04976fe sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1002-usvc-hook-saves-r3;stage90_fixture.macho
+set=armed-d13-b04976fe sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1002-usvc-hook-saves-r3;stage90-build-config.txt
+set=armed-d13-b04976fe sha256=af188697909af46aebbd2eedd8fb79f8c95efe0225d2e2bd1f52753e12e417d5 bytes=560 file=SHA256SUMS.txt role=1002-usvc-hook-saves-r3;SHA256SUMS.txt
