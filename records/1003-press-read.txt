@@ -1,0 +1,104 @@
+# 1003 press read — the per-tick pid-1 frame sampler (armed-d13-7669309b)
+
+Capture: `out/stage90/captures/recovered-unknown-arm-20261013-145121-last_kmsg.txt`
+(1,396,369 B, 29,139 lines; recovered after the operator's power press — the run did not
+self-return, exit 2, exactly as 1001/1002 for a resident rung).
+Adjudicator: `tools/check_1003_capture.py` → 0 HARD ANOMALIES, DEATH GATE OPEN. [S] section 14/14 KERNEL.
+
+THE PRESS. build RC=0; instrument confirmed in the parked image by value (`nm` `T entry_note_stall_sample`,
+7 `xnu_live_stall_*` literals, `pe_msm8974.o` carries the `U` reference); `fastboot boot` OKAY
+(sha256 29646dfd…, unchanged across the send, never flashed). Device dark after the boot; the operator
+power-pressed; a watcher recovered the log.
+
+WHAT 1003 WAS BUILT TO ANSWER. 1002 left a stalled pid 1 after 22 user SVCs while the kernel stayed
+alive. Whether that stall was a USER SPIN or a KERNEL BLOCK was not decidable from 1002's channel. 1003
+samples the interrupted frame on the tick's powers-of-two ladder and publishes pc/cpsr/sp/lr — pure
+measurement, no behavior change.
+
+## The finding: pid 1 is NOT a user spin, and NOT a passive sleep — it is stuck in the kernel's fault-return path
+
+**[S] classification: USER pc ×0, KERNEL pc ×14** (every sample cpsr mode = 0x13 = SVC, never 0x10 =
+USR). `_nz` = 0xe/0xf/0x10 on every sample → the reader read a REAL frame (self-check passed). Distinct
+pcs ×4.
+
+The nine LATEST samples (ladder n = 9..15, all after the 22nd SVC) are **the same frame**:
+```
+pc = 0x8001b1fd   (= astloop / enable_interrupts, one insn into the 6-instruction prologue)
+cpsr = 0x60000113 (SVC mode, IRQ masked on entry)
+sp = 0xcfdbbf00   (byte-for-byte identical across n=9..15)
+lr = 0x8046b92c   (= sleh_abort+0x468)
+```
+`0x8046b92c` is in the middle of the **`sleh_abort` return path**, immediately after:
+```
+8046b910  bl 8006f298 <vm_fault>              ; service the data abort
+8046b918  cmp r0,#0 / cmpne r6,#0xe           ; ret==0 (KERN_SUCCESS) or ret==14
+8046b928  bl 8001b1a0 <ml_set_interrupts_enabled>  ; r0=1 -> enable IRQ
+8046b92c  b  8046ba94 <sleh_abort+0x5d0>      ; <-- the sampled lr, i.e. call returned
+```
+A full data abort on the same thread has already been taken by then. The recorded pres signal for this
+shape is `sleh_abort + vm_fault + ml_set_interrupts_enabled` — this project's previous known
+`sleh`/abort path (`[[mi4-991-vmhint-guard-fired-commpage-frontier]]`, `[[mi4-994-ios7-traps-rung]]`).
+
+Three earlier samples (n = 3,4,5,9 pre-band) are also kernel:
+- n=3 `pc=0x80016741` = `Lbzeroengine+0x15` (the kernel `bzero`), lr=`0x800c706c`.
+- n=4 `pc=0x8000e6bd`, n=5..7 `pc=0x8000e6ed` = `st_pwr_wait+0x209/0x239` (the SDHCI power-wait
+  *poll*, `ldrb [fp,#0xe8]; add; cmp; beq` — a poll loop), lr=`0x8000e708` thereof.
+- n=1,2 `pc=0x8001b1fd`, lr=`0x8007b39c`/`0x8001bfbc` (early boot, before the frontier).
+
+## The sleh (fault) record confirms the same thread
+
+`xnu_live_sleh_*` detailed events: 8 recorded, **all `thr=0xc0bfa000` (pid 1's thread)**; five with
+`user=0x00000001` (a user-mode fault) at dyld addresses that de-slide to dyld's own image:
+`seq5 far=0x2be89fe0` (type 3 = **prefetch abort**), `seq6 0x2be8c78f`, `seq7 0x2be8a084` (type 3),
+`seq8 0x2beba004` → de-slid `0x2be4a004` = dyld **`__LINKEDIT`** (the slide this boot is 0x70000:
+`usvc_pc 0x2be8b328` − link `0x2be1b328`). So the same kernel thread is taking repeated aborts on dyld
+pages and each one is serviced and RETURNED.
+
+## Frontier reproduced EXACTLY; 1003 changed no behavior (as designed)
+
+- `xnu_live_usvc_pc` ×22; **last three `pc=0x2be8b328`** — de-slid link **`0x2be1b328`** = the `bx lr`
+  4 B after `mvn r12,#2; svc #0x80` in dyld's `_mach_absolute_time` — the identical 1002 frontier
+  (1002 slide 0x7C000; here 0x70000 — the boot-to-boot ASLR shift). So the 1002 frontier stands, byte
+  for byte, and the rung is a clean measurement.
+- Kernel alive to the end: `xnu_live_tick_sum_count` climbs to 0x1dc (476, past 999's 122 collapse);
+  `xnu_live_wdt_pet_countdown` published (97 feeds, resident); storage door stopped successfully at
+  ordinal 537; no panic, no `usermode data abort, EXC_BAD_ACCESS at 0x00000004` (1002's r3 fix holds).
+
+## Reading (honest scope)
+
+**pid 1's thread 0xc0bfa000 is NOT spinning in user space and NOT sleeping.** Both candidate stories are
+refuted:
+- `[[mi4-1002-usvc-r3-fix]]` / the 1003 target hypothesis of "pid 1 asleep in a page-in": the sampler
+  never sees a user pc, but the sleh record shows the same thread taking USER faults and the kernel
+  continuously re-entering `sleh_abort` — the thread is being serviced, not parked.
+- The stall-forensics agent's "user spin" reading (idle ran 43k×): consistent with a thread that never
+  RUNS in user mode, but the direct evidence is that the kernel is **in the abort-return path**, not
+  merely idle.
+
+**The frontier is therefore: pid 1 is in the kernel's data-abort return path for the whole late window.**
+The 22nd SVC (`mach_absolute_time`) is the last user SVC because at the frontier dyld is inside the
+fault/return cycle, not issuing syscalls. Two readings fit the evidence and 1004 must discriminate them:
+(a) **the same page re-faults** — each `vm_fault` returns and the user re-faults the same address (a
+validation / `cs_validated`-style loop); or (b) **dyld walks forward** one page per fault (normal paging
+of the 301 MiB cache), which is merely slow, not stuck. The evidence leans to (a) at the very end — the
+final seven samples hold sp = 0xcfdbbf00 byte-for-byte (one frame, not a moving walk) — but the sleh
+records so far name *different* far addresses (0x2be89fe0/0x2be8c78f/0x2be8a084), so the early window
+may be (b) and only the tail (a). UNFINISHED (1004's job): capture the sleh `far`/`fsr`/`type` for EVERY
+iteration (not just the first 8) together with the returning user pc, and publish whether consecutive
+iterations repeat the same `far` (loop) or advance (walk).
+
+## Falsifiers checked (all pass)
+
+- Instrument reached the image: YES (image-side, step 2-0).
+- No user-SVC progress past 22 and no panic: YES (both expected for a pure-measurement rung).
+- `_nz` > 0 every sample: YES (frame offsets correct — not a measurement defect).
+- 1002 r3-save regression: absent (0 `EXC_BAD_ACCESS at 0x4`).
+- `cs_invalid_page(0x2d5f9000)` ×1 (this boot's slide; 1002's was 0x2f7f6000): the tolerated one-shot,
+  NOT the frontier (1002 read).
+
+## 1004 input
+
+The verdict is **KERNEL, fault-return loop** — branch B-adjacent but finer: the decisive instrument is a
+per-abort capture (every `sleh_abort` entry: type/fsr/far/thr + the returning user pc + the `vm_fault`
+return code), NOT the idle-frame branch D. This separates "same page re-faulting" (a validation loop) from
+"walking forward" (a dyld progress that is merely slow). See `docs/1003-dyld-stall-design-draft.md`.
