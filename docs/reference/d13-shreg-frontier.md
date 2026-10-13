@@ -534,8 +534,18 @@ the machine returns to I=1 and never unmasks again (post-exec `sleh_cpsr` record
 of mach time**, which (i) rules out the tick ISR as a watchdog pet site (a pet there stops petting
 after ≤64 deliveries — wdt-policy and buildplumb informed 2026-10-13; the pet belongs in the
 storage-read ladder, 129 reads ran post-freeze, plus the idle site), and (ii) is a candidate
-mechanism for this section's own frontier: after `map_file kr=0` the SECOND
-`vm_shared_region_map_file` call never returned (`vm_unix.c:1425`-`:1438` — the print fires only on
-return), so a deadline-based park inside call #2 would now be unresolvable. Two forensics agents
-(timer-freeze, shreg-hang) are discriminating the models and locating call #2's first blocking
-point; the 999 probe set gains a model-discriminator observable once they report.
+mechanism for this section's own frontier. **Corrected 2026-10-13 (shreg-g1's exit-probe finding):**
+there was exactly ONE `shared_region_map_and_slide_np` invocation (a single entry probe at `:4104`;
+the static guard allows four), and its exit probe `IOS7SHREG map_slide ret=%d` (`vm_unix.c:1653-1654`
+— reached on the SUCCESS path too via the `done:` fall-through; 997's failure twin at its `:4109`
+proves the probe fires) never printed — nor did either of `_shared_region_slide`'s internal failure
+prints (`:1525` `slide_info initialization failed`, `:1542` `Sanity Check failed`). So the stop is
+inside `_shared_region_slide` (or the `_shared_region_map` tail after its `:1438` print), not in a
+second map call: after `map_file kr=0` (`:1425` call, `:1438` print) the syscall runs
+`if (slide)` → `_shared_region_slide` (`slide_init` → `get_slide_info_entry` →
+`copyin(slide_start, …, slide_size=0x89000)` → `sanity_check`), and none of its exits printed. The
+alternate reading (the exit print was text-side lost) needs a loss never yet observed — the one
+measured loss (exec_done) was record-side. A deadline-based park anywhere in that span would now be
+unresolvable under (i). Two forensics agents (timer-freeze, shreg-hang) are discriminating the timer
+models and locating the block inside the slide half; the 999 probe set gains their
+model-discriminator observable once they report.
