@@ -559,3 +559,45 @@ measured loss (exec_done) was record-side. A deadline-based park anywhere in tha
 unresolvable under (i). Two forensics agents (timer-freeze, shreg-hang) are discriminating the timer
 models and locating the block inside the slide half; the 999 probe set gains their
 model-discriminator observable once they report.
+
+## §10d — the slide half: one call, never returned; the 999 probe ladder (shreg-hang, 2026-10-13)
+
+**The single-call reading is triple-supported.** (i) By value in the capture: exactly FOUR
+`IOS7SHREG` text lines exist — the `check_np` pair `:4102-4103`, one entry probe `:4104`, one
+`map_file kr=0` `:4109`; the entry print (`vm_unix.c:1578`) and every return print
+(`:1630`/`:1646`/`:1654`) share one `static … < 4` flag, and the frozen elf carries every format
+string. (ii) The console channel CANNOT drop: the 128 KB os-block is space-filled at reserve
+(`entry_stubs.c:2506`, `:2692-2698`), `xnu_live_ostext_total` ends at `0x17ee` = 6,126 B,
+`xnu_live_ostext_limited` never published, and capture `:4110` is untouched fill — so §10c's
+"text-side loss" caveat is a non-candidate. (iii) dyld's own disassembly: `mapSharedCache`
+(0x2be04fa0) → `check_np` once (ret=12) → `openSharedCacheFile` → 8,192-B header read → build the
+4 mappings → ONE 438 call (0x2be04fe0). After a successful 438, dyld returns to `_main` → `load` →
+`link`; the next blocking-capable work is cache page-ins while loading libs.
+
+**Where it can wait** (all wakeup-only; the timer is frozen per §10c, so no deadline can expire):
+the `_shared_region_map` tail — atime `vnode_setattr` (`vm_unix.c:1479`; settled by value: an
+atime-only VATTR takes HFS's in-memory fast path, `hfs_vnops.c:1236-1239` `c_touch_acctime=TRUE;
+goto out` — no I/O; at most the cnode lock `:1224`) and put/drop/deallocate (`:1493-1503`, no
+I/O) — then `_shared_region_slide` (`:1513`): `slide_init` (`:1524`; object lock
+`vm_shared_region.c:1458`, `kmem_alloc` `:1502`), `copyin(0x3dc32000, 0x89000)` (`:1533-1535`) =
+137 cache-file pages, the only mass-I/O step (m2 tail, file offset 0x101aa000, card LBA
+0x4a3838+), sanity (`:1541`; its no-panic site `vm_shared_region.c:1564`).
+
+**The record tail (cap-truncated):** the 129 read groups end with the HFS B-tree nodes (vol
+0x1E92D000 leaf / 0x2404000 header), the partition's first block (HFSX VH at +0x400), then
+`/sbin/launchd` page 0 (LBA 0x422838 = vol 0x4507000) and its last page (LBA 0x422960-62) —
+truncated mid-read by the cap. NONE of the 129 lies in the cache file's block span [LBA 0x422AE8
+(vol 0x455d000) .. 0x4B9550]: dyld's 8,192-B header read fell after the cap.
+
+**The 999 probe ladder** (two prints, same gate as the existing `IOS7SHREG` probes, each with its
+own `static … < 4`): **L1** `IOS7SHREG slide enter` = first statement of `_shared_region_slide`
+(after the declarations `:1521-1522`, before the `slide_init` call `:1524`); **L2**
+`IOS7SHREG slide_init kr=%d entry=%p n=%x src=%08x` = between `:1527` and `:1529` (fires only
+when `slide_init` SUCCEEDED — its failure print `:1525` would otherwise have appeared). Reading:
+L1 absent ⇒ stop in the map tail (now a near-empty candidate set — a lock wait, not I/O); L1
+present + L2 absent ⇒ stop inside `slide_init`; L2 present + no exit `:1654` ⇒ stop in
+`get_slide_info_entry`/copin/sanity — the mass-I/O step. Independent record-channel ladder (cap
+24576 + thinning): the 8,192-B cache-header read (LBA 0x422AE8+, 16 sectors) becomes visible, and
+cache-span reads at LBA 0x4a3838+ appear iff the copyin's page-ins run. Exit `:1654` printed ⇒ the
+slide stage completed and the hang moved into dyld's load/link path. shreg-g1 audits this ladder
+by value (every cited line against the staged tree).
