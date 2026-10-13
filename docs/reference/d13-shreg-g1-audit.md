@@ -727,3 +727,75 @@ not 0x2064000; there is no discrepancy. Recorded.)
   `[0x4A3838, 0x4A3C80)` now derived two independent ways. Readings 999 must NOT be judged on: the
   position of `map_slide ret=` (one string, three sites), the presence of a sanity success print
   (compiled out), and any line number from a `\r`-splitting reader (this file numbers 62 high).
+
+## 11.8 The staged form — the patcher audited, and the staged sha reproduced (2026-10-13, second pass)
+
+Framing facts: (i) the three 999 prints are staged NOT by a direct tree edit but by
+`tools/patch_d13_shreg_probe.py` (vmabi-recon lane); `tools/stage_d13_shreg_probe.sh` only invokes it.
+(ii) The announced staged-file sha is `ace95acd…` ("10 guard regions / 8 literals"). (iii) THIS window
+the tree file is still the 996-era state — sha256 `4b3ec2b8…`, 7 guard regions
+(`vm_unix.c:1119/:1175/:1433/:1573/:1628/:1644/:1652`), 7 pre-existing prints
+(`:1126/:1177/:1438/:1578/:1630/:1646/:1654`) — the 999 staging has not landed (as the lead said:
+audit the patcher's blocks until it does).
+
+**The three blocks, by value** (`patch_d13_shreg_probe.py:149-213`). Each is one guard region of the
+`:1435` shape — `#if defined(STAGE90_XNU_SHREG_PROBE) && STAGE90_XNU_SHREG_PROBE` / braced
+`{ static unsigned int ios7shreg_slide_{enter,init,copyin}_logged = 0; if (x++ < 4) printf(…); }` /
+`#endif` — with its own counter (independent of the 438's one-flag/four-site
+`ios7shreg_slide_probe`, unchanged) and the printf texts character-identical to the lead's message:
+`"IOS7SHREG slide_enter slide=0x%x src=0x%08x n=0x%x\n", slide, (unsigned)slide_start,
+(unsigned)slide_size`; `"IOS7SHREG slide_init kr=%d entry=%p n=0x%x\n", error, slide_info_entry,
+(unsigned)slide_size`; `"IOS7SHREG slide_copyin kr=%d\n", error`. `LITERALS` = exactly 8 — the 5
+pre-existing plus these 3 (the builder's "8 literals" is this tuple).
+
+**Placement, by anchor, and the staged windows.** All ten anchors occur EXACTLY once in the tree file
+(rehearsed via the patcher's own constants: 7 of them anchor+block=1/1 — already staged; the three
+999 anchors 1/0). `plan_insert` inserts the block AFTER the anchor and keeps the anchor in the file
+below it (the `mi4-an-edit-on-a-prefix-deletes-the-suffix` discipline); idempotence is keyed on
+`anchor + block`. The staged text (printed from `plan()` in memory, not written) places:
+- (a) after `int error;` and before the `vm_shared_region_slide_init` call — the block sits directly
+  above `if((error = vm_shared_region_slide_init(…` — so all three args and no wait precede it.
+- (b) after the init-failure block's closing `}` and before
+  `slide_info_entry = vm_shared_region_get_slide_info_entry();` — so `slide_info_entry` is still NULL
+  (my §11.2 note applies to the staged form unchanged) and the printed `error` was just assigned 0 by
+  the `:1524` call's false branch.
+- (c) after the copyin else-block's `}` and before `if (error) {` — both outcomes print.
+**Verify-off**: stripping the ten blocks reproduces the base text BYTE FOR BYTE (`verify_off` True);
+`guard_balance` is 1/1 for every block.
+
+**The plan/classify contract** (`:240-304`). `classify()` accepts exactly three states — `pre` (0
+regions), `partial` = EXACTLY the 996 prefix (`EDITS_996 = 7`; the state the tree was committed with),
+`staged` (all 10) — and refuses anything else via the fragment test: after peeling the blocks it can
+account for, the remainder must carry 0 guard regions AND 0 `PROBE_TEXT` occurrences. `plan()` then
+re-inserts the missing blocks and REFUSES (code 6, before writing) unless the output carries exactly
+`len(EDITS)` = 10 guard regions. So the lead's "0 or len(EDITS)" is accurate in effect: accepted
+starting states carry 0 or 7 regions; the written state is exactly 10.
+
+**The rehearsal — writes nothing, and reproduces the announced artifact.** Importing the patcher and
+running `classify`/`plan`/`verify_off` in memory on the current tree: verdict `partial` ("the 996
+staging (7 of 10)"); `plan` changed=True with 10 guard regions in the output; `verify_off` True; and
+**sha256 of `plan()`'s staged text = `ace95acd6d590f43c45cb91c6d4eebf3aeb95005efe2d52417738cf29f934cd4`
+— the announced staged sha, EXACT.** The announced artifact is deterministically produced by this
+patcher from this tree; no other edit path yields it.
+
+**The checker** (`tools/check_d13_shreg_probe.py`, `--ladder` present as of this window): with the flag
+the demanded set is the 8 image literals and the allowed hosts are restricted to
+`_shared_region_slide`; `--tree <FILE>` (the file, not the tree root) demands the fully staged file's
+10 guard regions and runs the print-sites-inside-guard-regions scan. On the 999 image the `--ladder`
+run is EXPECTED to fail exactly one clause — the frozen 20 B straddle ("996 measures the misparse, it
+does not fix it"; the wire is 32 B from 997 on) — and `build_999.sh:225-232` asserts exactly one
+`^  FAIL ` line, naming it; `build_999.sh:215` separately asserts the three slide literals are IN THE
+POOL OBJECT (`slide_lits == 3`) — the staging→object join. Without `--ladder` a 999 image fails the
+outsiders clause; the 996/998 home images keep passing.
+
+**Status, by value at commit time.** The earlier "BLOCKED" wording (plan() refusing the 7-region 996
+prefix; checker lacking `--ladder`) is superseded and the record now says so: `EDITS_996 = 7` exists
+and classify() names the 7-region state the legitimate partial, and the checker carries `--ladder`
+(the audited binaries: patcher sha256 `50373942…`, checker `515be47f…` — both checked on disk this
+window). This rehearsal is an independent third reproduction of the announced `ace95acd…` sha,
+read-only, from the tree's current state. The only remaining precondition for that sha to become real
+is operational: run `stage_d13_shreg_probe.sh` (patcher writes the file) and rebuild the pool object
+with the define. Net effect on §11.2: every verdict stands in the staged form — (a) legal before the
+first waitable statement; (b) legal, entry necessarily NULL, KEEP as presence marker; (c) legal, both
+outcomes — and the elf requirement grows 5 → 8 `IOS7SHREG` literals for the 999 image. This section
+changed no byte of the tree (audit ran in memory; the tree file's sha is still `4b3ec2b8…`).
