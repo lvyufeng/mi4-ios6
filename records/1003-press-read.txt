@@ -35,9 +35,13 @@ lr = 0x8046b92c   (= sleh_abort+0x468)
 8046b928  bl 8001b1a0 <ml_set_interrupts_enabled>  ; r0=1 -> enable IRQ
 8046b92c  b  8046ba94 <sleh_abort+0x5d0>      ; <-- the sampled lr, i.e. call returned
 ```
-A full data abort on the same thread has already been taken by then. The recorded pres signal for this
-shape is `sleh_abort + vm_fault + ml_set_interrupts_enabled` — this project's previous known
-`sleh`/abort path (`[[mi4-991-vmhint-guard-fired-commpage-frontier]]`, `[[mi4-994-ios7-traps-rung]]`).
+A full data abort on the same thread has already been taken by then. **The sampled `sp = 0xcfdbbf00` is
+pid 1's own thread stack** — the detailed sleh records for pid 1 (`thr=0xc0bfa000`) carry `sp=0xcfdbbef4`,
+12 bytes below it — so this is not the idle thread: the CPU is on pid 1's kernel stack, returned into the
+abort path. `0x8001b1fd` is in `ml_set_interrupts_enabled`→`enable_interrupts`/`astloop` (the AST-check
+body that calls `ast_taken`), reached from `sleh_abort`'s `bl ml_set_interrupts_enabled(1)`. Total abort
+entries this boot: `xnu_live_sleh_seen` reached 40 (0x28) with `xnu_live_sleh_storm=9` (the >8-entry flag),
+all on thread 0xc0bfa000.
 
 Three earlier samples (n = 3,4,5,9 pre-band) are also kernel:
 - n=3 `pc=0x80016741` = `Lbzeroengine+0x15` (the kernel `bzero`), lr=`0x800c706c`.
