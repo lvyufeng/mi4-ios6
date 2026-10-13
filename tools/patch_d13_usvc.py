@@ -33,7 +33,8 @@ re-run `tools/assemble_arm_layer.sh` with `STAGE90_XNU_USVC=1` EXPORTED, then re
 `entry_stubs.o` is in `LINK_OBJS` before pass 1 runs, so the `bl` resolves there in pass 1 without
 a generated stand-in (the `entry_wdt_pet` family trap is the counterexample this avoids).
 
-Idempotent: a second run re-verifies the inserted form and is a no-op.
+Idempotent: a second run re-verifies the inserted form and is a no-op. A tree already staged at the
+1000/1001 four-word form is MIGRATED in place to the 1002 six-word form (see `_ASM_LEGACY_1001`).
 """
 import sys
 
@@ -47,6 +48,36 @@ _ASM_OLD = (
 )
 
 _ASM_NEW = (
+    "    mov     r11, r12\n"
+    "    cpsie   i\n"
+    "#if defined(STAGE90_XNU_USVC) && STAGE90_XNU_USVC\n"
+    "    /* **1000: USER_SVC - the user SVC frontier. 1002: r3 IS LIVE ACROSS THIS CALL.** r8 is\n"
+    "     * the saved frame (`mov r8, sp` above) and every path below reads it; r11 - just set to\n"
+    "     * the syscall number - survives the call by AAPCS (r4-r11 callee-saved). BUT `swi_trap`\n"
+    "     * below dispatches the `0x80000000` traps on the LIVE r3 (`cmp r3,#3; addls pc,pc,r3,lsl#2`\n"
+    "     * - r3=3 = thread_set_cthread_trap, which writes TPIDRURO). r3 is NOT AAPCS-preserved\n"
+    "     * across a C call, and `entry_note_user_svc` clobbers it (movw r3,#0xfff8 / mov r3,r0) -\n"
+    "     * so a hook that saved only {r0,r1,r8,lr} corrupted the trap dispatch and dyld's\n"
+    "     * thread-pointer store never reached TPIDRURO (1001's 230x data abort at 0x4). The LEO\n"
+    "     * sibling block below saves {r0-r12,lr} for exactly this reason. r0/r1 are saved because\n"
+    "     * the -3 timebase path preserves them; r2/r3 because the trap dispatch reads r3. SIX\n"
+    "     * words keep sp 8-aligned at the `bl` - 990's lesson: a 4-mod-8 frame kills the callee's\n"
+    "     * NEON loads (`{r0-r3,r8,lr}` = 6 x 4 = 24 B). The C half is `entry_note_user_svc`\n"
+    "     * (`src/entry/entry_stubs.c`); `assemble_arm_layer.sh` de-underscores the `bl` target\n"
+    "     * like every asm-to-C call in this tree. */\n"
+    "    stmfd   sp!, {r0-r3,r8,lr}\n"
+    "    mov     r0, r8\n"
+    "    bl      _entry_note_user_svc\n"
+    "    ldmfd   sp!, {r0-r3,r8,lr}\n"
+    "#endif /* STAGE90_XNU_USVC */\n"
+    "#if defined(BOARD_CONFIG_QSD8250_LEO)\n"
+)
+
+# The 1000/1001 inserted form (a four-word save set that clobbers r3 across the call). Kept as its
+# OWN literal so a tree already staged at 1001 is MIGRATED in place to the 1002 six-word form rather
+# than refused - the whole point of 1002 is that this exact text is the defect. If a tree carries the
+# marker but neither form below, the patch refuses (moved by hand, or a third variant).
+_ASM_LEGACY_1001 = (
     "    mov     r11, r12\n"
     "    cpsie   i\n"
     "#if defined(STAGE90_XNU_USVC) && STAGE90_XNU_USVC\n"
@@ -73,32 +104,47 @@ EDITS = (
 
 
 def patch_text(text: str, pairs, path: str) -> tuple[str, bool]:
-    """Return (new_text, changed). Idempotent, and a marker present is not taken on trust: every
-    inserted form must be present exactly once, or this refuses rather than certifying a tree the
-    switch does not actually carry (`patch_d13_kextb_login.py`'s rule)."""
-    if MARK in text:
-        for _old, new in pairs:
-            if text.count(new) != 1:
+    """Return (new_text, changed). Idempotent, and a marker present is not taken on trust: the tree
+    must carry EITHER the fresh anchor (insert) OR the 1001 legacy form (migrate) OR the 1002 form
+    (no-op) - exactly one, or this refuses rather than certifying a tree the switch does not carry
+    (`patch_d13_kextb_login.py`'s rule).
+
+    The 1001 -> 1002 migration is deliberate: the four-word `{r0,r1,r8,lr}` save set is the DEFECT
+    1002 fixes (r3 is live across the call and `swi_trap` dispatches on it), so a tree already
+    staged at 1000/1001 is brought forward in place rather than left broken."""
+    for _old, new in pairs:
+        if text.count(new) == 1:
+            # Already 1002 (or a fresh tree that needs no edit): verify nothing else is stale.
+            if text.count(_ASM_LEGACY_1001) != 0:
                 raise SystemExit(
-                    f"patch_d13_usvc: the marker is present in {path} but an inserted form "
-                    f"occurs {text.count(new)} times - moved by a hand edit, or half-applied. "
-                    "Refusing rather than reporting a patch the switch does not carry."
+                    f"patch_d13_usvc: {path} carries BOTH the 1002 form and the 1001 legacy form - "
+                    "a half-applied migration. Refusing."
                 )
-        return text, False
+            return text, False
     for old, new in pairs:
-        n = text.count(old)
-        if n != 1:
+        legacy = _ASM_LEGACY_1001
+        n_new = text.count(new)
+        n_legacy = text.count(legacy)
+        n_fresh = text.count(old)
+        if n_new == 0 and n_legacy == 1:
+            # Migrate the 1001 tree in place.
+            text = text.replace(legacy, new, 1)
+        elif n_new == 0 and n_legacy == 0 and n_fresh == 1:
+            # Fresh tree: insert.
+            text = text.replace(old, new, 1)
+        else:
             raise SystemExit(
-                f"patch_d13_usvc: anchor in {path} occurs {n} times, not once - the tree is "
-                f"not the expected revision, or it was edited by hand. Anchor begins: {old[:60]!r}. "
-                "Refusing."
+                f"patch_d13_usvc: {path} matches none of (one 1002 form, one 1001 legacy form, "
+                f"one fresh anchor) - 1002 forms={n_new}, 1001 forms={n_legacy}, anchors={n_fresh}. "
+                "The tree is not the expected revision, or it was hand-edited. Refusing."
             )
-    for old, new in pairs:
-        text = text.replace(old, new, 1)
-    # Sanity by value, before writing: every inserted form in place exactly once.
+    # Sanity by value, before writing: the target form in place exactly once, the legacy gone.
     for _old, new in pairs:
         if text.count(new) != 1:
-            raise SystemExit(f"patch_d13_usvc: an inserted form did not land once in {path} - "
+            raise SystemExit(f"patch_d13_usvc: the 1002 form did not land once in {path} - "
+                             "refusing to write")
+        if text.count(_ASM_LEGACY_1001) != 0:
+            raise SystemExit(f"patch_d13_usvc: the 1001 legacy form survives in {path} - "
                              "refusing to write")
     return text, True
 
