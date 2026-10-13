@@ -14235,3 +14235,137 @@ set=armed-d13-dee822b0 sha256=a14555f839821659772d7a2c9a9a40faffa92c647020b00137
 set=armed-d13-dee822b0 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=998-shreg-geom;-stage90_fixture.macho
 set=armed-d13-dee822b0 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=998-shreg-geom;-stage90-build-config.txt
 set=armed-d13-dee822b0 sha256=2ec93dcccf8a132163bb336bb86f7d3e4657c3ac7719856be39373a334436b2b bytes=560 file=SHA256SUMS.txt role=998-shreg-geom;-SHA256SUMS.txt
+# armed-d13-467d59e4  -  999: THE RECORD CHANNEL READS PAST 998-S CAP (16384 -> 24576 + THINNED READS), THE EXEC-DONE RECORDS BECOME CAP-EXEMPT, THE WDT IS FED AT THE STORAGE READ DOOR, THE OUTER NET MOVES 25s -> 29s, AND THE SLIDE-HALF PROBE LADDER IS IN THE POOL.
+# Switch set is 998-s VERBATIM (STAGE90_XNU_DYLD_WITNESS, STAGE90_XNU_SHREG_PROBE, SHREG_WIRE,
+# SHREG_GEOM, RESIDENT all stay 1 - NO new switch); the ENTRY BIN moved (dee822b0 -> 467d59e4); the
+# PAYLOAD bytes move (the watchdog constant is embedded in stage90.img); the pool moves
+# (bsd/vm/vm_unix.c gains the three slide prints via the vmabi-recon lane-s patcher, now 10
+# edits / 8 literals). build_entry.sh now ALSO passes the EXISTING -DSTAGE90_XNU_RESIDENT to
+# entry_storage.c-s two compile lines (the read-door pet-s gate; a new reader of an old switch).
+#
+# FIVE entry-side edits (the entry layer + the two staged asm hooks - NO kernel behaviour
+# change; the fifth was added AFTER this rung was first written - the amendment of 2026-10-13):
+# 1. ENTRY_LIVE_CAP 16384u -> 24576u (entry_stubs.c:2288). 998 hit 16384 MID-DYLD: the tombstone
+#    `xnu_live_capped=0x00004000` at :20502 IS the displaced `xnu_live_exec_done_seq` (the
+#    absence was the INSTRUMENT-s ceiling, not a missing return; the full counter identity is in
+#    docs/reference/d13-shreg-frontier.md section 10).
+# 2. The read dump THINS past ordinal 256: `st_read_single_block` keeps its six LOCATING cells
+#    (rd_calls / rd_ordinal / rd_lba / rd_op / rd_err / rd_complete - the ones whose ABSENCE is
+#    evidence) and its ~70 extended cells move to ST_LIVE_RD, silent when the read-s own rd_full_
+#    (st_read_count < 256) is clear: ~78 cells / ~4.2 KB -> 6 cells / ~280 B per read in the
+#    multi-hundred-read dyld era. The failure mode of the thinning can only be FEWER records.
+# 3. `entry_note_exec_returned`-s three records become DIRECT (cap-exempt, uncounted
+#    entry_write_kv) and stash a sig/size read-back of RAM_CONSOLE_BASE (g_exec_probe_*),
+#    published by the next any-kind direct writer as
+#    xnu_live_exec_done_probe_seq / _sig / _size / _records / _state - the probe that tells a
+#    torn append from a lost record the next time a done record is questioned.
+# 4. The WDT is fed from `entry_storage_driver_read`-s FIRST statement (argument = the monotone
+#    st_read_count): 998 logged ZERO xnu_live_wdt_* records - the handed-off kernel never idled,
+#    so the idle-site pet never ran. `entry_wdt_pet` is non-static for the second caller; the
+#    install/power-of-two/dog-tracking publishes are unchanged. **A FINDING was made here: the
+#    original four-edit WDT prescription was incomplete.** The door feed is the FIRST pre-pass-1
+#    -> post-pass-1 symbol reference this build has ever had: entry_storage.o links before the
+#    pass-1 undefined-set link (build_entry.sh:2308 vs :29126) while entry_trace.o joins only
+#    AFTER it (:29338), so the strong cross-TU reference was reported undefined in pass 1, the
+#    stub generator emitted an ordinary stand-in definition for the pet
+#    (xnu_arm_entry_realstubs.c), and the final link refused with `multiple definition of
+#    entry_wdt_pet` (measured verbatim on the first 999 build, EXIT=1; the documented stub
+#    family trap at build_entry.sh:29101-29112). RESOLUTION (team-lead ruling 2026-10-13): the
+#    reference is WEAK with a NULL GUARD (`if (entry_wdt_pet != 0)`) - no pass-1 undefined name,
+#    resolves to trace.o-s strong definition in the final link, and the guard cannot be taken in
+#    an accepted image (RESIDENT=1 with ENTRY_TRACE=0 is refused at build_entry.sh:1343; the 999
+#    clause refuses a linked image that defines no pet). build_entry.sh-s 999 clause now also
+#    asserts the guard shape (cmp rN,#0 + a conditional branch beside the single `bl`) so a
+#    future edit cannot drop the guard while keeping `weak` silently. THIRD stop of the same
+#    finding family (measured 2026-10-13 third run, EXIT=1): build_999.sh-s own by-value check
+#    grepped the storage object for a STRONG `U entry_wdt_pet` and rejected the (correct) weak
+#    object - the check predated the ruling; it now asserts exactly one `w entry_wdt_pet`, so a
+#    silent revert to the strong form stops the build at the check as well as at the link.
+# 5. THE TIMER DISCRIMINATOR (amendment #2). 997/998 both deliver `xnu_live_tick_irq` on the
+#    powers of two up to 0x40 (captures :7344 / :5463) and 0x80 NEVER appears, so deliveries
+#    stop at raw tick count 64 - and the captures cannot separate model A (a delivery-side
+#    failure: ISENABLER0 bit 20 CLEAR at 998 :3922 with no writer in a 4.78-7.30 s window) from
+#    model B (the handed-off kernel-s I=1, post-spin cpsr 0x20000193, was never cleared - the
+#    CPU mask, not the distributor, is the wall). So 999 publishes PRESENCE OF THE EDGE: a
+#    DIRECT (cap-exempt) record at (1) `ml_set_interrupts_enabled`-s enable path, immediately
+#    after `cpsie i` (machine_routines_asm.s:151-153; r1 = `mrs cpsr` read back), and (2)
+#    `thread_exception_return`-s `return_to_user` tail (cswitch.s:167-170; r1 = the CPSR the
+#    edge is about to install, [uss + 0x40]). Both sites sit behind an internal local label
+#    (`astloop` / `return_to_user`), which is why per-site readers must range to the next
+#    GLOBAL `T` and not the next T/t. Gates: the raw tick count has reached the frozen value 64
+#    (the same MSM8974_TICK_FROZEN_AT the capture evidence froze) and 4 events per site, then
+#    silent; readiness via entry_live_ready (interrupt-path rule). The six keys: site 1
+#    `xnu_live_edge_mlie_seq / _cpsr / _tick`, site 2 `xnu_live_edge_texr_seq / _cpsr / _tick`.
+#    READING for the pre-reg: NO edge record => model B; an edge with `_tick=64` and no
+#    tick_irq 0x80 within ~2 ms => model A; an edge followed by tick_irq=0x80 => the freeze
+#    ended at that edge. Staged by tools/stage_d13_timer_edge.sh; gated by the EXISTING
+#    STAGE90_XNU_RESIDENT (assemble_arm_layer.sh now appends -DSTAGE90_XNU_RESIDENT=$RESIDENT
+#    to its ASFLAGS - without the rebuild the linked image keeps hook-free asm objects).
+#
+# ONE payload edit: STAGE90_HW_WATCHDOG_TIMEOUT_S 25u -> 29u (stage90.h:4211) - the ARITHMETIC
+# CEILING of the 20-bit registers: 29s bark = 29 * 32765 = 950185 = 0xE7FA9, plus the fixed 3 s
+# BITE_EXTRA = 32 * 32765 = 1048480 = 0x000FFFA0 <= 0xFFFFF (30 s would truncate). 998-s 25 s
+# net was 0xC7FB5. The run must outlive the old ~28 s wall for the reading to reach the record
+# ceiling - the outer net protects the instrument, the instrument measures the machine.
+#
+# ONE pool edit: three PRINTF-ONLY lines inside `_shared_region_slide` (vm_unix.c:1513-1554),
+# under the SAME gate as the existing IOS7SHREG probes (STAGE90_XNU_SHREG_PROBE=1), each with
+# its own static counter < 4: `IOS7SHREG slide_enter slide=.. src=.. n=..`, `slide_init
+# kr=.. entry=.. n=..` (fires only when slide_init returned 0; `entry` is necessarily NULL -
+# a presence marker, not a value) and `slide_copyin kr=..`. The ladder measures the SAME slide
+# half 997 named (map_slide + slide_init) at the inner call sites where the outcome is decided.
+#
+# 998 (pressed 2026-10-12, arm armed-d13-dee822b0, commit 36bb341, evidence
+# out/stage90/captures/cancro-last_kmsg-998-armed-d13-dee822b0.txt) CONFIRMED G1: the geometry
+# literal `IOS7LAB shared region 0x2c000000..0x40000000; stack below 0x2be00000` prints exactly
+# ONCE (:4098) and `IOS7SHREG map_file kr=0` (:4109) is the FIRST time in the whole series the
+# shared cache file maps; the 997 halt chain (libbsm / witness / udf / `dyld>`) is GONE - all
+# zero. Regression guards held: check_np ret=12, VMHINT991 2x. Deviations read as deviations:
+# the IOS7LAB vm_allocate64 line is ABSENT - a failure-path artifact (994-s ruling), not a
+# regression; and the exec_done trio-s absence - root-caused to the cap, which is what 999-s
+# cap-exempt trio + probe make directly measurable. The two walls (cap + never-fed SoC watchdog,
+# ~28 s silent reset with 0 wdt records) are the INSTRUMENT and the POLICY, not the machine.
+#
+# The 999 PRESS- PRE-REGISTRATION (frozen once embedded; deviations reported, not
+# reinterpreted) is written by the TEAM-LEAD into scripts/press_999.sh. Expected reading per the
+# lead: `xnu_live_wdt_bark=0xE7FA9` once (29 * 32765), the `xnu_live_wdt_map/_via/_desc` trio
+# once, `xnu_live_wdt_pet_calls` >= 1 at powers of two and never above the running
+# `xnu_live_storage_rd_ordinal`, the runtime observables `hw_watchdog_timeout_s=0x0000001d` and
+# `hw_watchdog_bite_ticks_written=0x000FFFA0`, and the record log living PAST 998-s wall (the
+# 0x4000 tombstone) toward 24576; falsifier: `xnu_live_wdt_map=0` with `_desc` NOT a 1 MB block
+# of PA 0xf9000000.
+#
+# VERIFIED BY VALUE (build_999.sh): the 24576 cap constant, the 70/8 read-body split, the five
+# xnu_live_exec_done_probe_ keys in the linked image, the door-s null-guarded `bl <entry_wdt_pet>`
+# (cmp rN,#0 + conditional branch beside the call - the weak-reference guard) inside
+# `entry_storage_driver_read`-s own window, the three `IOS7SHREG slide_` literals in
+# bsd_vm_vm_unix.o, and `mov r0, #29` at the payload arm site (998 measured `mov r0, #25`); it
+# also reads the amendment: `entry_timer_edge_probe` as a T symbol, ONE `U` reference to it in
+# EACH of machine_routines_asm.o and cswitch.o (the ASFLAGS half of the switch), exactly ONE
+# `bl` inside each staged site-s own body (the next-GLOBAL-T range), and the six edge keys. The
+# SAME amendment properties are asserted at the LINK site by build_entry.sh-s 999 clause (plus
+# a SECOND integration finding, same species: build_entry.sh-s pre-existing 996/997 probe-checker
+# clause ran the checker on the BASE spelling, which on a 999 image reports the by-design slide
+# outsider clause BESIDE the 20 B straddle one (2 FAIL lines) - the checker-s own text says
+# re-run with --ladder - so the clause now invokes --ladder and the contract is unchanged
+# (exactly one clause FAIL, the straddle one; verified by value: rc=1, 1 FAIL).
+# entry_live_write-s `cmp ..., #24576`, the trio-s 3x entry_write_kv / 0x entry_live_write
+# branches, the pet-s global `T`, and the door-s single pet call). The 996/997/998 checkers
+# rerun ON the 999 image with the FROZEN 998/996/994 images as negative controls - the probe
+# checker-s ONE by-design frozen 20 B clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-467d59e4 sha256=467d59e4940f8e32d714640f22cae25e0b4585044094f1f21d15c142830e6c39 bytes=6343764 file=xnu_arm_entry.bin role=999-past-the-cap;-xnu_arm_entry.bin
+set=armed-d13-467d59e4 sha256=d2ea53d568b6a77715160e93534155847c3da40c840eec586caa76f647bcecec bytes=7385068 file=xnu_arm_entry.elf role=999-past-the-cap;-xnu_arm_entry.elf
+set=armed-d13-467d59e4 sha256=6f96fb39cf379cd7db346c59c31375b71e3463563302ebcc90f602bf9e850bdb bytes=1912 file=xnu_arm_entry.h role=999-past-the-cap;-xnu_arm_entry.h
+set=armed-d13-467d59e4 sha256=d4cb384ef0bc62e2b3a076791aab790712f80f03d41d317b60122c71224c6e58 bytes=1642 file=xnu_arm_entry-config.txt role=999-past-the-cap;-xnu_arm_entry-config.txt
+set=armed-d13-467d59e4 sha256=dabe50c45071aef472a937bda7ce8d6d05733a956c6ae06475b5d7ecbf6dc56f bytes=3149 file=xnu_arm_entry-sources.txt role=999-past-the-cap;-xnu_arm_entry-sources.txt
+set=armed-d13-467d59e4 sha256=20ef6885da948589acc2163c497c5969b8938209a9d9cbc668ce351a95283364 bytes=6839172 file=stage90.bin role=999-past-the-cap;-stage90.bin
+set=armed-d13-467d59e4 sha256=af4aff6931660542b4ddb20bd3fa2b17b37e67ac91a41b106e56aafcbe582bcf bytes=6901244 file=stage90.elf role=999-past-the-cap;-stage90.elf
+set=armed-d13-467d59e4 sha256=7baa046ce35b75da1eb6dc91d43db66f5f961691d85d6d43127f5f8e2b7e8784 bytes=6842368 file=stage90.img role=999-past-the-cap;-stage90.img
+set=armed-d13-467d59e4 sha256=2590eb990d56c5c4c1f78cd2bb92e47b67b9da1f1f817ef5fe8ae144c5cb705d bytes=9363456 file=stage90-qcdt.img role=999-past-the-cap;-stage90-qcdt.img
+set=armed-d13-467d59e4 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=999-past-the-cap;-stage90_fixture.macho
+set=armed-d13-467d59e4 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=999-past-the-cap;-stage90-build-config.txt
+set=armed-d13-467d59e4 sha256=6230ef2c3ad5499269683f161f9453f86e68149ec45fe2ab98a8e854f46b70f2 bytes=560 file=SHA256SUMS.txt role=999-past-the-cap;-SHA256SUMS.txt
