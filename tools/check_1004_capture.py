@@ -701,10 +701,21 @@ def s_abort(cap):
         hard("the abort count REACHED the 1004 cap (512) - the record set is the first 512 aborts, not "
              "the tail; read `xnu_live_sleh_storm` (x%d present?) and widen, or read the tail "
              "differently" % n_storm, absence_based=True)
-    if cap.all("xnu_live_capped"):
-        hard("the live channel hit its own cap (`xnu_live_capped` present) - the newest records were "
-             "dropped SILENTLY, so the LAST abort above is NOT the death-time frontier: the abort "
-             "trace is truncated upstream of 512", absence_based=True)
+    # A cap tombstone truncates only records AFTER it. The abort trace is truncated ONLY if the cap
+    # landed BEFORE the last abort record; a cap after it leaves the trace complete (the sleh band is
+    # 512, this rung's abort count is far smaller).  POSITIONAL, not mere presence - a bare "capped
+    # present" reading would flag a complete trace as truncated ([[mi4-measurement-defects]]: a
+    # number that is an artifact of when it was taken).
+    _cap = cap.all("xnu_live_capped")
+    _last_ln = recs[-1]["ln"]
+    if _cap and _last_ln > _cap[0][0]:
+        hard("the live channel cap (xnu_live_capped @:%d) landed BEFORE the last abort (@:%d) - the "
+             "abort trace IS truncated: the LAST abort above is NOT the death-time frontier"
+             % (_cap[0][0], _last_ln), absence_based=True)
+    elif _cap:
+        say("OBS", "`xnu_live_capped` @:%d is AFTER the last abort (@:%d) - the abort trace is COMPLETE; "
+                   "the cap truncated only later records (the run kept publishing after the faults)"
+            % (_cap[0][0], _last_ln))
     if n_storm:
         say("OBS", "`xnu_live_sleh_storm` present x%d - the abort count EXCEEDED the detailed band "
                    "(more than %d aborts); the recorded set is the head" % (n_storm, 512))
