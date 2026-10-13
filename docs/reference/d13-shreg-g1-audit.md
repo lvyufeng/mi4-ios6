@@ -473,3 +473,257 @@ tombstone IS the displaced `xnu_live_exec_done_seq`" additionally requires that 
 been abandoned, which the capture cannot separate. Fix in 999 (no readback probe owed): the trio
 goes direct / cap-exempt at `entry_stubs.c:5012-5017` — corroborated here: the direct family
 demonstrably survives the cap (the 6th `ostext` triple is post-cap, `:20503-:20505`).
+
+## 11. The 999 slide-half ladder, audited by value (2026-10-13)
+
+Scope, stated first: report #2's three-probe ladder inside `_shared_region_slide` (`vm_unix.c:1513-1554`),
+the atime arbitration (lead's NO-WRITE vs report #2), the three count discrepancies plus the byte-match,
+and the sleh/`trap.c` sharp question. "The elf" = `out/stage90/xnu_arm_entry.bin`, sha256
+`dee822b0ca58afa1…` — re-verified THIS window (`xnu_arm_entry-config.txt` records the same hash; nothing
+was rebuilt between 998's press and this reading), so every string fact below is the pressed image's own.
+"The capture" = `cancro-last_kmsg-998-armed-d13-dee822b0.txt`, sha256 `0c558c53…`, 20,507 lines by
+`wc -l`; the file also carries 63 raw `\r` bytes, so any reader that splits on `\r` (python text mode)
+numbers 62 lines HIGH — every cite in this doc and the frontier is newline-based, and no value below
+depends on which split produced it.
+
+### 11.1 Claim 1 — the gate, the strings, the four lines (VERIFIED; two precisions)
+
+**One flag, four sites, one function.** `:1574-1575`: `static unsigned int ios7shreg_slide_logged = 0;`
+and `int ios7shreg_slide_probe = (ios7shreg_slide_logged++ < 4);` — block-scope inside
+`shared_region_map_and_slide_np` (`:1556`), static storage; the same `ios7shreg_slide_probe` governs the
+entry print (`:1577-1581`) and ALL THREE exit prints (`:1629-1630` map-failed, `:1645-1646` slide-failed,
+`:1653-1654` done-fallthrough). The last two print the identical string `IOS7SHREG map_slide ret=%d` —
+**one format string, three call sites** — so "ret=" in a capture cannot by itself say which of the three
+fired; only program order can, and within one invocation exactly one can.
+
+**Precision 1 — five strings, not six.** The elf carries exactly 5 `IOS7SHREG` format strings (`check_np
+pid=`, `check_np ret=`, `map_file kr=`, the `map_slide` entry text, `map_slide ret=`); the four
+`IOS7LAB cache mapping` lines are a different prefix (`IOS7LAB` = 14 strings in all). Present also:
+`slide_info initialization failed with kr=%d` (1, `vm_shared_region.c:1525`) and `Sanity Check failed
+for slide_info` (1, `:1543`). Absent: `Succesfully init slide_info…` (0) — the `#if DEBUG` block at
+`vm_shared_region.c:1545-1550` did not compile ⇒ **the sanity path succeeds SILENTLY**. That is
+load-bearing for the ladder's top rung: after `(c) kr=0`, the next possible texts are `Sanity Check
+failed for slide_info` + `map_slide ret=14`, the `vm_shared_region.c:1564` panic's own message
+(`mach_vm_protect` refused), or the `:1653-1654` `map_slide ret=0`. Silence between `(c)` and the exit
+print is a reading only under this inventory (m817 shape).
+
+**Precision 2 — the count.** 998 has exactly 4 `IOS7SHREG` lines: `:4102-4103` (`check_np`, the 294
+probe's, ret=12), `:4104` (entry; `count=4 mappings=0x2bd81848 slide=0x1a86000 slide_start=0x3dc32000
+size=0x00089000`), `:4109` (`map_file kr=0`). No exit print. The silence to be split is exactly the span
+between the `:1438` print (inside `_shared_region_map` = `:1251-1511`, under its own block-scope
+`static … < 4` at `:1433-1440`) and the first print site in program order, which is probe `(a)`.
+
+### 11.2 The three probes — placement, argument types, one falsifier each
+
+The body as the tree carries it: `:1521` `void *slide_info_entry = NULL;` · `:1522` `int error;` ·
+`:1524` `if((error = vm_shared_region_slide_init(slide_size, entry_start_address, entry_size, slide,
+sr_file_control)))` → `:1525` failure printf → `:1526` `goto done;` · `:1529` `slide_info_entry =
+vm_shared_region_get_slide_info_entry();` · `:1530-1532` NULL → `error = EFAULT;` · `:1533-1535`
+`copyin((user_addr_t)slide_start, slide_info_entry, (vm_size_t)slide_size);` · `:1537-1539` `if (error)
+goto done;` · `:1541-1551` sanity (+DEBUG block) · `:1552-1554` `done: return error;`. Parameter types:
+`slide` `uint32_t` (`:1514`), `slide_start` `mach_vm_offset_t`, `slide_size` `mach_vm_size_t`.
+
+- **(a)** `:1523`, between `int error;` (`:1522`) and the init call (`:1524`) — a blank line; legal,
+  and it precedes the first waitable statement. All three args in scope. On this armv7 build
+  `mach_vm_offset_t`/`mach_vm_size_t` ARE `uint32_t` (`osfmk/mach/arm/vm_types.h:108-109`, the `#else`
+  of the `__LP64__` split — the same file's "We target iOS 4.3" note), so the proposed `(unsigned)`
+  casts are **identity, not truncation guards**; keep them only to match the `:1578-1581` house style.
+  Proposed text: `printf("IOS7SHREG slide_enter slide=0x%x src=0x%08x n=0x%x\n", slide,
+  (unsigned)slide_start, (unsigned)slide_size);` — 3 args, 3 conversions, types match.
+  **Falsifier:** `(a)` prints with `src`/`n` different from `:4104`'s `0x3dc32000`/`0x00089000` — the
+  call site `:1636-1641` passes `uap->slide_start`/`uap->slide_size` UNCHANGED, so any difference is a
+  wiring/argument finding; stop and re-read the call.
+- **(b)** `:1528`, between the init-failure block's `}` (`:1527`) and the getter (`:1529`) — a blank
+  line; legal. Fires only when `vm_shared_region_slide_init` returned 0 (the failure branch prints
+  `:1525` and `goto done`, never reaching `:1528`). `slide_info_entry` there is **necessarily NULL**:
+  `:1521` is its only initializer, `:1529` its only assignment. **Keep it at `:1528`; do not
+  relocate.** As a presence marker it is exactly the discriminator needed ("stopped inside
+  `vm_shared_region_slide_init`" vs "past it"); the getter is a one-line return
+  (`vm_shared_region.c:1541-1544`), so there is no stop candidate between `:1529` and the NULL check;
+  and after a successful init the pointer is guaranteed non-NULL by value — the success path stores it
+  inside `kmem_alloc` (`vm_shared_region.c:1502-1504`, allocator writes through
+  `&slide_info.slide_info_entry`), sets `shared_region_completed_slide = TRUE` (`:1523`), returns `kr`
+  (`:1533`); every other path returns `KERN_FAILURE`/`KERN_INVALID_ADDRESS` (`:1500`, `:1525`). A
+  post-getter `%p` would print a non-NULL pointer every time — zero information. **Falsifier:** `(b)`
+  AND `slide_info initialization failed with kr=%d` in the same run — mutually exclusive per call;
+  that text set is two invocations or a mixed build, not one reading.
+- **(c)** after `:1536` (the copyin `else`-branch's closing `}`) and before `:1537` (`if (error)`) —
+  legal; fires on BOTH outcomes. Arg `error` is `int`; `%d` matches. Reading: once `(b)` has printed,
+  the `:1531` EFAULT is impossible on this path, so `error` here is only 0 or the copyin's return.
+  **Falsifier:** `(c) kr!=0` with NO `IOS7SHREG map_slide ret=%d` later in the text — for a failing
+  slide half the `:1645-1646` print is unconditional (`:1643` undo, then print, then `return kr`), and
+  this text channel has no measured losses (§10); treat as source/capture mismatch, not a stop.
+
+### 11.3 The reading table — frozen
+
+- **No `(a)`.** Stop before `_shared_region_slide`'s first statement: in `_shared_region_map`'s tail
+  (`:1466-1510`) or the call/return boundary. The tail's steps by value: `vnode_lock_spin` (`:1468`),
+  `v_flag |= VSHARED_DYLD` (`:1470`), the atime update `:1474-1480` (write-free — §11.4),
+  `P_NOSHLIB` atomic (`:1482-1484`), then `done:` `vnode_put` (`:1493`), `fp_drop` (`:1498`),
+  `vm_shared_region_deallocate` (`:1503`). The tree's own comment (`:1490-1491`) says `ubc_map()`
+  still holds the vnode in the non-error case — `vnode_put` cannot drive an inactive/flush here. No
+  step in the tail issues I/O; the only blocking candidates are waits (spinlock, the setattr's cnode
+  lock), not I/O.
+- **`(a)` only.** Stop inside `vm_shared_region_slide_init` (`vm_shared_region.c:1441-1534`). Its only
+  waitable steps: the object lock (released `:1528`; map lock `:1530-1532`) and `kmem_alloc`
+  (`:1502`) — no disk I/O in the function.
+- **`(a)+(b)`.** Entered the copyin block; its only work is the `copyin` of `[slide_start, +slide_size)`
+  = `[0x3dc32000, 0x3dcbb000)` — 0x89000 bytes, which the wire places as the LAST 0x89000 bytes of
+  `m2` (wire extent `[0x3b9ce000, 0x3dcbb000)`), i.e. the cache file's slide-info region at
+  `0x101AA000` (§11.6). Any storage delivery of these pages reads LBAs `[0x4A3838, 0x4A3C80)` — the
+  draft's prediction, exact.
+- **`(a)+(b)+(c) kr=0`.** Copyin completed. Remaining: `vm_shared_region_slide_sanity_check`
+  (`vm_shared_region.c:1547-1590`) — `mach_vm_protect` (`:1559-1562`; failure panics with its own
+  text, `:1564`), then a memory-only toc loop (`:1567-1576`; failure prints `No sliding bitmap entry…`
+  `:1572`). Both outcomes print ⇒ "in sanity" = neither text printed; its only waiting step is the
+  `mach_vm_protect`.
+- **`(a)+(b)+(c) kr!=0`.** The copyin itself failed ⇒ `:1645-1646` `map_slide ret=14` must follow in
+  the same text.
+- No deadline anywhere in the half (the frozen timer enters only through the empty page pool; the
+  draft's `vm_resident.c:4574` cite bounds that, not re-derived here).
+
+### 11.4 ATIME — the lead's NO-WRITE reading is CORRECT, and stronger than stated; report #2 refuted by value
+
+The chain, each line as the tree has it:
+
+1. The only setattr on the path: `vm_unix.c:1474-1480` — `MNT_NOATIME` gate; `VATTR_INIT`; `nanotime`;
+   `VATTR_SET_ACTIVE(&va, va_access_time)` ONLY; `vnode_setattr(vp, &va, vfs_context_current())`
+   (`:1479`). The VATTR carries exactly one active field: `va_access_time`.
+2. `hfs_vnop_setattr` (`hfs_vnops.c:1107`): `decmpfs_update_attributes` (`:1134`) — its whole body is
+   under `if (VATTR_IS_ACTIVE(vap, va_flags))` (`decmpfs.c:786`) ⇒ for an atime-only VATTR it falls
+   through to `return 0` without a single read (no xattr, no attribute fetch).
+3. `check_for_tracked_file` (`:1142`) is explicitly skipped for the atime-only shape; the truncate
+   block (`:1198-1221`) needs `va_data_size` — skipped.
+4. `hfs_lock(VTOC(vp), HFS_EXCLUSIVE_LOCK)` (`:1222-1226`) — the only wait on the path, a sleepable
+   cnode mutex; no disk. It is the documented reason the fast path exists ("…speeds up mmaps, in the
+   rare case that they get caught behind a sync", `:1228-1234`).
+5. **The fast path** `:1236-1239` — verbatim: `if (vap->va_active == VNODE_ATTR_va_access_time) {
+   cp->c_touch_acctime = TRUE; goto out; }` — a dirty-flag on the in-core cnode, then a jump past
+   everything below.
+6. `out:` (`:1354-1387`): `hfs_unlock(cp)` (`:1363`), the `decmpfs_reset_state` block (`:1365-1384`;
+   set only under a UF_COMPRESSED `va_flags` change — past the fast path), `return error` (`:1387`).
+   **`hfs_update(vp, TRUE)` at `:1352` — the only catalog-write call in the function — is NOT
+   executed**: the fast path jumps over it to `out:`.
+
+**Verdict: no write is issued anywhere on the atime path; nothing on the map tail does disk I/O at
+all.** Report #2's "the tail's only I/O — a metadata write delivered by the CNTVCT-polled ladder
+(`entry_storage.c:8942`)" is refuted twice over: (i) the setattr is write-free by construction, with
+the tree's own comment naming this exact scenario; (ii) the `:8942` cite is right AS A LINE in the
+998-committed tree (`ST_LIVE("xnu_live_storage_dr_ticks", (uint32_t)stage90_cntvct_read() - t0);` —
+the rung-45 DAT-line self-clear poll inside `st_data_reset`; 999's staged WDT edit moves it to
+`:8984`) but wrong as a ROLE — `dr_ticks` measures a host-reset poll, it delivers nothing; the
+delivery path for every recorded sector is the door `entry_storage_driver_read` (working tree
+`:7700-7718`; committed tree `:7661`), whose `drv_*` records show it alive to the record tail. If
+report #2 were right, the writing function would have to be `hfs_update` at `hfs_vnops.c:1352` — the
+one line this path skips. **Corollary for 999:** a run with NO `(a)` cannot be explained by a hung
+atime write; the remaining candidates on that rung are waits, not I/O.
+
+### 11.5 The sleh / `trap.c` question — CONSISTENT as reported; two frontier wordings are each wrong
+
+`trap.c` data-abort decider (`:644-712`), by value: `vm_fault(thread->map, …)` (`:657-661`); if that
+fails, `vm_fault(kernel_map, …)` (`:667-671`); **only if BOTH fail**: `if (!thread->recover)` →
+`panic_context(… "Kernel data abort" …)` (`:676-692`), else redirect (`pc = thread->recover`, I-bit
+cleared, `recover = NULL`, `return`; `:693-708`). `return;` at `:712` is reached whenever EITHER fault
+succeeded — the handler returns with no panic and no redirection. The decider's actual rule: an
+unarmed kernel data abort panics only when the fault is UNSATISFIABLE; satisfiable ⇒ silent return.
+Report #2's event 3 — `fsr=0x807` (data abort, write, translation), `far=0xcfdfe000`,
+`recover=0x00000000`, `pc=0x80015fc8`, back trio `sleh_back=3 / redirect=0 / at_back=3`
+(`:20182-20194`, `:20211-20213`) — returned un-redirected ⇒ by `:712` the fault was satisfied; **the
+return is exactly what `trap.c` does; no panic is owed and none appears.** The two statements conflict
+only when "panics on unarmed kernel data aborts" is read as "on ALL of them"; the tree says "on the
+unsatisfiable ones". All three 998 events are kernel-mode (`sleh_user=0`, thr `0xc0bfa000`); all
+three back trios read `redirect=0` (no redirect record anywhere in the capture), so events 1-2
+(`recover` `0x80495670` / `0x80495bac`) were satisfied and retried too; `sleh_armed` = 2 (events 1-2;
+event 3 had `recover=0` at entry). Line arithmetic: 3 events × 15 keys + 3 backs × 3
+(back/redirect/at_back) + 2 `armed` = 45 + 9 + 2 = 56 — the block's exact size.
+
+Frontier flags: §10's "8 `sleh` user-fault events" is wrong twice — the count is **3** (the 8 is
+`SLEH_LIVE_MAX`, the recording cap) and the mode is **kernel** (`user=0` on all three); §10c's "all
+`sleh_cpsr` 0x20000193" is 2-of-3 (event 3 reads `0x60000193`); the memory file
+`mi4-998-g1-confirmed-map-file-kr0.md` carries the same "user-fault" wording and owes the same
+correction.
+
+### 11.6 The three counts, the byte-match, the span
+
+**The families, by their tree sites.** `rd_*` (69 keys/group) — `st_read_single_block`
+(`entry_storage.c:7294`; `rd_calls` `:7313`, `rd_lba` `:7518/:7524`). `drv_*` — the door
+`entry_storage_driver_read` (`:7700`): `drv_calls`/`drv_lba` at the head (`:7705-7706`), then
+`st_data_reset()` (`:7709`) and `st_read_single_block(1u)` (`:7710`), then the 5-key tail
+`after_lba/get/w0/w1/held` (`:7712-7716`). `dr_*` — `st_data_reset` (`:8958`), 14 keys, whose body the
+record tail shows complete at `:20412-20417` (`ps_after, dat_line, data_inhibit, status_after,
+ena_after, done`).
+
+**The counts and the reconciliation.** rd groups = 129; drv calls = 120 (119 with a full 5-key tail +
+1 head-only); dr bodies = 130 with `dr_done` in 129. The multiset test over every recorded LBA (awk,
+newline-based): rd − drv = {`0x1`…`0x8` ×1 each, `0x400002` ×2}; drv − rd = {`0x422963` ×1}. Mechanism:
+**130 reads attempted** (130 resets); **129 completed** (the rd groups); **120 went through the door**,
+of which **119 completed** and the 120th (`drv_lba=0x422963`, the last `drv` line, `:20492-20493`) was
+cut at the cap inside its `dr` body — after `dr_timeout` (`:20501`; the poll had completed,
+`dr_polls=0x104`, `dr_held_after=0`) and before `ps_after`, with its `st_read_single_block` never
+reached (no rd group for that LBA); the remaining **10 went direct** (boot-rung sites call
+`st_data_reset` + the read body without the door — LBAs `1..8` and two of the three `0x400002`
+volume-header reads). Arithmetic closes exactly: 129 − 120 = 9 = 10 direct − 1 door-in-flight. Neither
+"129" nor "120" is wrong; they count different families, and the "9" is the sum of two tails, not a
+gap. (The tombstone `:20502` — `xnu_live_capped=0x00004000` — sits one counted write after `:20501`;
+§10's displaced-payload analysis stands unmodified.)
+
+**The byte-match (VERIFIED byte-for-byte; the strongest single integrity proof of the text channel).**
+The four `:4105-4108` wire lines vs the cache header at rootfs.hfs offset 0x455d000 (re-parsed this
+window; the on-disk mapping entries are 32-byte, uint64 fields — parse them that way): magic
+`dyld_v1   armv7`; mappingOffset 0x68, mappingCount 3. m0 header `(0x2c000000, 0x0c266000, 0)` → wire
+`va=0x2da86000 = 0x2c000000 + slide(0x1a86000)` EXACT, size/offset equal, prots 5/5 = 5/5. m1 header
+`(0x38268000, 0x1ce0000, 0xc266000)` → wire `va=0x39cee000` EXACT, size/offset equal, prots wire 23/23
+where the header holds 3/3 — `0x23 = 0x3 | 0x20`, and **0x20 is `VM_PROT_SLIDE`**
+(`osfmk/mach/shared_region.h:117`; consumed `vm_shared_region.c:1061`): dyld's mark on the slid
+segment, printed raw (`vm_unix.c:1218-1220` prints `wire[].max_prot`). m2 header
+`(0x39f48000, 0x22ed000, 0xdf46000)` → wire `va=0x3b9ce000` EXACT, prots 1/1. The 4th line
+`(0x3dcbb000, 0x177000, 0x12bda000)` is dyld's own extra mapping: offset = codeSignatureOffset, size =
+fileSize − codeSignatureOffset, flags 1/1 — not a header row. The wire reproduces the file's header
+losslessly under `+slide`, and the one "mismatch" (23 vs 3) is tree-defined semantics, not a wire
+misparse. Two of my own earlier notes corrected here: the 4th line's offset field is
+`codeSignatureOffset` (not localSymbolsOffset — that is 0x10233000/0x29a6a80 and is not in the wire),
+and the "6 IOS7SHREG strings" count is 5.
+
+**The span test.** Cache file first sector: 0x455d000/0x200 = 0x22AE8, + card partition base 0x400000
+⇒ first LBA **0x422AE8**. End: fileSize = codeSignatureOffset + m3 size = 0x12bda000 + 0x177000 =
+0x12D51000 (= 300.8 MiB — the frontier's "301 MiB") ⇒ 0x96A88 sectors ⇒ last LBA 0x422AE8 + 0x96A88 −
+1 = **0x4B956F**. Recorded LBAs in `[0x422AE8, 0x4B9570)`: **ZERO** (min recorded 0x1, max 0x4F4987).
+Report #2's span end 0x4B9550 is short of mine by 0x1F sectors (31; its derivation bounded the file
+~15.9 KiB tighter); both ends lie below the first recorded LBA above the span (0x4F4987), so the
+verdict is end-independent. **Self-correction, recorded:** my earlier suspicion that 0x4B9550 was
+"miscalculated" rested on a stale fileSize (0x12E51000) from a mislabeled note; by value the end is
+0x4B956F and the report's figure was essentially right. Interpretation, as the draft has it: the
+record tail's last door LBA (0x422963) is 0x185 sectors BELOW the cache file's first sector and no
+cache-file sector was recorded — consistent with the cap cutting the channel before the 438-era reads
+(the 8192-byte header read at 0x422AE8 would be post-cap and invisible), NOT evidence that the reads
+did not happen.
+
+**The copyin source, two independent derivations (both exact).** VA-side: `slide_start − m2.base =
+0x3dc32000 − 0x3b9ce000 = 0x2264000` (= 0x22ed000 − 0x89000, the last slideSize bytes of m2);
+`+ m2.fileOffset 0xdf46000 = 0x101AA000` = the header's `slideInfoOffset`. File-side: `0x455d000 +
+0x101AA000 = 0x14727000` ⇒ LBA `0x400000 + 0x22AE8 + 0x80D50 = 0x4A3838`, count `0x89000/0x200 =
+0x448` ⇒ `[0x4A3838, 0x4A3C80)` — the draft's prediction, exact by both routes. (My prior-window
+"Δ 0x200000 from slideInfoOffset" was an arithmetic slip of mine — the within-m2 offset is 0x2264000,
+not 0x2064000; there is no discrepancy. Recorded.)
+
+### 11.7 Flags for the frontier doc; the frozen pre-reg
+
+- **Frontier §10** "8 `sleh` user-fault events" → 3 events, kernel-mode (`user=0`); the 8 =
+  `SLEH_LIVE_MAX`. **§10c** "all `sleh_cpsr` 0x20000193" → 2-of-3 (event 3 `0x60000193`). **§10d/r2**
+  span end 0x4B9550 → 0x4B956F by value (±31 sectors; verdict unaffected). The same "user-fault"
+  wording in the 998 memory file.
+- **Claim 2 (console cannot drop) — substance VERIFIED** as stated: `#define ENTRY_OS_BLOCK
+  0x00020000u` (`entry_stubs.c:2510`), reserve+space-fill at `:2737-2739` with the block record
+  `:2746`; the capture's `ostext_total` ends `0x17ee` (`:20505`), 6 heals, `ostext_block=0x00020000`
+  (`:4111`), and `ostext_limited` occurs ZERO times; `:4110` is the 124,122-char fill line ending in
+  the space-prefixed `xnu_live_ostext_at=0x00048296`. One cite corrected: the lead's ":2692-2698
+  space-filled" — the fill loop is `:2738-2739` (inside `entry_os_reserve`); `:2692-2700` is the
+  console-externs comment block.
+- **Report #2's `entry_storage.c:8942`** — correct line, wrong role (§11.4); the delivery path to
+  name is the door at `:7700-7718`.
+- **Frozen for 999:** the three probes as texted in §11.2 ((b) KEPT at `:1528` — presence marker,
+  entry necessarily NULL, no relocation), the reading table §11.3, the atime dispute resolved for the
+  lead, the counts and byte-match recorded in §11.6, and the copyin-fault LBA prediction
+  `[0x4A3838, 0x4A3C80)` now derived two independent ways. Readings 999 must NOT be judged on: the
+  position of `map_slide ret=` (one string, three sites), the presence of a sanity success print
+  (compiled out), and any line number from a `\r`-splitting reader (this file numbers 62 high).
