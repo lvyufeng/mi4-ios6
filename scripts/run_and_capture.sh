@@ -706,6 +706,16 @@ adb_state() {
 
 summarise_log() {
   local log=$1
+  # **Which arm this log belongs to, when that is knowable - the residency clause below is the one
+  # reader that needs it.** Two sources, both the project's own: the caller names it for the log *this
+  # run produced* (`--expect-arm`, which the runner refuses at the send unless it equals the recorded
+  # set of the bytes to be sent - a claim about the bytes and not a guess), and an archived capture
+  # carries it in its own name (`...-armed-d13-dee822b0.txt`, the convention every capture in
+  # out/stage90/captures follows; an arm name is `<kind>-<sha8>`, the entry bin's own hash). Empty
+  # when neither holds: a log with no name and no declaration is then read as a log alone, and the
+  # clause that wants the arm's record keeps the text it printed before this rung.
+  local log_arm=${2:-}
+  [[ -n $log_arm ]] || log_arm=$(basename "$log" | sed -n 's/.*\(armed-[a-z0-9-]*-[0-9a-f]\{8\}\).*/\1/p')
   # **The self-test arm's own keys were missing from this table until 669, and they are the ones that
   # answer its question.** The arm in `out/` (the hardware-watchdog self-test) publishes FIVE
   # `hw_watchdog_*` keys before it spins (`hw_watchdog.c:161-165`) and two SELFTEST sentences of its own
@@ -763,7 +773,7 @@ summarise_log() {
   n=$(grep -a -c 'MI4IOS6_STAGE90' "$log" || true)
   say "MI4IOS6_STAGE90 lines: $n"
   if [[ $n -eq 0 ]]; then
-    say "NONE. The log has no payload output from this run - either the power cycle that"
+    say "NONE. The log has no payload output at all - either the power cycle that"
     say "brought the device back cleared DRAM, or the payload never reached log_init()."
   else
     grep -a -n 'MI4IOS6_STAGE90' "$log" | tail -60
@@ -3136,9 +3146,51 @@ summarise_log() {
       fi
     fi
   else
-    say ""
-    say "  ---- no xnu_live_wdt_ map: this image has no resident pet (RESIDENT off, or predates 909), ----"
-    say "  ---- so its ending is the seam's, not the watchdog's, and the exit rungs above are the ----"
+    # **An absent `xnu_live_wdt_` key is TWO facts, and only the arm's own record says which (the 998
+    # press measured the misread).** On an image built without the resident pet (`RESIDENT` off, or one
+    # predating 909) the absence belongs to the image: no pet was ever compiled in, and the ending is
+    # the seam's. On a `RESIDENT=1` image - 998's - the pet IS in the image at `entry_wdt_pet`
+    # (entry_trace.c:3030, the idle-exit site the USB ladder shares), and the absence can only mean it
+    # never ran: the pet is reached from the idle path alone, so a handed-off kernel that never idled
+    # never fed, and the SoC's own watchdog - armed 25 s / 3 s before the jump - is what ends the run.
+    #
+    # The record is read only for the arm this log belongs to (`$log_arm`: the log's own name, or the
+    # caller's `--expect-arm` when this run produced it), out of the parked copy first so a capture
+    # re-read after a later build still reads against ITS arm's record and not the live one's.
+    #
+    # And the channel above still bounds the claim: on a TRUNCATED channel - 998's own - a pet that
+    # ran after the cap would have had its records dropped, which this log cannot tell from a pet that
+    # never ran. That is said where it applies rather than left implicit.
+    local wdt_rec="" wdt_res="" wdt_sha8=""
+    if [[ $log_arm =~ ([0-9a-f]{8})$ ]]; then wdt_sha8=${BASH_REMATCH[1]}; fi
+    if [[ -n $log_arm && -r $OUT/frozen/$log_arm/xnu_arm_entry-config.txt ]]; then
+      wdt_rec=$OUT/frozen/$log_arm/xnu_arm_entry-config.txt
+    elif [[ -n $wdt_sha8 && -r $OUT/xnu_arm_entry-config.txt ]] \
+         && grep -aq "^STAGE90_XNU_ENTRY_SHA256=$wdt_sha8" "$OUT/xnu_arm_entry-config.txt"; then
+      wdt_rec=$OUT/xnu_arm_entry-config.txt
+    fi
+    if [[ -n $wdt_rec ]]; then
+      wdt_res=$(grep -ao 'STAGE90_XNU_RESIDENT=[0-9a-fx]*' "$wdt_rec" 2>/dev/null | tail -1 | sed 's/^[^=]*=//' || true)
+    fi
+    if [[ $wdt_res == 1 ]]; then
+      say ""
+      say "  ---- no xnu_live_wdt_ key, but $log_arm's record says STAGE90_XNU_RESIDENT=1: this image ----"
+      say "  ---- HAS the pet (entry_wdt_pet, entry_trace.c:3030), so the absence reads as NEVER RAN: ----"
+      say "  ---- it is reached from the idle path alone, so a handed-off kernel that never idled in ----"
+      say "  ---- the window never fed it. The ending is the SoC watchdog's, not the seam's - armed ----"
+      say "  ---- 25 s / 3 s before the jump - and the pass it stopped on is in the exit rungs above ----"
+      say "  ---- (998: a silent reset ~28 s after the jump). ----"
+      if (( live_trunc == 1 )); then
+        say "  ---- CAVEAT: this log's channel is TRUNCATED (above), so a pet that ran after the cap ----"
+        say "  ---- would have had its records dropped, and this log cannot tell that from a pet that ----"
+        say "  ---- never ran. The USB stream on the host - the ladder shares the pet's site - is the ----"
+        say "  ---- reading that separates the two; no key here can. ----"
+      fi
+    else
+      say ""
+      say "  ---- no xnu_live_wdt_ map: this image has no resident pet (RESIDENT off, or predates 909), ----"
+      say "  ---- so its ending is the seam's, not the watchdog's, and the exit rungs above are the ----"
+    fi
   fi
 
   # ---------------------------------------------------------------------------------------------
@@ -3271,8 +3323,13 @@ summarise_log() {
   # reached behind it. `xnu_live_exec_*` (entry_stubs.c:4966, 509) is the first that is the kernel's
   # own act, and the block's own header says why its *presence* is the finding: `load_init_program`
   # returns on every success arm, and its only other way out of the body is
-  # `panic("Process 1 exec of %s failed")` - so `xnu_live_exec_done_seq` exists **iff** the OS loaded
-  # its init image. It is the sentence under the console's last line (`attempting to load
+  # `panic("Process 1 exec of %s failed")` - so a returned load is a returned load, and this block
+  # carried the claim that `xnu_live_exec_done_seq` exists **iff** the OS loaded its init image.
+  # **998 falsified that "iff": the wrapper's own printf printed while the done-records never reached
+  # the log.** The record call precedes the printf in the pinned source (entry_trace.c:3776, :3784),
+  # so the record was *lost in the channel* and not never made - absence of a record is not absence of
+  # the return, which is why the absent case below now branches on the printf line first.
+  # It is the sentence under the console's last line (`attempting to load
   # /sbin/launchd`), and the goal's 「进入操作系统」 turns on it. `_who` is `proc_pid(initproc)` (1) and
   # `_done_current` is `proc_pid(current_proc())` (0 = kernproc: the loader runs on the kernel task,
   # not in the process it loads) - two numbers that say *where* the loader was, not just that it ran.
@@ -3286,9 +3343,35 @@ summarise_log() {
     local exec_done
     exec_done=$(keyval exec_done_seq)
     if [[ -z $exec_done ]]; then
-      say "  UNREAD  the kernel ENTERED load_init_program but no xnu_live_exec_done_seq is here: the"
-      say "        load did not return. On this structure the only way out of its body without returning"
-      say "        is panic(\"Process 1 exec failed\") - so look for that panic, or a death before it"
+      # **Absence of the record is not absence of the return, and 998 is the measurement.** The wrapper
+      # prints its own line - `mini4: the OS's own init load returned, so pid N has the init image
+      # (caller 0x...)` - at entry_trace.c:3784, AFTER the record call at :3776 in the pinned source,
+      # so a log carrying that sentence carries proof the load returned whatever the record channel
+      # did afterwards. On 998 the sentence printed while the three done-records did not: ROOT-CAUSED
+      # (buildplumb 2026-10-13) to the live channel's cap - the done calls ran at counter >= 16384,
+      # and capture :20502's `xnu_live_capped` tombstone is where the displaced `exec_done_seq`
+      # landed - so on 998 the absence is the cap's and EXPECTED, not the panic this branch used to
+      # name. 999 writes the trio directly (cap-exempt, entry_stubs.c:5065 and its block at :2548),
+      # so on 999+ a done record missing beside the printf IS anomalous. The printed text below says
+      # both readings rather than keying a branch on the generation: 999 adds NO record key (its
+      # changes are constants and source-level), so the arm this log came from cannot be asked.
+      local exec_printf
+      exec_printf=$(grep -a -c "mini4: the OS's own init load returned" "$log" 2>/dev/null || true)
+      if [[ ${exec_printf:-0} -gt 0 ]]; then
+        say "  => OS ENTERED: the wrapper's OWN console line is in this log - 'mini4: the OS's own init"
+        say "     load returned, so pid N has the init image' - and it is printed after the record call"
+        say "     (entry_trace.c:3776 then :3784 in the pinned source), so the load RETURNED. The"
+        say "     xnu_live_exec_done_* records absent beside it are the cap's doing on 998 - the capped"
+        say "     tombstone at capture :20502 is where the displaced done_seq landed, not a failed load"
+        say "     and not a channel fault - and on a build whose done trio is cap-exempt (999: direct"
+        say "     writes, entry_stubs.c:5065) a missing done record beside this printf is genuinely"
+        say "     ANOMALOUS. Either way: do NOT read this as 'the load did not return', and do not go"
+        say "     looking for panic(\"Process 1 exec failed\") on this evidence"
+      else
+        say "  UNREAD  the kernel ENTERED load_init_program but no xnu_live_exec_done_seq is here: the"
+        say "        load did not return. On this structure the only way out of its body without returning"
+        say "        is panic(\"Process 1 exec failed\") - so look for that panic, or a death before it"
+      fi
     else
       say "  xnu_live_exec_done_seq=$exec_done done_who=$(keyval exec_done_who) done_current=$(keyval exec_done_current)"
       say "  => OS ENTERED: the kernel's load of /sbin/launchd RETURNED (exec_done_seq present, the only"
@@ -4205,9 +4288,16 @@ else
   # above has just said the file is suspect, and the summary is then read under that warning rather
   # than instead of it. `--summarise` remains the way to re-read a log later, and the two paths print
   # the same table from the same function.
+  #
+  # **`$EXPECT_ARM` is passed, and only here.** This is the log THIS run produced, and the runner
+  # refused at the send unless that name equalled the recorded set of the bytes it sent - so the name
+  # is established provenance for this file and the residency clause may read its arm's record. The
+  # earlier summarise of the *previous* run's log (`step "payload output"`) deliberately passes
+  # nothing: that file belongs to whatever arm made it, which is the name in the file, not the arm
+  # this run is for.
   say ""
   step "reading the log this run captured"
-  summarise_log "$LOGFILE"
+  summarise_log "$LOGFILE" "$EXPECT_ARM"
 fi
 
 # The marker table is the part that decides what a run *meant*, so it is a function with
