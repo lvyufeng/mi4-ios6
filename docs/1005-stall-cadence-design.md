@@ -214,9 +214,15 @@ the cadence gets post-cap snapshots across the whole run without a new publish s
 ## 4. Instrument 2 — the `sleh_seq`/`sleh_back` atomicity fix (a MEASUREMENT fix)
 
 **Why:** `g_sleh_back++` (`entry_stubs.c:1861`) is a non-atomic read-modify-write on a field reached
-from `__wrap_sleh_abort` (`entry_trace.c:5677`) on up to 4 CPUs. A cross-CPU lost update can make
-`xnu_live_sleh_back` read below `xnu_live_sleh_seq` and **masquerade as a non-return** — the exact
-false "death" 1004 warned against.
+from `__wrap_sleh_abort` (`entry_trace.c:5677`). On a MULTI-CPU box a lost update could make
+`xnu_live_sleh_back` read below `xnu_live_sleh_seq` and **masquerade as a non-return**.
+
+**Honest scope (corrected 2026-10-13 by the adversarial re-derivation):** the 1004 capture boots
+**UNIPROCESSOR** (`real_ncpus: 1`, `pmap_asid_ncpus: 1`; the header's `cpu_count=4` is the DEVICE-TREE
+value, not the booted count). So the *observed* missing back-note is NOT this race, and its cause is
+not proven. This instrument is therefore **hygiene, not a diagnosis**: it removes a POTENTIAL
+false-positive (and would matter the moment the box boots SMP), and it must NOT be cited as the
+explanation for 1004's missing `_back`.
 
 **Minimal edit (primary):** make both increments atomic, gated under the same switch:
 

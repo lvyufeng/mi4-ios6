@@ -734,17 +734,17 @@ def s_abort(cap):
         n_frame, len(recs), SLEH_OLD_MAX, n_seen))
     # ---- DID EVERY ABORT RETURN?  `xnu_live_sleh_back` is the wrapper's post-`sleh_abort` note,
     # written for every abort <= the FRAMES band.  A `_seq` with NO matching `_back` is RECORDED,
-    # but it is NOT read as "never returned": `g_sleh_seq`/`g_sleh_back` are non-atomic shared
-    # globals and this tree reports cpu_count=4, so a cross-CPU lost update can drop a `_back`
-    # (mi4-measurement-defects).  The DECISIVE reading is whether the machine PROGRESSES past the
-    # last abort - read from the CAP-EXEMPT channels (usvc / storage), which publish to the log's
-    # end even after the general channel caps.  If it progresses, no abort was fatal.
+    # but it is NOT read as "never returned": the back-note's absence has NO proven cause (not the
+    # cap - both keys share the general channel and the cap is ~24000 records later; not a race -
+    # the box boots UNIPROCESSOR, real_ncpus: 1).  The DECISIVE reading is whether the machine
+    # PROGRESSES past the last abort - read from the CAP-EXEMPT channels (usvc / storage), which
+    # publish to the log's end even after the general channel caps.  If it progresses, not fatal.
     n_back = cap.family_count("xnu_live_sleh_back")
     if n_back and n_back < len(recs):
         say("OBS", "`xnu_live_sleh_back` x%d for x%d abort records - x%d abort(s) have no "
-                   "`_back`, but the counter is NON-ATOMIC across CPUs (cpu_count=4) so a lost "
-                   "update is not a lost return; see the PROGRESS check below" % (
-                       n_back, len(recs), len(recs) - n_back))
+                   "`_back`, but its cause is UNPROVEN (not the cap: both keys share the general "
+                   "channel; not a race: the box boots uniprocessor) and it is NOT a death marker; "
+                   "see the PROGRESS check below" % (n_back, len(recs), len(recs) - n_back))
     elif n_back:
         say("PASS", "every abort has a matching `_back` (`xnu_live_sleh_back` x%d == `_seq` x%d)"
                     % (n_back, len(recs)))

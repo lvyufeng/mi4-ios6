@@ -78,7 +78,7 @@ the commpage-timebase-invalid fallback, `svc #128`) at `lr` **advancing** `0x2bf
 address MOVES, so it is truly executing, not re-trapped.
 
 The run's real end-state is the instrument's own **tick summary**: `xnu_live_tick_sum_maxd` reaches
-`0x1be8b709` ≈ **23 s** (the max inter-tick gap) while `tick_sum_count` drags and `wdt_pets` climbs
+`0x1be8b709` ≈ **24.4 s** (the max inter-tick gap; 468,236,041 ticks / 19.2 MHz) while `tick_sum_count` drags and `wdt_pets` climbs
 to 0x61. The machine is alive (ticks, pets, storage) but tick DELIVERY **collapses** — the STALL
 999/1003 named. The frozen sampler frame (below) is the last thing the *tick* saw, held while the
 synchronous paths continued.
@@ -132,14 +132,23 @@ handful of kernel-mode faults. **So 1005 branch (a) (CS-validation LOOP,
    touches the shared-cache page. The `recover` word is non-zero ⇒ the handler had a plan for it
    (page in and retry, or convert to `EFAULT`).
 3. **The 1003/1004 "abort #40 never returned" reading is RETRACTED — it is not supported by the
-   evidence.** Its basis (`xnu_live_sleh_back` 39× for 40 aborts) is UNRELIABLE: `cpu_count=4` and
-   `g_sleh_seq`/`g_sleh_back` are **non-atomic shared globals** (`entry_stubs.c`), so a cross-CPU
-   race can drop a `_back` (a lost update, not a lost return). Independent, ATOMIC evidence
-   CONTRADICTS a death at #40: **after @:28020 the machine keeps executing** — pid 1's thread
-   `0xc0bfa000` makes FURTHER `mach_absolute_time` syscalls (`xnu_live_usvc_num=0xfffffffd`,
-   @29112/@29120, `lr` ADVANCING `0x2bf08a9f→0x2bf08af1→0x2bf08b11`), the root-media keeps serving
-   reads (`served` 0x39→0x3e, LBA `0x4a3810→0x4a3830`, `err` 0), `xnu_live_sleh_storm` **absent**
-   (no abort #41). **The first touch of the shared cache is NOT fatal**; dyld proceeds past it.
+   evidence.** The missing `sleh_back` is REAL (39 backs for 40 seqs — verified), but it does NOT
+   mean a lost return: **independent, cap-exempt evidence shows the machine keeps executing past
+   @:28020** — pid 1's thread `0xc0bfa000` makes FURTHER `mach_absolute_time` syscalls
+   (`xnu_live_usvc_num=0xfffffffd`, @29112/@29120, `lr` ADVANCING `0x2bf08a9f→0x2bf08af1→0x2bf08b11`)
+   and the root-media keeps serving reads (`served` 0x39→0x3e, LBA `0x4a3810→0x4a3830`, `err` 0).
+   The `sleh` entry note for #40 DID complete (`xnu_live_slot_ab_calls=0x28`, its last statement);
+   only the after-`__real_sleh_abort` back-note is missing. **The first touch of the shared cache is
+   NOT fatal**; dyld proceeds past it.
+   - **A first-draft cause — a cross-CPU lost update on the non-atomic `g_sleh_seq`/`g_sleh_back` —
+     is REFUTED**: the box boots UNIPROCESSOR (the capture's own `real_ncpus: 1`,
+     `pmap_asid_ncpus: 1`; the MI4 header's `cpu_count=4` is the DEVICE-TREE value, not the booted
+     count — [[mi4-one-value-two-definitions]]). With one CPU and every abort on the single thread
+     `0xc0bfa000`, no such race can operate.
+   - **Why the back-note is missing is NOT PROVEN either way.** It is not the channel cap (@:29006
+     is ~24000 records after @:28020, and both the seq and back keys share the general channel), and
+     not a race (uniprocessor). What is excluded is every *fatal* explanation; the back-note is a
+     lost RECORD, not a lost return.
 4. **Item 3's "no more syscalls" was a capped-channel artifact.** The cap tombstone @:29006 drops
    only the GENERAL channel; the CAP-EXEMPT channels (`xnu_live_usvc_*`, `xnu_live_stall_*`) publish
    to the very end of the log. Reading "no further syscalls" from the capped channel is exactly the
@@ -152,7 +161,7 @@ handful of kernel-mode faults. **So 1005 branch (a) (CS-validation LOOP,
 
 **The real frontier = the STALL, not the sleh return path.** The instrument's own summary says it:
 `xnu_live_tick_sum_maxd` grows `0x3142d1 → 0x4b9fa4c → 0x1be8b709` — the MAXIMUM inter-tick gap
-reaches **0x1be8b709 ≈ 23 s** while `tick_sum_count` (0x6b→0x1de) drags and `wdt_pets` climbs to
+reaches **0x1be8b709 ≈ 24.4 s** while `tick_sum_count` (0x6b→0x1de) drags and `wdt_pets` climbs to
 0x61. The machine keeps running (ticks, watchdog pets, storage) but tick DELIVERY collapses — the
 same stall 999 measured ("rate collapse: 122 delivered = 98 fast + 24 slow") and 1003 named
 ("alive but no syscall progress ~23 min"). The 1003 STALL reading survives; the 1004 abort #40
@@ -160,22 +169,24 @@ reframe does not.
 
 **What is NOT proven — the CAUSE of the stall.** The abort trace is complete and clean (a WALK);
 the machine does not die at any abort; but between the last recorded events and the operator's
-power press the tick cadence degrades to a 23 s gap. Two readings:
+power press the tick cadence degrades to a 24.4 s gap. Two readings:
   (b1) **A lost/degraded timer interrupt** — the tick source is being delivered ever more slowly
        (an interrupt storm, a wedged GIC line, or the timer device itself); the samplers that ride
        the tick freeze while synchronous paths (syscalls, demand paging) continue. The frozen
        `enable_interrupts` frame is the LAST thing the tick saw.
   (b2) **A long-lived kernel critical section** — some path holds IRQs masked long enough that
-       ticks queue and coalesce; the 23 s max gap is the coalescing.
+       ticks queue and coalesce; the 24.4 s max gap is the coalescing.
   The tiebreaker (1005) is a TIMER-INDEPENDENT cadence witness: publish a monotonic counter bumped
   from a synchronous path (the USVC handler already exists) plus a per-tick counter, and read the
   RATIO at the end — if syscalls keep climbing while ticks fall, it is (b1); if both freeze
   together it is a full stop.
 
 **What 1005 must NOT do:** it must not instrument `sleh_abort`'s return path (there is no evidence
-of a hang there) and must not treat `sleh_back` as a death marker (non-atomic across CPUs). The
-`sleh_seq/back` race itself is a fix worth making — make the two counters `os_atomic` or gate the
-`_back` note on a per-CPU value — but that is a MEASUREMENT fix, not the frontier.
+of a hang there) and must not treat `sleh_back` as a death marker (the box is UNIPROCESSOR, so the
+counter is not the claimed race either — the back-note's absence has NO proven cause, which is
+exactly why it must not be read as one). The 1005 design still makes the two counters atomic as a
+cheap MEASUREMENT hygiene fix, but the record is explicit that the fix removes a *potential*
+false-positive, not an observed one.
 
 **Why it matters:** dyld paged in ~24 of its own pages, touched the first shared-cache page (and
 survived it), and then the SYSTEM's clock decayed until the run stopped making progress. The wall
@@ -194,7 +205,7 @@ cache. Most of dyld's `ImageLoader::link` work still lies beyond it.
 
 ## 1005 input
 
-The frontier is **the STALL** (tick delivery collapses to a 23 s max gap), NOT a hang in the
+The frontier is **the STALL** (tick delivery collapses to a 24.4 s max gap), NOT a hang in the
 `sleh_abort` return path. Two instruments, both timer-independent:
 1. **Cadence ratio witness** — publish a monotonic counter bumped from the USVC (syscall) path
    beside the per-tick counter, and read the RATIO at the end: syscalls climbing while ticks fall
