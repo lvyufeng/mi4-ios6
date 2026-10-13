@@ -1,0 +1,793 @@
+#!/usr/bin/env python3
+"""SKELETON - mechanical adjudicator for the 1004 press capture - by value, and DEATH-AWARE.
+
+MODELLED BYTE-STRUCTURALLY ON tools/check_1003_capture.py.  1004 adds ONE instrument - the per-tick
+PID-1 FRAME sampler (switch `STAGE90_XNU_USER_PC`), a GENERALISATION of 1003's stall sampler - and
+keeps 1003's stall sampler, 1002's r3-save fix and 1001's submap skip as regressions.  The section
+that carries the new reading is `[U]`; its VERDICT blocks are marked 1004-TODO and must be completed
+by the 1004 design before the rung is pressed.
+
+numpy-free: this tool imports only os / re / sys (like its 1003 sibling).
+
+1004-TODO TOKENS (replace each when the design lands; search for "1004-TODO"):
+  * __1004_RECORDER__ = `entry_note_user_pc` - the PROPOSED recorder symbol (mirrors 1003's
+    `entry_note_stall_sample`).  The real name is chosen by the 1004 implementer.
+  * The USER_PC key set: `xnu_live_user_pc` (the sampled pc) plus `xnu_live_user_pc_n` (sample
+    counter), `xnu_live_user_pc_nz` (frame word count), `xnu_live_user_pc_cpsr` (the frame's cpsr).
+    These four are given by the task; the walker below assumes `_n` OPENS a sample and the three
+    fields follow - mirroring 1003's seven-key block.
+  * The USER_PC sample CADENCE and the SPIN/ASLEEP thresholds are TODO (see `[U]`).
+
+1003's baseline (kept): 1003's r3-save fix TOOK BY VALUE (the USVC hook's save set gained r3), the
+230x byte-identical `launchd[1]: usermode data abort ... at 0x00000004` is GONE, and the frontier
+MOVED to a pid-1 user-space STALL (22 SVCs, the last three num=-3 = mach_absolute_time from pc
+0x2be97328, then NO further syscall for ~23 min).  `cs_invalid_page(0x2f7f6000): p=1[launchd]` is a
+TOLERATED warning (retval 0), NOT the frontier.  1003 sampled the interrupted frame to settle
+SPIN vs ASLEEP; 1004 generalises that sample so the user pc can be read as CHANGING (naming a
+function) rather than a single fixed reading.
+
+[0] THE DEATH GATE - the toggle every absence-based verdict below is routed through.  It is the
+FROZEN three-way conjunction: no panic stanza + the exec-done trio (and its five probe keys) +
+kv records after the exec-returned point.  Verbatim from the 1003 tool - a segment that clause 1004
+does not change.  Gate CLOSED: absence-based readings print `[death-gated]` and are NOT counted.
+Presence-based readings stay hard.
+
+WHAT 1004 CHECKS (the frozen block in `scripts/press_1004.sh` is the authority; `authority_line()`
+reads THAT file):
+  [R] THE 1002 r3-SAVE FIX AS A REGRESSION (verbatim from 1003): after `IOS7SHREG check_np ret=12`,
+      the count of `usermode data abort ... at 0x00000004` must STILL be 0.  A recurrence is a
+      REGRESSION - REBUILD, not a reading.
+  [U] THE PID-1 FRAME SAMPLE - THE 1004 RUNG ITSELF (the reason this rung exists).  Per-tick samples
+      of the interrupted pid-1 frame, published as `xnu_live_user_pc` / `_n` / `_nz` / `_cpsr`.
+      Classifies each sample's cpsr/pc as USER vs KERNEL, and reports SPINNING (user cpsr, changing
+      or looping pc) vs ASLEEP (all-kernel).  A MEASUREMENT by design: the stall is the EXPECTED
+      outcome, so [U] FAILS only on ZERO samples or on all-`_nz`=0 (a wrong saved-state offset).
+      1004-TODO: the SPIN/ASLEEP VERDICT WORDS and the pc-domain NAMING are TODO (see `s_userpc`).
+  [S] THE 1003 STALL SAMPLE - KEPT AS A REGRESSION.  1003's `xnu_live_stall_*` (7 keys) must STILL be
+      present; its SPIN/ASLEEP reading is restated by value (adjudicated in the 1003 tool's [S]).
+  [F] THE CODE-SIGNING PAGE-VALIDATION WALL - `cs_invalid_page` is a TOLERATED warning (retval 0),
+      recorded ONCE in the 1002 capture, NOT the frontier.  Verbatim from 1003.
+  (2) SUBMAPSKIP, (3) VMHINT991, (4) THE SURVIVAL GATE, (5) THE USER-SVC FRONTIER, (6) THE PET,
+  (7) THE CAP AND THE TICK, (8) THE FROZEN REGRESSION GUARDS - all VERBATIM from 1003 (1004 changes
+  none of them).
+
+METHOD.  Every reader (the `newline=""` file read, the de-doubling panic reader, the KV regex, the
+`@:line` numbering, `groups_of`, the death gate) is the 1001/1002/1003 tool's, key for key.  This
+tool is `tools/check_1003_capture.py` with the ONE new section [U] and the 1004 authority path; the
+clauses 1003 got right are mirrored verbatim.
+
+Usage:  tools/check_1004_capture.py <capture.txt>
+
+Exit: 0 = no hard anomaly; 1 = at least one hard anomaly (any `[FAIL]` line); 2 = usage.  A hard
+anomaly means STOP-and-report, never "rerun until green" - and a `[death-gated]` line is a death
+reading that must be adjudicated against the timeline before it is called anything.
+"""
+
+import os
+import re
+import sys
+
+KV_RE = re.compile(r'(xnu_live_[a-z0-9_]+|hw_watchdog_[a-z0-9_]+)=([0-9A-Za-z_.+-]+)')
+
+# ---- The 1001 probe, VERBATIM from the rung's spec (1002/1003/1004 keep it - the SUBMAP skip is
+#      unchanged).  The reader never assumes a `%p` width: any `0x` + hex digits.
+SUBMAPSKIP_LIT = "SUBMAPSKIP:"
+SUBMAPSKIP_RE = re.compile(
+    r'SUBMAPSKIP:\s*obj=(0x[0-9a-fA-F]+)\s+start=(0x[0-9a-fA-F]+)\s+end=(0x[0-9a-fA-F]+)'
+    r'\s+size=(0x[0-9a-fA-F]+)\s+lr=(0x[0-9a-fA-F]+)')
+SUBMAPSKIP_DOUBLED = "SSUUBBMMAAPPSSKKIIPP"
+PROBE_MAX_HITS = 8
+
+# ---- [R] the rung's own signature - VERBATIM from 1003 (the 1002 regression).
+ABORT_LIT = "usermode data abort, EXC_BAD_ACCESS at 0x00000004"
+CHECK_NP_LIT = "IOS7SHREG check_np ret=12"
+MAP_SLIDE_LIT = "IOS7SHREG map_slide"
+
+# ---- [F] the code-signing wall - VERBATIM from 1003.
+CS_INVALID_LIT = "cs_invalid_page"
+CS_PAGE_1002 = "0x2f7f6000"
+CS_CLEAR_LIT = "clearing CS_VALID"
+CS_PID_1002 = "p=1[launchd]"
+CS_TOLERATED = 1
+
+# ---- [S] THE 1003 STALL SAMPLE - KEPT (7 keys, one per field).  Classified by cpsr's mode bits.
+STALL_KEYS = ("n", "t", "pc", "cpsr", "sp", "lr", "nz")
+USER_MODE_CPSR = 0x60000010
+STALL_1002_PC = 0x2be97328
+DYLD_BASE = 0x2be00000
+DYLD_END = 0x2be58000
+SHARED_CACHE_BASE = 0x2c000000
+SHARED_CACHE_SLIDE = 0x37f6000
+SS_WORDS = 19
+
+# ---- [U] THE 1004 PID-1 FRAME SAMPLE - THE NEW RUNG.  1004-TODO: the key set and the cadence are
+#      PROVISIONAL, mirroring 1003's block shape.  The pc key is the BARE `xnu_live_user_pc`; the
+#      three fields are `_n` (opens a sample), `_nz`, `_cpsr`.
+USERPC_PC_KEY = "xnu_live_user_pc"           # the sampled interrupted pc (BARE key)
+USERPC_FIELDS = ("n", "nz", "cpsr")          # the field suffix set following `_n`
+USERPC_NS = "xnu_live_user_pc_n"             # opens a sample
+# 1004-TODO: whether the 1004 instrument replaces or coexists with 1003's [S] is a design choice;
+# this checker treats [S] as a KEPT regression and [U] as the NEW reading.
+
+# ---- 999's VMHINT991 objects, by value.
+SUB_OBJS = ((0xc0005b48, "999's VMHINT991 object #19"),
+            (0xc0005ab0, "999's VMHINT991 object #18"))
+
+# ---- The death gate's toggle + probes (VERBATIM from 1003).
+TRIO = ("xnu_live_exec_done_seq", "xnu_live_exec_done_who", "xnu_live_exec_done_current")
+ENTRY_QUARTET = ("xnu_live_exec_seq", "xnu_live_exec_caller", "xnu_live_exec_who", "xnu_live_exec_proc")
+DONE_PROBE = ("xnu_live_exec_done_probe_seq", "xnu_live_exec_done_probe_sig",
+              "xnu_live_exec_done_probe_size", "xnu_live_exec_done_probe_records",
+              "xnu_live_exec_done_probe_state")
+
+# ---- The kept instrument families (the census discriminates a 1000..1004 arm from its baselines).
+NEW_FAMILIES = (
+    ("xnu_live_tick_anom_", "(1) the late-delivery anomalies"),
+    ("xnu_live_tick_sum_",  "(1) the tick aggregate summaries"),
+    ("xnu_live_wdt_pet_",   "(2) the pet feed records (direct)"),
+    ("xnu_live_usvc_",      "(4) the user-SVC frontier"),
+    ("xnu_live_stall_",     "(S) 1003's stall sampler (kept)"),
+    ("xnu_live_user_pc",    "(U) 1004's pid-1 frame sampler (the NEW instrument)"),
+)
+
+LADDER_LITERALS = (
+    ("IOS7SHREG map_slide ret=", "438's own exit - must be present and 0 while the boot survives"),
+    ("IOS7SHREG map_file kr=",   "the G1 reading (must stay kr=0)"),
+    (CHECK_NP_LIT,               "the pre-438 constant (must stay; exactly once)"),
+    ("IOS7LAB cache mapping",    "the wire's mapping lines (exactly 4; printed inside the exec)"),
+    ("IOS7LAB shared region",    "the geometry line (exactly once)"),
+    ("VMHINT991",                "the 991 guard - the submap call is skipped, so 0x while surviving"),
+    ("vm_allocate64",            "absent = EXPECTED (997: the failure path's buffer alloc)"),
+    (SUBMAPSKIP_LIT,             "the 1001 skip-branch probe (>= 1 while surviving; <= 8)"),
+    (CS_INVALID_LIT,             "the code-signing wall (cs_invalid_page); read by value in [F]"),
+)
+
+FIXED_WDT = {
+    "hw_watchdog_timeout_s": 0x0000001D,
+    "hw_watchdog_bite_ticks_written": 0x000FFFA0,
+}
+BARK_1004 = 0xE7FA9
+WDT_HZ = 32765
+PERIOD_FALLBACK = 19200
+TVAL_SLACK = 512
+FULL_N = 64
+USVC_1001_N = 6
+
+FAILURES = []
+GATED = []
+SOFT = []
+SIGNATURES = []
+GATE_OPEN = False
+TRIO_OPEN = False
+GATE_CONJ = {}
+
+
+def to_int(s):
+    try:
+        return int(s, 16) if s.lower().startswith("0x") else int(s, 10)
+    except ValueError:
+        return None
+
+
+def fmt(v):
+    return "?" if v is None else "0x%08x(%d)" % (v, v)
+
+
+def secs(ticks, hz):
+    return None if (ticks is None or not hz) else ticks / float(hz)
+
+
+def dur(t, hz):
+    return "?" if t is None else "%.2f s at %s Hz" % (t, "{:,}".format(hz) if hz else "?")
+
+
+def is_pow2(v):
+    return v is not None and v != 0 and (v & (v - 1)) == 0
+
+
+def clip(s, n=200):
+    return s if len(s) <= n else s[:n] + "..."
+
+
+def hard(msg, absence_based=False):
+    if absence_based and not GATE_OPEN:
+        GATED.append(msg)
+        print("  [death-gated] " + msg)
+        return
+    FAILURES.append(msg)
+    print("  [FAIL] " + msg)
+
+
+def soft(msg):
+    SOFT.append(msg)
+    print("  [soft] " + msg)
+
+
+def signature(msg):
+    SIGNATURES.append(msg)
+    print("  [SIGNATURE] " + msg)
+
+
+def say(tag, msg=""):
+    print(("  [%s] " % tag) + msg if msg else ("  [%s]" % tag))
+
+
+class Capture:
+    def __init__(self, path):
+        # `newline=""` + `split("\n")`: NO universal-newline translation (the 1001 tool's reader,
+        # unchanged; line numbers are the reader's property, m997).
+        with open(path, "r", errors="replace", newline="") as fh:
+            self.text = fh.read()
+        self.nbytes = len(self.text)
+        self.lines = self.text.split("\n")
+        if self.lines and self.lines[-1] == "":
+            self.lines.pop()
+        self.toks = []
+        for line_no, line in enumerate(self.lines, 1):
+            for m in KV_RE.finditer(line):
+                self.toks.append((line_no, m.group(1), m.group(2), to_int(m.group(2))))
+        self.lit = {}
+        for line_no, line in enumerate(self.lines, 1):
+            for lit, _why in LADDER_LITERALS:
+                if lit in line:
+                    e = self.lit.setdefault(lit, [0, line_no, line_no, clip(line.strip())])
+                    e[0] += 1
+                    e[2] = line_no
+
+    def all(self, key):
+        return [t for t in self.toks if t[1] == key]
+
+    def first(self, key):
+        a = self.all(key)
+        return a[0] if a else None
+
+    def last(self, key):
+        a = self.all(key)
+        return a[-1] if a else None
+
+    def lit_count(self, lit):
+        return self.lit.get(lit, [0])[0]
+
+    def family_count(self, prefix):
+        return sum(1 for t in self.toks if t[1].startswith(prefix))
+
+    def ordered_pairs(self, key_a, key_b):
+        out, last_a = [], None
+        for _, key, _raw, val in self.toks:
+            if key == key_a:
+                last_a = val
+            elif key == key_b:
+                out.append((val, last_a))
+        return out
+
+    def groups_of(self, nkey, prefix, fields):
+        out, cur = [], None
+        fkeys = {prefix + f: f for f in fields}
+        for ln, key, _raw, val in self.toks:
+            if key == nkey:
+                cur = [ln, val, {}, []]
+                out.append(cur)
+            elif key in fkeys and cur is not None:
+                f = fkeys[key]
+                cur[2][f] = (ln, val)
+                cur[3].append(f)
+        return out
+
+    def panic_hits(self):
+        out = []
+        for ln, line in enumerate(self.lines, 1):
+            de = line[::2]
+            if ("panic(" in line or "panic(" in de or "Debugger called" in line
+                    or "Debugger called" in de or "Waiting for remote debugger" in line
+                    or "Waiting for remote debugger" in de):
+                out.append((ln, clip(line.strip(), 120)))
+        return out
+
+    def abort_hits(self):
+        return [(ln, clip(line.strip(), 160)) for ln, line in enumerate(self.lines, 1)
+                if ABORT_LIT in line]
+
+    def cs_invalid_hits(self):
+        out = []
+        for ln, line in enumerate(self.lines, 1):
+            de = line[::2]
+            if CS_INVALID_LIT in line or CS_INVALID_LIT in de:
+                out.append((ln, clip(line.strip(), 160)))
+        return out
+
+    def wdt_samples(self):
+        out, sts = [], None
+        for ln, key, _raw, val in self.toks:
+            if key == "xnu_live_wdt_sts":
+                sts = (ln, val) if val is not None else None
+            elif key == "xnu_live_wdt_countdown":
+                out.append({"ln": ln, "sts": sts, "countdown": val, "pets": None})
+            elif key == "xnu_live_wdt_pets" and out and out[-1]["pets"] is None:
+                out[-1]["pets"] = val
+        return out
+
+    def stall_samples(self):
+        """[S] THE 1003 STALL SAMPLE (kept): `_n` -> `_t` -> `_pc` -> `_cpsr` -> `_sp` -> `_lr` ->
+        `_nz` in that order; `_n` opens the sample."""
+        out, cur = [], None
+        for ln, key, raw, val in self.toks:
+            if key == "xnu_live_stall_n":
+                if cur is not None:
+                    out.append(cur)
+                cur = {"ln": ln, "f": {"n": (ln, val)}, "order": ["n"]}
+            elif cur is not None and key.startswith("xnu_live_stall_"):
+                fk = key[len("xnu_live_stall_"):]
+                if fk in STALL_KEYS:
+                    cur["f"][fk] = (ln, val)
+                    cur["order"].append(fk)
+        if cur is not None:
+            out.append(cur)
+        return out
+
+    def userpc_samples(self):
+        """[U] THE 1004 PID-1 FRAME SAMPLE - THE NEW RUNG.
+
+        1004-TODO: the walker is PROVISIONAL.  It assumes the recorder writes, in ONE block,
+        `xnu_live_user_pc_n` (opens) -> `xnu_live_user_pc` (the pc, the BARE key) ->
+        `xnu_live_user_pc_nz` -> `xnu_live_user_pc_cpsr`, mirroring 1003's `_n`-opens block.  If the
+        implementer chooses a different field order or key spelling, update this walker AND the
+        recorder together (one value, two definitions - [[mi4-one-value-two-definitions]])."""
+        out, cur = [], None
+        pc_key = USERPC_PC_KEY
+        for ln, key, raw, val in self.toks:
+            if key == USERPC_NS:
+                if cur is not None:
+                    out.append(cur)
+                cur = {"ln": ln, "f": {"n": (ln, val)}, "order": ["n"]}
+            elif cur is not None and key.startswith("xnu_live_user_pc_"):
+                fk = key[len("xnu_live_user_pc_"):]
+                if fk in USERPC_FIELDS:
+                    cur["f"][fk] = (ln, val)
+                    cur["order"].append(fk)
+            elif cur is not None and key == pc_key:
+                cur["f"]["pc"] = (ln, val)
+                cur["order"].append("pc")
+        if cur is not None:
+            out.append(cur)
+        return out
+
+
+def authority_line():
+    """Which 1004 pre-registration this run's expectations can be checked against - by value, at run
+    time ([[mi4-self-written-record-is-not-a-constraint]])."""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "scripts", "press_1004.sh")
+    try:
+        with open(p, "r", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return ("authority: scripts/press_1004.sh is NOT frozen yet (absent at run time) - the "
+                "expectations below are the ones handed to the 1004 rung; RE-CHECK them against the "
+                "pre-registration when it lands", False)
+    has = "1004 PRESS PRE-REGISTRATION" in text
+    # A SKELETON pre-reg is not a frozen one: the team-lead removes the `# 1004-SKELETON` sentinel when
+    # the real block lands (scripts/press_1004.sh refuses to press while it is present).
+    if has and "# 1004-SKELETON" in text:
+        return ("authority: scripts/press_1004.sh (%d bytes) - the block is a SKELETON (the "
+                "`# 1004-SKELETON` sentinel is present): the expectations below are the task's, and a "
+                "pre-reg deviation must be REPORTED" % len(text), False)
+    return ("authority: scripts/press_1004.sh (%d bytes, read at run time)%s" % (
+        len(text), " - the frozen block IS embedded" if has else
+        " - but the frozen 1004 PRESS PRE-REGISTRATION block is NOT in it: the expectations below are "
+        "the task's, and a pre-reg deviation must be REPORTED"), has)
+
+
+def s0_gate(cap):
+    """[0] THE DEATH GATE - VERBATIM from the 1003 tool (1004 does not change it)."""
+    global GATE_OPEN, TRIO_OPEN, GATE_CONJ
+    print("\n== [0] DEATH GATE (absence counts only if the boot reached the print site) ==")
+    found = {k: cap.first(k) for k in TRIO}
+    dp = {k: cap.first(k) for k in DONE_PROBE}
+    for k in TRIO:
+        t = found[k]
+        say("OBS" if t else "---", "%s %s" % (k, ("= %s @:%d" % (t[2], t[0])) if t else "(absent)"))
+    n_present = sum(1 for k in TRIO if found[k] is not None)
+    TRIO_OPEN = (n_present == 3)
+    if 0 < n_present < 3:
+        soft("a PARTIAL exec-done trio (%d/3) - the gate is defined as all three" % n_present)
+    ph = cap.panic_hits()
+    say("OBS" if not ph else "OBS", "panic stanza %s" % (
+        "present x%d (first @:%d: %s)" % (len(ph), ph[0][0], ph[0][1]) if ph
+        else "absent in the text channel"))
+    have_probe = sum(1 for k in DONE_PROBE if dp[k] is not None)
+    say("OBS", "the trio's five probe keys: %d/%d present" % (have_probe, len(DONE_PROBE)))
+    exec_done_last = max((t[0] for t in [found[k] for k in TRIO] + [dp[k] for k in DONE_PROBE] if t),
+                         default=None)
+    after_exec = [t for t in cap.toks if exec_done_last is not None and t[0] > exec_done_last]
+    say("OBS" if after_exec else "---", "kv records after the exec-returned point (@:%s): x%d" % (
+        exec_done_last, len(after_exec)))
+    q = {k: cap.first(k) for k in ENTRY_QUARTET}
+    if any(q.values()) and n_present == 0:
+        say("READING", "exec ENTRY quartet present, trio absent => the exec STARTED and never "
+                       "RETURNED: the 1000 death signature")
+    GATE_CONJ = {"i_no_panic": not ph, "ii_trio_and_probes": (n_present == 3 and have_probe == len(DONE_PROBE)),
+                 "iii_records_after_exec": bool(after_exec)}
+    GATE_OPEN = all(GATE_CONJ.values())
+    print("DEATH GATE: exec-done trio %s => %s" % (
+        "present" if TRIO_OPEN else "ABSENT",
+        "absences count" if TRIO_OPEN else "absence-based verdicts are NOT counted"))
+    print("DEATH GATE: EFFECTIVE = %s (frozen conjunction: %s)" % (
+        "OPEN" if GATE_OPEN else "CLOSED",
+        " AND ".join("%s->%s" % (k, "holds" if GATE_CONJ[k] else "FAILS") for k in sorted(GATE_CONJ))))
+
+
+def s_identity(cap):
+    print("\n== IDENTITY / the 1000-1001-1002-1003-1004 instrument census ==")
+    cap_hdr = cap.all("xnu_live_cap")
+    if cap_hdr:
+        vals = sorted(set(t[3] for t in cap_hdr))
+        say("OBS", "xnu_live_cap header: %s" % ", ".join(fmt(v) for v in vals))
+        if 0x4000 in vals:
+            hard("xnu_live_cap=0x00004000 - a PRE-999 image; not the 1004 arm")
+    census = {}
+    for prefix, why in NEW_FAMILIES:
+        n = cap.family_count(prefix)
+        census[prefix] = n
+        first = next((t for t in cap.toks if t[1].startswith(prefix)), None)
+        say("OBS" if n else "---", "%s x%d%s" % (prefix, n,
+            "  first @:%d" % first[0] if first else "  (%s)" % why))
+    if not any(census.values()):
+        hard("ZERO tokens of ALL kept families - a pre-1000 image or the edits did not reach the "
+             "image: REBUILD, do not judge", absence_based=True)
+
+
+def s1_tick(cap):
+    print("\n== [1] TICK - the delivery sampled at its source (VERBATIM from 1003) ==")
+    hz = cap.first("xnu_live_tick_hz")
+    period = (hz[3] // 1000) if hz else PERIOD_FALLBACK
+    recs = cap.groups_of("xnu_live_tick_anom_n", "xnu_live_tick_anom_", ("d", "tval", "ctl"))
+    for ln, n, f, order in recs:
+        say("OBS", "anom n=%s @:%d %s" % (fmt(n), ln, ",".join(order)))
+    sums = cap.groups_of("xnu_live_tick_sum_count", "xnu_live_tick_sum_", ("anom", "maxd"))
+    for ln, cnt, f, _o in sums:
+        say("OBS", "summary @:%d count=%s anom=%s maxd=%s" % (ln, fmt(cnt),
+            fmt(f.get("anom", (0, None))[1]), fmt(f.get("maxd", (0, None))[1])))
+    say("OBS", "tick_hz %s (period %d ticks)" % (fmt(hz[3]) if hz else "ABSENT", period))
+
+
+def pet_evidence(cap):
+    bark = cap.first("xnu_live_wdt_bark")
+    bark_v = bark[3] if bark else BARK_1004
+    half = bark_v // 2 if bark_v else 0
+    samples = cap.wdt_samples()
+    mx = max((s for s in samples if s["countdown"] is not None),
+             key=lambda s: s["countdown"], default=None)
+    hz = cap.first("xnu_live_tick_hz")
+    return {"bark": bark_v, "bark_src": ("xnu_live_wdt_bark @:%d" % bark[0]) if bark
+            else "the frozen constant %s" % fmt(BARK_1004), "half": half, "samples": samples,
+            "mx": mx, "tick_hz": hz[3] if hz else None, "half_s": secs(half, WDT_HZ)}
+
+
+def s2_direct_pet(cap):
+    print("\n== [2] THE DIRECT CHANNEL + pet feed (VERBATIM from 1003) ==")
+    cells = cap.all("xnu_live_capped")
+    if cells:
+        if any(t[3] == 0x4000 for t in cells):
+            hard("capped==0x00004000 - the cap did NOT move (pre-999 image; STOP)")
+    recs = cap.groups_of("xnu_live_wdt_pet_n", "xnu_live_wdt_pet_", ("calls", "countdown"))
+    ev = pet_evidence(cap)
+    for ln, n, f, _o in recs:
+        say("OBS", "pet n=%s @:%d calls=%s countdown=%s" % (fmt(n), ln,
+            fmt(f.get("calls", (0, None))[1]), fmt(f.get("countdown", (0, None))[1])))
+    if not recs:
+        soft("no pet-feed records - read against the gate bark/2 = %s (%s); the 1003 frozen (6) "
+             "reads it as 'the door stopped or the gate moved: a READING'" % (
+                 fmt(ev["half"]), dur(ev["half_s"], WDT_HZ)))
+    else:
+        say("PASS", "pet feeds published x%d - the feed channel reached the image" % len(recs))
+
+
+def s3_submapskip(cap):
+    print("\n== [3] THE SUBMAP SKIP (VERBATIM from 1003) ==")
+    parsed, unparsed = [], []
+    for ln, line in enumerate(cap.lines, 1):
+        if SUBMAPSKIP_LIT in line:
+            m = SUBMAPSKIP_RE.search(line)
+            (parsed if m else unparsed).append((ln, [int(g, 16) for g in m.groups()] if m else clip(line.strip(), 160)))
+    total = len(parsed) + len(unparsed)
+    say("OBS" if total else "---", "SUBMAPSKIP lines: x%d (parsed x%d, unparsed x%d)" % (
+        total, len(parsed), len(unparsed)))
+    for ln, tup, _raw in parsed:
+        obj, start, end, size, lr = tup
+        say("OBS", "  @:%d obj=%s start=%s end=%s size=%s lr=%s" % (
+            ln, fmt(obj), fmt(start), fmt(end), fmt(size), fmt(lr)))
+        for want, who in SUB_OBJS:
+            if obj == want:
+                say("MATCH", "    -> obj MATCHES %s" % who)
+    if GATE_OPEN:
+        if total == 0:
+            hard("no SUBMAPSKIP probe line while the boot survived - the probe/skip did not reach "
+                 "the image")
+        else:
+            say("PASS", "SUBMAPSKIP x%d while the boot survived" % total)
+
+
+def s4_usvc(cap):
+    print("\n== [4] THE USER-SVC FRONTIER (VERBATIM from 1003) ==")
+    fields = ("num", "pid", "thr", "pc", "lr", "cpsr", "r0")
+    recs = cap.groups_of("xnu_live_usvc_n", "xnu_live_usvc_", fields)
+    if not recs:
+        if GATE_OPEN:
+            hard("no user-SVC records while the boot survived - the frontier did not reach user mode")
+        else:
+            hard("no user-SVC records while the exec-done trio is ABSENT - the frontier is NOT "
+                 "judged", absence_based=True)
+        return
+    for ln, n, f, _o in recs[:3]:
+        say("OBS", "  @:%d n=%s num=%s pid=%s pc=%s cpsr=%s" % (
+            ln, fmt(n), fmt(f.get("num", (0, None))[1]), fmt(f.get("pid", (0, None))[1]),
+            fmt(f.get("pc", (0, None))[1]), fmt(f.get("cpsr", (0, None))[1])))
+    ln, n, f, _o = recs[-1]
+    say("READING", "LAST usvc record @:%d n=%s _num=%s _pc=%s" % (
+        ln, fmt(n), fmt(f.get("num", (0, None))[1]), fmt(f.get("pc", (0, None))[1])))
+
+
+def s5_context(cap):
+    print("\n== [5] THE CAP AND THE THINNING (context, not a new reading) ==")
+    say("OBS", "cap stays 24576 (0x6000); the read-dump thinning ordinal stays 64 (checked AT THE "
+               "SOURCE by the build script, not re-derivable from the capture)")
+
+
+def s_rung(cap):
+    """[R] THE 1002 r3-SAVE FIX AS A REGRESSION - VERBATIM from 1003."""
+    print("\n== [R] THE 1002 REGRESSION: the dyld `_cerror` abort at 0x4 stays GONE after `check_np ret=12`? ==")
+    aborts = cap.abort_hits()
+    n_abort = len(aborts)
+    np_ln = next((ln for ln, line in enumerate(cap.lines, 1) if CHECK_NP_LIT in line), None)
+    say("OBS" if np_ln else "---", "the anchor `%s`: %s" % (
+        CHECK_NP_LIT, "@:%d" % np_ln if np_ln else "ABSENT"))
+    say("OBS" if n_abort else "---", "`%s`: x%d" % (ABORT_LIT, n_abort))
+    if n_abort > 0:
+        hard("1002-FIX REGRESSION: `%s` x%d - 1002 CONFIRMED these GONE, so a recurrence means the "
+             "r3 fix was reverted or the assembly layer was not rebuilt - REBUILD" % (ABORT_LIT, n_abort))
+    elif np_ln is not None:
+        if GATE_OPEN:
+            say("PASS", "ZERO `usermode data abort at 0x4` after `check_np ret=12` - the 1002 r3-save "
+                        "fix HOLDS (regression)")
+        else:
+            say("OBS", "0 aborts and the anchor present, but the death gate is CLOSED - the survival "
+                       "half is not established")
+    else:
+        hard("no anchor - the 1002 regression cannot be read", absence_based=True)
+
+
+def s_userpc(cap):
+    """[U] THE PID-1 FRAME SAMPLE - THE 1004 RUNG ITSELF (the pure MEASUREMENT, the NEW section).
+
+    1004-TODO: the whole SPIN/ASLEEP VERDICT is a PLACEHOLDER.  The walk (the per-sample table, the
+    USER/KERNEL classification by cpsr mode bits) is structural and mirrors 1003's [S]; the two
+    VERDICT blocks (SPINNING vs ASLEEP and the pc-domain NAMING) are TODO because they depend on the
+    frame semantics the 1004 design fixes (which candidate call site, which thread filter, which pc
+    domain).  Complete them before the rung is pressed."""
+    print("\n== [U] THE PID-1 FRAME SAMPLE - the per-tick interrupted frame (the 1004 MEASUREMENT rung) ==")
+    recs = cap.userpc_samples()
+    n_tok = cap.family_count("xnu_live_user_pc")
+    if not recs:
+        # (a) THE FALSIFIER - PRESENT-BASED (mirrors 1003's [S]): the instrument did not reach the
+        # image.  1004-TODO: the reader counts 4 keys; if the design uses a different set, update here.
+        hard("ZERO `xnu_live_user_pc*` records - the 1004 pid-1 frame instrument did not reach the "
+             "image: REBUILD with STAGE90_XNU_USER_PC=1 exported before build_xnu_arm_kernel.sh, do "
+             "not judge the frontier from this capture")
+        if n_tok:
+            soft("xnu_live_user_pc* tokens x%d but no `_n` record - the record shape broke" % n_tok)
+        return
+    ns = [r["f"].get("n", (0, None))[1] for r in recs]
+    say("OBS", "samples x%d (n %s .. %s; 1004-TODO: confirm the cadence)" % (
+        len(recs), fmt(ns[0]), fmt(ns[-1])))
+    user_n = kern_n = 0
+    pcs, cpsrs, nzs = [], [], []
+    for r in recs:
+        ln = r["ln"]
+        f = r["f"]
+        n = f.get("n", (None, None))[1]
+        pc = f.get("pc", (None, None))[1]
+        cpsr = f.get("cpsr", (None, None))[1]
+        nz = f.get("nz", (None, None))[1]
+        missing = [k for k in ("pc", "nz", "cpsr") if k not in f]
+        if missing:
+            soft("user_pc sample n=%s @:%d is missing fields (%s) - the block shape broke" % (
+                fmt(n), ln, ",".join(missing)))
+        mode = (cpsr & 0x1F) if cpsr is not None else None
+        is_user = (mode == 0x10) or (pc is not None and pc < 0x80000000)
+        if nz is not None:
+            nzs.append(nz)
+        if pc is not None:
+            pcs.append(pc)
+        if cpsr is not None:
+            cpsrs.append(cpsr)
+        user_n += 1 if is_user else 0
+        kern_n += 0 if is_user else 1
+        say("OBS", "  @:%d n=%s pc=%s cpsr=%s nz=%s  -> %s" % (
+            ln, fmt(n), fmt(pc), fmt(cpsr), fmt(nz), "USER" if is_user else "KERNEL"))
+    # ---- THE SELF-CHECK: `_nz` = the count of non-zero frame words (mirrors 1003's [S]).
+    if nzs and all(v == 0 for v in nzs):
+        hard("EVERY user_pc sample carries `_nz`=0 - the frame read ALL ZERO: the frame pointer or the "
+             "STAGE90_SS_* offsets are WRONG. This is a MEASUREMENT defect - adjudicate the offsets "
+             "against src/entry/entry_saved_state.h before any [U] conclusion")
+    else:
+        say("PASS", "`_nz` > 0 on every sample - the interrupted-frame reader read a REAL frame")
+    # ---- THE CLASSIFICATION VERDICT.  1004-TODO: PLACEHOLDER - the SPIN/ASLEEP reading and the
+    #      pc-domain NAMING are the 1004 design's decision.  The structure is 1003's [S]; the words
+    #      and the domains must be filled in by the implementer.
+    distinct = sorted(set(pcs))
+    say("OBS", "classification: USER pc x%d, KERNEL pc x%d; distinct pcs x%d" % (
+        user_n, kern_n, len(distinct)))
+    say("TODO", "1004-TODO VERDICT (PLACEHOLDER): fill in the SPIN/ASLEEP reading - a CHANGING user pc "
+                "(cpsr low 5 bits = 0x10) = pid 1 is SPINNING and the pc NAMES THE FUNCTION; every "
+                "sample a KERNEL cpsr = ASLEEP/blocked.  (1003's [S] classifies: user pcs that ADVANCE "
+                "or REPEAT on a small loop = SPINNING; all-kernel = ASLEEP.  Reuse that shape, keyed "
+                "to the 1004 instrument.)")
+    say("TODO", "1004-TODO VERDICT (PLACEHOLDER): fill in the pc-domain NAMING - which address ranges "
+                "count as dyld (0x2be00000..0x2be58000), the shared-cache window (0x2c000000 + slide "
+                "0x37f6000), or the 0x2be58000..0x2c000000 gap.  See `_stall_region` for 1003's map.")
+    say("OBS", "this is a MEASUREMENT section: the stall is the EXPECTED outcome of this rung (1004 "
+               "changes no kernel behaviour) - the classification above IS the 1004 finding")
+
+
+def _stall_region(pc):
+    """Name the region a sampled user pc falls in (the 1002/1003 map).  Kept from 1003."""
+    if pc is None:
+        return "unknown"
+    if DYLD_BASE <= pc < DYLD_END:
+        return "dyld image 0x2be00000..0x2be58000"
+    if pc >= SHARED_CACHE_BASE:
+        return "shared cache (base 0x2c000000 + slide 0x37f6000)"
+    if pc >= DYLD_END:
+        return "the 0x2be58000..0x2c000000 gap"
+    return "low user map (< 0x2be00000)"
+
+
+def s_stall(cap):
+    """[S] THE 1003 STALL SAMPLE - KEPT AS A REGRESSION.  Structural mirror of 1003's [S]; a full
+    SPIN/ASLEEP reading is in the 1003 tool, not re-derived here."""
+    print("\n== [S] THE 1003 STALL SAMPLE (KEPT as a regression in 1004) ==")
+    recs = cap.stall_samples()
+    if not recs:
+        hard("ZERO `xnu_live_stall_*` records - 1003's instrument was dropped, but 1004's set is 1003's "
+             "verbatim: REBUILD")
+        return
+    ns = [r["f"].get("n", (0, None))[1] for r in recs]
+    say("OBS", "samples x%d (n %s .. %s)" % (len(recs), fmt(ns[0]), fmt(ns[-1])))
+    nzs = [r["f"].get("nz", (None, None))[1] for r in recs]
+    if nzs and all(v == 0 for v in nzs):
+        hard("EVERY stall sample `_nz`=0 - 1003's saved-state frame read all-zero (a MEASUREMENT "
+             "defect): adjudicate the offsets against entry_saved_state.h")
+    else:
+        say("PASS", "1003's `_nz` > 0 on every sample - the kept instrument reads a real frame")
+
+
+def s_f(cap):
+    """[F] THE CODE-SIGNING WALL - VERBATIM from 1003."""
+    print("\n== [F] THE CODE-SIGNING PAGE-VALIDATION WALL (cs_invalid_page) ==")
+    hits = cap.cs_invalid_hits()
+    n = len(hits)
+    say("OBS" if n else "---", "`%s` lines: x%d%s" % (
+        CS_INVALID_LIT, n, "  first @:%d" % hits[0][0] if n else "  (not hit)"))
+    if n == CS_TOLERATED:
+        say("PASS", "cs_invalid_page x%d - the TOLERATED warning the 1002 capture measured (CS_VALID "
+                    "cleared, retval 0): NOT the frontier" % n)
+    elif n == 0:
+        say("OBS", "cs_invalid_page x0 - the wall was not hit this boot")
+    else:
+        say("READING", "cs_invalid_page x%d - a count above 1 is NOT the tolerated single occurrence; "
+                       "adjudicate against records/1002-press-read.txt" % n)
+
+
+def s6_guards(cap):
+    print("\n== [6] REGRESSION GUARDS (VERBATIM from 1003) ==")
+    for lit, n, want_txt in (("IOS7LAB cache mapping", 4, "the wire's four mapping lines"),
+                             ("IOS7LAB shared region", 1, "the geometry line, exactly once"),
+                             (CHECK_NP_LIT, 1, "the pre-438 constant")):
+        n_have = cap.lit_count(lit)
+        if n_have == n:
+            say("PASS", "%s x%d (%s)" % (lit, n_have, want_txt))
+        elif n_have == 0:
+            hard("%s x0 - regression (%s)" % (lit, want_txt), absence_based=True)
+        else:
+            say("OBS", "%s x%d (expected %d)" % (lit, n_have, n))
+    ret = [int(m.group(1)) for m in re.finditer(r'IOS7SHREG map_slide ret=(-?\d+)', cap.text)]
+    if not ret:
+        hard("no `map_slide ret=` - absent while the boot survived = the slide regressed", absence_based=True)
+    elif all(v == 0 for v in ret):
+        say("PASS", "IOS7SHREG map_slide ret=0 x%d (999's success held)" % len(ret))
+    else:
+        hard("map_slide ret=%s - STOPS per pre-reg (8): the slide regressed" % ret)
+    mf = [int(m.group(1)) for m in re.finditer(r'IOS7SHREG map_file kr=(-?\d+)', cap.text)]
+    if any(v != 0 for v in mf):
+        hard("map_file kr!=0 - GEOMETRY REGRESSION")
+    n991 = cap.lit_count("VMHINT991")
+    if GATE_OPEN:
+        if n991 == 0:
+            say("PASS", "VMHINT991 x0 - the FLIPPED expectation (the submap call is skipped)")
+        else:
+            hard("VMHINT991 fired while the boot survived x%d" % n991)
+    for k, want in FIXED_WDT.items():
+        t = cap.first(k)
+        if t is None:
+            hard("%s: ABSENT - the frozen WDT net must hold" % k, absence_based=True)
+        elif t[3] == want:
+            say("PASS", "%s=%s (frozen)" % (k, fmt(t[3])))
+
+
+def s7_falsifiers(cap):
+    """The frozen 1004 pre-reg (8)(a)-(d).  1004-TODO: the wording tracks 1003's; the team-lead's
+    frozen block is the authority."""
+    print("\n== [7] FALSIFIERS (frozen 1004 (8)(a)-(d)) ==")
+    say("OBS", "(8)(a) the 1004 change's by-value reading is IMAGE-side (scripts/press_1004.sh step "
+               "2-0): the recorder symbol + the 4 `xnu_live_user_pc*` literals in "
+               "out/stage90/xnu_arm_entry.elf - not derivable from this capture")
+    n_abort = len(cap.abort_hits())
+    say("OBS", "(8)(b) `%s` x%d => %s" % (ABORT_LIT, n_abort,
+        "1002-FIX REGRESSION - adjudicated in [R]" if n_abort else "the 1002 r3-save fix holds"))
+    upc = cap.family_count("xnu_live_user_pc")
+    say("OBS", "(8)(c) the 1004 instrument: `xnu_live_user_pc*` tokens x%d => %s" % (
+        upc, "EXPECTED (the instrument reached the image)" if upc else
+        "the instrument did NOT reach the image - the (8)(a) rebuild signal"))
+    ph = cap.panic_hits()
+    tail = [l for l in cap.lines[-6:] if l.strip()]
+    say("OBS", "(8)(d) the capture's last lines: %s" % " | ".join(clip(l.strip(), 90) for l in tail))
+    for fam in ("xnu_live_user_pc", "xnu_live_usvc_", "xnu_live_wdt_pet_"):
+        t = next((x for x in reversed(cap.toks) if x[1].startswith(fam)), None)
+        say("OBS" if t else "---", "(8)(d) last DIRECT key of %s: %s" % (
+            fam, ("%s=%s @:%d" % (t[1], t[2], t[0])) if t else "(none)"))
+
+
+def main():
+    if len(sys.argv) != 2:
+        print(__doc__.strip().splitlines()[0])
+        print("usage: %s <capture.txt>" % sys.argv[0])
+        return 2
+    cap = Capture(sys.argv[1])
+    print("1004 capture adjudicator - %s (%d bytes, %d lines)" % (
+        sys.argv[1], cap.nbytes, len(cap.lines)))
+    auth, frozen = authority_line()
+    print(auth)
+    print("spec read here: 1003's switch set VERBATIM (STALL=1, USVC=1, SUBMAP_PMAP_SKIP=1) + the ONE "
+          "new 1004 switch STAGE90_XNU_USER_PC (the pid-1 frame sampler, section [U]); the tolerated "
+          "wall `%s` is NOT the frontier; the 1002 regression is ZERO `%s` after `%s`" % (
+              CS_INVALID_LIT, ABORT_LIT, CHECK_NP_LIT))
+    s0_gate(cap)
+    s_identity(cap)
+    s1_tick(cap)
+    s2_direct_pet(cap)
+    s3_submapskip(cap)
+    s4_usvc(cap)
+    s5_context(cap)
+    s_rung(cap)
+    s_userpc(cap)
+    s_stall(cap)
+    s_f(cap)
+    s6_guards(cap)
+    s7_falsifiers(cap)
+    print("\n== VERDICT ==")
+    if GATED:
+        print("  %d absence-based reading(s) printed [death-gated] and NOT counted" % len(GATED))
+    if SOFT:
+        print("  %d soft finding(s) above (report-only)" % len(SOFT))
+    print("HARD ANOMALIES: %d" % len(FAILURES))
+    for f in FAILURES:
+        print("    - " + f)
+    print("  !! 1004 SKELETON: section [U]'s SPIN/ASLEEP and pc-domain VERDICT blocks are 1004-TODO "
+           "PLACEHOLDERS - complete them before this rung is pressed (see scripts/build_1004.sh).")
+    if not frozen:
+        print("  !! NO FROZEN 1004 PRE-REGISTRATION was found at run time - the expectations above are "
+              "the task's; a deviation here is to REPORT")
+    if SIGNATURES:
+        print("  !! %d REBUILD-CLASS SIGNATURE(S) present (not counted):" % len(SIGNATURES))
+        for s in SIGNATURES:
+            print("    ! " + clip(s, 200))
+    conj = " AND ".join("%s->%s" % (k, "holds" if GATE_CONJ.get(k) else "FAILS") for k in sorted(GATE_CONJ))
+    print("DEATH GATE: %s (frozen conjuncts: %s)" % ("OPEN" if GATE_OPEN else "CLOSED", conj))
+    if FAILURES:
+        print("  => STOP and report per the pre-reg's FAILURE SIGNATURES")
+        return 1
+    print("  no hard anomaly; readings above are the evidence")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

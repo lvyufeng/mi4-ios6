@@ -130,3 +130,54 @@ chasing CS now would be treating a red herring as the frontier ([[mi4-measuremen
   1002 r3-save regression, `[F]` the stall reading, plus the frozen regression guards.
 - `tools/check_1003_capture.py` — adds the `[S]` stall section (classify the sampled pcs), keeps the
   `[F]`/`[0]`/`[0b]` sections and the regression guards.
+## 1003 PRESS + reconciliation (2026-10-13, armored `armed-d13-7669309b`)
+
+**Press outcome.** build RC=0; instrument confirmed in the parked image (`nm` `T entry_note_stall_sample`,
+7 `xnu_live_stall_*` literals, `pe_msm8974.o` carries the `U` reference); `fastboot boot` OKAY
+(sha256 29646dfd…, unchanged across the send, never flashed). The device did **not** self-return
+(runner exit 2 — the resident-rung outcome, same as 1001), so the log holds in DRAM and the operator's
+power press is owed. On return the auto-recovery watcher runs `recover_last_kmsg.sh` (`--read-only` if
+Android is up), then `tools/check_1003_capture.py`'s `[S]` section reads the samples.
+
+**Reconciled: the two forensics agents disagreed only in words.** The correct de-slide is the one
+ANCHORED on the capture: `@:4099 the OS starts the process at 0x2be7d028` = dyld `__dyld_start` link
+`0x2be01028` ⇒ **slide = 0x7C000** (exact). dyld's full image is `[0x2be7C000, 0x2beD4000)`
+(`__TEXT` vmaddr 0x2be00000 vmsize 0x21000 + `__DATA` 0x29000 + `__LINKEDIT` 0xe000 = 0x54000). So
+the stall pc `0x2be97328` **is inside dyld's own `__TEXT`** — the agent saying "past dyld `__TEXT`"
+used a __TEXT-only end (0x2be58000+slide = 0x2beD4000 is the whole image, not __TEXT alone); the
+agent saying "inside dyld" is right about the module but its exact `__TEXT` bound was high by 0x30000.
+**Both readings agree on the object: the stall pc is dyld's own libsystem-shim code, not a
+shared-cache library.**
+
+**`pc=0x2be97328` = the `bx lr` AFTER the `svc`.** The dyld.dis bytes: `0x2be1b320 mvn r12,#2`
+(r12=−3), `0x2be1b324 svc #0x80`, `0x2be1b328 bx lr`. De-slid 0x2be97328−0x7C000 = `0x2be1b328` = the
+`bx lr`. So the record's pc is the return address 4 B past the SVC — i.e. the `svc #0x80` (num=−3 =
+`mach_absolute_time`'s kernel path) was taken and dyld is executing its return. The `lr` trio
+(0x2be09a9f/0x2be09af1/0x2be09b11) sits in dyld `ImageLoader::link` — three timing snapshots, not a loop.
+
+**CS-blob (counter to the earlier draft): `code_signed` is FALSE, but it is NOT the frontier.**
+The 1,535,514-byte cache code signature exceeds `CS_MAX_BLOB_SIZE` (1280 KiB, `kern_descrip.c:1543`)
+and the 2 MiB allowance sits behind `#if IOS7_COMPAT_PLATFORM` (`:1545`), which is 0 on CANCRO, so
+dyld's `fcntl(F_ADDFILESIGS)` (USVC #16) gets `E2BIG` and no blob attaches. But (i) `cs_invalid_page`
+is structurally capped at one line per process (`kern_proc.c:2783-2797`) and tolerated
+(`retval=0`), and (ii) the SHA1 check is a zero-vs-zero no-op anyway (`_NOTYET` undefined). So the CS
+gate is a latent correctness item, not the stall.
+
+**The commpage byte at `0xffff4090` is BY DESIGN 0** — this tree ships no `mach_absolute_time`
+commpage publisher (`commpage_populate` never touches +0x88/+0x90; only `commpage_set_timestamp`
+writes the *gettimeofday* struct at +0x40). Publishing it would (a) risk a PL0 `mrrc …c14` fault
+(`CNTKCTL` is set NOWHERE on D13) and (b) return raw 19.2 MHz ticks against the kernel path's ns.
+**1004 must NOT publish the byte.**
+
+**1004 = the per-tick pid-1 FRAME instrument, branched on the 1003 verdict.** If 1003 reads
+**ASLEEP** (kernel pc every sample), the instrument moves to a RAW, always-run site (the idle
+preemption path, `entry_trace.c`'s `Idle_load_context` wrapper, the `context` frame at
+`pe_msm8974.c:496`) so the block is *where* the kernel holds pid 1; if it reads **SPINNING** (user pc
+recurring), 1004 is a bail-out-error/abort capture in the dyld `link`/`rebase` path (an
+always-static-linked-dyld build). The 1003 sampler's user-pc-on-a-kernel-tick has a known false-ASLEEP
+bias (a 1 ms tick rarely lands on a user frame unless user mode is nearly continuous), which is why
+the verdict chooses between a kernel-block and a kernel-spin capture rather than silently assuming one.
+
+**Ruled out:** large-contiguous allocation. The cache regions are file-backed memory objects
+(`vm_shared_region.c:1058/1119`, `VM_FLAGS_FIXED|ALREADY`, file offset, no `phys_contiguous`), demand
+paged 4 KiB at a time out of ~1.4 GiB free (`docs/1005-contiguous-alloc-wall.md`).
