@@ -10,13 +10,13 @@ WHAT IT CHECKS (mode-independent, both modes):
      narg / arg_bytes / function pointer - the master's signature, re-run off the image
      (`bsd/kern/syscalls.master:452/:671` -> `out/xnu_generated_d13/bsd/init_sysent.c:440/:649`).
      The probe must never move the dispatch.
-  2. the two syscall bodies and `_shared_region_map` have disassembly bodies.
+  2. the two syscall bodies, `_shared_region_map` and `_shared_region_slide` have disassembly bodies.
   3. the wire is STILL 20 bytes wide: `shared_region_copyin_mappings` computes `count * 5 * 4`
      (`add rX, rY, rY, lsl #2` then `lsl rZ, rX, #2` - measured at 0x8041fdf4/0x8041fdf8 in the
      994/995 image).  The 996 probe MEASURES the misparse, it does not fix it: a 20 -> 32 change here
      at this rung would make the probe's own reading uninterpretable (`mi4-measurement-defects`).
 
-SWITCH ON (`--expect on`, the default): each of the five literals (patch_d13_shreg_probe.LITERALS) is
+SWITCH ON (`--expect on`, the default): each of the eight literals (patch_d13_shreg_probe.LITERALS) is
   (a) present in the image, and
   (b) referenced INSIDE its own function's body - by a `movw rX, #lo` / `movt rX, #hi` pair composing
       to the literal's VA (the shape this tree's compiler emits for a string argument, measured in the
@@ -26,7 +26,7 @@ SWITCH ON (`--expect on`, the default): each of the five literals (patch_d13_shr
   The counts of `bl printf` are printed as INFO only: clang MERGES identical print tails (measured:
   map_slide's three `ret=` sites compile to two `bl printf`, the third a tail-branch into the second),
   so a count is not a contract.
-  (d) "inside the two functions ONLY", by value: no OTHER body in the image references any probe
+  (d) "inside the probed functions ONLY", by value: no OTHER body in the image references any probe
       literal.  This is the strongest form of the statement available at image level.
 SWITCH OFF (`--expect off`): the mirror image, asserted POSITIVELY: zero occurrences of the
   `IOS7SHREG` byte string in every ALLOC+CONTENTS section, and no body references one.  The gate is
@@ -34,8 +34,8 @@ SWITCH OFF (`--expect off`): the mirror image, asserted POSITIVELY: zero occurre
   the probe did not exist.
 
 `--tree PATH` is optional and adds the SOURCE-SIDE gate check the image cannot show: the guard line
-`#if defined(STAGE90_XNU_SHREG_PROBE) && STAGE90_XNU_SHREG_PROBE` occurs 7 times in the staged
-`bsd/vm/vm_unix.c` and every one of the seven print literals sits INSIDE a guard region (a line scan
+`#if defined(STAGE90_XNU_SHREG_PROBE) && STAGE90_XNU_SHREG_PROBE` occurs 10 times in the staged
+`bsd/vm/vm_unix.c` and every one of the ten print sites sits INSIDE a guard region (a line scan
 that tracks the guard depth).  That is the "the gate line" assertion; without it the checker can only
 assert the gate's EFFECT (present ON / absent OFF).
 
@@ -61,9 +61,9 @@ SYSENT_ROWS = (
 )
 
 # (literal, function whose body must reference it, what it prints, print SITES in the staged source)
-# The sites are 7 for 5 literals: 438 has THREE returns (an early `return kr`, the slide-failure one,
+# The sites are 10 for 8 literals: 438 has THREE returns (an early `return kr`, the slide-failure one,
 # and the shared `done:` exit) all printing the same text, and clang merges identical string constants
-# into ONE .rodata copy (measured: the merged image carries 5 distinct IOS7SHREG strings).
+# into ONE .rodata copy (measured: the 996-era image carried 5 distinct IOS7SHREG strings).
 PROBE_LITERALS = (
     (b"IOS7SHREG check_np pid=%d out=0x%08x\n", "shared_region_check_np", "294 entry", 1),
     (b"IOS7SHREG check_np ret=%d\n", "shared_region_check_np", "294 exit (the errno)", 1),
@@ -71,6 +71,12 @@ PROBE_LITERALS = (
      b"size=0x%08x\n", "shared_region_map_and_slide_np", "438 entry (the whole wire)", 1),
     (b"IOS7SHREG map_slide ret=%d\n", "shared_region_map_and_slide_np", "438 exit (all three)", 3),
     (b"IOS7SHREG map_file kr=%d\n", "_shared_region_map", "the kr inside _shared_region_map", 1),
+    (b"IOS7SHREG slide_enter slide=0x%x src=0x%08x n=0x%x\n", "_shared_region_slide", "999 entry "
+     "(slide, slide_start, slide_size)", 1),
+    (b"IOS7SHREG slide_init kr=%d entry=%p n=0x%x\n", "_shared_region_slide", "999 step past "
+     "slide_init (error, entry still NULL, slide_size)", 1),
+    (b"IOS7SHREG slide_copyin kr=%d\n", "_shared_region_slide", "999 step past the copyin "
+     "(both outcomes)", 1),
 )
 PROBE_SITES = sum(n for _l, _f, _w, n in PROBE_LITERALS)
 
@@ -437,7 +443,7 @@ def check_on(env):
     if outsiders:
         for fn, addr in outsiders.items():
             print(f"  FAIL {fn} references a probe literal ({', '.join(hex(a) for a in addr)}) - the "
-                  f"prints must live in the three probed functions ONLY")
+                  f"prints must live in the probed functions ONLY")
         ok = False
     else:
         print(f"  ok   no body outside {{{', '.join(sorted(allowed))}}} references an IOS7SHREG "
@@ -479,7 +485,8 @@ def check_tree(path):
     opens = text.count(GUARD_OPEN)
     if opens != PROBE_SITES:
         print(f"  FAIL --tree: {opens} guard line(s) `{GUARD_OPEN}`, expected {PROBE_SITES} "
-              f"(one per print site: 2 in check_np, 4 in map_slide, 1 in _shared_region_map)")
+              f"(one per print site: 2 in check_np, 4 in map_slide, 1 in _shared_region_map, "
+              f"3 in _shared_region_slide)")
         ok = False
     else:
         print(f"  ok   --tree: {opens} guard regions in {path}")

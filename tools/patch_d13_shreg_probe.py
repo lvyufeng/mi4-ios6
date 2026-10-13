@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage the 996 SHARED-REGION syscall probe into the D13 tree (idempotent, ONE file).
+"""Stage the 996/999 SHARED-REGION syscall probe into the D13 tree (idempotent, ONE file).
 
 WHY, by value.  995 read dyld's real halt message (`Library not loaded: /usr/lib/libbsm.0.dylib`,
 out/stage90/captures/cancro-last_kmsg-995-armed-d13-4efcabae.txt:4111-4138).  That library is in the
@@ -33,6 +33,14 @@ image is byte-identical:
   5. immediately after the `vm_shared_region_map_file()` call INSIDE `_shared_region_map` ->
      `IOS7SHREG map_file kr=%d`  (its kr is not visible at 438's exit sites: `_shared_region_map`
      returns the errno it folded, vm_unix.c:1418-1433)
+  6. the 999 slide half - `_shared_region_slide`'s entry, the step past `slide_init`, and the step
+     past the slide_info copyin -> `IOS7SHREG slide_enter` / `slide_init` / `slide_copyin` (with G3
+     and G1 open, 438 first reaches this function; these three lines say how far it gets)
+
+The 996-only subset of the ten blocks is a state in its own right: the living tree was COMMITTED with
+the first seven staged (the 996 probe, before the 999 slide half existed), so the patcher must be
+able to stage from there.  `classify()` accepts exactly three states - none staged, the 996-only
+subset, all ten - and refuses anything else, never repairing it in place.
 
 Bounded (the first 4 calls of each syscall; one entry line and one exit line per bounded call) and
 fail-soft: every line is a single `printf`, no lock, no allocation, no sleep, no panic - the same shape
@@ -62,8 +70,11 @@ XNU_VM_UNIX = "bsd/vm/vm_unix.c"
 
 GUARD_OPEN = "#if defined(STAGE90_XNU_SHREG_PROBE) && STAGE90_XNU_SHREG_PROBE\n"
 GUARD_CLOSE = "#endif\n"
+# Every block carries one of these: the print literal's prefix (upper) or a counter's name (lower).
+# classify() proves that none is left over after removing the blocks it can account for.
+PROBE_TEXT = ("IOS7SHREG", "ios7shreg")
 
-# ---- the five print sites ---------------------------------------------------------------------
+# ---- the ten print sites (996's seven + 999's slide half) ---------------------------------------
 
 # plan_insert() places the block immediately AFTER its anchor; the anchor must be unique and the
 # insertion must be undone exactly by removing `block`, so every block is one GUARD_OPEN..GUARD_CLOSE
@@ -134,7 +145,45 @@ MAPFILE_BLOCK = "\n" + GUARD_OPEN + """\t{
 \t}
 """ + GUARD_CLOSE
 
-# (name, anchor, block) - order matters only for the report; each anchor is unique in the tree's file.
+# ---- the 999 slide half: three lines inside `_shared_region_slide` (438's success path) ---------
+# Placed after their anchors, each in its own braced guard region (the :1435 shape): one static
+# counter bounded at 4, fail-soft like the rest.  `slide`, `slide_start`, `slide_size`, `error` and
+# `slide_info_entry` are all in scope at their anchors (measured against the live tree, 2026-10-13).
+
+SLIDE999_ENTER_ANCHOR = ("\tvoid *slide_info_entry = NULL;\n"
+                         "\tint\t\t\terror;\n")
+SLIDE999_ENTER_BLOCK = "\n" + GUARD_OPEN + """\t{
+\t\tstatic unsigned int ios7shreg_slide_enter_logged = 0;
+
+\t\tif (ios7shreg_slide_enter_logged++ < 4)
+\t\t\tprintf("IOS7SHREG slide_enter slide=0x%x src=0x%08x n=0x%x\\n", slide, (unsigned)slide_start, (unsigned)slide_size);
+\t}
+""" + GUARD_CLOSE
+
+SLIDE999_INIT_ANCHOR = ("\t\tprintf(\"slide_info initialization failed with kr=%d\\n\", error);\n"
+                        "\t\tgoto done;\n"
+                        "\t}\n")
+SLIDE999_INIT_BLOCK = "\n" + GUARD_OPEN + """\t{
+\t\tstatic unsigned int ios7shreg_slide_init_logged = 0;
+
+\t\tif (ios7shreg_slide_init_logged++ < 4)
+\t\t\tprintf("IOS7SHREG slide_init kr=%d entry=%p n=0x%x\\n", error, slide_info_entry, (unsigned)slide_size);
+\t}
+""" + GUARD_CLOSE
+
+SLIDE999_COPYIN_ANCHOR = ("\t\t\t       (vm_size_t)slide_size);\n"
+                          "\t}\n")
+SLIDE999_COPYIN_BLOCK = "\n" + GUARD_OPEN + """\t{
+\t\tstatic unsigned int ios7shreg_slide_copyin_logged = 0;
+
+\t\tif (ios7shreg_slide_copyin_logged++ < 4)
+\t\t\tprintf("IOS7SHREG slide_copyin kr=%d\\n", error);
+\t}
+""" + GUARD_CLOSE
+
+# (name, anchor, block) - order matters: EDITS[:EDITS_996] must stay the 996 staging (the tree's
+# committed partial state), so new edits are APPENDED; each anchor is unique in the tree's file.
+EDITS_996 = 7   # the 996-era prefix; classify() accepts exactly this subset as the partial state
 EDITS = (
     ("vm_unix.c: check_np entry", NP_ENTRY_ANCHOR, NP_ENTRY_BLOCK),
     ("vm_unix.c: check_np exit", NP_EXIT_ANCHOR, NP_EXIT_BLOCK),
@@ -143,9 +192,14 @@ EDITS = (
     ("vm_unix.c: map_slide return after the slide failure", SLIDE_RET2_ANCHOR, SLIDE_RET2_BLOCK),
     ("vm_unix.c: map_slide return at done:", SLIDE_RET3_ANCHOR, SLIDE_RET3_BLOCK),
     ("vm_unix.c: map_file kr in _shared_region_map", MAPFILE_ANCHOR, MAPFILE_BLOCK),
+    ("vm_unix.c: _shared_region_slide entry (999)", SLIDE999_ENTER_ANCHOR, SLIDE999_ENTER_BLOCK),
+    ("vm_unix.c: _shared_region_slide past slide_init (999)", SLIDE999_INIT_ANCHOR,
+     SLIDE999_INIT_BLOCK),
+    ("vm_unix.c: _shared_region_slide past the copyin (999)", SLIDE999_COPYIN_ANCHOR,
+     SLIDE999_COPYIN_BLOCK),
 )
 
-# The five format literals the checker looks for in the linked image (by value, in .rodata).
+# The eight format literals the checker looks for in the linked image (by value, in .rodata).
 LITERALS = (
     b"IOS7SHREG check_np pid=%d out=0x%08x\n",
     b"IOS7SHREG check_np ret=%d\n",
@@ -153,6 +207,9 @@ LITERALS = (
     b"size=0x%08x\n",
     b"IOS7SHREG map_slide ret=%d\n",
     b"IOS7SHREG map_file kr=%d\n",
+    b"IOS7SHREG slide_enter slide=0x%x src=0x%08x n=0x%x\n",
+    b"IOS7SHREG slide_init kr=%d entry=%p n=0x%x\n",
+    b"IOS7SHREG slide_copyin kr=%d\n",
 )
 
 
@@ -180,20 +237,62 @@ def plan_insert(text, what, anchor, block):
     return text[:at] + block + text[at:], True, f"{what}: staged"
 
 
+def classify(text):
+    """Name the file's staging state: (verdict, present, base, why).
+
+    `present` = the names of the edits whose `anchor + block` the text carries (EDITS order); `base`
+    = the text with each of those peeled back to its anchor.  Verdicts:
+      pre      - nothing staged; base == text
+      partial  - EXACTLY the 996 prefix (EDITS[:EDITS_996]) staged; the state this tree was committed
+                 with, and what the 999 stage script legitimately feeds in
+      staged   - all ten staged
+      foreign  - anything else, never repaired in place
+    The foreign test is the fragment test: after peeling what it can account for, the remainder must
+    carry ZERO guard regions and zero PROBE_TEXT occurrences (upper in print literals, lower in
+    counter names) - so a hand edit that deletes part of a block
+    (mi4-an-edit-on-a-prefix-deletes-the-suffix) leaves a guard line or probe bytes the peel cannot
+    explain, and is refused.
+    """
+    present, base = [], text
+    for what, anchor, block in EDITS:
+        n = base.count(anchor + block)
+        if n > 1:
+            return ("foreign", present, base,
+                    f"{what}: {n} staged copies - the region was edited by hand; not repaired")
+        if n == 1:
+            base = base.replace(anchor + block, anchor)
+            present.append(what)
+    guards = base.count(GUARD_OPEN.strip())
+    left = sum(base.count(t) for t in PROBE_TEXT)
+    if guards or left:
+        return ("foreign", present, base,
+                f"after removing the {len(present)} block(s) it can account for, the text still "
+                f"carries {guards} `{GUARD_OPEN.strip()}` region(s) and {left} probe-text "
+                f"occurrence(s) - a partial or foreign edit is present; not repaired in place")
+    if len(present) == len(EDITS):
+        return "staged", present, base, f"all {len(EDITS)} blocks staged"
+    if present == [what for what, _anchor, _block in EDITS[:EDITS_996]]:
+        return ("partial", present, base,
+                f"the 996 staging ({EDITS_996} of {len(EDITS)} block(s) staged)")
+    if not present:
+        return "pre", present, base, "no blocks staged"
+    return ("foreign", present, base,
+            f"{len(present)} of {len(EDITS)} block(s) staged, but not the 996 prefix "
+            f"({present!r}) - not a named state; not repaired in place")
+
+
 def plan(text):
     """Apply every edit in memory.  [(what, anchor, block, note)], staged_text, changed.
 
-    Pre-flight (the partial-state hole): a hand edit that DELETES part of an inserted block leaves the
-    anchor intact and `anchor + block` absent, so plan_insert would re-insert a second copy beside the
-    fragment - the failure `mi4-an-edit-on-a-prefix-deletes-the-suffix` names.  The guard count is the
-    invariant that catches it: this rung's file must carry either ZERO guard regions (the tree's text)
-    or exactly one per edit.  Anything else is refused, never repaired in place.
+    Pre-flight is classify(): plan_insert re-inserts a block whose `anchor + block` is absent, so a
+    hand edit that deleted part of a staged block would get a SECOND copy beside the fragment - the
+    failure `mi4-an-edit-on-a-prefix-deletes-the-suffix` names.  classify() peels every edit the text
+    actually carries and demands the remainder be clean, so the 996-only partial state stages to the
+    full ten and every fragment is refused, never repaired in place.
     """
-    opens = text.count(GUARD_OPEN.strip())
-    if opens not in (0, len(EDITS)):
-        raise Refusal(6, f"the file carries {opens} `{GUARD_OPEN.strip()}` region(s), expected 0 "
-                         f"(unstaged) or {len(EDITS)} (staged) - a partial or foreign edit is present; "
-                         f"not repaired in place")
+    verdict, _present, _base, why = classify(text)
+    if verdict == "foreign":
+        raise Refusal(6, why)
     notes, out, changed = [], text, False
     for what, anchor, block in EDITS:
         out, ch, note = plan_insert(out, what, anchor, block)
@@ -211,13 +310,14 @@ def guard_balance(block):
     return block.count("#if defined(STAGE90_XNU_SHREG_PROBE)"), block.count("#endif")
 
 
-def verify_off(original, staged):
-    """Prove the staged text is the tree's plus removable guarded blocks.  Returns (ok, why).
+def verify_off(base, staged):
+    """Prove the staged text is the base text plus removable guarded blocks.  Returns (ok, why).
 
-    Removal is by exact string equality: strip every inserted block and the result must be the
-    original BYTE FOR BYTE.  That proves insertion-only and that each block is a self-contained
-    guard region; it does NOT prove the preprocessor's answer - that is the build's byte-identity
-    check plus `check_d13_shreg_probe.py --expect off` on the image.
+    Removal is by exact string equality: strip every inserted block and the result must be the base
+    text BYTE FOR BYTE.  That proves insertion-only and that each block is a self-contained guard
+    region; it does NOT prove the preprocessor's answer - that is the build's byte-identity check
+    plus `check_d13_shreg_probe.py --expect off` on the image.  `base` is the tree's text with the
+    edits classify() found peeled back (== the tree's text when nothing was staged).
     """
     for what, anchor, block in EDITS:
         if block not in staged:
@@ -233,26 +333,15 @@ def verify_off(original, staged):
         if len(stripped) == len(staged):
             return False, f"{what}: the block was not found behind its anchor"
         staged = stripped
-    if staged != original:
-        return False, "removing the blocks does not reproduce the original text"
-    return True, f"removing all {len(EDITS)} guarded blocks reproduces the tree's text exactly"
-
-
-def strip_blocks(staged):
-    """The staged text minus every inserted block (anchor+block -> anchor), or (None, why)."""
-    for what, anchor, block in EDITS:
-        if anchor + block not in staged:
-            return None, f"{what}: no `anchor + block` in the text - not this rung's staged shape"
-        staged = staged.replace(anchor + block, anchor)
-    if staged.count(GUARD_OPEN.strip()):
-        return None, "guard regions remain after removing every block"
-    return staged, "ok"
+    if staged != base:
+        return False, "removing the blocks does not reproduce the base text"
+    return True, f"removing all {len(EDITS)} guarded blocks reproduces the base text exactly"
 
 
 def diff_text(original, staged):
     import difflib
     return "".join(difflib.unified_diff(original.splitlines(True), staged.splitlines(True),
-                                        "bsd/vm/vm_unix.c (tree)", "bsd/vm/vm_unix.c (996 staged)",
+                                        "bsd/vm/vm_unix.c (tree)", "bsd/vm/vm_unix.c (staged)",
                                         n=3))
 
 
@@ -261,6 +350,10 @@ SYNTHETIC_PROBE_C = """/* ON rehearsal TU, emitted by patch_d13_shreg_probe.py f
  * (a linked synthetic probe), because the real image cannot be rebuilt in this lane. */
 #include <stdint.h>
 typedef unsigned int user_addr_t;
+typedef unsigned int vm_size_t;
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
 struct proc { int p_pid; };
 struct shared_region_check_np_args { user_addr_t start_address; };
 struct shared_region_map_and_slide_np_args {
@@ -275,6 +368,8 @@ extern int vm_shared_region_map_file(void);
 extern int ios7synth_kr(void);
 extern void ios7synth_undo(void);
 extern int copyin(unsigned int, void *, unsigned int);
+extern int ios7synth_slide_init(unsigned int, unsigned int, unsigned int, unsigned int);
+extern void *ios7synth_entry(void);
 
 /* The 20 B wire, modelled so the rehearsal exercises the checker's mode-independent anchor too.  The
  * expression is the tree's own (vm_unix.c:1210, `mappings_count * sizeof(mappings[0])`); clang emits
@@ -331,6 +426,39 @@ done:
 \treturn kr;
 }
 
+/* The 999 slide half, modelled after the tree's `_shared_region_slide`: the three blocks are
+ * substituted at the points plan_insert lands them, behind byte-identical anchor context (the local
+ * pair, the tree's own failure printf + goto + brace, the copyin tail + brace), so this rehearsal
+ * compiles the same block bytes the real staging inserts.  The tree's failure printf's conversion is
+ * doubled for this template's own string-interpolation; the calls are OPAQUE for the reason above. */
+int
+_shared_region_slide(unsigned int slide, unsigned int entry_start, unsigned int entry_size,
+                     unsigned int slide_start, unsigned int slide_size)
+{
+\tvoid *slide_info_entry = NULL;
+\tint\t\t\terror;
+%(slide999_enter)s\
+\tif((error = ios7synth_slide_init(slide_size, entry_start, entry_size, slide))) {
+\t\tprintf("slide_info initialization failed with kr=%%d\\n", error);
+\t\tgoto done;
+\t}
+%(slide999_init)s\
+\tslide_info_entry = ios7synth_entry();
+\tif (slide_info_entry == NULL){
+\t\terror = 14;
+\t} else {
+\t\terror = copyin((user_addr_t)slide_start,
+\t\t\t       slide_info_entry,
+\t\t\t       (vm_size_t)slide_size);
+\t}
+%(slide999_copyin)s\
+\tif (error) {
+\t\tgoto done;
+\t}
+done:
+\treturn error;
+}
+
 struct sysent_ent sysent[439] = {
 \t[294] = {1, 0, 0, (void *)shared_region_check_np, 0, 0, 3, 4},
 \t[438] = {6, 0, 0, (void *)shared_region_map_and_slide_np, 0, 0, 3, 24},
@@ -343,6 +471,9 @@ int vm_shared_region_map_file(void) { return 0; }
 int ios7synth_kr(void) { return 0; }
 void ios7synth_undo(void) { }
 int copyin(unsigned int a, void *b, unsigned int c) { (void)a; (void)b; (void)c; return 0; }
+int ios7synth_slide_init(unsigned int a, unsigned int b, unsigned int c, unsigned int d)
+{ (void)a; (void)b; (void)c; (void)d; return 0; }
+void *ios7synth_entry(void) { return (void *)0x80001000; }
 """
 
 
@@ -357,6 +488,9 @@ def emit_synthetic(dirpath):
         "slide_ret1": SLIDE_RET1_BLOCK,
         "slide_ret2": SLIDE_RET2_BLOCK,
         "slide_ret3": SLIDE_RET3_BLOCK,
+        "slide999_enter": SLIDE999_ENTER_BLOCK.lstrip("\n"),
+        "slide999_init": SLIDE999_INIT_BLOCK.lstrip("\n"),
+        "slide999_copyin": SLIDE999_COPYIN_BLOCK.lstrip("\n"),
     })
     (d / "stub.c").write_text(SYNTHETIC_STUB_C)
     print(f"patch_d13_shreg_probe: wrote {d}/probe.c + {d}/stub.c")
@@ -388,9 +522,10 @@ def main() -> int:
 
     if verify:
         # Rehearse on a throwaway copy so the tree is never touched, then prove the ROUND TRIP on the
-        # copy's bytes: strip(staged) has no guard left, and staging that stripped text again
-        # reproduces the staged text BYTE FOR BYTE.  The round trip holds whether the tree is staged
-        # or not, which the earlier version (compare against the on-disk text) did not.
+        # copy's bytes: classify() names the tree's state and peels every block it carries (the tree
+        # ships the 996-only partial state - the 999 stage script feeds exactly that in), verify_off()
+        # proves the staged text minus the ten guarded blocks is that base BYTE FOR BYTE, and
+        # re-staging the base reproduces the staged text BYTE FOR BYTE.  Holds in every state.
         tmp = Path(tempfile.mkdtemp(prefix="shreg_verify_"))
         src = Path(argv[0]) / XNU_VM_UNIX
         if not src.is_file():
@@ -405,12 +540,13 @@ def main() -> int:
             return rc
         original = src.read_text()
         staged = (tmp / XNU_VM_UNIX).read_text()
-        pre, why = strip_blocks(staged)
-        if pre is None:
+        verdict, present, base, why = classify(original)
+        if verdict == "foreign":
             print(f"patch_d13_shreg_probe: verification: FAIL - {why}")
             shutil.rmtree(tmp, ignore_errors=True)
             return 1
-        re_staged = pre
+        ok_v, why_v = verify_off(base, staged)
+        re_staged = base
         try:
             for what, anchor, block in EDITS:
                 re_staged, _ch, _n = plan_insert(re_staged, what, anchor, block)
@@ -419,18 +555,15 @@ def main() -> int:
             shutil.rmtree(tmp, ignore_errors=True)
             return 1
         round_trip = re_staged == staged
-        was_staged = original.count(GUARD_OPEN.strip()) == len(EDITS)
-        pre_matches_tree = pre == original
-        print(f"patch_d13_shreg_probe: verification: the tree file was "
-              f"{'ALREADY STAGED' if was_staged else 'unstaged'}")
-        print(f"  strip:  removing all {len(EDITS)} blocks leaves "
-              f"{pre.count('IOS7SHREG')} literal(s) and 0 guard regions; pre-image sha256 "
-              f"{hashlib.sha256(pre.encode()).hexdigest()}")
-        print(f"  restage: re-staging that pre-image reproduces the staged text byte for byte "
+        print(f"patch_d13_shreg_probe: verification: the tree file was {verdict.upper()} "
+              f"({len(present)} of {len(EDITS)} block(s) staged)")
+        print(f"  base:   peeling the {len(present)} staged block(s) leaves "
+              f"{base.count('IOS7SHREG')} literal(s) and {base.count(GUARD_OPEN.strip())} guard "
+              f"region(s); base sha256 {hashlib.sha256(base.encode()).hexdigest()}")
+        print(f"  structure: {'ok' if ok_v else 'FAIL'} - {why_v}")
+        print(f"  restage: re-staging that base reproduces the staged text byte for byte "
               f"({'PASS' if round_trip else 'FAIL'})")
-        ok = round_trip and (pre_matches_tree if not was_staged else True)
-        if not was_staged and not pre_matches_tree:
-            print("  FAIL the unstaged tree's text is not what strip() produces")
+        ok = ok_v and round_trip
         print(f"patch_d13_shreg_probe: verification: {'PASS' if ok else 'FAIL'}")
         shutil.rmtree(tmp, ignore_errors=True)
         return 0 if ok else 1
@@ -452,7 +585,8 @@ def main() -> int:
         print(f"  {note}")
 
     if dry_run or not changed:
-        ok, why = verify_off(original, staged) if changed else (True, "nothing staged")
+        _verdict, _present, base, _why = classify(original)
+        ok, why = verify_off(base, staged)
         print(f"  guard structure: {'ok' if ok else 'FAIL'} - {why}")
         if changed and dry_run:
             print(diff_text(original, staged))
