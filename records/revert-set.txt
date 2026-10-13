@@ -14369,3 +14369,103 @@ set=armed-d13-467d59e4 sha256=2590eb990d56c5c4c1f78cd2bb92e47b67b9da1f1f817ef5fe
 set=armed-d13-467d59e4 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=999-past-the-cap;-stage90_fixture.macho
 set=armed-d13-467d59e4 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=999-past-the-cap;-stage90-build-config.txt
 set=armed-d13-467d59e4 sha256=6230ef2c3ad5499269683f161f9453f86e68149ec45fe2ab98a8e854f46b70f2 bytes=560 file=SHA256SUMS.txt role=999-past-the-cap;-SHA256SUMS.txt
+# armed-d13-bbdf41bc  -  1000: THE TICK RATE IS MEASURED AT THE DELIVERY (CNTVCT delta + the raw TVAL/CTL pair), THE ABSENCE-IS-EVIDENCE RECORDS GO DIRECT (pet feed + tick anomalies + summaries), AND THE USER-SVC FRONTIER IS OPEN BY VALUE (first 64 SVCs, 8 fields each).
+# Switch set is 999-s VERBATIM (DYLD_WITNESS, SHREG_PROBE, SHREG_WIRE, SHREG_GEOM, RESIDENT all
+# stay 1) plus ONE NEW switch, STAGE90_XNU_USVC (asm ASFLAGS + build_entry EXPORTS; NO pool
+# object reads it); the ENTRY BIN moved (467d59e4 -> bbdf41bc); the PAYLOAD moves (it embeds the
+# entry blob; the 29 s watchdog constant is 999-s, unchanged); the POOL does NOT move (no pool
+# source edit this rung - 1000 adds no key to build_xnu_arm_kernel.sh-s EXTRA either); the
+# TREE moves by ONE staged edit (traps_lo.s gains the USVC hook). build_entry.sh carries the
+# switch end-to-end (new arm key parsed + guarded, ENTRY_ARM_KEYS read-back, record writer).
+#
+# THE THREE GIVENS the run answers (the 999 read-s own [134]-[141]), and what carries each:
+# (a) THE TICK RATE COLLAPSE - not a stop: 122 deliveries with 24 of them across the >= 2.4 s the
+#     rest of the boot took (the :5468 powers-of-two ladder vs the :28723 direct probes).
+#     `msm8974_tick_sample` (pe_msm8974.c, noinline) is ONE call in `msm8974_handle_interrupt`-s
+#     timer branch BEFORE its EOI; it reads CNTVCT (the counter the deadline is expressed in -
+#     mrrc p15, 1 - never its physical twin) and, only past one full period, publishes the raw
+#     pair `xnu_live_tick_anom_tval`/`_ctl` read AT the entry plus the delta `_d` (first four
+#     events; `_n` is the ordinal, incremented before anything is written). A SECOND CNTV writer
+#     (`_tval` a value the gap could not produce) and a long MASKED window (`_tval` consistent,
+#     `_ctl` IMASK/ENABLE) are DIFFERENT logs. `entry_tick_summary` publishes `_sum_count` /
+#     `_sum_anom` / `_sum_maxd` - the aggregates without the sampling rule.
+# (b) A RECORD WHOSE ABSENCE IS READ AS EVIDENCE MUST BE CAP-EXEMPT (999-s cap bit again at
+#     0x6000 and swallowed the pet-s own evidence). The pet-s feed records move to the DIRECT
+#     channel under `xnu_live_wdt_pet_n`/`_calls`/`_countdown` (first four feeds in full, then a
+#     powers-of-two ladder); the tick-anomaly records are direct from birth; the summaries ride
+#     the pet-s sparse gate AND the exec-done point (`entry_note_exec_returned`) - the two
+#     moments the counted channel goes quiet.
+# (c) THE USER-SVC FRONTIER after `cs_invalid_page`: `entry_note_user_svc` (entry_stubs.c) called
+#     from ONE `bl _entry_note_user_svc` hooked into traps_lo.s-s `fleh_swi` right after
+#     `cpsie i` (staged by tools/patch_d13_usvc.py -> tools/stage_d13_usvc.sh; the 13-line block
+#     pushes {r0,r1,r8,lr}, passes r8 = the saved-state frame, pops it back - a `bl` between
+#     `cpsie i` and the -3 timebase fast path, the body-s FIRST branch). Gated by
+#     STAGE90_XNU_USVC (ASFLAGS half via tools/assemble_arm_layer.sh). The first 64 SVCs publish
+#     all eight fields DIRECT (n/num/pid/thr/pc/lr/cpsr/r0, USVC_FULL_N 64u); a powers-of-two
+#     ladder follows - so the LAST `xnu_live_usvc_n` in a log IS the last syscall the user side
+#     managed before it stopped. `num` is `saved_state.r[12]` (STAGE90_SS_R12), the frame
+#     word the SWI convention puts the syscall number in.
+#
+# PLUS the ordinary move committed separately (0504be5): the read-dump thinning ordinal
+# 256 -> 64 (`rd_full_ = (st_read_count < 64u);` in entry_storage.c). 999 measured 218 reads in
+# the WHOLE boot, so 256 never fired and the full-width dump spent the cap before exec - the
+# thinning was dead code that boot. The key-order tool parses the ordinal from the source (its
+# --selftest runs in the build); a `|`-less restatement elsewhere is what the build refuses.
+#
+# AND the saved-state table gains the two words the C half reads (`STAGE90_SS_R0`,
+# `STAGE90_SS_R12` in entry_saved_state.h), with tools/check_saved_state_offsets.py deriving
+# the offsets from the assym SOURCES (selftest included; wired into `make check` with both the
+# default 4570 tree and the D13 tree) - a wrong offset would print a field of the WRONG frame
+# word, and the USVC records are exactly such fields.
+#
+# 999 (pressed 2026-10-13, arm armed-d13-467d59e4, evidence out/stage90/captures/ -
+# records/999-press-read.txt) reached USER MODE: the exec-done trio byte-closed at :28715,
+# `IOS7SHREG map_slide ret=0` at :4113 (the 438 mapped the shared cache), then the counted
+# channel goes quiet after `cs_invalid_page` (:4114). The machine stayed ALIVE (31 min, no USB
+# return at all, fed by the read door). TWO walls bounded that reading: the cap bit AGAIN
+# (`xnu_live_capped=0x6000` @:28714) and the silence itself. 1000 changes WHERE the evidence is
+# recorded, adds ONE probe at the delivery, and opens ONE frontier reader - NO kernel behaviour
+# change.
+#
+# The 1000 PRESS PRE-REGISTRATION (frozen once embedded; deviations reported, not reinterpreted)
+# is written by the TEAM-LEAD into scripts/press_1000.sh. Expected per the lead: the first 64
+# SVCs each with the eight usvc fields (pid expected 1 = launchd; a plausible launchd syscall;
+# ladder pairs `_n`/`_num` past 64); `xnu_live_tick_sum_count` climbing past 999-s 122 if the
+# machine lived on; <= 4 `xnu_live_tick_anom_*` events each carrying d/tval/ctl; the pet feed
+# ladder present REGARDLESS of the cap, `_calls` monotone and never above the last preceding
+# `xnu_live_storage_rd_ordinal`. Falsifier: `xnu_live_usvc_n` ABSENT with the exec proven
+# (done trio present, map_slide ret=0) => the hook did not reach the image or the state pointer
+# is wrong - rebuild, do not judge.
+#
+# VERIFIED BY VALUE (build_1000.sh): the thinning ordinal AT THE SOURCE (exactly one
+# `rd_full_ = (st_read_count < 64u);`, no `< 256u` survivor, key-order tool --selftest), the
+# `USVC_FULL_N 64u` define, the saved-state checker (--selftest + both trees), the fresh record
+# carrying `STAGE90_XNU_USVC=1`; in the LINKED IMAGE: `entry_note_user_svc` a T symbol,
+# traps_lo.o with exactly one `U entry_note_user_svc`, the `locore_fleh_swi` window (reader
+# ranged to the next GLOBAL T - the body has internal labels, so the C readers first-T/t rule
+# would stop early; same no-early-exit awk as 999-s edge reader) carrying exactly ONE hook call,
+# IMAGE-WIDE exactly one, the hook as the body-s FIRST branch, the C half-s window with >= 8
+# entry_write_kv / 0 entry_live_write / `cmp #64` / exactly 8 `xnu_live_usvc_*` keys; the FROZEN
+# 999 elf as the NEGATIVE CONTROL (0 usvc keys, 0 tick sum_/anom_ keys); `entry_tick_summary` a
+# T symbol, the sample-s ONE call site inside `msm8974_handle_interrupt`, each of the two summary
+# call sites (`entry_note_exec_returned`, `entry_wdt_pet`) calling it exactly once, the ten new
+# direct keys once each (3 summary + 4 anomaly + 3 pet); `mov r0, #29` at the payload-s arm site
+# (the 29 s net cannot silently fall back to 999-s predecessor). The 996/997/998 checkers rerun
+# ON the 1000 image with the FROZEN 999/998/996 images as negative controls - the probe
+# checker-s ONE by-design frozen 20 B clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-bbdf41bc sha256=bbdf41bc73e0afe9d8ca237384c276218efdfa6028a2e2a18f9388117544ba46 bytes=6343764 file=xnu_arm_entry.bin role=1000-tick-rate+cap-exempt+usvc;xnu_arm_entry.bin
+set=armed-d13-bbdf41bc sha256=4891ed89f8a7cb35459c981b531d49cc3ec283d2becad21dcd92b67739d10d21 bytes=7385364 file=xnu_arm_entry.elf role=1000-tick-rate+cap-exempt+usvc;xnu_arm_entry.elf
+set=armed-d13-bbdf41bc sha256=6f96fb39cf379cd7db346c59c31375b71e3463563302ebcc90f602bf9e850bdb bytes=1912 file=xnu_arm_entry.h role=1000-tick-rate+cap-exempt+usvc;xnu_arm_entry.h
+set=armed-d13-bbdf41bc sha256=95c95f3e81d4c5400bf05e54d517214d257262911ae39d738335e3078875dd97 bytes=1661 file=xnu_arm_entry-config.txt role=1000-tick-rate+cap-exempt+usvc;xnu_arm_entry-config.txt
+set=armed-d13-bbdf41bc sha256=3715d7a691ef048d281799c10a0ea51083f79b741aba36739ab085ea3ee7a96e bytes=3149 file=xnu_arm_entry-sources.txt role=1000-tick-rate+cap-exempt+usvc;xnu_arm_entry-sources.txt
+set=armed-d13-bbdf41bc sha256=59b2597885f814b2e2ad1255c9b28b02c13d9b728a021bd223c6a4baa22337de bytes=6839172 file=stage90.bin role=1000-tick-rate+cap-exempt+usvc;stage90.bin
+set=armed-d13-bbdf41bc sha256=2456bbcbbb3c256a308926c112a8fb1c8a09ee5d14e267b5c74a61b22819e560 bytes=6901244 file=stage90.elf role=1000-tick-rate+cap-exempt+usvc;stage90.elf
+set=armed-d13-bbdf41bc sha256=d8d79108970152004a1e1a21fb7efb796aead44ed3587bcca11a31afad67d10a bytes=6842368 file=stage90.img role=1000-tick-rate+cap-exempt+usvc;stage90.img
+set=armed-d13-bbdf41bc sha256=a50ccbea582fc0f050792e6304856573bcebd55058b0237c1d698b3898cbf006 bytes=9363456 file=stage90-qcdt.img role=1000-tick-rate+cap-exempt+usvc;stage90-qcdt.img
+set=armed-d13-bbdf41bc sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1000-tick-rate+cap-exempt+usvc;stage90_fixture.macho
+set=armed-d13-bbdf41bc sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1000-tick-rate+cap-exempt+usvc;stage90-build-config.txt
+set=armed-d13-bbdf41bc sha256=d3236fe41b8b1b91c1959ecf821906f10dbc26dadcaf8ff81243f8851a386370 bytes=560 file=SHA256SUMS.txt role=1000-tick-rate+cap-exempt+usvc;SHA256SUMS.txt
