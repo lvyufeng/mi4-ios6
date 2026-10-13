@@ -529,18 +529,28 @@ necessary conditions, not exclusions. 999's fix: the trio becomes direct/cap-exe
 
 ## §10c — the timer chain stops at tick 64 in EVERY run (measured 2026-10-13)
 
-**(d) the timer dies early — measured across all six captures (987, 994-998).** `xnu_live_tick_irq`
+**(d) the timer DELIVERIES die early — measured across all six captures (987, 994-998).** `xnu_live_tick_irq`
 (published on powers of two from `msm8974_handle_interrupt`, `pe_msm8974.c:369`) reaches **max 0x40 =
 64 and never 128** in every capture, so fewer than 128 timer-PPI deliveries ever occur in a whole
-boot. The whole family stops together at 998 `:5475` — `tmr_enter_seq` 0x40, `tmr_qexp_seq` 0xc,
-`tmr_enter_over` 0x8, `setpop_count` 0x40 — and no timer record of any kind appears again through
-exec (`:19374`) and 1,128 dyld-era records to the cap (`:20502`). The last healthy window is the
+boot. The delivery side stops at 998 `:5463` (with `tmr_enter_seq` 0x40 `:5437`, `setpop_count`
+0x40 `:5462`, `tmr_qexp_seq` 0xc `:5471`) and no timer DELIVERY appears again through
+exec (`:19374`) and 1,128 dyld-era records to the cap (`:20502`). **Corrected 2026-10-13
+(timer-freeze): the family does NOT all stop — `tmr_enter_over` counts ARMINGS, not deliveries,
+and continues 0x10 `:17334`, 0x20 `:17426`, 0x40 `:19100`** — the freeze is a [64,128)-arming
+≈ 60 ms window, not a point; timer code keeps arming what never fires. The last healthy window is the
 storage power spin `st_pwr_wait` (`src/entry/entry_storage.c:1920-2065`): premise
 `_pwr_wait_cpsr=0x80000113` (I=0) at `:5416`; ticks 8/16/32/64 publish during it (`:5415-:5463`);
 tail at `:5475-5483` = `_cpsr_after=0x20000193` (I=1), `_polls=0x67400`, `_ticks=0x1d5767` (100 ms
 CNTV), `_timeout=1`. Two models remain open — (A) the PPI/countdown is killed at the spin tail; (B)
 the machine returns to I=1 and never unmasks again (post-exec `sleh_cpsr` records all read
-`0x20000193`, the same masked value). Either way, **nothing driven by `rtclock_intr` runs after ~4.8 s
+`0x20000193`, the same masked value). **timer-freeze (2026-10-13): the captures do NOT cleanly
+separate them; the tape favors (B)** (no `cpsie i`, `splx(0)`, or user-CPSR-restore site
+demonstrably executes before the cap), **but one measured (A) fact survives — the tick line's
+distributor bit (ISENABLER0 bit 20) reads CLEAR at the pre-jump disarm (`:3922`, 0xc7fff, before
+that disarm's own 18|19-only mask write) with no recorded writer in a 4.78-7.30 s attribution
+window; the line is set again post-jump (`:4116/:4128` 0x7fff→0x107fff; `:19042` reads 0x107fff)
+with CNTV enabled/expired (ctl=0x5) and PPI-20 not pending (`:19044`) — still no delivery.**
+Either way, **nothing driven by `rtclock_intr` runs after ~4.8 s
 of mach time**, which (i) rules out the tick ISR as a watchdog pet site (a pet there stops petting
 after ≤64 deliveries — wdt-policy and buildplumb informed 2026-10-13; the pet belongs in the
 storage-read ladder, 129 reads ran post-freeze, plus the idle site), and (ii) is a candidate
@@ -556,9 +566,16 @@ second map call: after `map_file kr=0` (`:1425` call, `:1438` print) the syscall
 `copyin(slide_start, …, slide_size=0x89000)` → `sanity_check`), and none of its exits printed. The
 alternate reading (the exit print was text-side lost) needs a loss never yet observed — the one
 measured loss (exec_done) was record-side. A deadline-based park anywhere in that span would now be
-unresolvable under (i). Two forensics agents (timer-freeze, shreg-hang) are discriminating the timer
-models and locating the block inside the slide half; the 999 probe set gains their
-model-discriminator observable once they report.
+unresolvable under (i) — timer-freeze's Q5 backs this independently: **no post-freeze record
+requires a timer expiry** (all recorded sleep deadlines are 0, no `ast_done` records, the five
+`block_returns` `:19371` are wakeups). shreg-hang located the block inside the slide half (§10d).
+**The 999 timer discriminator (timer-freeze):** publish at every ENABLE edge of
+`ml_set_interrupts_enabled` (`machine_routines.c:143-146` → `machine_routines_asm.s:151-153`
+`cpsie i`) and at `thread_exception_return` (`arm/status.c:112-123`) — first-4 per site,
+**cap-exempt** (absence-is-evidence), each record carrying count + site + CPSR read back after
+the edge + the raw tick-delivery counter. Reading: **no edge record ⇒ (B)** (no unmask ever ran);
+**edge record with tick=64 and no `tick_irq ≥128` within ~2 ms ⇒ (A)**; edge record followed by
+`tick_irq=0x80` ⇒ the freeze ENDED at that edge.
 
 ## §10d — the slide half: one call, never returned; the 999 probe ladder (shreg-hang, 2026-10-13)
 
