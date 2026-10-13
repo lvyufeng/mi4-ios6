@@ -27,6 +27,13 @@ What it will not do, on purpose:
   * **It does not guess a guard it cannot evaluate.** A condition outside the simple
     rung-comparison vocabulary is reported UNKNOWN, and an UNKNOWN guard on the path makes the
     ordering UNKNOWN too (`mi4-a-status-is-a-verdict-only-if-its-producer-delivered-one`).
+  * **It does not fold a C-level condition into the preprocessor guard.** Since 999 the read
+    body publishes its extended cells through `ST_LIVE_RD`, a macro whose body is silent when
+    the read's own `rd_full_` flag is clear (`st_read_single_block`: reads past ordinal 256
+    publish six cells, not ~78). Those cells are still recorded here - their MOMENT is the same
+    call - with `thinned: 1` and a printed note; whether a *given read* carries them is a
+    runtime question this preprocessor-level model refuses to answer, the same way it refuses a
+    guard it cannot evaluate ([`mi4-a-status-is-a-verdict-only-if-its-producer-delivered-one`]).
 
 Usage:
 
@@ -57,7 +64,7 @@ RUNG_MACRO = "STAGE90_XNU_STORAGE_PROBE"
 # storage stages) out of it, which is what makes a `--after` answer about the ladder.
 CALL_RE = re.compile(r"(?<![\w.])([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 REGISTER_RE = re.compile(r"\(uintptr_t\)\s*([A-Za-z_][A-Za-z0-9_]*)|&\s*([A-Za-z_][A-Za-z0-9_]*)\b")
-LIVE_HEAD_RE = re.compile(r"ST_LIVE\s*\(")
+LIVE_HEAD_RE = re.compile(r"ST_LIVE(?:_RD)?\s*\(")
 DEFINE_RE = re.compile(r"^#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(.*)$", re.S)
 
 
@@ -491,7 +498,8 @@ def parse(source):
             if len(parts) == 1 and parts[0][0] == "lit":
                 key = parts[0][1]
                 keys.setdefault(key, {"line": idx, "func": owner(idx),
-                                      "guard": guards.get(idx, []), "generated_by": None})
+                                      "guard": guards.get(idx, []), "generated_by": None,
+                                      "thinned": line[hit.start():].startswith("ST_LIVE_RD")})
             # a concatenation here that mentions a parameter is the `#define` itself, and
             # `macro_templates` has already recorded it; it is not a key.
     unresolved = []
@@ -610,6 +618,7 @@ def moment(model, key, rung):
         "func": f.name,
         "path": path,
         "emission_guard": info["guard"],
+        "thinned": info.get("thinned", False),
         "registered": [h[0] for h in hops],
         "points": [p[1] for p in path] + [info["line"]],
     }
@@ -708,6 +717,10 @@ def cmd_key(model, names, rung):
         print(f"  {name}: {kind}   {render_path(detail)}")
         if detail["emission_guard"]:
             print(f"      guard: {' && '.join(detail['emission_guard'])}")
+        if detail.get("thinned"):
+            print("      thinned: published through ST_LIVE_RD - absent from any read past ordinal "
+                  "256 (`rd_full_`), a runtime condition this preprocessor-level model does not fold "
+                  "into the guard vocabulary")
         if detail["registered"]:
             print(f"      reached by registration of {', '.join(detail['registered'])} "
                   f"- the moment is an interval, not a point")

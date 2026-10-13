@@ -1983,6 +1983,7 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -DSTAGE90_XNU_STORAGE_PROBE="$STORAGE_PROBE" \
     -DSTAGE90_XNU_PWR_WAIT_TICKS="$PWR_WAIT_TICKS" \
     -DSTAGE90_XNU_HDD_WRITE="$HDD_WRITE" \
+    -DSTAGE90_XNU_RESIDENT="$RESIDENT" \
     -c "$BOOT_DIR/entry_storage.c" -o "$OUT/xnu_arm_entry_storage.o"
 # **AND THE SAME LINE AGAIN AS A SYNTAX-ONLY PASS.** `-Werror` above only refuses what the COMPILER
 # objects to; the ladder's own encoded invariants - the eighteen `_Static_assert`s that hold CMD8's two
@@ -1996,6 +1997,7 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -DSTAGE90_XNU_STORAGE_PROBE="$STORAGE_PROBE" \
     -DSTAGE90_XNU_PWR_WAIT_TICKS="$PWR_WAIT_TICKS" \
     -DSTAGE90_XNU_HDD_WRITE="$HDD_WRITE" \
+    -DSTAGE90_XNU_RESIDENT="$RESIDENT" \
     -fsyntax-only "$BOOT_DIR/entry_storage.c"
 # **910a: the USB2 OTG controller read.** Compiled on the same condition as the four above - a
 # measurement whose numbers only exist in a traced build - with the same split the storage line states:
@@ -30677,7 +30679,7 @@ verify_trace_symbols() {
     # (arm armed-d13-13355bf0, commit af099f4, evidence /tmp/cancro-last_kmsg-991.txt) is a
     # READ-CONFIRMED SUCCESS in the pre-registered sense: the VMHINT991 guard fired exactly twice
     # (lr=0x8003d8ec = vm_map_pmap_enter's call) and the boot moved PAST the kernel-mode exec wall into
-    # userspace - `/sbin/launchd` EXECUTED, dyld ran from the mapped shared cache (dyld_all_image_info
+    # userspace - `/sbin/launchd` EXECUTED, dyld ran as a FILE LOAD off the rootfs (dyld_all_image_info
     # set, pc/lr in the 0x2be5-0x2be7 region) - and then aborted 231x:
     #     launchd[1]: usermode data abort, EXC_BAD_ACCESS at 0xffff4090 in map 0xc00057b8 (pmap
     #     0xc0ba3cc0) (Translation fault on page)
@@ -30716,7 +30718,7 @@ verify_trace_symbols() {
     # L2 slot pre = 0x00000000` - and the commpage alias is live (`IOS7LAB commpage alias 0xffff4000:
     # same page, user read-only, XN`, `IOS7LAB commpage cpus: ...`); the 991 `0xffff4090 ...
     # Translation fault` burst is GONE (0 commpage faults) and there is NO panic. The boot ran bsd_init
-    # and exec'd launchd's dyld from the shared cache - and then HALTED inside dyld:
+    # and exec'd launchd's dyld as a file load off the rootfs - and then HALTED inside dyld:
     #     launchd[1]: usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x2be7e0c4 ... (236x)
     # 0x2be7e0c4 - slide 0x7d000 = 0x2be010c4 = `_dyld_fatal_error` (`fe de ff e7`, i.e. `udf #0xdefe`),
     # whose ONLY caller is `dyld::halt`, reached from `dyld::throwf`'s out-of-memory path:
@@ -30833,8 +30835,18 @@ verify_trace_symbols() {
         # and the 997 clause below asserts the 32 B inversion. So this clause requires: the checker
         # FAILs, EXACTLY ONE clause FAIL line is printed, and it is the 20 B straddle one. A PASS
         # (rc 0) or any other failing clause is a real refusal, not the by-design one.
+        # **999: the invocation carries `--ladder`, because THIS image now carries the slide half.**
+        # The 999 slide-half prints ride the same SHREG_PROBE gate, so the checker's BASE spelling
+        # reports their by-design outsider clause (its own text: "this is the 999 slide half -
+        # re-run with --ladder") BESIDE the 20 B straddle one - two FAIL lines - and a base-spelling
+        # reader cannot tell "the probe went missing" from "the ladder is present". Under `--ladder`
+        # the three slide literals are expected, the base five must still be in the image, and the
+        # contract above is unchanged: the checker must FAIL, with EXACTLY ONE clause FAIL line, the
+        # frozen 20 B straddle one. (999's run is the first to hold this image; the first build of
+        # the rung died here on the base spelling with 2 clause FAIL lines - measured, verbatim in
+        # the run log.)
         sp_rc=0
-        sp_out=$(python3 "$REPO_ROOT/tools/check_d13_shreg_probe.py" "$OUT/xnu_arm_entry.elf" --expect on 2>&1) || sp_rc=$?
+        sp_out=$(python3 "$REPO_ROOT/tools/check_d13_shreg_probe.py" "$OUT/xnu_arm_entry.elf" --expect on --ladder 2>&1) || sp_rc=$?
         if [[ $SHREG_WIRE -eq 1 ]]; then
             sp_fails=$(printf '%s\n' "$sp_out" | grep -c '^  FAIL ' || true)
             if [[ $sp_rc -eq 0 ]]; then
@@ -30843,9 +30855,9 @@ verify_trace_symbols() {
             fi
             if [[ $sp_fails -ne 1 ]] || ! printf '%s\n' "$sp_out" | grep -q '^  FAIL shared_region_copyin_mappings does not compute'; then
                 printf '%s\n' "$sp_out" >&2
-                layout_fail "STAGE90_XNU_SHREG_WIRE=1 and the 996 probe checker failed on something OTHER than its one by-design 20 B clause ($sp_fails clause FAIL line(s); the expected single one is 'shared_region_copyin_mappings does not compute count * 5 << 2') - the FAIL lines above name the missing probe clause: the probe itself did not reach the linked image; stage the tree (tools/stage_d13_shreg_probe.sh) and rebuild the pool with -DSTAGE90_XNU_SHREG_PROBE=1"
+                layout_fail "STAGE90_XNU_SHREG_WIRE=1 and the 996 probe checker failed on something OTHER than its one by-design 20 B clause ($sp_fails clause FAIL line(s); the expected single one is 'shared_region_copyin_mappings does not compute count * 5 << 2' - the invocation is the --ladder spelling, so the three 999 slide-half literals are EXPECTED and a FAIL naming one of them means the pool's vm_unix.o is stale, not that the ladder is an outsider) - the FAIL lines above name the missing probe clause: the probe itself did not reach the linked image; stage the tree (tools/stage_d13_shreg_probe.sh) and rebuild the pool with -DSTAGE90_XNU_SHREG_PROBE=1"
             fi
-            say "  xnu_entry_996: probe checker's ONE by-design failure is its frozen 20 B clause (996 measures the misparse, 997 fixes it; the 32 B inversion is xnu_entry_997 below) and every probe-presence clause passed - $(printf '%s\n' "$sp_out" | grep '^  FAIL ')"
+            say "  xnu_entry_996: probe checker's ONE by-design failure is its frozen 20 B clause (--ladder spelling: the three 999 slide-half literals are expected, base five still asserted; 996 measures the misparse, 997 fixes it; the 32 B inversion is xnu_entry_997 below) and every probe-presence clause passed - $(printf '%s\n' "$sp_out" | grep '^  FAIL ')"
         else
             if [[ $sp_rc -ne 0 ]]; then
                 printf '%s\n' "$sp_out" >&2
@@ -30951,6 +30963,147 @@ verify_trace_symbols() {
                 layout_fail "$gfn ($gfa..$gfnx) still materializes the tree's default 0x2FE00000 stack top - osfmk_arm_status.o is the pre-998 object (LAB_USER_STACK still expands to USRSTACK directly), so create_unix_stack's FIXED allocation at trunc(0x2FE00000 - MAXSSIZ) would land INSIDE the new 0x2C000000..0x40000000 window for every process (audit section 2): the geometry half is on and the stack half is not, which is exactly the split the one switch exists to prevent"
         done
         say "  xnu_entry_998: the linked image carries the iOS 7 shared-region geometry (the IOS7LAB shared region literal is in, and the source side is all-staged) and the 0x2BE00000 stack top in both thread_userstack and thread_userstackdefault (the 0x2FE00000 default gone) - $gg_out"
+    fi
+    # **999: the instrument reads past the 998 cap, and three readings get their evidence back.**
+    # 998's press (arm armed-d13-dee822b0, commit 36bb341, log
+    # out/stage90/captures/cancro-last_kmsg-998-armed-d13-dee822b0.txt) was bounded by TWO walls the
+    # instrument itself owned: `xnu_live_capped=0x4000` (the 16384-record cap, hit MID-dyld, with the
+    # tombstone IDENTICAL to the displaced done_seq) and the never-fed SoC watchdog (0 xnu_live_wdt_*
+    # lines -> the ~28 s silent reset). The 999 entry layer answers both and repairs the reading 998
+    # lost. Five properties, read out of THIS link:
+    #   (1) `ENTRY_LIVE_CAP` 16384 -> 24576: `entry_live_write`'s cap compare is against 24576 and the
+    #       old 16384 compare is GONE from its body. The tombstone value moves with it (0x6000).
+    #   (2) the read dump THINS past ordinal 256. This one has no clean image signature (every
+    #       `ST_LIVE_RD` still emits the guarded call), so it is read SOURCE-side - and legitimately:
+    #       this script compiles entry_storage.c itself two lines above, so a revert is a property of
+    #       the file being built, not of a stale object. 70 `ST_LIVE_RD(` statement uses and the 8
+    #       `ST_LIVE(` uses inside `st_read_single_block` must both still be there: the six locating
+    #       cells and the two 471-side records never thin (a record whose absence is read as evidence
+    #       must not be the one that moves).
+    #   (3) `entry_note_exec_returned`'s trio goes DIRECT: written through the uncounted
+    #       `entry_write_kv` (3 branches, and NO branch to `entry_live_write` inside its body). 998's
+    #       arithmetic closed to the line (16,384 counted + direct = 16,426 lines) - the cap HAD
+    #       displaced the trio while the SAME wrapper's printf printed, which is why their absence was
+    #       misread as "the load did not return". The five read-back keys
+    #       (`xnu_live_exec_done_probe_*`) are published from `entry_write_kv`'s own head.
+    #   (4) RESIDENT=1: the watchdog is fed at the STORAGE READ DOOR (`entry_storage_driver_read`'s
+    #       first statement, `#if STAGE90_XNU_RESIDENT`, argument = the monotone st_read_count),
+    #       because 998's handed-off kernel never idled and the idle-site pet never ran. So the pet
+    #       must be GLOBAL (the storage object calls it across translation units - a static would have
+    #       failed the link) and the door's own body must branch to it exactly once.
+    #   (5) RESIDENT=1, 999 amendment #2 (the timer discriminator): `entry_timer_edge_probe`
+    #       (pe_msm8974.c, beside the raw tick counter) is called from the TWO staged assembly edges -
+    #       `ml_set_interrupts_enabled`'s enable path (machine_routines_asm.s, after `cpsie i`) and
+    #       `thread_exception_return`'s `return_to_user` tail (cswitch.s) - so each site's range must
+    #       carry exactly ONE `bl` to it, and the six keys `xnu_live_edge_mlie_seq/_cpsr/_tick` +
+    #       `xnu_live_edge_texr_seq/_cpsr/_tick` must be in the image. Same switch as (4): the hooks
+    #       compile under `-DSTAGE90_XNU_RESIDENT`, which tools/assemble_arm_layer.sh now appends to
+    #       ASFLAGS (933's trap: without the rebuild the linked image keeps hook-free asm objects and
+    #       a run reports zero events that says nothing).
+    # The key literals are counted in the `.text` BINARY and not in the ELF file: this link has no
+    # `.rodata`, so `.text` is where the literals live, and the file's own `.debug_str`/`.strtab`
+    # copies are not in the image at all (514's measured rule, three copies vs one).
+    # NOT asserted here, on purpose: the payload's 29 s watchdog constant (it is one `mov r0, #29` in
+    # the PAYLOAD build - scripts/build_999.sh reads it at stage90_main.o's arm site) and the POOL's
+    # three slide literals (vm_unix.c is compiled by tools/build_xnu_arm_kernel.sh; the 996 checker
+    # under `--ladder` reads them there).
+    n9_nm1() { arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk -v s="$1" '$3 == s { print "0x" $1; f = 1 } END { exit(f ? 0 : 1) }'; }
+    # Next GLOBAL `T`, deliberately NOT the next `T/t` the door reader below uses: both edge sites sit
+    # BEHIND an internal label the assembler gave a local symbol (`astloop` at mlie+0xc,
+    # `return_to_user` at texr+0x28), so a first-T/t reader stops 4 bytes into the function and reports
+    # 0 calls on a CORRECT image (measured 2026-10-13 on the 998 elf: mlie range 12 bytes, texr 4).
+    # The next global is the function's true end here. No early `exit` in this awk (998's measured
+    # SIGPIPE/141 defect under pipefail): read the stream, keep the first match.
+    n9_nextT() { arm-none-eabi-nm -n "$OUT/xnu_arm_entry.elf" | awk -v s="${1#0x}" '
+        BEGIN { sv = strtonum("0x" s) }
+        { a = strtonum("0x" $1) }
+        a > sv && $2 == "T" { if (!d) { print "0x" $1; d = 1 } }'; }
+    arm-none-eabi-objcopy -O binary --only-section=.text "$OUT/xnu_arm_entry.elf" "$OUT/xnu_entry_text.bin"
+    n9_lit_n() { arm-none-eabi-strings "$OUT/xnu_entry_text.bin" | awk -v L="$1" '$0 == L { n++ } END { printf "%d", n + 0 }'; }
+    # (1) The cap compare, in entry_live_write's own instructions.
+    n9_cap=$(n9_nm1 entry_live_write) ||
+        layout_fail "entry_live_write is not in the linked image - the live channel's cap compare is what 999 moved (16384 -> 24576), and without the function there is nothing to read it out of"
+    n9_capx=$(n9_nextT "$n9_cap")
+    [[ -n $n9_capx ]] ||
+        layout_fail "no symbol follows entry_live_write in the image, so its instruction range cannot be read"
+    n9_cap_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$n9_cap" --stop-address="$n9_capx")
+    grep -qE 'cmp\s+r[0-9]+, #24576' <<<"$n9_cap_body" ||
+        layout_fail "entry_live_write ($n9_cap..$n9_capx) does not compare against 24576 - the cap is not 999's, so a run would stop at 998's 16384 wall MID-dyld again (measured xnu_live_capped=0x4000 with the tombstone displacing done_seq): ENTRY_LIVE_CAP in entry_stubs.c must be 24576u and this object rebuilt"
+    grep -qE 'cmp\s+r[0-9]+, #16384' <<<"$n9_cap_body" &&
+        layout_fail "entry_live_write ($n9_cap..$n9_capx) still compares against 16384 - a reverted ENTRY_LIVE_CAP or a stale xnu_arm_entry_stubs.o: 998 measured exactly what that cap does to the reading and it is the wall 999 exists to move"
+    # (2) The thinning, read out of the source this run compiles (no image signature: the guarded
+    # calls are still emitted).
+    n9_thin=$(grep -cE '^\s*ST_LIVE_RD\(' "$BOOT_DIR/entry_storage.c" || true)
+    n9_full=$(sed -n '/^static __attribute__((noinline, noclone)) void st_read_single_block/,/^}/p' "$BOOT_DIR/entry_storage.c" | grep -cE '(^|[^_])ST_LIVE\(' || true)
+    [[ "$n9_thin" == 70 && "$n9_full" == 8 ]] ||
+        layout_fail "the read-dump thinning in entry_storage.c reads $n9_thin thinned site(s) / $n9_full never-thinned locating cell(s) (want 70/8): 998's mid-dyld read died against the cap with 78 cells per read, and the six locating cells (plus the two 471-side records) must NOT thin - a record whose absence is evidence is not the one that may move"
+    # (3) The trio's writer, in entry_note_exec_returned's own branches.
+    n9_edn=$(n9_nm1 entry_note_exec_returned) ||
+        layout_fail "entry_note_exec_returned is not in the linked image - it is where the done trio is written, and HOW it writes them is the whole of 999's repair"
+    n9_ednx=$(n9_nextT "$n9_edn")
+    [[ -n $n9_ednx ]] ||
+        layout_fail "no symbol follows entry_note_exec_returned in the image, so its instruction range cannot be read"
+    n9_edn_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$n9_edn" --stop-address="$n9_ednx")
+    n9_kv=$(grep -c '<entry_write_kv>' <<<"$n9_edn_body" || true)
+    n9_lw=$(grep -c '<entry_live_write>' <<<"$n9_edn_body" || true)
+    [[ "$n9_kv" -ge 3 && "$n9_lw" -eq 0 ]] ||
+        layout_fail "entry_note_exec_returned ($n9_edn..$n9_ednx) branches to entry_write_kv $n9_kv time(s) and to entry_live_write $n9_lw time(s): the trio must go DIRECT (>=3 uncounted writes, 0 counted) - with a branch to the counted writer left in, the cap can eat the trio AGAIN and 998's misreading returns (an absent done_seq read as 'the load did not return' while the wrapper's own printf printed)"
+    for n9_key in xnu_live_exec_done_seq xnu_live_exec_done_who xnu_live_exec_done_current \
+                  xnu_live_exec_done_probe_seq xnu_live_exec_done_probe_sig xnu_live_exec_done_probe_size \
+                  xnu_live_exec_done_probe_records xnu_live_exec_done_probe_state; do
+        n9_n=$(n9_lit_n "$n9_key")
+        [[ "$n9_n" == 1 ]] ||
+            layout_fail "the .text binary carries $n9_n literal(s) equal to '$n9_key' (want exactly 1): the trio keeps the SAME three names the pre-registration greps for, and the five probe keys publish the console state read back at the done point from entry_write_kv's head - 0 means the source edit did not reach the image, and >1 means a copy moved somewhere it is not read from"
+    done
+    say "  xnu_entry_999: the cap compare is 24576 (the 16384 compare is gone), the read dump thins 70/8 in the source being built, entry_note_exec_returned writes the trio through entry_write_kv (3 branches, no entry_live_write branch), and the eight xnu_live_exec_done* literals are each in the image's .text once"
+    # (4)+(5) The RESIDENT-gated halves: the read door's watchdog feed and the two timer edges.
+    if [[ $RESIDENT -eq 1 ]]; then
+        n9_pet=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
+            awk '$3 == "entry_wdt_pet" { print $2; n++ } END { exit(n == 1 ? 0 : 1) }') ||
+            layout_fail "STAGE90_XNU_RESIDENT=1 but the linked image defines no entry_wdt_pet - the read-door feed and the idle-site pet both call it (IT IS ONLY THE PET THAT DIES HERE, NOT THE REST OF THE WATCHDOG POLICY: the payload's 29 s net is a different artifact)"
+        [[ "$n9_pet" == "T" ]] ||
+            layout_fail "entry_wdt_pet is defined as '$n9_pet' in the image and not as a global 'T': the storage object calls it across translation units, so a second caller that stayed static could not have linked - and if it did link, the pet is a different function than the one 909's clause reads"
+        n9_drd=$(n9_nm1 entry_storage_driver_read) ||
+            layout_fail "entry_storage_driver_read is not in the linked image - RESIDENT=1 feeds the watchdog at the read door and the door's body is where the one call is read out of"
+        n9_drdx=$(n9_nextT "$n9_drd")
+        [[ -n $n9_drdx ]] ||
+            layout_fail "no symbol follows entry_storage_driver_read in the image, so its instruction range cannot be read"
+        n9_drd_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$n9_drd" --stop-address="$n9_drdx")
+        n9_pets=$(grep -c 'bl.*<entry_wdt_pet>' <<<"$n9_drd_body" || true)
+        [[ "$n9_pets" == 1 ]] ||
+            layout_fail "entry_storage_driver_read ($n9_drd..$n9_drdx) branches to the watchdog pet $n9_pets time(s) (want exactly 1): 998 had ZERO xnu_live_wdt_* records because the handed-off kernel never idled - the feed must be the door's first statement in entry_storage.c under #if STAGE90_XNU_RESIDENT, and the door is compiled by THIS script, so 0 here means the switch never reached that compile line"
+        # **The weak call's NULL GUARD, asserted rather than assumed.** `entry_storage.c` holds a
+        # *weak* reference to the pet - its object is in pass 1's link and `entry_trace.o` joins only
+        # after the undefined set is computed, so a strong reference gets a stand-in stub from the
+        # generator and the final link dies with `multiple definition` (the first 999 build measured
+        # exactly that). The weak form is only safe because the source guards the call; if a future
+        # edit drops the guard while keeping `weak`, the link stays green and the reading becomes a
+        # jump to address 0. The shape is `cmp rN, #0` plus a conditional branch in the same window
+        # as the single `bl`, so it is a refusal here instead.
+        n9_petwin=$(grep -B8 'bl.*<entry_wdt_pet>' <<<"$n9_drd_body")
+        grep -qE 'cmp[[:space:]]+r[0-9]+, #0' <<<"$n9_petwin" &&
+            grep -qE '(^|[[:space:]])(b(eq|ne)|bx(eq|ne)|bl(eq|ne))([[:space:]]|$)' <<<"$n9_petwin" ||
+            layout_fail "the door's single pet call ($n9_drd..$n9_drdx) carries no null guard in the 8 instructions before it: $(printf '%s' "$n9_petwin" | tr '\n' '|') - entry_storage.c references entry_wdt_pet WEAKLY (this object is linked before pass 1; entry_trace.o joins after it, so a strong reference would be stubbed and collide), which is only safe while the call stays guarded against a NULL threshold. Expected shape: 'cmp rN, #0' plus a conditional branch in the 'bl <entry_wdt_pet>' window; a guard dropped while 'weak' is kept must stop THIS build, not the phone"
+        n9_etp=$(n9_nm1 entry_timer_edge_probe) ||
+            layout_fail "entry_timer_edge_probe is not in the linked image - pe_msm8974.c's helper (the timer discriminator's C half) did not link, so both staged assembly hooks are either absent or pointing at a name nothing defines"
+        for n9_sym in ml_set_interrupts_enabled thread_exception_return; do
+            n9_sa=$(n9_nm1 "$n9_sym") ||
+                layout_fail "$n9_sym is not in the linked image - it is one of the two sites the timer discriminator's edge probe rides (the \`cpsie i\` enable edge / the return_to_user tail), so without the function the records have no site to be read from"
+            n9_sx=$(n9_nextT "$n9_sa")
+            [[ -n $n9_sx ]] ||
+                layout_fail "no symbol follows $n9_sym in the image, so its instruction range cannot be read"
+            n9_s_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$n9_sa" --stop-address="$n9_sx")
+            n9_scalls=$(grep -c 'bl.*<entry_timer_edge_probe>' <<<"$n9_s_body" || true)
+            [[ "$n9_scalls" == 1 ]] ||
+                layout_fail "$n9_sym ($n9_sa..$n9_sx) calls entry_timer_edge_probe $n9_scalls time(s) (want exactly 1): the hook lives in the ASSEMBLY layer (machine_routines_asm.o / cswitch.o) and only compiles under -DSTAGE90_XNU_RESIDENT, which tools/assemble_arm_layer.sh now appends to ASFLAGS - 0 means the assembly layer was not rebuilt with the switch EXPORTED (933/990's trap: build_entry.sh only LINKS those objects), >1 means the body moved"
+        done
+        for n9_key in xnu_live_edge_mlie_seq xnu_live_edge_mlie_cpsr xnu_live_edge_mlie_tick \
+                      xnu_live_edge_texr_seq xnu_live_edge_texr_cpsr xnu_live_edge_texr_tick; do
+            n9_n=$(n9_lit_n "$n9_key")
+            [[ "$n9_n" == 1 ]] ||
+                layout_fail "the .text binary carries $n9_n literal(s) equal to '$n9_key' (want exactly 1): each site's records carry its own raw tick count and the CPSR of its edge, and the press-side pre-registration greps these six keys verbatim"
+        done
+        say "  xnu_entry_999: RESIDENT=1 - entry_wdt_pet is global, null-guarded and called exactly once from the read door's body, entry_timer_edge_probe is called exactly once from each of ml_set_interrupts_enabled and thread_exception_return, and all six xnu_live_edge_* keys are in the image's .text once"
     fi
     # **The AST-delivery function's name follows the tree.** 4570 delivers the user AST through
     # `ast_taken_user` (`osfmk/kern/ast.c:141`), the arm-return path calling it directly. D13 has **no

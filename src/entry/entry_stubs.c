@@ -2277,11 +2277,15 @@ uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_before_out,
  * exactly 500's: the *instrument* losing the end of the trace. At ~50 bytes/record 16384 is ~800 KB,
  * comfortably inside the 2 MB console minus the 128 KB OS-text block, and the runner's truncation
  * detector reads `xnu_live_cap` from the log so it scales with this number instead of a literal.
- * **16384 and not more, on purpose**: the console's own 2 MB bound is the hard ceiling, and a cap that
- * approached it would recreate this same defect at a higher number - the trace would be cut by the
- * silent `entry_write_kv` bound instead of by this named one, which is the harder failure to read.
+ * **999 raised it to 24576, on 998's measurement rather than a projection.** 998 hit 16384 MID-DYLD,
+ * its post-exec tail name-for-name identical to 997's, and the exec-done records themselves lost to the
+ * cap - the instrument, not the machine, ended that reading. 24576 records at ~50 B is ~1.2 MB, and with
+ * the 128 KB OS block the console still has ~0.65 MB of headroom inside its 2 MB: 904's rule stands - a
+ * cap that approached the buffer would hand the cut back to the silent `entry_write_kv` bound, the
+ * harder failure to read. What pays for the multi-hundred-read dyld era is the read dump's own thinning
+ * (999: a read past ordinal 256 publishes six cells, ~280 B, instead of ~78 cells, ~4.2 KB).
  */
-#define ENTRY_LIVE_CAP 16384u
+#define ENTRY_LIVE_CAP 24576u
 
 static void entry_live_init(void)
 {
@@ -2540,6 +2544,33 @@ static void entry_putc(volatile uint8_t *data, uint32_t *size_p, uint32_t max, c
  * reported as "undefined reference to `entry_write_kv`" from an object file both the tracer and the
  * stubs were in.
  */
+
+/*
+ * **999: THE EXEC-DONE PROBE'S OWN WORDS.** 998 could not say whether the three done records were
+ * lost to the cap or never written - `xnu_live_exec_done_seq` absent while the SAME wrapper's printf
+ * was in the log (capture :4100) - and the arithmetic then showed they ran past the cap. Two answers
+ * are staged here, both re-usable by the next instrument that needs them:
+ *
+ *   1. The trio is written DIRECTLY (uncounted) by `entry_note_exec_returned`, so at 999's cap the
+ *      records' ABSENCE is evidence again - exactly the property `xnu_live_capped` itself has and
+ *      for the same reason (`mi4-998-g1-confirmed-map-file-kr0`: any record whose absence is read
+ *      as evidence must be cap-exempt).
+ *   2. The five words below are the console state read back AT the done point - `_sig` must read
+ *      `RAM_CONSOLE_SIG`, `_size` must have advanced past the trio's own bytes, `_records`/`_state`
+ *      are the counted channel's bookkeeping at that instant - and they are READ THERE and published
+ *      LATER, by `entry_write_kv`'s head, on purpose: a read-back published through the same writer
+ *      it is checking would move with it (a check that measures the label, m168), while these words
+ *      are the state before the next write touches anything. `entry_live_write` reaches the same
+ *      head through its own `entry_write_kv` call, so ANY later record of either kind flushes them.
+ *      `_size` has the trio INCLUDED - it is read after the three writes.
+ */
+static uint32_t g_exec_probe_pending;   /* 1 from the done records to the next any-kind write */
+static uint32_t g_exec_probe_seq;
+static uint32_t g_exec_probe_sig;
+static uint32_t g_exec_probe_size;
+static uint32_t g_exec_probe_records;
+static uint32_t g_exec_probe_state;
+
 void entry_write_kv(const char *key, uint32_t value)
 {
     static const char hex[] = "0123456789abcdef";
@@ -2548,6 +2579,20 @@ void entry_write_kv(const char *key, uint32_t value)
     volatile uint8_t *data = (volatile uint8_t *)(uintptr_t)(RAM_CONSOLE_BASE + 12u);
     const uint32_t max = 0x00200000u - 12u;
     uint32_t size;
+
+    /* **999: THE EXEC-DONE PROBE'S PUBLISH SITE, AND IT IS HERE RATHER THAN AT A NAMED LATER
+     * STEP.** Nothing may be assumed to run after the exec returned - 998's whole post-exec tail is
+     * reads and user faults - so the probe is stashed at the done point and flushed by ANY later
+     * direct writer, which is this function's own head. The flag is cleared FIRST: the five calls
+     * below re-enter this function, and a probe that re-flushed itself would publish forever. */
+    if (g_exec_probe_pending != 0u) {
+        g_exec_probe_pending = 0u;
+        entry_write_kv("xnu_live_exec_done_probe_seq", g_exec_probe_seq);
+        entry_write_kv("xnu_live_exec_done_probe_sig", g_exec_probe_sig);
+        entry_write_kv("xnu_live_exec_done_probe_size", g_exec_probe_size);
+        entry_write_kv("xnu_live_exec_done_probe_records", g_exec_probe_records);
+        entry_write_kv("xnu_live_exec_done_probe_state", g_exec_probe_state);
+    }
 
     if (*sig != RAM_CONSOLE_SIG) {
         /* Nothing sane to append to; start a fresh buffer so the line is not lost. */
@@ -5011,9 +5056,24 @@ uint32_t entry_note_exec(uint32_t caller, uint32_t who, uint32_t proc)
 
 void entry_note_exec_returned(uint32_t seq, uint32_t who, uint32_t after_who)
 {
-    entry_live_write("xnu_live_exec_done_seq", seq);
-    entry_live_write("xnu_live_exec_done_who", who);
-    entry_live_write("xnu_live_exec_done_current", after_who);
+    /* **999: DIRECT AND UNCCOUNTED, AND THAT IS THE POINT.** 998's bookkeeping closed to the line
+     * (16,384 counted + direct = 16,426 `xnu_live_` lines; the tombstone at the cap IS the displaced
+     * `done_seq`) - the three done records ran at counter >= 16384 and the cap ate them, so their
+     * ABSENCE was read as "the load did not return" while the same wrapper's printf was in the log.
+     * A record whose absence is evidence must not be subject to the cap; these three are written the
+     * way the tombstone is, and - since the counter belongs to the cap - not counted. */
+    entry_write_kv("xnu_live_exec_done_seq", seq);
+    entry_write_kv("xnu_live_exec_done_who", who);
+    entry_write_kv("xnu_live_exec_done_current", after_who);
+
+    /* The probe: read the console back NOW (the trio's own bytes are the last thing in it) and let
+     * the next any-kind direct writer publish the five words - see the block above `entry_write_kv`. */
+    g_exec_probe_seq = seq;
+    g_exec_probe_sig = *(volatile uint32_t *)(uintptr_t)RAM_CONSOLE_BASE;
+    g_exec_probe_size = *(volatile uint32_t *)(uintptr_t)(RAM_CONSOLE_BASE + 8u);
+    g_exec_probe_records = g_live_records;
+    g_exec_probe_state = g_live_state;
+    g_exec_probe_pending = 1u;
 }
 
 /* ------------------------------ where the OS starts the process it just loaded (510) */

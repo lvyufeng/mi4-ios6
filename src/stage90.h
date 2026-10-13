@@ -4184,8 +4184,8 @@ struct stage90_xnu_macho_loader_result {
 /*
  * How long the payload may run before the hardware watchdog resets the SoC.
  *
- * 25s: unmistakably longer than any healthy run (~1s), far shorter than the manual power
- * cycle it replaces, and - the part hardware taught us - small enough to fit.
+ * 29s: unmistakably longer than any healthy run (~1s), far shorter than the manual power
+ * cycle it replaces, and - the part hardware taught us - the largest value that fits.
  *
  * The bark and bite registers are 20 bits wide. WDT_HZ is 32765, so the largest encodable
  * value is 0xfffff / 32765 = 32.0s, and with the vendor driver's 3s bark->bite gap the bark
@@ -4199,13 +4199,16 @@ struct stage90_xnu_macho_loader_result {
  * The watchdog still fired and the device still returned - the truncation only shortened the
  * gap - but the mismatch made readback_ok report "NOT confirmed armed", so a net that
  * demonstrably worked was reported as absent. Both halves are fixed: this value fits, and the
- * readback now distinguishes truncation from a dead register.
+ * readback now distinguishes truncation from a dead register. 999 raised 25s -> 29s (the
+ * arithmetic ceiling above), because the outer net must fire as late as the registers allow:
+ * the record channel it protects now runs to 24576 records, and a run past the cap needs the
+ * whole window.
  *
  * Note this is the *outer* bound: the software dead-man (60s) is deliberately longer, because
  * the hardware net exists precisely for the case where the software one cannot fire.
  */
 #if !defined(STAGE90_HW_WATCHDOG_TIMEOUT_S)
-#define STAGE90_HW_WATCHDOG_TIMEOUT_S 25u
+#define STAGE90_HW_WATCHDOG_TIMEOUT_S 29u
 #endif
 
 /* The vendor driver's own gap between bark and bite. */

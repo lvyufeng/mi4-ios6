@@ -202,6 +202,24 @@ extern uint32_t g_live_mmio_ttbr1;
 #define ST_LIVE(key, value) do { (void)(key); (void)(value); } while (0)
 #endif
 
+/*
+ * **999: THE READ DUMP'S WIDTH SWITCH, AND WHY IT IS NOT `ST_LIVE`.** A full read publishes ~78
+ * cells, ~4.2 KB in the record; once the run is past the frontier worth dumping, the six cells a
+ * reader LOCATES a read by (`rd_calls`, `rd_ordinal`, `rd_lba`, `rd_op`, `rd_complete`, `rd_err`)
+ * are the whole reading and the rest are the body's internals - so `st_read_single_block`
+ * publishes those six unconditionally and every other cell through this macro, which goes silent
+ * only when the read's own flag says the dump is thinned (~280 B). The flag is a CONST LOCAL of
+ * the read body, fixed for the whole read, so a dump can never interleave half a read's cells;
+ * the reason it can be a local at all is that the six cells it protects are published through
+ * `ST_LIVE` directly. Below the ordinal rung there is nothing to thin on and this is `ST_LIVE`
+ * exactly - a 42..52 build carries no fewer cells than it did.
+ */
+#if STAGE90_XNU_STORAGE_PROBE >= 53
+#define ST_LIVE_RD(key, value) do { if (rd_full_) ST_LIVE((key), (uint32_t)(value)); } while (0)
+#else
+#define ST_LIVE_RD(key, value) ST_LIVE(key, value)
+#endif
+
 extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_before_out,
                                    uint32_t *desc_out);
 
@@ -7281,6 +7299,16 @@ static __attribute__((noinline, noclone)) void st_read_single_block(uint32_t int
 #if STAGE90_XNU_STORAGE_PROBE >= 49
     uint32_t cap, over;
 #endif
+#if STAGE90_XNU_STORAGE_PROBE >= 53
+    /*
+     * **999: THE READ'S DUMP WIDTH, DECIDED ONCE FOR THE WHOLE READ.** `st_read_count` is the
+     * PRE-increment ordinal at this point (the bump is below, just before the command), so reads
+     * 1..256 publish every cell and 257.. only the six the reader locates a read by. `const`
+     * because a flag that could change mid-read would let a dump interleave two widths - the
+     * ordinal this is decided on IS the ordinal the read publishes. See `ST_LIVE_RD`.
+     */
+    const uint32_t rd_full_ = (st_read_count < 256u);
+#endif
 
     ST_LIVE("xnu_live_storage_rd_calls", 1u);
 
@@ -7305,10 +7333,10 @@ static __attribute__((noinline, noclone)) void st_read_single_block(uint32_t int
      */
     cap = st_ext_sec_count;
     over = (cap > ((2u * 1024u * 1024u * 1024u) / 512u)) ? 1u : 0u;
-    ST_LIVE("xnu_live_storage_rd_cap", cap);
-    ST_LIVE("xnu_live_storage_rd_cap_over", over);
-    ST_LIVE("xnu_live_storage_rd_shift", over ? 0u : 512u);
-    ST_LIVE("xnu_live_storage_rd_blockaddr", over);
+    ST_LIVE_RD("xnu_live_storage_rd_cap", cap);
+    ST_LIVE_RD("xnu_live_storage_rd_cap_over", over);
+    ST_LIVE_RD("xnu_live_storage_rd_shift", over ? 0u : 512u);
+    ST_LIVE_RD("xnu_live_storage_rd_blockaddr", over);
     /*
      **AND A SECOND, INDEPENDENT PRODUCER OF THE SAME CAPACITY - THE CSD THIS LADDER ALREADY CARRIED.**
      * `mmc.c:158-171` decodes CSD v1.0's `c_size` (bits 73:62, TWELVE bits) and `c_size_mult` (bits
@@ -7327,47 +7355,47 @@ static __attribute__((noinline, noclone)) void st_read_single_block(uint32_t int
         uint32_t cz = ((st_csd_words[2] & 0x3FFu) << 2) | ((st_csd_words[1] >> 30) & 0x3u);
         uint32_t cm = (st_csd_words[1] >> 15) & 0x7u;
         uint32_t csd_cap = (cz + 1u) << (cm + 2u);
-        ST_LIVE("xnu_live_storage_rd_cap_csd_valid", 1u);
-        ST_LIVE("xnu_live_storage_rd_cap_csd", csd_cap);
-        ST_LIVE("xnu_live_storage_rd_cap_csd_over",
+        ST_LIVE_RD("xnu_live_storage_rd_cap_csd_valid", 1u);
+        ST_LIVE_RD("xnu_live_storage_rd_cap_csd", csd_cap);
+        ST_LIVE_RD("xnu_live_storage_rd_cap_csd_over",
                 (csd_cap > ((2u * 1024u * 1024u * 1024u) / 512u)) ? 1u : 0u);
-        ST_LIVE("xnu_live_storage_rd_cap_agree",
+        ST_LIVE_RD("xnu_live_storage_rd_cap_agree",
                 (((csd_cap > ((2u * 1024u * 1024u * 1024u) / 512u)) ? 1u : 0u) == over) ? 1u : 0u);
     } else {
-        ST_LIVE("xnu_live_storage_rd_cap_csd_valid", 0u);
+        ST_LIVE_RD("xnu_live_storage_rd_cap_csd_valid", 0u);
     }
 #endif
 
     /* --- the precondition: the card's own R1, re-read from RESPONSE + 0, same gate rung 38 uses -- */
     pre = st_read32(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE);
-    ST_LIVE("xnu_live_storage_rd_gate_resp", pre);
-    ST_LIVE("xnu_live_storage_rd_gate_state", (pre & 0x00001E00u) >> 9);
+    ST_LIVE_RD("xnu_live_storage_rd_gate_resp", pre);
+    ST_LIVE_RD("xnu_live_storage_rd_gate_state", (pre & 0x00001E00u) >> 9);
     if (((pre & 0x00001E00u) >> 9) != 4u) {
-        ST_LIVE("xnu_live_storage_rd_gated", 1u);
-        ST_LIVE("xnu_live_storage_rd_done", 0u);
+        ST_LIVE_RD("xnu_live_storage_rd_gated", 1u);
+        ST_LIVE_RD("xnu_live_storage_rd_done", 0u);
         return;
     }
-    ST_LIVE("xnu_live_storage_rd_gated", 0u);
+    ST_LIVE_RD("xnu_live_storage_rd_gated", 0u);
 
     /* --- HOST_CONTROL read, as rung 38 does, so the surface matches ----------------------------- */
-    ST_LIVE("xnu_live_storage_rd_host_control_pre",
+    ST_LIVE_RD("xnu_live_storage_rd_host_control_pre",
             (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_HOST_CONTROL));
 
     /* --- the window opens: the command-completion enable PLUS the PIO pair ----------------------- */
     word = int_enable | (uint32_t)ST_SDHCI_INT_PIO_IRQS | (uint32_t)ST_SDHCI_INT_ENABLE_CMD;
     word &= ~((uint32_t)ST_SDHCI_INT_DMA_END | (uint32_t)ST_SDHCI_INT_ADMA_ERROR);
-    ST_LIVE("xnu_live_storage_rd_ena_wrote", word);
+    ST_LIVE_RD("xnu_live_storage_rd_ena_wrote", word);
     st_write32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE, word);
-    ST_LIVE("xnu_live_storage_rd_ena_held",
+    ST_LIVE_RD("xnu_live_storage_rd_ena_held",
             st_read32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE));
-    ST_LIVE("xnu_live_storage_rd_sig_enable",
+    ST_LIVE_RD("xnu_live_storage_rd_sig_enable",
             st_read32(ST_HC_MEM_BASE + ST_SDHCI_SIGNAL_ENABLE));
 
     /* --- TIMEOUT_CONTROL, recomputed from the CSD this ladder carried --------------------------- */
     tacc = 0u;
     clks = 0u;
     count_max = 0xFu;   /* SDHCI_QUIRK2_USE_RESERVED_MAX_TIMEOUT, sdhci-msm.c:2904 */
-    ST_LIVE("xnu_live_storage_rd_csd_carried", st_csd_words_valid);
+    ST_LIVE_RD("xnu_live_storage_rd_csd_carried", st_csd_words_valid);
     if (st_csd_words_valid != 0u) {
         m = (st_csd_words[0] >> 16) & 0xFu;
         e = (st_csd_words[0] >> 8) & 0x7u;
@@ -7386,24 +7414,24 @@ static __attribute__((noinline, noclone)) void st_read_single_block(uint32_t int
     }
     if (count >= 0xFu)
         count = count_max;
-    ST_LIVE("xnu_live_storage_rd_tout_count", count);
+    ST_LIVE_RD("xnu_live_storage_rd_tout_count", count);
     was = (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_TIMEOUT_CONTROL);
-    ST_LIVE("xnu_live_storage_rd_tout_was", was);
+    ST_LIVE_RD("xnu_live_storage_rd_tout_was", was);
     st_write8(ST_HC_MEM_BASE + ST_SDHCI_TIMEOUT_CONTROL, (uint8_t)count);
-    ST_LIVE("xnu_live_storage_rd_tout_held",
+    ST_LIVE_RD("xnu_live_storage_rd_tout_held",
             (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_TIMEOUT_CONTROL));
 
     /* --- BLOCK_SIZE, BLOCK_COUNT, TRANSFER_MODE: sdhci.c:974-976 then :1121 ----------------------- */
-    ST_LIVE("xnu_live_storage_rd_blksz", (uint32_t)ST_SDHCI_BLOCK_SIZE_512);
+    ST_LIVE_RD("xnu_live_storage_rd_blksz", (uint32_t)ST_SDHCI_BLOCK_SIZE_512);
     st_write16(ST_HC_MEM_BASE + ST_SDHCI_BLOCK_SIZE, (uint16_t)ST_SDHCI_BLOCK_SIZE_512);
-    ST_LIVE("xnu_live_storage_rd_blksz_held",
+    ST_LIVE_RD("xnu_live_storage_rd_blksz_held",
             (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_BLOCK_SIZE));
     st_write16(ST_HC_MEM_BASE + ST_SDHCI_BLOCK_COUNT, 1u);
-    ST_LIVE("xnu_live_storage_rd_blkcnt_held",
+    ST_LIVE_RD("xnu_live_storage_rd_blkcnt_held",
             (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_BLOCK_COUNT));
-    ST_LIVE("xnu_live_storage_rd_trns", (uint32_t)ST_SDHCI_TRNS_READ_1BLK);
+    ST_LIVE_RD("xnu_live_storage_rd_trns", (uint32_t)ST_SDHCI_TRNS_READ_1BLK);
     st_write16(ST_HC_MEM_BASE + ST_SDHCI_TRANSFER_MODE, (uint16_t)ST_SDHCI_TRNS_READ_1BLK);
-    ST_LIVE("xnu_live_storage_rd_trns_held",
+    ST_LIVE_RD("xnu_live_storage_rd_trns_held",
             (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_TRANSFER_MODE));
 
     /* --- the command: the three argument words, then CMD17 --------------------------------------- */
@@ -7489,16 +7517,16 @@ static __attribute__((noinline, noclone)) void st_read_single_block(uint32_t int
 #endif
     ST_LIVE("xnu_live_storage_rd_lba", st_read_lba);
     ST_LIVE("xnu_live_storage_rd_op", ST_CMD_OP_READ_SINGLE_BLOCK);
-    ST_LIVE("xnu_live_storage_rd_arg", st_read_lba);
-    ST_LIVE("xnu_live_storage_rd_arg_lba_agree",
+    ST_LIVE_RD("xnu_live_storage_rd_arg", st_read_lba);
+    ST_LIVE_RD("xnu_live_storage_rd_arg_lba_agree",
             (st_read_lba == ST_MMC_READ_LBA) ? 1u : 0u);
 #else
     ST_LIVE("xnu_live_storage_rd_lba", ST_MMC_READ_LBA);
     ST_LIVE("xnu_live_storage_rd_op", ST_CMD_OP_READ_SINGLE_BLOCK);
-    ST_LIVE("xnu_live_storage_rd_arg", ST_MMC_READ_BYTEADDR);
+    ST_LIVE_RD("xnu_live_storage_rd_arg", ST_MMC_READ_BYTEADDR);
 #endif
-    ST_LIVE("xnu_live_storage_rd_flags", ST_MMC_RSP_R1_ADTC);
-    ST_LIVE("xnu_live_storage_rd_flags_mapped",
+    ST_LIVE_RD("xnu_live_storage_rd_flags", ST_MMC_RSP_R1_ADTC);
+    ST_LIVE_RD("xnu_live_storage_rd_flags_mapped",
             (uint32_t)ST_SDHCI_CMD_FLAGS(ST_MMC_RSP_R1_ADTC));
     /*
      * **BOTH WORDS, AND THE FIVE-BIT ONE IS NOT REDUNDANT.** `_rd_word_bits` is what
@@ -7510,9 +7538,9 @@ static __attribute__((noinline, noclone)) void st_read_single_block(uint32_t int
      * effect on THIS opcode has `_rd_word_bits` beside it. The three numbers on one line of the log
      * - 0x111A, 0x113A, `_rd_word_read` - are the whole of the command word's derivation.
      */
-    ST_LIVE("xnu_live_storage_rd_word_bits",
+    ST_LIVE_RD("xnu_live_storage_rd_word_bits",
             (uint32_t)ST_SDHCI_CMD_WORD(ST_CMD_OP_READ_SINGLE_BLOCK, ST_MMC_RSP_R1_ADTC));
-    ST_LIVE("xnu_live_storage_rd_word",
+    ST_LIVE_RD("xnu_live_storage_rd_word",
             (uint32_t)ST_SDHCI_CMD_WORD_DATA(ST_CMD_OP_READ_SINGLE_BLOCK, ST_MMC_RSP_R1_ADTC));
 #if STAGE90_XNU_STORAGE_PROBE >= 53
     /*
@@ -7531,18 +7559,18 @@ static __attribute__((noinline, noclone)) void st_read_single_block(uint32_t int
 #else
     st_send_command(ST_CMD_OP_READ_SINGLE_BLOCK, ST_MMC_READ_BYTEADDR, ST_MMC_RSP_R1_ADTC, &c17);
 #endif
-    ST_LIVE("xnu_live_storage_rd_sent", c17.sent);
-    ST_LIVE("xnu_live_storage_rd_word_read", c17.word_read);
-    ST_LIVE("xnu_live_storage_rd_arg_wrote", c17.arg_wrote);
+    ST_LIVE_RD("xnu_live_storage_rd_sent", c17.sent);
+    ST_LIVE_RD("xnu_live_storage_rd_word_read", c17.word_read);
+    ST_LIVE_RD("xnu_live_storage_rd_arg_wrote", c17.arg_wrote);
     ST_LIVE("xnu_live_storage_rd_complete", c17.complete);
     ST_LIVE("xnu_live_storage_rd_err", c17.err);
-    ST_LIVE("xnu_live_storage_rd_status_after", c17.status_after);
-    ST_LIVE("xnu_live_storage_rd_timeout", c17.timed_out);
-    ST_LIVE("xnu_live_storage_rd_inhibit_timeout", c17.inhibit_timeout);
-    ST_LIVE("xnu_live_storage_rd_resp", c17.resp);
-    ST_LIVE("xnu_live_storage_rd_state", (c17.resp & 0x00001E00u) >> 9);
-    ST_LIVE("xnu_live_storage_rd_ready", (c17.resp >> 8) & 0x1u);
-    ST_LIVE("xnu_live_storage_rd_illegal", (c17.resp >> 22) & 0x1u);
+    ST_LIVE_RD("xnu_live_storage_rd_status_after", c17.status_after);
+    ST_LIVE_RD("xnu_live_storage_rd_timeout", c17.timed_out);
+    ST_LIVE_RD("xnu_live_storage_rd_inhibit_timeout", c17.inhibit_timeout);
+    ST_LIVE_RD("xnu_live_storage_rd_resp", c17.resp);
+    ST_LIVE_RD("xnu_live_storage_rd_state", (c17.resp & 0x00001E00u) >> 9);
+    ST_LIVE_RD("xnu_live_storage_rd_ready", (c17.resp >> 8) & 0x1u);
+    ST_LIVE_RD("xnu_live_storage_rd_illegal", (c17.resp >> 22) & 0x1u);
     /*
      * **RUNG 44's FOUR CELLS: THE MASK, AND THE BIT IT NOW COVERS.** The rung-43 press measured this
      * command being refused by a `DATA_INHIBIT` bit the old bit-0-only guard never tested. These are
@@ -7552,10 +7580,10 @@ static __attribute__((noinline, noclone)) void st_read_single_block(uint32_t int
      * cannot wish away - and `_rd_inhibit_polls`/`_rd_inhibit_before` say whether the wait had to
      * happen at all. **A `0x1` mask here is the rung-43 image wearing this arm's name.**
      */
-    ST_LIVE("xnu_live_storage_rd_inhibit_mask", c17.inhibit_mask);
-    ST_LIVE("xnu_live_storage_rd_inhibit_dat", c17.inhibit_dat_before);
-    ST_LIVE("xnu_live_storage_rd_inhibit_before", c17.inhibit_before);
-    ST_LIVE("xnu_live_storage_rd_inhibit_polls", c17.inhibit_polls);
+    ST_LIVE_RD("xnu_live_storage_rd_inhibit_mask", c17.inhibit_mask);
+    ST_LIVE_RD("xnu_live_storage_rd_inhibit_dat", c17.inhibit_dat_before);
+    ST_LIVE_RD("xnu_live_storage_rd_inhibit_before", c17.inhibit_before);
+    ST_LIVE_RD("xnu_live_storage_rd_inhibit_polls", c17.inhibit_polls);
 
     /* --- the PIO read: 512 bytes = 128 words, each gated on DATA_AVAILABLE, bounded -------------- */
     gated = 0u;
@@ -7581,37 +7609,37 @@ static __attribute__((noinline, noclone)) void st_read_single_block(uint32_t int
         gated++;
     }
     waited = 0u;   /* kept for symmetry with rung 40's cells; the accumulated cost is rd_data_ticks */
-    ST_LIVE("xnu_live_storage_rd_data_waited", waited);
-    ST_LIVE("xnu_live_storage_rd_data_wait_timeout", data_timeout);
-    ST_LIVE("xnu_live_storage_rd_words_gated", gated);
-    ST_LIVE("xnu_live_storage_rd_data_ticks",
+    ST_LIVE_RD("xnu_live_storage_rd_data_waited", waited);
+    ST_LIVE_RD("xnu_live_storage_rd_data_wait_timeout", data_timeout);
+    ST_LIVE_RD("xnu_live_storage_rd_words_gated", gated);
+    ST_LIVE_RD("xnu_live_storage_rd_data_ticks",
             (uint32_t)stage90_cntvct_read() - t0_data);
 
 
     /* --- the transfer's own end ------------------------------------------------------------------ */
     word = st_read32(ST_HC_MEM_BASE + ST_SDHCI_INT_STATUS);
-    ST_LIVE("xnu_live_storage_rd_int_status_end", word);
-    ST_LIVE("xnu_live_storage_rd_int_data_avail",
+    ST_LIVE_RD("xnu_live_storage_rd_int_status_end", word);
+    ST_LIVE_RD("xnu_live_storage_rd_int_data_avail",
             (word & (uint32_t)ST_SDHCI_INT_DATA_AVAIL) ? 1u : 0u);
-    ST_LIVE("xnu_live_storage_rd_int_data_err",
+    ST_LIVE_RD("xnu_live_storage_rd_int_data_err",
             word & ((uint32_t)ST_SDHCI_INT_DATA_TIMEOUT | (uint32_t)ST_SDHCI_INT_DATA_CRC |
                     (uint32_t)ST_SDHCI_INT_DATA_END_BIT));
 
     #if STAGE90_XNU_STORAGE_PROBE >= 60
-    ST_LIVE("xnu_live_storage_rd_driver", st_driver_get);   /* 887: which door this read came through */
+    ST_LIVE_RD("xnu_live_storage_rd_driver", st_driver_get);   /* 887: which door this read came through */
 #endif
     /* --- THE SECTOR ITSELF: the first four words, and the GPT magic they either are or are not ---- */
-    ST_LIVE("xnu_live_storage_rd_w0", st_read_block[0]);
-    ST_LIVE("xnu_live_storage_rd_w1", st_read_block[1]);
-    ST_LIVE("xnu_live_storage_rd_w2", st_read_block[2]);
-    ST_LIVE("xnu_live_storage_rd_w3", st_read_block[3]);
+    ST_LIVE_RD("xnu_live_storage_rd_w0", st_read_block[0]);
+    ST_LIVE_RD("xnu_live_storage_rd_w1", st_read_block[1]);
+    ST_LIVE_RD("xnu_live_storage_rd_w2", st_read_block[2]);
+    ST_LIVE_RD("xnu_live_storage_rd_w3", st_read_block[3]);
     /*
      * **`_rd_gpt` IS THE DERIVED CELL, and it is the medium's own signature read back.** GPT's LBA 1
      * begins with the 8-byte signature `EFI PART` = `0x45 0x46 0x49 0x20 0x50 0x41 0x52 0x54`, so
      * little-endian the first word is `0x20494645` and the second is `0x54524150`. The comparison is
      * written as the two words rather than as a byte loop so the clause can assert both immediates.
      */
-    ST_LIVE("xnu_live_storage_rd_gpt",
+    ST_LIVE_RD("xnu_live_storage_rd_gpt",
             ((st_read_block[0] == 0x20494645u) && (st_read_block[1] == 0x54524150u)) ? 1u : 0u);
     /*
      * **RUNG 47's DERIVED CELL: THE MBR SIGNATURE, FROM THE SECTOR'S OWN LAST WORD.** An MBR ends with
@@ -7624,24 +7652,24 @@ static __attribute__((noinline, noclone)) void st_read_single_block(uint32_t int
      * from the same 512 bytes** - a medium cannot be called MBR or GPT except by one of these two
      * comparisons, and publishing both means the log says which.
      */
-    ST_LIVE("xnu_live_storage_rd_sig",
+    ST_LIVE_RD("xnu_live_storage_rd_sig",
             (st_read_block[ST_EXT_CSD_WORDS - 1u] >> 16) & 0xFFFFu);
-    ST_LIVE("xnu_live_storage_rd_mbr",
+    ST_LIVE_RD("xnu_live_storage_rd_mbr",
             (((st_read_block[ST_EXT_CSD_WORDS - 1u] >> 16) & 0xFFFFu) == 0xAA55u) ? 1u : 0u);
-    ST_LIVE("xnu_live_storage_rd_w127", st_read_block[ST_EXT_CSD_WORDS - 1u]);
+    ST_LIVE_RD("xnu_live_storage_rd_w127", st_read_block[ST_EXT_CSD_WORDS - 1u]);
 
     /* --- the window's ONE exit, the timeout restored, the state the block is left in ------------- */
-    ST_LIVE("xnu_live_storage_rd_wrote_back", int_enable);
+    ST_LIVE_RD("xnu_live_storage_rd_wrote_back", int_enable);
     st_write32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE, int_enable);
-    ST_LIVE("xnu_live_storage_rd_ps_end",
+    ST_LIVE_RD("xnu_live_storage_rd_ps_end",
             st_read32(ST_HC_MEM_BASE + ST_SDHCI_PRESENT_STATE));
-    ST_LIVE("xnu_live_storage_rd_tout_restore", was);
+    ST_LIVE_RD("xnu_live_storage_rd_tout_restore", was);
     st_write8(ST_HC_MEM_BASE + ST_SDHCI_TIMEOUT_CONTROL, (uint8_t)was);
-    ST_LIVE("xnu_live_storage_rd_tout_readback",
+    ST_LIVE_RD("xnu_live_storage_rd_tout_readback",
             (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_TIMEOUT_CONTROL));
-    ST_LIVE("xnu_live_storage_rd_readback",
+    ST_LIVE_RD("xnu_live_storage_rd_readback",
             st_read32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE));
-    ST_LIVE("xnu_live_storage_rd_done", 1u);
+    ST_LIVE_RD("xnu_live_storage_rd_done", 1u);
 }
 #endif /* STAGE90_XNU_STORAGE_PROBE >= 42 - one body, one caller, the ladder's first read of the medium:
         *   `_rd_complete = 1` with `_rd_err = 0` and `_rd_gpt = 1` is **THE MEDIUM ANSWERED AND LBA 1
@@ -7657,9 +7685,37 @@ static __attribute__((noinline, noclone)) void st_read_single_block(uint32_t int
 /* 887 (rung 61): the ladder's read, at an LBA a caller supplies - the OS's own strategy's door. */
 #if STAGE90_XNU_STORAGE_PROBE >= 60
 static void st_data_reset(void);   /* defined below, with the read-side rungs */
+#if STAGE90_XNU_RESIDENT
+/* **999: THE PET'S SECOND SITE, AT THE DOOR THE HANDED-OFF KERNEL ACTUALLY USES.** 998's zero
+ * `xnu_live_wdt_*` records proved the idle-exit site never ran once the kernel had the machine
+ * (0 wdt/usb/pcx: the kernel never idled), so the SoC net was armed and never fed - and the reads
+ * are the one ladder that provably keeps running to the end of every capture (998's last records
+ * are a read completing). `entry_wdt_pet` is `entry_trace.c`'s own function, made non-static for
+ * exactly this second caller; the argument is the monotone read count and never a constant (a
+ * constant - 0 included - would make the powers-of-two publish test true on every call and flood
+ * the channel).
+ *
+ * **and the reference is WEAK, because this object is in pass 1's link and `entry_trace.o` is
+ * not.** `build_entry.sh` computes the image's stub table from the names its pre-pass-1 objects
+ * leave undefined (`LINK_OBJS` includes this object at :2308; the pass-1 link is at :29126, and
+ * `xnu_arm_entry_trace.o` joins the link only at :29338). A STRONG reference here made pass 1
+ * report `entry_wdt_pet` undefined, the stub generator emitted an ordinary stand-in definition for
+ * it - the documented family trap at `build_entry.sh:29101-29112` - and the final link died with
+ * `multiple definition of 'entry_wdt_pet'` (realstubs.o vs trace.o; the first build of this rung
+ * measured exactly that). A weak reference contributes no name to pass 1's undefined set and
+ * resolves to trace.o's strong definition in the final link. The null guard at the call site is
+ * what makes the weak form safe, and it cannot be taken in an accepted image: `build_entry.sh`
+ * refuses RESIDENT=1 with ENTRY_TRACE=0 (:1343), so trace.o is always in the link, and the 999
+ * clause refuses a linked image that defines no entry_wdt_pet. */
+extern void entry_wdt_pet(uint32_t calls) __attribute__((weak));
+#endif
 const uint32_t *
 entry_storage_driver_read(uint32_t lba)
 {
+#if STAGE90_XNU_RESIDENT
+    if (entry_wdt_pet != 0)             /* WEAK: trace.o links after pass 1 - see the comment above */
+        entry_wdt_pet(st_read_count);   /* 999: the resident pet, fed from the read door */
+#endif
     ST_LIVE("xnu_live_storage_drv_calls", 1u);
     ST_LIVE("xnu_live_storage_drv_lba", lba);
     st_driver_lba = lba;

@@ -2162,7 +2162,7 @@ static inline uint32_t wdt_count(void)
     return (wdt_read(STAGE90_WDT_REG_STS) >> 1) & 0xfffffu;
 }
 
-__attribute__((noinline)) static void entry_wdt_pet(uint32_t calls)
+__attribute__((noinline)) void entry_wdt_pet(uint32_t calls)
 {
     uint32_t count;
     /* **Zero-initialised, and that is the arm-1 lesson applied.** These are written only on the
@@ -2419,7 +2419,7 @@ extern void entry_slot_tb_note(struct entry_slot_tb_keys *k, uint32_t before, ui
  * (below); on D13, which ships no `cpu_idle`, it is called from `__wrap_machine_idle`
  * itself. A `RESIDENT=1` D13 image that carried no pet would arm the SoC watchdog and
  * never feed it (see the pet's own block). */
-__attribute__((noinline)) static void entry_wdt_pet(uint32_t calls);
+__attribute__((noinline)) void entry_wdt_pet(uint32_t calls);
 #endif
 
 /* **937: the 513-535 idle block is 4570-only and is compiled out on D13.** It begins here and runs to

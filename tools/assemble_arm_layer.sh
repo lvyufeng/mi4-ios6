@@ -126,6 +126,15 @@ case "$IOS7_TRAPS" in
     0|1) ;;
     *) echo "STAGE90_XNU_IOS7_TRAPS must be 0 or 1, not [$IOS7_TRAPS]" >&2; exit 1 ;;
 esac
+# 999 (amendment #2): the timer-discriminator edge hooks (`tools/stage_d13_timer_edge.sh` ->
+# machine_routines_asm.s's `enable_interrupts` and cswitch.s's `return_to_user`). NO new switch: this
+# reuses RESIDENT, the 999 rung's own switch (the resident pet + WDT feed ride it too). Default 0: the
+# tree's original text is compiled byte for byte.
+RESIDENT=${STAGE90_XNU_RESIDENT:-0}
+case "$RESIDENT" in
+    0|1) ;;
+    *) echo "STAGE90_XNU_RESIDENT must be 0 or 1, not [$RESIDENT]" >&2; exit 1 ;;
+esac
 PATCH_IDLE_STACK=$TOOLS_DIR/patch_idle_stack.py
 idle_patched=0
 ASSYM=$XNU_ASSYM_OUT/$CONFIG
@@ -208,6 +217,10 @@ ASFLAGS+=("-DSTAGE90_XNU_SP_ALIGN=$SP_ALIGN")
 # 994: the traps_lo.s -3 timebase wiring (`tools/patch_d13_ios7_traps.py`) - same append-after-assignment
 # rule as the two lines above.
 ASFLAGS+=("-DSTAGE90_XNU_IOS7_TRAPS=$IOS7_TRAPS")
+# 999: the timer-discriminator edge hooks (`tools/patch_d13_timer_edge.py`) - same append-after-assignment
+# rule as the three lines above. Without this line the `#if STAGE90_XNU_RESIDENT` in the two .s files
+# reads the macro as undefined (= 0) and the hooks silently compile out even when staged.
+ASFLAGS+=("-DSTAGE90_XNU_RESIDENT=$RESIDENT")
 INCLUDES=(
     -I"$ASSYM" -I"$REPO_ROOT/src/entry"
     -I"$OPTION_HEADERS" -I"$DEVICE_HEADERS"

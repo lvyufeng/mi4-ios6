@@ -145,6 +145,15 @@ extern void rtclock_intr(arm_saved_state_t *regs);
  * different lines rather than one silence ([[mi4-silence-is-a-reading-only-if-success-is-silent]]). */
 extern void entry_live_write(const char *key, uint32_t value);
 
+/* **999 amendment #2: the timer discriminator's writers.** `entry_write_kv` is the DIRECT (uncounted)
+ * half of the same sink - the cap cannot eat these records, and that is the requirement, not a
+ * convenience: an edge record's ABSENCE is the evidence, and a record whose absence is evidence must
+ * be cap-exempt ([[mi4-998-g1-confirmed-map-file-kr0]]'s law, which the 998 done-trio paid for).
+ * `entry_live_ready` is the readiness guard `entry_wdt_pet` uses (`src/entry/entry_trace.c`), reused
+ * by value so an edge taken before the live channel is up publishes nothing. */
+extern void entry_write_kv(const char *key, uint32_t value);
+extern uint32_t entry_live_ready(void);
+
 static volatile unsigned long long msm8974_cntfrq = MSM8974_CNTFRQ_HZ;
 
 /* ---- the D13 clock tick (985) ---- */
@@ -175,6 +184,12 @@ static unsigned int g_msm8974_tick_ticks;
  * armed but never fired" (this stays 0) and "the tick is running" (it climbs) are different lines -
  * the reading 984 could not make, because the line it would have come from did not exist. */
 static unsigned int g_msm8974_tick_count;
+
+/* **999's timer discriminator: the count the deliveries FREEZE at.** Both 997 and 998 publish the
+ * powers of two up to `xnu_live_tick_irq=0x40` (captures :7344 / :5463) and `0x80` never appears -
+ * the last DELIVERED tick is 64 - so an edge at a count below it belongs to the healthy pre-freeze
+ * clock and must not burn one of the four per-site slots `entry_timer_edge_probe` publishes in. */
+#define MSM8974_TICK_FROZEN_AT 64u
 
 /* Arm the countdown: `CNTV_TVAL` = one period, `CNTV_CTL` = ENABLE|unmask. The order is the entry
  * image's own (`src/entry/entry_timebase.c:293,370`): program the value, then unmask - so the shortest
@@ -377,6 +392,61 @@ msm8974_handle_interrupt(void *context)
 	 * still the correct minimum: a line left un-EOI'd would re-enter forever. */
 	*gicc_eoir = id;
 	msm8974_barrier();
+}
+
+/* ---- the 999 timer discriminator: the two edges that could end the freeze ---- */
+
+/* WHY THIS EXISTS, AND WHY ASSEMBLY HAS TO CALL IT. 998's timer chain stops delivering after tick 64
+ * with a measured A fact (ISENABLER0 bit 20 CLEAR with no writer in a 4.78-7.30 s window) against a
+ * competing B model (the kernel entered with I=1 and never unmasked). The discriminator is
+ * presence-of-edge, so the hooks sit exactly AT the two candidate edges, read by value:
+ *
+ *   site 1 - `osfmk/arm/machine_routines_asm.s`'s `ml_set_interrupts_enabled`, the instruction after
+ *            its `cpsie i` (:151-153). The lead's citation pointed at a C wrapper at
+ *            `machine_routines.c:143-146` - there is none; that region is `ml_init_interrupt` CALLING
+ *            this function, and the whole body is assembly, so the hook is a `bl` in the asm.
+ *   site 2 - `osfmk/arm/cswitch.s`'s `thread_exception_return` -> `return_to_user` (:144, :167-170).
+ *            The citation's `status.c:112-123` is `sanitise_cpsr`, a different function (it builds the
+ *            user CPSR at thread-bootstrap time); `thread_exception_return` exists only as assembly.
+ *            It is also the shared tail of `thread_syscall_return` (:137), so a record here is any
+ *            return-to-user, whichever vector put the thread in the kernel.
+ *
+ * Each call publishes three direct, cap-exempt records, at most four per site - the per-site ordinal
+ * is incremented BEFORE anything is written, so the re-entry site 1 invites by design (it runs with
+ * interrupts ON, that is the edge) cannot publish the same slot twice. `_cpsr` is the CPSR read back
+ * after the edge: for site 1 the asm's own `mrs` after the `cpsie`; for site 2 the word the edge is
+ * about to install into `spsr_cxsf` (`[uss + 0x40]`), because the post-edge CPSR lives in user mode
+ * and no kernel hook can read it. `_tick` is the raw delivery count above, so the reading compares
+ * counts - never wall-clock. */
+void
+entry_timer_edge_probe(uint32_t site, uint32_t cpsr)
+{
+    static uint32_t mlie_published;
+    static uint32_t texr_published;
+    uint32_t raw = (uint32_t)g_msm8974_tick_count;
+
+    /* The readiness pattern `entry_wdt_pet` uses, by value: nothing is published before the live
+     * channel is up (state 1), and edges taken during the healthy clock publish nothing either. */
+    if (entry_live_ready() == 0u)
+        return;
+    if (raw < MSM8974_TICK_FROZEN_AT)
+        return;
+
+    if (site == 1u) {
+        if (mlie_published >= 4u)
+            return;
+        mlie_published++;
+        entry_write_kv("xnu_live_edge_mlie_seq", mlie_published);
+        entry_write_kv("xnu_live_edge_mlie_cpsr", cpsr);
+        entry_write_kv("xnu_live_edge_mlie_tick", raw);
+    } else {
+        if (texr_published >= 4u)
+            return;
+        texr_published++;
+        entry_write_kv("xnu_live_edge_texr_seq", texr_published);
+        entry_write_kv("xnu_live_edge_texr_cpsr", cpsr);
+        entry_write_kv("xnu_live_edge_texr_tick", raw);
+    }
 }
 
 /* ---- timebase ---- */
