@@ -491,8 +491,9 @@ reinterpreted).**
 wrapper's printf printed (`:4100` `mini4: the OS's own init load returned ... (caller 0x80036100)`);
 in the pinned source the record call (`entry_trace.c:3776`) precedes the printf (`:3784`), and the
 pressed `entry_trace.c` sha `0cd3f105…` == the pinned `xnu_arm_entry-sources.txt` entry. ⇒ the load
-DID return; the three done-records were lost in the channel (candidate: the silent `g_live_state !=
-1` refusal during the exec window — `g_live_refusals` is only published in the pre-jump report). The
+DID return; the three done-records were lost in the channel — **root-caused 2026-10-13: the CAP** (buildplumb's
+closed identity: the trio ran at counter ≥16,384 and the tombstone at `:20502` is the displaced
+`done_seq`; see (c) below). The
 runner's "the load did not return / look for the panic" verdict is contradicted by the wrapper's own
 console line.
 
@@ -506,16 +507,25 @@ The multiplier is **thinning the per-read dump after `rd_ordinal > 256`** (keep
 `calls/ordinal/lba/op/err/complete` ≈ 280 B/read ⇒ cap 24576 reaches ≈ 2,300 reads). Recommendation to
 buildplumb: cap 24576 **and** thin-after-256. (b) decide the watchdog policy — WDT_HZ 32765, armed
 25 s bark + 3 s bite (payload `STAGE90_HW_WATCHDOG_TIMEOUT_S`=25); the pet fires only on idle, so a
-boot that never idles ends at the SoC's ~28 s whatever else it does. (c) the exec_done fix — **two
-candidates falsified 2026-10-13 by disassembling the frozen 998 elf** (`out/stage90/frozen/
-armed-d13-dee822b0/xnu_arm_entry.elf`): the call executes (0x8049de98 `bl entry_note_exec_returned`,
-unconditional, before the printf tail-call; key pointers correct, `.rodata` 0x4b3368/380/398), and
-refusal-by-state is impossible (`g_live_state` is monotone — set 2 only at `entry_stubs.c:2091`, 1
-only at `:2396`, `entry_live_init` runs only at 0 — and the 1,128 records after the done point,
-starting with the `sleh` emitter at `:1740`, prove state 1). Cap is also impossible (done point =
-ordinal 15,299; cap marker = 16,423). The loss is inside the console write path at that instant (or a
-same-instant overwrite); 999 should probe it by reading back `*sig`/`*size_p` after the done call,
-stashing in `.bss`, and publishing from the next known-good writer.
+boot that never idles ends at the SoC's ~28 s whatever else it does. (c) the exec_done fix — **root-caused 2026-10-13 (buildplumb's closed identity on the 998 capture);
+this section's earlier "cap impossible" reading is refuted.** The books close to the unit: 16,425
+`xnu_live_` lines = 16,384 cap-counted + 41 direct `entry_write_kv` writes; counted lines ≤ the exec
+block = 15,260 (15,297 lines − 37 direct), plus the 1,124 lines `:19378-:20501` (all counted) =
+16,384 exactly. Those 1,124 lines are the LOAD's own traffic (11 storage reads ≈ 89 lines each + the
+56 `sleh` + slot/block lines), so `load_init_program`'s return sits at their END (`:20501`) — the
+done calls run at counter ≥16,384, and the tombstone `xnu_live_capped=0x00004000` (`:20502`, the
+printed value IS the counter) is the immediate next counted write: **zero counted writes before it
+were silent**, which retires the console-write-path-loss reading. The earlier ordinal arithmetic
+(done point = ordinal 15,299; cap marker = 16,423) had put the done calls right after the exec-ENTRY
+records (`:19374-77` = the entry to `load_init_program`); the missing premise was where the return
+sits in the stream. Strongest reading: the tombstone IS the displaced `xnu_live_exec_done_seq` — the
+one-time marker is a DIRECT write and survived; the counted trio did not (`done_who`/`done_current`
+are the two silent counted calls after it). Certain either way: mechanism = the cap; all three
+records were lost at/after counter 16,384. The frozen-elf disassembly results stand as far as they
+go (the call executes: 0x8049de98 `bl entry_note_exec_returned`; `g_live_state` is monotone) —
+necessary conditions, not exclusions. 999's fix: the trio becomes direct/cap-exempt at
+`entry_stubs.c:5012-5017`, carrying `g_live_records`/`g_live_state` inside the records
+(self-locating). General law: **any absence-is-evidence record must be cap-exempt.**
 
 ## §10c — the timer chain stops at tick 64 in EVERY run (measured 2026-10-13)
 
