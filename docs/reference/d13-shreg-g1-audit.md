@@ -412,8 +412,9 @@ The `IOS7SHREG map_file` printf lives in `_shared_region_map` (`vm_unix.c:1251`)
 (`:1433-1440`); the tree holds exactly one call site of `vm_shared_region_map_file` (`:1425`;
 definition `osfmk/vm/vm_shared_region.c:969`). By value: (a) every print is a RETURN — the printed
 call's mapping work COMPLETED, so the boot is not "stuck inside the map"; (b) the guard admits four
-returns and exactly ONE exists — a second return would have printed and did not. The frontier doc's
-§10c reads this as "the SECOND `vm_shared_region_map_file` call never returned". The by-value
+returns and exactly ONE exists — a second return would have printed and did not. (The frontier doc's
+§10c carried this as "the SECOND call never returned"; it was corrected 2026-10-13, commit `8139194`,
+to the single-invocation reading derived below — the two docs now agree.) The by-value
 addition here, on the same bytes: the wrapping syscall (`shared_region_map_and_slide_np`, `:1556`)
 prints an entry probe (`:1577-1581`; capture `:4104`) and an exit probe that fires on the SUCCESS
 path too (`if (slide)` → `_shared_region_slide` → fall through to `done:` →
@@ -424,9 +425,9 @@ never reached its own exit print. Between `_shared_region_map`'s return (`:1626`
 only work in flight is `_shared_region_slide` (`:1636`, body `:1513-1554`), whose two named failure
 prints (`slide_info initialization failed`, `:1525`; `Sanity Check failed for slide_info`, `:1543`)
 are likewise absent. Minimal reading, no channel loss assumed: the stop lies inside the SLIDE half
-of the first invocation. The text channel has no measured losses (the one measured loss in this
-image, the `exec_done` records, was record-side); locating the exact blocking line is the shreg-hang
-lane's question, not this section's.
+of the first invocation. The text channel has no measured losses (the one measured "loss" in this
+image, the `exec_done` records, is root-caused to the cap itself — point 4); locating the exact
+blocking line is the shreg-hang lane's question, not this section's.
 
 **3. What bounds the silence: the record cap and the watchdog — not the map.** (a) The record
 channel stops at `xnu_live_capped=0x00004000` (`:20502`; cap 16,384) — its silence past that point
@@ -449,5 +450,26 @@ GROWTH: does the record channel keep growing after the freeze (progress independ
 freeze. Counters to read together, 998's by value: `xnu_live_tick_arm_calls=0x1` (`:4112`) ·
 `xnu_live_capped=0x4000` (`:20502`) · `xnu_live_storage_dr_ticks=0x855` (`:20500`) ·
 `xnu_live_ostext_total=0x17ee` (`:20505`). Also owed per the frontier doc's §10: the cap raise +
-post-256 dump thinning, and the `exec_done` loss probe (its two candidates already falsified against
-the frozen elf there).
+post-256 dump thinning.
+
+**The `exec_done` "loss" is root-caused to the cap (buildplumb 2026-10-13; verified here by value).**
+The capture's 16,426 `xnu_live_` lines split exactly into **16,384 cap-counted + 42 direct** (38
+direct in the head span, 0 in `:19378-:20501`, 4 post-cap — the tombstone and the final `ostext`
+triple; the direct set is fixed by its tree sites, `entry_stubs.c:2398-2413`, `:2475`, `:2659-2664`,
+`:2687-2688`, `:2700-2701`, `:2740`, `:2765-2767`, `:2786`, `:2796-2797`, and includes the
+space-filled `xnu_live_ostext_at` record ending the 124,122-char line at `:4110`). Counted through
+the exec block = 15,298 − 38 = **15,260**; `:19378-:20501` is 1,124 counted, 0 direct;
+15,260 + 1,124 = **16,384 = 0x4000 exactly** — the tombstone's own value. So every counted write up
+to the cap left a present line (zero silent counted writes before it), and the trio — whose calls'
+premise, the load's return, the `:4100` printf proves — ran at counter ≥ 16,384: dropped by the
+CAP, not by the console write path (whose two candidates §10(c) had already falsified). (buildplumb's
+message counts 16,425 / 15,297 / 41 / 37 — each one line short, all four the same line: the
+space-prefixed `xnu_live_ostext_at` record at `:4110` is invisible to a line-start name parse; the
+derived 15,260 and the identity are unaffected.) The tombstone's displaced payload is the first counted call after the cap: by the trailing
+read group's shape (84 records vs the **90** of the ten earlier groups — it is missing exactly
+`storage_dr_ps_after`, `dat_line`, `data_inhibit`, `status_after`, `ena_after`, `done`, cf.
+`:20412-:20417`) the slot is the driver tail's first missing key; buildplumb's stronger "the
+tombstone IS the displaced `xnu_live_exec_done_seq`" additionally requires that read's tail to have
+been abandoned, which the capture cannot separate. Fix in 999 (no readback probe owed): the trio
+goes direct / cap-exempt at `entry_stubs.c:5012-5017` — corroborated here: the direct family
+demonstrably survives the cap (the 6th `ostext` triple is post-cap, `:20503-:20505`).
