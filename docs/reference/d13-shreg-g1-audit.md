@@ -379,3 +379,75 @@ build carrying the storage keys must also carry `HFS_ROOT_MEDIA` / `EMMC_STRATEG
 
 Full log retained at `/tmp/g1off/RESULT.txt` (`build1.log` / `build2.log`, sha/mtime snapshots)
 until 998's press is judged.
+
+## 10. Post-`kr=0`: what the silence does and does not imply (2026-10-13)
+
+**Scope.** Audit-side reading of the 998 capture (`cancro-last_kmsg-998-armed-d13-dee822b0.txt`,
+sha256 `0c558c533353c9abb3ebd6111773208253c47ab3acef993c12cdf7b09d8acec2`) against the staged tree
+(`bsd/vm/vm_unix.c` sha256 `4b3ec2b83aaf9e6ae3d22264085c100a57cf562de7a2b1b30ef967c3d42ed0b6`) and
+997's capture (sha256 `23bb574ba7795bd4205f76af83d2e4b0622ba8978db64d8f55a7ea07060215f1`). No tree
+edits. The frontier doc's §10/§10c carry the build-side narrative; the timer measurement
+cross-linked in point 4 is theirs.
+
+**1. The silence is the TEXT channel; the record channel runs on — the two must not be conflated.**
+998's console text ends at `:4109` (`IOS7SHREG map_file kr=0`), and the 997 halt chain is gone
+(libbsm / IOS7WITNESS / `undefined instruction` / `dyld>` — 0 lines each), so the silence is not a
+halt-with-a-name. But the capture has a second channel: `:4110`-`:20501` is 100% `xnu_live_*` records
+(0 non-record lines in the whole span — checked), written in event order by the entry-side live
+recorder. It shows the run did not end at `:4109`: the exec records sit at `:19374-:19377`
+(`xnu_live_exec_seq=0x1`, `exec_caller=0x80036100`, `exec_who=0x1`, `exec_proc=0xc0c41cf8`; 997 has
+the same block, `:21255-:21258`, same values), then 1,124 further record lines to `:20501` (1,128
+counting the exec block) — storage reads continuing to a last `xnu_live_storage_drv_lba=0x00422963`
+(`:20493`). **997's post-exec tail is name-for-name and order-for-order identical** over 1,125 lines
+(998 `:19378-:20502` vs 997 `:21259-:22383`); the only value drift is 33 lines, all of it run-to-run
+timing counters (`storage_dr_ticks` / `dr_polls` / `rd_data_ticks`) and entry-image addresses
+(`sleh_pc` / `sleh_lr` / `sleh_recover`, `slot_ab_m4`) — no LBA, ordinal, seq or caller field
+differs. So the kr=1-vs-kr=0 divergence never enters the record channel. Text-silence is the absence
+of a NAME, not of progress (the m817 shape: a silent channel is a reading only if success is silent —
+this channel prints probes and failures only).
+
+**2. `kr=0` is a RETURN value at a one-call-site probe — and it is not the syscall's last word.**
+The `IOS7SHREG map_file` printf lives in `_shared_region_map` (`vm_unix.c:1251`), immediately after
+`kr = vm_shared_region_map_file(...)` returns (`:1425-1431`), under a `static … < 4` guard
+(`:1433-1440`); the tree holds exactly one call site of `vm_shared_region_map_file` (`:1425`;
+definition `osfmk/vm/vm_shared_region.c:969`). By value: (a) every print is a RETURN — the printed
+call's mapping work COMPLETED, so the boot is not "stuck inside the map"; (b) the guard admits four
+returns and exactly ONE exists — a second return would have printed and did not. The frontier doc's
+§10c reads this as "the SECOND `vm_shared_region_map_file` call never returned". The by-value
+addition here, on the same bytes: the wrapping syscall (`shared_region_map_and_slide_np`, `:1556`)
+prints an entry probe (`:1577-1581`; capture `:4104`) and an exit probe that fires on the SUCCESS
+path too (`if (slide)` → `_shared_region_slide` → fall through to `done:` →
+`printf("IOS7SHREG map_slide ret=%d")`, `:1651-1656`; 997 shows the failure-path twin `ret=14`,
+source `:1629-1630`, capture `:4109`). 998 has NO `map_slide ret=` line at all: the single recorded
+invocation — one entry probe (`:4104`), one `map_file` return (`:4109`), no second entry probe —
+never reached its own exit print. Between `_shared_region_map`'s return (`:1626`) and that print the
+only work in flight is `_shared_region_slide` (`:1636`, body `:1513-1554`), whose two named failure
+prints (`slide_info initialization failed`, `:1525`; `Sanity Check failed for slide_info`, `:1543`)
+are likewise absent. Minimal reading, no channel loss assumed: the stop lies inside the SLIDE half
+of the first invocation. The text channel has no measured losses (the one measured loss in this
+image, the `exec_done` records, was record-side); locating the exact blocking line is the shreg-hang
+lane's question, not this section's.
+
+**3. What bounds the silence: the record cap and the watchdog — not the map.** (a) The record
+channel stops at `xnu_live_capped=0x00004000` (`:20502`; cap 16,384) — its silence past that point
+is the CAP, not a stop; 1,128 post-exec dyld-era lines ran before it. (b) 0 `xnu_live_wdt_*` / 0
+`xnu_live_usb_*` / 0 `xnu_live_pcx` records ⇒ the handed-off kernel never idled ⇒ the resident pet
+never ran ⇒ the SoC watchdog reset it un-fed. The "~28 s" is a RUNTIME/OPERATOR reading, not a
+capture timestamp — `last_kmsg` carries none; it bounds when the run ENDED, not where it stopped.
+Together, the silence licenses exactly this: "after a successful map return there is no named
+failure, no named halt and no panic; the record channel is truncated at its cap; the run was ended
+by the un-fed SoC watchdog." It does not license "the kernel stopped at `kr=0`", and it does not
+locate the stop.
+
+**4. What 999 owns — the discriminating measurement.** The 2026-10-13 timer-freeze measurement
+(frontier doc §10c) is the binding constraint: `xnu_live_tick_irq` stops at ≤64 deliveries in ALL
+six captures (987, 994-998), so nothing driven by `rtclock_intr` runs after ~4.8 s of mach time — a
+deadline-based park after the freeze can never resolve, and "hung on a deadline" vs "hung in a spin"
+are indistinguishable by outcome. 999's discriminating observable is therefore POST-FREEZE RECORD
+GROWTH: does the record channel keep growing after the freeze (progress independent of
+`rtclock_intr` — 997/998 are themselves evidence that it does, up to the cap) or stall at the
+freeze. Counters to read together, 998's by value: `xnu_live_tick_arm_calls=0x1` (`:4112`) ·
+`xnu_live_capped=0x4000` (`:20502`) · `xnu_live_storage_dr_ticks=0x855` (`:20500`) ·
+`xnu_live_ostext_total=0x17ee` (`:20505`). Also owed per the frontier doc's §10: the cap raise +
+post-256 dump thinning, and the `exec_done` loss probe (its two candidates already falsified against
+the frozen elf there).
