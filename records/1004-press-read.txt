@@ -40,14 +40,17 @@ repeat; the tail is not page-frozen (`x8 distinct word / x8 distinct page`).
 dyld slide this boot = **0xFF000** (`the OS starts the process at 0x2bf00028` @:4115 = `__dyld_start`
 link `0x2be01028`). The 40 aborts, de-slid, are dyld walking down its own image:
 
-| seq | type | far (runtime) | far page | de-slid / identity | user |
-|-----|------|---------------|----------|--------------------|------|
-| 1–4 | 4 | 0x1000 / 0xcfdbd000 / 0xcfdfe000 / 0x2bd00f7c | — | (kernel / stack, pre-exec) | 0 |
-| 5–36 | 3,4 | 0x2bf0….–0x2bf4… | ~24 pages | 0x2be0….–0x2be4… = dyld `__TEXT`/`__LINKEDIT` (e.g. `_strcmp`+0, `_strlen`+0, `dyld::addImage`+0, `_arc4_fetch`+0, `__cstring` literals) | 1 |
-| 37 | 4 | 0x2bcff000 | 0x2bcff000 | **BELOW dyld base** (de-slid 0x2bc00000) = the process's stack region, not dyld | **0** |
-| 38 | 3 | 0x2bf15058 | 0x2bf15000 | dyld `_arc4_fetch`+0 | 1 |
-| 39 | 4 | 0x2bf1eb27 | 0x2bf1e000 | dyld `__cstring` (`"/dev/random"`) | **0** |
-| 40 | 4 | 0x3e8dd000 | 0x3e8dd000 | **= `map_slide` slide_start** (shared-region code page) | **0** |
+| seq | type | far (runtime) | user | faulting pc (by value) |
+|-----|------|---------------|------|------------------------|
+| 1 | 4 | 0x00001000 | 0 | 0x804959f0 `.Lcopyout_guts` (kernel copy) |
+| 2 | 4 | 0xcfdbd000 | 0 | 0x80495e1c `copyinstr` (kernel copy) |
+| 3 | 4 | 0xcfdfe000 | 0 | 0x80016440 `bcopy` `L64loop` |
+| 4 | 4 | 0x2bd00f7c | 0 | 0x80495a14 `.Lcopyout_guts` |
+| 5–36 | 3,4 | 0x2bf0….–0x2bf4… | **1** | dyld `__TEXT`/`__LINKEDIT` — its own image (`_strcmp`, `_strlen`, `dyld::addImage`, `_arc4_fetch`, `__cstring`) |
+| 37 | 4 | 0x2bcff000 | 0 | 0x8001644c `bcopy` `L64loop` (stack region below dyld) |
+| 38 | 3 | 0x2bf15058 | 1 | dyld `_arc4_fetch`+0 |
+| 39 | 4 | 0x2bf1eb27 | 0 | 0x80495e10 `copyinstr` (kernel copy) |
+| 40 | 4 | 0x3e8dd000 | 0 | 0x80495590 `.Lcopyin_guts` (**kernel `copyin` into the shared-cache page**) |
 
 De-slide by value (extracted `/usr/lib/dyld` from the card image: Mach-O, `__TEXT` vmaddr
 0x2be00000; slide 0xFF000): the USER-mode aborts (seq 5–36) are dyld paging in **its own code and
@@ -57,35 +60,42 @@ cold-image faulting: forward, one page at a time, slow — WALK, not a loop.
 
 **seq 40 `far=0x3e8dd000` is exactly the `IOS7SHREG map_slide … slide_start=0x3e8dd000` page
 (@:4120)** — the shared-region code page `map_slide` slid in (mapping-0 of the shared cache, base
-0x2c000000 + slide). seq 37/39/40 are KERNEL-mode faults (`user=0`): the kernel touching the
-stack region (0x2bcff000, below dyld's base) and the shared-cache slide page on the process's
+0x2c000000 + slide). Its `recover=0x804954fc` is the armed-retry address; the faulting pc is in
+`copyin`. seq 37/39/40 are KERNEL-mode copy faults (`user=0`) — the kernel reading/writing the
+process's memory (stack region below dyld, dyld `__cstring`, the shared-cache slide page) on dyld's
 behalf. `cs_invalid_page(0x2e731000)` @:4130 = `0x2c000000 + 0x2731000` (the same shared-region
 slide) is the EARLY tolerated event, NOT the frontier (1003).
 
-## The frontier: the kernel's first kernel-mode page-in of the shared-region slide page
+## The frontier: NOT abort #40 — the machine survives it and then the clock decays
 
-After the 40th abort the kernel **does not crash** (no panic, death gate OPEN). Stated as
-measured facts: after @:28020 (the 40th abort), the run publishes NO further abort
-and NO further system call (`xnu_live_usvc` ×0 in the post-abort window), yet KEEPS RUNNING:
-storage reads served, the tick climbs, the wdt pet lands. The last three syscalls before the
-freeze are `xnu_live_usvc_num=0xfffffffd` ×3 = **`mach_absolute_time`**, at dyld link
-`0x2be1b328` = the `bx lr` right after `svc #128` in dyld's **`_mach_absolute_time`** wrapper
-(the **commpage-timebase-invalid fallback** path — the wrapper checks commpage byte
-`0xffff4090` at `[r12,#8]`, finds it 0, and takes the `svc`). The wrapper is reached from
-**`ImageLoader::link`** — dyld is inside the image-linking phase, snapshotting absolute time.
+Abort #40 is the kernel's first touch of the shared-cache slide page (`far=0x3e8dd000`) **inside a
+`copyin`** (pc 0x80495590 `.Lcopyin_guts`), and the machine **does not crash on it** (no panic,
+death gate OPEN, `sleh_storm` absent — no abort #41). **It survives and keeps going**: storage
+reads keep completing (`served` 0x39→0x3e, LBA `0x4a3810→0x4a3830`), and pid 1's thread `0xc0bfa000`
+makes FURTHER `mach_absolute_time` syscalls (`xnu_live_usvc_num=0xfffffffd` == `_mach_absolute_time`:
+the commpage-timebase-invalid fallback, `svc #128`) at `lr` **advancing** `0x2bf08a9f→0x2bf08af1→
+0x2bf08b11`. dyld is inside **`ImageLoader::link`**, snapshotting absolute time — and its return
+address MOVES, so it is truly executing, not re-trapped.
 
-The interrupted frame at every late tick sample (n=9..15, pc=0x8001b1fd, `cpsr=0x60000113` SVC
-mode, `sp=0xcfdbbf00`, `lr=0x8046b92c`) DECODES, by disassembly, as the CPU inside **`sleh_abort`'s
-data-abort RETURN path**: `sleh_abort+0x468` (`bl ml_set_interrupts_enabled`, taken when `vm_fault`
-returned success) → `ml_set_interrupts_enabled`(1) falls through into `astloop`/`enable_interrupts`
-(0x8001b1ac AST check → `bl ast_taken`; 0x8001b1f8 `cpsie i`; 0x8001b1fc `push {r0,r1,r2,r7,r8,lr}`).
-`pc=0x8001b1fd` is **byte 2 of that `push`** — a transient pass-through in the prologue, NOT a
-spin word (`astloop`'s only backward branch is `b 0x8001b1ac` at 0x8001b1f4; nothing branches to
-0x8001b1fd). The saved `I`-bit=1 is correct: `sleh` runs the fault with IRQ masked, and the
-interrupted state is captured before `cpsie i`. One EARLIER sample (n=8, @:27345) is USER mode
-(`cpsr=0x40000010`) at dyld `0x2be1aecc` = `_open`+0x8 (`svc #5`) — proof the sampler reads a real
-user frame and that pid 1 RAN in user mode before the freeze onset (the switch is between tick 256
-and 512).
+The run's real end-state is the instrument's own **tick summary**: `xnu_live_tick_sum_maxd` reaches
+`0x1be8b709` ≈ **23 s** (the max inter-tick gap) while `tick_sum_count` drags and `wdt_pets` climbs
+to 0x61. The machine is alive (ticks, pets, storage) but tick DELIVERY **collapses** — the STALL
+999/1003 named. The frozen sampler frame (below) is the last thing the *tick* saw, held while the
+synchronous paths continued.
+
+The frame held at every late tick sample (n=9..15, pc=0x8001b1fd, `cpsr=0x60000113` SVC mode,
+`sp=0xcfdbbf00`, `lr=0x8046b92c`) is **one frame, captured once and then STALE** — not a dwell.
+`lr=0x8046b92c` is `sleh_abort+0x468` (right after `bl ml_set_interrupts_enabled`), and the pc
+falls in `enable_interrupts` (`ml_set_interrupts_enabled`(1) falls through into `astloop`/
+`enable_interrupts`: 0x8001b1ac AST check → `bl ast_taken`; 0x8001b1f8 `cpsie i`; 0x8001b1fc
+`push {r0,r1,r2,r7,r8,lr}`). `pc=0x8001b1fd` is **byte 2 of that `push`** — a transient pass-through
+in the prologue, NOT a spin word (`astloop`'s only backward branch is `b 0x8001b1ac` at 0x8001b1f4;
+nothing branches to 0x8001b1fd). One EARLIER sample (n=8, @:27345) is USER mode (`cpsr=0x40000010`)
+at dyld `0x2be1aecc` = `_open`+0x8 (`svc #5`) — proof the sampler reads real user frames and pid 1
+RAN in user mode. **The same pc/`sp` appears on three DIFFERENT kernel stacks across the run**
+(`0xc9d8bf58`/`0xc9d7bfb0` early, `0xcfdbbf00` late) — `enable_interrupts` is a high-frequency pc
+every `ml_set_interrupts_enabled(1)` passes through, so seeing it is expected and says nothing about
+a hang.
 
 **CAUTION — the frozen frame may be a MEASUREMENT artifact, not the machine's true state.** Three
 facts: (i) `pc=0x8001b1fd` is ODD, while every other sampled pc is even (Thumb/ARM interworking
@@ -95,9 +105,11 @@ written while pc/sp/lr/cpsr are held**, so the six identical samples are one hel
 independent confirmations. `enable_interrupts` is a HIGH-FREQUENCY pc (every `ml_set_interrupts_
 enabled(1)` falls through it, and the 999/1004 hook `entry_timer_edge_probe` now sits inside it at
 0x8001b208), so a sampler that catches the CPU there repeatedly may be reading a common pc, not a
-dwell. **Whether the CPU is genuinely frozen here for ~24 min, versus this being the last frame the
-sampler captured, is UNRESOLVED from the static image** ([[mi4-measurement-defects]]): the
-conclusive test is the live advance-vs-hold plus whether `far=0x3e8dd000` is ever mapped.
+dwell. **This pass SETTLES it: the frame is the last thing the TICK saw, not the machine's state.**
+The cap-exempt channels show the machine executing (usvc, storage) after this frame, and
+`tick_sum_maxd`=0x1be8b709 says tick delivery collapsed — so the sampler stopped updating because
+its own cadence collapsed, not because the CPU halted here. The `far=0x3e8dd000` page is never
+re-recorded as a fault, consistent with it having been handled.
 
 ## Reading (honest scope)
 
@@ -107,77 +119,91 @@ handful of kernel-mode faults. **So 1005 branch (a) (CS-validation LOOP,
 `STAGE90_XNU_CS_TAINT_TRACE`) is NOT the branch the evidence selects.**
 
 **What is proven:**
-1. pid 1 executed dyld's user code (`ImageLoader::link` linking images) and faulted in its own
-   pages forward, one page at a time, to the very end of the trace.
-2. The LAST abort (seq 40, @:28020) is a KERNEL-mode fault on `far=0x3e8dd000` = the
-   **shared-region slide page** (`map_slide` slide_start) — the first touch of the 301 MiB shared
-   cache. seq 37/39 are likewise kernel-mode (stack region below dyld; dyld `__cstring`). The
-   walk crosses from dyld's own image to the shared cache at the frontier.
-3. **ABORT #40 NEVER RETURNED.** `xnu_live_sleh_back` (the wrapper's post-`sleh_abort` note) is
-   recorded **39** times — values 0x01…0x27, consecutive — for **40** aborts (`sleh_seq` 0x01…0x28).
-   The 40th abort (`seq=0x28`, `far=0x3e8dd000`) has NO matching `sleh_back`: the kernel entered
-   `sleh_abort` for the first shared-cache page fault and **never reached the end of it**. This is
-   the death episode, measured, not inferred.
-4. After seq 40, NO more aborts and NO more syscalls; the machine keeps running (storage, ticks,
-   wdt pets) to the operator's power press. **Crucially, the kernel was still PAGING**: the
-   root-media reads after the 40th abort ADVANCE forward (`storage_rd_ordinal` 0x1f8→0x207,
-   `storage_rd_lba` 0x4a3821→0x4a3830, `rootmedia card_off` →0x14706000), i.e. the 40th fault's
-   backing read COMPLETES (the page is read from the card). Then every channel — aborts,
-   syscalls, AND storage — stops together.
-5. The frozen pc (0x8001b1fd) is in `sleh_abort`'s **post-`vm_fault` RETURN path** (via
-   `ml_set_interrupts_enabled(1)` → `astloop`/`enable_interrupts`). Taken with (3): **`vm_fault`
-   for abort #40 RETURNED (the page read completed), and the kernel then hung in the
-   interrupt-enable / AST-check path on the way back to user mode — `sleh_abort` never
-   completed.** The wall is not the fault or its read; it is the *return path* out of `sleh_abort`.
+1. pid 1 executed dyld's USER code (`ImageLoader::link` linking images) and faulted in its OWN
+   pages forward, one page at a time — 34 of the 40 aborts are user-mode (`user=1`), dyld's image.
+2. The other **6 aborts are KERNEL-mode** (`user=0`): seq 1-4, 37, 39, 40. Their `pc` does NOT
+   resolve to `sleh_abort` — by value it lands in the copy primitives: seq 1/2/39/40 in
+   `.Lcopyin_guts`/`copyinstr` (`bcopyinout.o`; pc 0x804959f0 / 0x80495e1c / 0x80495e10 /
+   0x80495590), seq 3/37 in `bcopy`'s `L64loop` (0x80016440 / 0x8001644c). So these are the
+   **kernel COPYING to/from an unmapped user address while servicing dyld** (strings, argv, a
+   shared-cache header), not dyld faulting on its own code. Abort #40 — `far=0x3e8dd000` = the
+   shared-cache slide page, pc 0x80495590 `.Lcopyin_guts`, `recover=0x804954fc` — is the kernel
+   faulting **inside a `copyin`** whose source is the process's address space; the `copyin` step
+   touches the shared-cache page. The `recover` word is non-zero ⇒ the handler had a plan for it
+   (page in and retry, or convert to `EFAULT`).
+3. **The 1003/1004 "abort #40 never returned" reading is RETRACTED — it is not supported by the
+   evidence.** Its basis (`xnu_live_sleh_back` 39× for 40 aborts) is UNRELIABLE: `cpu_count=4` and
+   `g_sleh_seq`/`g_sleh_back` are **non-atomic shared globals** (`entry_stubs.c`), so a cross-CPU
+   race can drop a `_back` (a lost update, not a lost return). Independent, ATOMIC evidence
+   CONTRADICTS a death at #40: **after @:28020 the machine keeps executing** — pid 1's thread
+   `0xc0bfa000` makes FURTHER `mach_absolute_time` syscalls (`xnu_live_usvc_num=0xfffffffd`,
+   @29112/@29120, `lr` ADVANCING `0x2bf08a9f→0x2bf08af1→0x2bf08b11`), the root-media keeps serving
+   reads (`served` 0x39→0x3e, LBA `0x4a3810→0x4a3830`, `err` 0), `xnu_live_sleh_storm` **absent**
+   (no abort #41). **The first touch of the shared cache is NOT fatal**; dyld proceeds past it.
+4. **Item 3's "no more syscalls" was a capped-channel artifact.** The cap tombstone @:29006 drops
+   only the GENERAL channel; the CAP-EXEMPT channels (`xnu_live_usvc_*`, `xnu_live_stall_*`) publish
+   to the very end of the log. Reading "no further syscalls" from the capped channel is exactly the
+   [[mi4-measurement-defects]] class; the exempt channels show the syscalls CONTINUE.
+5. The frozen stall frame (pc `0x8001b1fd`, sp `0xcfdbbf00`, lr `0x8046b92c`) is therefore a
+   **HELD / STALE frame, not the live state** — the tick-driven sampler stopped updating while the
+   syscall and paging paths kept going. This is consistent with a collapsed tick rate (below), and
+   it is why the frame is a measurement artifact even though it is not (as earlier feared) a
+   bit-garbled read: the read is fine, the frame is just old.
 
-**What is NOT proven — WHERE in the return path.** Abort #40 did not return (fact 3), and the
-frozen pc is in the return path (fact 5), so the hang is in returning from `sleh_abort` #40.
-Within that, two readings the trace cannot yet separate:
-  (b1) **Hangs in `ml_set_interrupts_enabled`/`astloop`** — the `bl ml_set_interrupts_enabled(1)`
-       at 0x8046b928 is unbounded: `astloop` re-tests `thread->ast & 4` every iteration, and a
-       continuously-re-armed AST would spin there forever. This is a kernel AST spin.
-  (b2) **Hangs deeper in `vm_ipc_kmsg_copyout`/`vm_map_enter`** — a post-`copyin-add` kernel fault
-       (the next page-in, e.g. 0x3e8de000) that itself never resolves, so the inner `sleh_abort`
-       never returns and the outer frame only *appears* to be in the return path. The frozen
-       pc being a HIGH-FREQUENCY pass-through (every `ml_set_interrupts_enabled(1)`) makes this
-       reading live: the sampler may be catching a common pc, not a dwell.
-  The tiebreaker (1005): does a tick sample ADVANCE off 0x8001b1fd, and does the kernel publish
-  any record from the return path (e.g. a post-`sleh_abort`-back note for abort 41+, or an
-  AST/spin witness). The `sleh_back` count already says no abort #41 occurred, so if the pc
-  advances within `astloop` it is (b1); if the pc stays put across advancing ticks it is a dwell.
+**The real frontier = the STALL, not the sleh return path.** The instrument's own summary says it:
+`xnu_live_tick_sum_maxd` grows `0x3142d1 → 0x4b9fa4c → 0x1be8b709` — the MAXIMUM inter-tick gap
+reaches **0x1be8b709 ≈ 23 s** while `tick_sum_count` (0x6b→0x1de) drags and `wdt_pets` climbs to
+0x61. The machine keeps running (ticks, watchdog pets, storage) but tick DELIVERY collapses — the
+same stall 999 measured ("rate collapse: 122 delivered = 98 fast + 24 slow") and 1003 named
+("alive but no syscall progress ~23 min"). The 1003 STALL reading survives; the 1004 abort #40
+reframe does not.
 
-**1005 = branch (b)**, but SHARPENED: the decisive instrument is not "fault rate" alone — it is
-(a) **does a tick sample ever ADVANCE off 0x8001b1fd, and does the sample pc carry the E bit
-correctly** (kill the artifact question — v0.1 `stage90_sample_sanitize`), and (b) **what does the
-seq-40 shared-cache page-in do — does `vm_fault(0x3e8dd000)` return, and is the page ever
-mapped**. That separates "blocked page-in" from "sampler artifact". A `STAGE90_XNU_FAULT_RATE`
-timing (1005 draft branch (b)) is still useful to date the 40th abort, but the mapping witness is
-the one that answers the frontier.
+**What is NOT proven — the CAUSE of the stall.** The abort trace is complete and clean (a WALK);
+the machine does not die at any abort; but between the last recorded events and the operator's
+power press the tick cadence degrades to a 23 s gap. Two readings:
+  (b1) **A lost/degraded timer interrupt** — the tick source is being delivered ever more slowly
+       (an interrupt storm, a wedged GIC line, or the timer device itself); the samplers that ride
+       the tick freeze while synchronous paths (syscalls, demand paging) continue. The frozen
+       `enable_interrupts` frame is the LAST thing the tick saw.
+  (b2) **A long-lived kernel critical section** — some path holds IRQs masked long enough that
+       ticks queue and coalesce; the 23 s max gap is the coalescing.
+  The tiebreaker (1005) is a TIMER-INDEPENDENT cadence witness: publish a monotonic counter bumped
+  from a synchronous path (the USVC handler already exists) plus a per-tick counter, and read the
+  RATIO at the end — if syscalls keep climbing while ticks fall, it is (b1); if both freeze
+  together it is a full stop.
 
-**Why it matters:** dyld paged in ~24 of its own pages and then demanded the first shared-cache
-page — the wall 969 named ("launchd links a 301 MiB dyld cache"). The frontier is the kernel
-handling (or failing to complete) that first shared-cache fault. Most of dyld's `ImageLoader::link`
-work — and the entire shared cache — still lies beyond it.
+**What 1005 must NOT do:** it must not instrument `sleh_abort`'s return path (there is no evidence
+of a hang there) and must not treat `sleh_back` as a death marker (non-atomic across CPUs). The
+`sleh_seq/back` race itself is a fix worth making — make the two counters `os_atomic` or gate the
+`_back` note on a per-CPU value — but that is a MEASUREMENT fix, not the frontier.
+
+**Why it matters:** dyld paged in ~24 of its own pages, touched the first shared-cache page (and
+survived it), and then the SYSTEM's clock decayed until the run stopped making progress. The wall
+is not the abort — it is what happens to the machine's timebase after dyld enters the shared
+cache. Most of dyld's `ImageLoader::link` work still lies beyond it.
 
 ## Falsifiers checked (all pass)
 
 - Instrument reached the image: YES (`xnu_live_sleh_upc` ×40, `_frame_ok`=1 ×40).
 - The trace is complete (not cap-truncated): YES (cap @:29006 is AFTER the last abort @:28020).
-- Cap-not-exceeded: YES (`xnu_live_sleh_storm` absent).
-- No panic: `HARD ANOMALIES 0`; death gate OPEN; the machine ran to the end (wdt pets, ticks).
+- Cap-not-exceeded: YES (`xnu_live_sleh_storm` absent — no abort #41).
+- No panic: `HARD ANOMALIES 0`; death gate OPEN; the machine ran to the end (wdt pets ×0x61, ticks).
 - 1002 r3-save regression: absent.
-- 1003 stall frame reproduction: EXACT (pc/cpsr/sp/lr identical).
+- 1003 stall frame reproduction: EXACT (pc/cpsr/sp/lr identical) — and now EXPLAINED as tick-sampler staleness.
+- Abort #40 fatal: **NO** (refuted) — the machine executes well past it.
 
 ## 1005 input
 
-Branch **(b)**, sharpened. The frontier is the kernel's first kernel-mode page-in of the
-**shared-cache slide page `0x3e8dd000`** — not a dyld self-page loop. Two instruments:
-1. **Shared-cache page-in witness** — instrument `vm_fault` (or the shared-cache pager) for
-   `far=0x3e8dd000`: does the fault return? is the page ever mapped/`cs_validated`? Locates the
-   wall precisely.
-2. **Sample-sanitize** — record the interrupted cpsr's T-bit and the raw interrupted pc, and
-   re-sample at finer granularity after the last abort, to kill (or confirm) the `0x8001b1fd`
-   artifact. If the pc advances off the sleh-return path, it is a live dwell; if the samples are
-   one common pc, the frontier is elsewhere.
-See `docs/1005-branch-decision-draft.md` branch (b) (`STAGE90_XNU_FAULT_RATE`) and the caveat
-above.
+The frontier is **the STALL** (tick delivery collapses to a 23 s max gap), NOT a hang in the
+`sleh_abort` return path. Two instruments, both timer-independent:
+1. **Cadence ratio witness** — publish a monotonic counter bumped from the USVC (syscall) path
+   beside the per-tick counter, and read the RATIO at the end: syscalls climbing while ticks fall
+   ⇒ (b1) degraded timer interrupt; both freezing together ⇒ a full stop. The USVC channel already
+   exists (`xnu_live_usvc_*`) and already keeps publishing to the log's end.
+2. **`sleh_seq`/`back` atomicity fix** — make the two counters `os_atomic` (or store the seq into
+   the `_back` record itself) so a cross-CPU lost update cannot masquerade as a non-return. This is
+   a MEASUREMENT fix ([[mi4-measurement-defects]]), not the frontier.
+NOT for 1005: instrumenting `sleh_abort`'s return path (no evidence of a hang there) or treating
+`sleh_back` as a death marker (`cpu_count=4`, non-atomic).
+See `docs/1005-branch-decision-draft.md`; its branch (b) `STAGE90_XNU_FAULT_RATE` is still useful
+to date faults, but the cadence-ratio witness is what answers the stall.

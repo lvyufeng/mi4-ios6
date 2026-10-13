@@ -723,8 +723,8 @@ def s_abort(cap):
         say("OBS", "the repeat positions (0-based record idx): %s" % ",".join(str(i) for i in repeats[:24]))
     last = recs[-1]
     lf = last["f"]
-    say("READING", "THE FRONTIER = the LAST abort @:%d seq=%s type=%s far=%s upc=%s thr=%s "
-                   "frame_ok=%s user=%s" % (
+    say("READING", "THE LAST ABORT @:%d seq=%s type=%s far=%s upc=%s thr=%s "
+                   "frame_ok=%s user=%s (NOT the frontier - see the PROGRESS check below)" % (
         last["ln"], fmt(lf.get("seq", (0, None))[1]), fmt(lf.get("type", (0, None))[1]),
         fmt(lf.get("far", (0, None))[1]), fmt(lf.get("upc", (0, None))[1]),
         fmt(lf.get("thr", (0, None))[1]), fmt(lf.get("frame_ok", (0, None))[1]),
@@ -733,19 +733,35 @@ def s_abort(cap):
                "pre-1004 `SLEH_LIVE_MAX` hid all but the first %d); the running `_seen` count x%d" % (
         n_frame, len(recs), SLEH_OLD_MAX, n_seen))
     # ---- DID EVERY ABORT RETURN?  `xnu_live_sleh_back` is the wrapper's post-`sleh_abort` note,
-    # written for every abort <= the FRAMES band (512 here). An abort with a `_seq` but NO
-    # corresponding `_back` entered `sleh_abort` and never completed it - the death episode,
-    # measured.  Counted over the same band so a >512 abort is not miscounted.
+    # written for every abort <= the FRAMES band.  A `_seq` with NO matching `_back` is RECORDED,
+    # but it is NOT read as "never returned": `g_sleh_seq`/`g_sleh_back` are non-atomic shared
+    # globals and this tree reports cpu_count=4, so a cross-CPU lost update can drop a `_back`
+    # (mi4-measurement-defects).  The DECISIVE reading is whether the machine PROGRESSES past the
+    # last abort - read from the CAP-EXEMPT channels (usvc / storage), which publish to the log's
+    # end even after the general channel caps.  If it progresses, no abort was fatal.
     n_back = cap.family_count("xnu_live_sleh_back")
     if n_back and n_back < len(recs):
-        say("READING", "ABORTS THAT NEVER RETURNED: x%d - `xnu_live_sleh_back` x%d for x%d abort "
-                       "records. The LAST abort (seq @:%d, far=%s, user=%s) entered `sleh_abort` and "
-                       "never reached its end = THE FRONTIER (the fault the kernel died on)."
-            % (len(recs) - n_back, n_back, len(recs), _last_ln,
-               fmt(recs[-1]["f"].get("far", (0, None))[1]), fmt(recs[-1]["f"].get("user", (0, None))[1])))
+        say("OBS", "`xnu_live_sleh_back` x%d for x%d abort records - x%d abort(s) have no "
+                   "`_back`, but the counter is NON-ATOMIC across CPUs (cpu_count=4) so a lost "
+                   "update is not a lost return; see the PROGRESS check below" % (
+                       n_back, len(recs), len(recs) - n_back))
     elif n_back:
-        say("PASS", "every abort returned (`xnu_live_sleh_back` x%d == `_seq` x%d) - no single abort "
-                    "is the frontier by non-return" % (n_back, len(recs)))
+        say("PASS", "every abort has a matching `_back` (`xnu_live_sleh_back` x%d == `_seq` x%d)"
+                    % (n_back, len(recs)))
+
+    # The PROGRESS check: any CAP-EXEMPT record (usvc syscall, storage read) AFTER the last abort
+    # means the machine kept executing past it.  This is the reading that refutes "the abort was
+    # fatal", and it uses channels the cap tombstone cannot touch.
+    _post = [t[0] for t in cap.all("xnu_live_usvc_num") if t[0] > _last_ln]
+    _post += [t[0] for t in cap.all("xnu_live_storage_rd_complete") if t[0] > _last_ln]
+    if _post:
+        say("READING", "THE MACHINE PROGRESSED PAST THE LAST ABORT: x%d cap-exempt record(s) "
+                       "(usvc/storage) AFTER @:%d - so the LAST abort was NOT fatal. The 1004 "
+                       "frontier is NOT the sleh return path; it is the run's tick-collapse STALL "
+                       "(read `xnu_live_tick_sum_maxd`)." % (len(_post), _last_ln))
+    else:
+        say("READING", "NO cap-exempt record after the last abort @:%d - nothing executed past it "
+                       "(consistent with that abort being the frontier)" % _last_ln)
     say("OBS", "this is a MEASUREMENT section: the stall is the EXPECTED outcome of this rung (1004 "
                "changes no kernel behaviour) - the classification above IS the 1004 finding")
 
