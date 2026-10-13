@@ -136,13 +136,40 @@ appear @:6033+ and the exec trio appears @:23498. Read position, not sequence, a
     TPIDRURO). Our `machine_thread_create` never initializes `cthread_self`.
   NONE of 1001's changes (SUBMAPSKIP / VMHINT991 / USVC / timer-edge / ostext) touch any of these.
 
-  CONCLUSION (by value, and bounded): 1001's frontier is a latent kernel defect in USER THREAD
-  POINTER establishment (TPIDRURO), reachable the moment pid 1's dyld takes its first error path.
-  999 did not exhibit it - its earlier changes did not remove any TPIDRURO writer, so the divergence
-  is either nondeterministic pcb state or a 999-specific value; the captures do NOT resolve which,
-  and this record does not claim they do. What IS resolved: the fault MECHANISM and LOCATION (dyld's
-  `_cerror_nocancel` reading [TPIDRURO+4] with TPIDRURO=0), and that the kernel's TPIDRURO
-  establishment is INCOMPLETE versus the 4570 reference. This is the 1002 rung's input.
+  *** TWO CANDIDATE CAUSES - one structural, one 1001-introduced; the capture does NOT isolate ***
+  which one produces TPIDRURO = 0. Both are recorded; the 1002 rung fixes both.
+
+  (A) STRUCTURAL (matches TPIDRURO=0 cleanly). Our kernel NEVER establishes the user thread pointer
+  for pid-1's exec'd thread. dyld NEVER writes it itself: disassembly of `/tmp/ios7bin/dyld.dis`
+  shows exactly ONE `0x80000000` trap (2be1ac04-0c, `mov r3,#2` = a dcache operation) and NO
+  `thread_set_cthread` call anywhere - so the pointer must come from the kernel, and our tree's
+  writers (`Switch_context` cswitch.s:88; `arm_set_threadpid_user_readonly` pcb.c:84) only ever write
+  `thread->machine.cthread_self`, which our `machine_thread_create` never initializes (pcb.c:148-182,
+  no `cthread_self = ...`) and our tree has no `machine_thread_set_tsd_base`/`tsd_base` plumbing to
+  set (4570 pcb.c:370 + thread_act.c:778 + pthread_shims.c:672 do). With a single CPU (cpunum=0),
+  TPIDRURO = 0. The 4570 reference writes TPIDRURO in FOUR places our tree lacks (`machine_load_context`
+  cswitch.s:83-97 - our :106-125 loads+reads but writes neither; `machine_set_current_thread` in
+  `machine_routines_asm.s:34-47`; `start.s:78,309`). Why 999 (no such 1001 changes) did not fault is
+  NOT resolved by the captures - it needs the 999-side `cthread_self` value, which no record carries.
+
+  (B) 1001-INTRODUCED - a PROVEN real defect in the USVC hook (regardless of (A)). In `traps_lo.s:145`
+  the hook saves only `{r0,r1,r8,lr}`, but the C helper clobbers r3: built `entry_note_user_svc`
+  (elf 0x800066e4) does `80006700 movw r3,#65528 / 80006708 movt r3,#32864 / 80006750 mov r3,r0`, and
+  the hook never restores it. `fleh_swi` dispatches the `0x80000000` traps on **live r3**
+  (`swi_trap`, traps_lo.s:262, built `16c: cmp r3,#3 / addls pc,pc,r3,lsl#2`), so the clobber
+  corrupts dyld's dcache trap dispatch. The LEO sibling two lines down (traps_lo.s:152-166) does it
+  right: `stmfd {r0,r1}` guard, then `stmfd {r0-r12,lr}` for the call. This is the ONLY code
+  difference between the 999 kernel (no fault) and the 1001 kernel (fault), which is why it is
+  recorded even though the trap dyld issues is r3=2, not r3=3. Fix: save `r3` too (`{r0-r3,r8,lr}`).
+  Cf. [[mi4-linked-code-order-is-not-source-order]] (read a noinline helper BY VALUE) and
+  [[mi4-a-claim-in-a-comment-is-not-a-check]] (the hook's comment claims r0/r1/r8 suffice).
+
+  CONCLUSION (by value, bounded): the fault MECHANISM and LOCATION are resolved (dyld's
+  `_cerror_nocancel` reading `[TPIDRURO+4]` with TPIDRURO=0, @0x2be1b8d4). The defect is in kernel
+  USER THREAD POINTER establishment; two candidates above, (A) structural, (B) 1001-introduced. The
+  1002 rung: fix (B) (one line, provably present) AND harden (A) (establish TPIDRURO for exec'd user
+  threads). A 1002 instrument that reads TPIDRURO for pid 1 at the first user return would isolate
+  which.
 
 ## [7] REGRESSION GUARDS (3 HARD FAILs, adjudicated by value - NOT regressions)
 
