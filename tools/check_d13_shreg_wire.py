@@ -2,13 +2,14 @@
 """Assert BY VALUE that the linked image carries (ON) or lacks (OFF) the iOS 7 32-byte shared-region
 wire - 997's G3, the fix 996's measurement points at (`docs/reference/d13-shreg-frontier.md` 2).
 
-SIBLING, not an edit: `check_d13_shreg_probe.py` (sha256 e68a7657...84c, frozen for 996 by the lead's
-ruling) asserts the PROBE's presence and, in BOTH modes, that the wire is still 20 bytes wide ("996
-measures the misparse, it does not fix it").  997 fixes it, so this checker's OFF mode keeps 996's
-clause verbatim and its ON mode asserts the exact inversion.  The utility layer below is copied from
-the frozen checker byte-for-byte in meaning (objdump/sections/symbols/image_blob/find_string/
+SIBLING, not an edit: `check_d13_shreg_probe.py` (sha256 515be47f...c21 since commit 4b520b0, the
+999 `--ladder` revision; the sha 996 froze was e68a7657...84c) asserts the PROBE's presence and, in
+BOTH modes, that the wire is still 20 bytes wide ("996 measures the misparse, it does not fix it").
+997 fixes it, so this checker's OFF mode keeps 996's clause verbatim and its ON mode asserts the exact
+inversion.  The utility layer below is copied from the sibling checker byte-for-byte in meaning
+(objdump/sections/symbols/image_blob/find_string/
 count_bytes/make_u32_reader/read_cstr/bodies_and_raw/imm_value/string_refs/reaches_print/calls_to/
-straddle_terms/Env) so the two can be read against each other; the frozen file is never imported from,
+straddle_terms/Env) so the two can be read against each other; the sibling is never imported from,
 so a change to it cannot change this one silently.
 
 WHAT IT CHECKS (both modes):

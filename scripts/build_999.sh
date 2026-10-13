@@ -348,4 +348,4 @@ echo "-- by value: the 999 PAYLOAD constant AT THE ARM SITE (stage90_main.o's ca
 arm_site=$(arm-none-eabi-objdump -dr out/stage90/stage90_main.o 2>/dev/null | grep -B3 'bl.*stage90_hw_watchdog_arm' | grep -E 'mov[a-z]*[[:space:]]+r0, #(25|29)' || true)
 printf '%s\n' "${arm_site:-   (no mov r0,#25|#29 found near the arm call - the reader is stale)}"
 grep -qE 'mov[a-z]*[[:space:]]+r0, #29' <<<"$arm_site" || { echo "FAIL: the payload's arm site does not pass 29 - the loaded payload would arm the OLD 25 s net and the run would die at 998's wall"; exit 1; }
-echo "-- 999 build done: park with scripts/park_999.sh (HELD until the lead lifts the timer-freeze hold) --"
+echo "-- 999 build done: park with scripts/park_999.sh --"

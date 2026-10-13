@@ -35,9 +35,9 @@
 # `mi4-off-option-two-spellings` guard), and the patcher PROVES the removability of its guard structure
 # before it writes a single byte (`--verify-off`).
 #
-# Idempotent: the patcher decides all seven chunks before writing any, asserts each anchor window's
-# occurrence count exactly, REFUSES (file untouched) on a partial/double/foreign edit, and a second run
-# prints "nothing to do".
+# Idempotent: the patcher decides all ten chunks (996's seven plus 999's three slide prints) before
+# writing any, asserts each anchor window's occurrence count exactly, REFUSES (file untouched) on a
+# partial/double/foreign edit, and a second run prints "nothing to do".
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
