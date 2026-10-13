@@ -14469,3 +14469,95 @@ set=armed-d13-bbdf41bc sha256=a50ccbea582fc0f050792e6304856573bcebd55058b0237c1d
 set=armed-d13-bbdf41bc sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1000-tick-rate+cap-exempt+usvc;stage90_fixture.macho
 set=armed-d13-bbdf41bc sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1000-tick-rate+cap-exempt+usvc;stage90-build-config.txt
 set=armed-d13-bbdf41bc sha256=d3236fe41b8b1b91c1959ecf821906f10dbc26dadcaf8ff81243f8851a386370 bytes=560 file=SHA256SUMS.txt role=1000-tick-rate+cap-exempt+usvc;SHA256SUMS.txt
+# armed-d13-6ab42af7  -  1001: THE SUBMAP-AS-OBJECT CALL IS SKIPPED (vm_map_enter-s pmap-enter tail, `!is_submap`), THE SKIP BRANCH REPORTS ITSELF (SUBMAPSKIP, bounded, <= 8), AND THE SURVIVING BOOT OPENS THE USVC/PET READINGS 1000 ARMED.
+# Switch set is 1000-s VERBATIM (DYLD_WITNESS, SHREG_PROBE, SHREG_WIRE, SHREG_GEOM, RESIDENT
+# and USVC all stay 1) plus ONE NEW switch, STAGE90_XNU_SUBMAP_PMAP_SKIP (the POOL define
+# rides build_xnu_arm_kernel.sh-s DEFINES array - the SAME array as VMHINT_GUARD, vm_map.c
+# being a kernel-pool file - and build_entry.sh-s EXPORTS records it in the entry image); the
+# ENTRY BIN moved (bbdf41bc -> 6ab42af7); the PAYLOAD moves (it embeds the entry blob; the 29 s
+# watchdog constant is 999-s, unchanged); the POOL MOVES this time (osfmk_vm_vm_map.o carries
+# the fix - 1000-s pool did not move); the TREE moves by ONE staged edit (vm_map.c gains the
+# guard and the probe). build_entry.sh carries the switch end-to-end (new arm key parsed +
+# guarded, ENTRY_ARM_KEYS read-back, record writer) - the VMHINT_GUARD shape, not the USVC one
+# (USVC had an ASFLAGS half; this one is pool-side).
+#
+# THE FIX, BY VALUE (records/1000-press-read.txt - "Root cause"): vm_map_enter-s pmap-enter
+# tail (vm_map.c:2149-2161) calls `vm_map_pmap_enter` with the `object` parameter - which on a
+# SUBMAP enter IS the submap itself (:2063 `submap = (vm_map_t) object;`), a vm_map, not a
+# vm_object. The block-s guard is `object != VM_OBJECT_NULL && vm_map_pmap_enter_enable &&
+# !anywhere && !needs_copy && size < 128K` - with NO `is_submap` test - so the helper locks the
+# element-s +8 word as if it were a struct vm_object-s lock and reads its +0x18 (memq_hint) as
+# if it were a vm_object-s queue. The SAME function guards the SAME parameter 30 lines later
+# (:2192 pager block: `if (!is_submap && object != VM_OBJECT_NULL && object->named && ...)`);
+# the fix is that idiom: `if (!is_submap) { override_nx...; vm_map_pmap_enter(...); } else {
+# probe; }`, keeping `pmap_empty = FALSE`, behind STAGE90_XNU_SUBMAP_PMAP_SKIP (defined()-first
+# like every 991+ kernel edit; tools/stage_d13_submap_pmap_skip.sh). All four 2050-era trees in
+# this workspace carry the unguarded call verbatim (pristine apple-xnu-rel-2050 :2143,
+# xnu-2050.18.24 :2143, xnu-upstream :2143, hd2-darwin13 :2149).
+#
+# THE PROBE (the VMHINT991 pattern; text channel; BOUNDED, max 8 hits): `SUBMAPSKIP: obj=<ptr>
+# start=<ptr> end=<ptr> size=<ptr> lr=<ptr>` once per skip - `obj` is the submap, `lr` names
+# the callers by measurement and `start`/`end`/`size` range them. The reading it makes possible
+# is positional: SUBMAPSKIP present + VMHINT991 0 + survival = the call was skipped before the
+# lookup AND the boot lived; SUBMAPSKIP absent + death at the same call = the skip did not
+# reach the image.
+#
+# 1000 (pressed 2026-10-13, arm armed-d13-bbdf41bc, evidence out/stage90/captures/,
+# records/1000-press-read.txt) DIED at XNU time 10.31 s: `panic(cpu 0 caller 0x80498058):
+# hw_lock_lock(): PANIC: Lock 0xc0005b50 = 0xffb5be0b`, immediately after `attempting to
+# start init of /sbin/launchd`. The locked word - 8 = 0xc0005b48 = the "object" 999-s
+# VMHINT991 guard had already recorded (obj=0xc0005b48 / 0xc0005ab0, w04=0xbaddecaf =
+# zalloc-s free marker => both are FREED vm_map-zone elements passed as vm_objects). 990 died
+# on the same two non-objects one field over (+0x18, vm_page_lookup); 999-s benign DRAM words
+# let it live; 1000-s +8 word held 0xffb5be0b (bit0 set) and hw_lock_lock panicked. Three
+# fields of the same two non-objects, one common cause: the call. The death point sits BEFORE
+# every one of 1000-s instruments - the adjudicator-s five anomalies are ALL death artifacts
+# (its own [5]), ZERO regressions (the tick geometry - 16 = 4x4 anomaly fields + 12 = 3x4
+# summaries - is the instrument that proves the image WAS 1000-s).
+#
+# The 1001 PRESS PRE-REGISTRATION (frozen once embedded; deviations reported, not
+# reinterpreted) is written by the TEAM-LEAD into scripts/press_1001.sh. Expected per the lead:
+# the SUBMAPSKIP probe >= 1 (most likely EXACTLY 2, with obj equal to 999-s two VMHINT991
+# objects 0xc0005b48 / 0xc0005ab0 - report by value; absence while survived = the probe did not
+# reach the image); VMHINT991 **0 WHILE THE BOOT SURVIVES** (INVERTED from 999-s 2 - the call
+# is skipped before the lookup; any count > 0 while surviving = the skip did not reach the
+# image OR another caller path still arrives at the lookup with a non-object - a reading); the
+# SURVIVAL GATE (no panic + the exec-done trio and its five probe keys + records past the
+# exec-return point) - guard absence counts ONLY under it, the 1000 adjudicator-s lesson,
+# carried by tools/check_1001_capture.py; the USVC first records (8 field keys, first 64 in
+# full - the frontier 1000 armed and never reached; `cs_invalid_page` may recur, which would
+# mean the dyld frontier MOVED rather than stopped); the pet-s FIRST feed (`xnu_live_wdt_pet_n`)
+# once the boot passes ~14.5 s with the read door in use (1000-s zero feeds was the 10.31 s
+# death - the gate is bark/2 = 14.5 s - not a door failure; zero feeds past 14.5 s with the
+# door used = the door stopped or the gate moved, a READING); the tick summaries continuing
+# (the 2.58 s masked-window question stays OPEN). Falsifiers: death at the SAME call
+# (hw_lock_lock / vm_map_pmap_enter / vm_map_enter) with SUBMAPSKIP ABSENT => the skip did not
+# reach the image - REBUILD, do not re-adjudicate; death elsewhere later => the frontier
+# ADVANCED, record by value. The frozen regression guards (geometry exactly once, cache mapping
+# x4, shared region x1, check_np ret=12 x1, map_file kr=0, map_slide ret=0) are re-verified
+# only under the survival gate.
+#
+# VERIFIED BY VALUE (build_1001.sh): the staged vm_map.c edit BY SOURCE (`!is_submap` inside
+# the existing pmap-enter block, `pmap_empty = FALSE` kept, the SUBMAPSKIP literal and its
+# <= 8 bound in the same guarded region, defined()-first) and BY OBJECT (`osfmk_vm_vm_map.o`
+# carries the SUBMAPSKIP literal); the fresh record carries `STAGE90_XNU_SUBMAP_PMAP_SKIP=1`;
+# the FROZEN 1000 elf as the NEGATIVE CONTROL (0 SUBMAPSKIP literals - a reader that cannot
+# fail certifies nothing). The 996/997/998/999/1000 checkers rerun ON the 1001 image with the
+# FROZEN 1000/999 images as negative controls - the probe checker-s ONE by-design frozen 20 B
+# clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-6ab42af7 sha256=6ab42af7238d3148eed0f92a67386a9a523133e9faad2b2b236810b498ebc469 bytes=6343764 file=xnu_arm_entry.bin role=1001-submap-pmap-skip+probe;xnu_arm_entry.bin
+set=armed-d13-6ab42af7 sha256=317eb918597d796ff05d0b91b314aa67dc23d70960e57aebadef7afec2785e01 bytes=7385412 file=xnu_arm_entry.elf role=1001-submap-pmap-skip+probe;xnu_arm_entry.elf
+set=armed-d13-6ab42af7 sha256=6f96fb39cf379cd7db346c59c31375b71e3463563302ebcc90f602bf9e850bdb bytes=1912 file=xnu_arm_entry.h role=1001-submap-pmap-skip+probe;xnu_arm_entry.h
+set=armed-d13-6ab42af7 sha256=5dd51e43e2ec77422e2eb5f11a8867d85975525f8cae093ef2539d1619b43e5d bytes=1692 file=xnu_arm_entry-config.txt role=1001-submap-pmap-skip+probe;xnu_arm_entry-config.txt
+set=armed-d13-6ab42af7 sha256=cdb31d7c762d0b9f4dce4a580b25b1e79e43ee7c7cbfe1debadce8c0476ceafc bytes=3149 file=xnu_arm_entry-sources.txt role=1001-submap-pmap-skip+probe;xnu_arm_entry-sources.txt
+set=armed-d13-6ab42af7 sha256=08d1aab13112368ad0dab0acb6550f8486141484ec7ee739ad8c839920ffb10a bytes=6839172 file=stage90.bin role=1001-submap-pmap-skip+probe;stage90.bin
+set=armed-d13-6ab42af7 sha256=d272087e820b937ff41241e603d5a9cec201a538c8c3dfec90d19228ef880012 bytes=6901244 file=stage90.elf role=1001-submap-pmap-skip+probe;stage90.elf
+set=armed-d13-6ab42af7 sha256=7ba8ce3a66b5723217e849a938630e31536d459fe38e9ce863061b9f63103c1f bytes=6842368 file=stage90.img role=1001-submap-pmap-skip+probe;stage90.img
+set=armed-d13-6ab42af7 sha256=f2bc5836445720b5194e4db1a298c7f966c76e46dd107c0f1bc4c2f9e9abf890 bytes=9363456 file=stage90-qcdt.img role=1001-submap-pmap-skip+probe;stage90-qcdt.img
+set=armed-d13-6ab42af7 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1001-submap-pmap-skip+probe;stage90_fixture.macho
+set=armed-d13-6ab42af7 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1001-submap-pmap-skip+probe;stage90-build-config.txt
+set=armed-d13-6ab42af7 sha256=8def24bd6476e04fd528bf3114a432e16322550cf94cfcd69be3d9adfe1fe727 bytes=560 file=SHA256SUMS.txt role=1001-submap-pmap-skip+probe;SHA256SUMS.txt
