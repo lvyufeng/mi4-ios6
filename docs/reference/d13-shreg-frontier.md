@@ -464,7 +464,10 @@ reinterpreted).**
   `slide=0x1a86000 slide_start=0x3dc32000 size=0x00089000`); 997's trailing `map_slide ret=14` and
   the §8 item 4 hook (`slide_info initialization failed with kr=`) are absent.
 - (d) **not a new failure name — NO halt at all**: every marker of the 997 chain is gone from the
-  text block — `libbsm` 0 lines, `IOS7WITNESS` 0, `undefined instruction` 0, `dyld>` 0. The console
+  text block — `libbsm` 0 lines, `IOS7WITNESS` 0, `undefined instruction` 0, `dyld>` 0. The absence
+is confirmed independently by the direct-record arithmetic (buildplumb 2026-10-13): 997's capture
+holds 16,795 `xnu_live_` lines = 16,384 counted + 411 direct; 998's 16,426 = 16,384 + 42; the
+369-record delta is exactly the direct writes the witness/udf halt chain no longer makes. The console
   text ENDS at `map_file kr=0`.
 - Guards held: `check_np ret=12` (`:4103`), `VMHINT991` 2× (`:4096-4097`); the stack falsifier
   (`Process 1 exec failed`) is absent. **Reported deviation:** the pre-registration's
@@ -508,9 +511,11 @@ The multiplier is **thinning the per-read dump after `rd_ordinal > 256`** (keep
 buildplumb: cap 24576 **and** thin-after-256. (b) decide the watchdog policy — WDT_HZ 32765, armed
 25 s bark + 3 s bite (payload `STAGE90_HW_WATCHDOG_TIMEOUT_S`=25); the pet fires only on idle, so a
 boot that never idles ends at the SoC's ~28 s whatever else it does. (c) the exec_done fix — **root-caused 2026-10-13 (buildplumb's closed identity on the 998 capture);
-this section's earlier "cap impossible" reading is refuted.** The books close to the unit: 16,425
-`xnu_live_` lines = 16,384 cap-counted + 41 direct `entry_write_kv` writes; counted lines ≤ the exec
-block = 15,260 (15,297 lines − 37 direct), plus the 1,124 lines `:19378-:20501` (all counted) =
+this section's earlier "cap impossible" reading is refuted.** The books close to the unit: 16,426
+`xnu_live_` lines = 16,384 cap-counted + 42 direct `entry_write_kv` writes (the 42nd is the
+space-prefixed `xnu_live_ostext_at` that ends the 124,122-char line at `:4110` — a line-start parse
+misses it; corrected by value 2026-10-13, shreg-g1 + buildplumb); counted lines ≤ the exec
+block = 15,260 (15,298 lines − 38 direct), plus the 1,124 lines `:19378-:20501` (all counted) =
 16,384 exactly. Those 1,124 lines are the LOAD's own traffic (11 storage reads ≈ 89 lines each + the
 56 `sleh` + slot/block lines), so `load_init_program`'s return sits at their END (`:20501`) — the
 done calls run at counter ≥16,384, and the tombstone `xnu_live_capped=0x00004000` (`:20502`, the
