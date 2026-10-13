@@ -14622,3 +14622,49 @@ set=armed-d13-b04976fe sha256=04059824737d39ee7ffd25e05783b717482c5f247f8ddf0379
 set=armed-d13-b04976fe sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1002-usvc-hook-saves-r3;stage90_fixture.macho
 set=armed-d13-b04976fe sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1002-usvc-hook-saves-r3;stage90-build-config.txt
 set=armed-d13-b04976fe sha256=af188697909af46aebbd2eedd8fb79f8c95efe0225d2e2bd1f52753e12e417d5 bytes=560 file=SHA256SUMS.txt role=1002-usvc-hook-saves-r3;SHA256SUMS.txt
+# armed-d13-7669309b  -  1003: THE PID-1 STALL INSTRUMENT (per-tick sample of the interrupted frame: a user pc
+# that advances/repeats = SPINNING; every sample a KERNEL pc = ASLEEP).
+# Switch set is 1002-s VERBATIM plus STAGE90_XNU_STALL=1 (DYLD_WITNESS, SHREG_PROBE, SHREG_WIRE,
+# SHREG_GEOM, RESIDENT, USVC and SUBMAP_PMAP_SKIP all stay 1); the ENTRY BIN moved (b04976fe ->
+# 7669309b); the PAYLOAD moves (it embeds the entry blob; the 29 s watchdog constant is 999-s,
+# unchanged); the TREE does NOT move - 1003 has NO tree edit and NO stage driver (the instrument
+# lives in TWO src/ files: the recorder entry_note_stall_sample in src/entry/entry_stubs.c, and
+# ONE gated call site in src/platform/darwin13/pe_msm8974.c).
+#
+# THE FRONTIER, BY VALUE (records/1002-press-read.txt): the 1002 press CONFIRMED the r3-save fix
+# (the 230x dyld usermode data abort at 0x4 is GONE) and pushed the boot into pid-1 user mode:
+# 22 SVCs, the last three num=-3 = mach_absolute_time from the SAME pc 0x2be97328 with lr marching
+# 0x2be85a9f -> 0x2be85af1 -> 0x2be85b11, cpsr 0x60000010 (USR), then NO further syscall while the
+# kernel stays alive ~23 min. cs_invalid_page(0x2f7f6000) is a TOLERATED warning (clearing
+# CS_VALID = retval 0), NOT the frontier.
+#
+# THE 1003 PRESS PRE-REGISTRATION (frozen once embedded; deviations reported, not interpreted) is
+# written by the TEAM-LEAD into scripts/press_1003.sh: THE READING is the xnu_live_stall_pc samples -
+# a USER pc (cpsr 0x10) that advances or repeats = the pid-1 program is SPINNING; every sample a
+# KERNEL pc (0x8000xxxx) = pid 1 is ASLEEP/blocked. The frozen regression guards (geometry exactly
+# once, cache mapping x4, shared region x1, check_np ret=12 x1, map_file kr=0, map_slide ret=0) are
+# re-verified only under the survival gate. The 1002 r3-save fix is a REGRESSION: the six-word
+# window must STILL be present in locore_fleh_swi.
+#
+# VERIFIED BY VALUE (build_1003.sh): the pe_msm8974.o references entry_note_stall_sample (U), the
+# linked image carries the symbol (T) + the 7 xnu_live_stall_* key literals + the source has 1
+# gated call site, with the FROZEN 1002 elf (armed-d13-b04976fe) as the NEGATIVE CONTROL (x0
+# symbol, x0 literals); the 1002 six-word save set asserted present (regression). The 996/997/998/
+# 999/1000/1001 checkers rerun ON the 1003 image with the FROZEN images as negative controls -
+# the probe checker-s ONE by-design frozen 20 B clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-7669309b sha256=7669309b8027ea01dd5f476c86b6fb478c3dc2e775a6b0c59dba87291ff7389f bytes=6343764 file=xnu_arm_entry.bin role=1003-pid1-stall-instrument;xnu_arm_entry.bin
+set=armed-d13-7669309b sha256=78e9ba96ad62ec12aa5a3394cee0c0b52ddae4df742ffd2ef2c77e9087d2cd00 bytes=7385484 file=xnu_arm_entry.elf role=1003-pid1-stall-instrument;xnu_arm_entry.elf
+set=armed-d13-7669309b sha256=6f96fb39cf379cd7db346c59c31375b71e3463563302ebcc90f602bf9e850bdb bytes=1912 file=xnu_arm_entry.h role=1003-pid1-stall-instrument;xnu_arm_entry.h
+set=armed-d13-7669309b sha256=98e35bf5a38c48d76b2c0f3c1eaf3a863ee94172e0e302cc7f1fb6ea8c56abf1 bytes=1712 file=xnu_arm_entry-config.txt role=1003-pid1-stall-instrument;xnu_arm_entry-config.txt
+set=armed-d13-7669309b sha256=ea30dad833fb04df199d617f05167f3ff1960687d84b66947f7ad80eedf461bf bytes=3149 file=xnu_arm_entry-sources.txt role=1003-pid1-stall-instrument;xnu_arm_entry-sources.txt
+set=armed-d13-7669309b sha256=05a5dd9195bb4fa6fe6f8e14532d7d690fd7dfbd8291edc476901ca38a923e14 bytes=6839172 file=stage90.bin role=1003-pid1-stall-instrument;stage90.bin
+set=armed-d13-7669309b sha256=09ccbc089f3ef3879cbdcdaef9b596c2f0ff4b49d88cd19bdd8a607b367e1913 bytes=6901244 file=stage90.elf role=1003-pid1-stall-instrument;stage90.elf
+set=armed-d13-7669309b sha256=1715f3f5713dd3a6180e8712889622ef9c25bda06f94afa438527ef569902e22 bytes=6842368 file=stage90.img role=1003-pid1-stall-instrument;stage90.img
+set=armed-d13-7669309b sha256=29646dfddb326e7b85153fbb1b1dc483b275ff3ac9f6e34655a452991dc7cc3f bytes=9363456 file=stage90-qcdt.img role=1003-pid1-stall-instrument;stage90-qcdt.img
+set=armed-d13-7669309b sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1003-pid1-stall-instrument;stage90_fixture.macho
+set=armed-d13-7669309b sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1003-pid1-stall-instrument;stage90-build-config.txt
+set=armed-d13-7669309b sha256=c909c28c43b61b60e6f975f262fb051a449c2dd566eb3cc4215f99a310aec7fb bytes=560 file=SHA256SUMS.txt role=1003-pid1-stall-instrument;SHA256SUMS.txt

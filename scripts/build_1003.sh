@@ -1,36 +1,39 @@
 #!/usr/bin/env bash
-# Build 1003: 1002's switch set VERBATIM - NO new switch - and exactly ONE code change on the
-# CODE-SIGNING page-validation wall. The rung answers the frontier the 1002 press read reached
-# (2026-10-13, arm armed-d13-b04976fe): the boot now runs INTO userspace and stops at
+# Build 1003: 1002's switch set VERBATIM plus ONE new switch, STAGE90_XNU_STALL - a pure MEASUREMENT
+# rung (no kernel behaviour changes) that samples pid 1's user pc on the timer tick. It answers the
+# one question the 1002 press read (2026-10-13, arm armed-d13-b04976fe) could NOT answer by value.
 #
-#     CODE SIGNING: cs_invalid_page(0x2f7f6000): p=1[launchd] clearing CS_VALID
+# 1002's press advanced the boot INTO pid-1 user mode, FIXED the 1001 abort (230x `usermode data abort
+# at 0x4` -> 0) and moved the frontier: after `IOS7SHREG check_np ret=12` the boot prints `map_slide`,
+# runs 22 user SVCs, then the user side makes NO further syscall while the kernel stays alive ~23 min
+# (43,179 WDT pets, tick summaries climbing) and the storage door serves 537 reads. See
+# records/1002-press-read.txt and docs/1003-dyld-stall-design-draft.md.
 #
-# - the SAME wall 999 stopped on. This is a NEW/OLD wall, not a rung-inside-a-hook bug (1002's
-# shape); the exact kernel change is being determined by the parallel forensics agent (forensics-1003).
+# WHY THE INSTRUMENT, AND WHY *THIS* ONE. The capture cannot distinguish (i) pid 1 ASLEEP in the
+# kernel (blocked on a page-in or IPC that never completes) from (ii) pid 1 SPINNING in user mode
+# (the last three SVCs are num=-3 = `mach_absolute_time`, same pc 0x2be97328, `lr` marching - a
+# monotonic-clock poll). An SVC is a syscall, and a spin makes none, so "no more SVCs" fits both. The
+# kernel-side suspects are exonerated BY VALUE: `rtclock_bus_configure` ran ([RTCLOCK] 19.2 MHz, so
+# `rtclock_sec_divisor != 0` and `mach_absolute_time()` advances), `cs_validate_page`'s SHA1 is
+# compile-stubbed to ACCEPT (`ubc_subr.c` `_NOTYET`), the read door completes every op
+# (`rd_complete=1`/`rd_err=0`). So the question is a MEASUREMENT, not an inference - and 1003 takes it:
+# the board PE's timer IRQ already holds the interrupted frame (`context`), and sampling its pc/cpsr on
+# the tick's powers-of-two ladder gives a short autonomous history that separates the two cases.
 #
-# 1002's headline: the 1001 frontier (230x byte-identical `launchd[1]: usermode data abort,
-# EXC_BAD_ACCESS at 0x00000004` on dyld's `_cerror`/TPIDRURO=0 path, right after `IOS7SHREG check_np
-# ret=12`) was FIXED BY VALUE and the fix was SELF-TESTING: the USVC hook's save set gained r3
-# (`{r0,r1,r8,lr}` -> `{r0-r3,r8,lr}`, six words = 24 B, still 8-aligned), so `fleh_swi`'s `swi_trap`
-# dispatch of the `0x80000000` traps kept its live r3 and dyld stopped reading TPIDRURO=0. 1002's
-# press (armed-d13-b04976fe) confirmed the abort GONE and the frontier MOVED to the code-signing
-# page-validation wall (cs_invalid_page / clearing CS_VALID) - see records/1002-press-read.txt.
+#   * the sampled pcs ADVANCE or REPEAT as a USER pc (cpsr low bits 0x10) => pid 1 is SPINNING in user
+#     mode (a user-space wait loop);
+#   * every sample is a KERNEL pc (0x8000xxxx) => pid 1 is ASLEEP, and the last syscall is its sleep
+#     site.
 #
-# TODO(1003): set from forensics-1003 - REPLACE the placeholder tokens below with the confirmed root
-# cause and the confirmed switch/file(s). The skeleton keeps 1002's STRUCTURE identical:
-#
-#   * THE ROOT CAUSE (BY VALUE): <forensics-1003: the kernel-side reason cs_invalid_page fires for
-#     launchd (0x2f7f6000, p=1) and clears CS_VALID - e.g. the pmap/code-signing page validation
-#     reading a page whose CS blob/hash was never entered, the shared-cache mapping not marked
-#     CS_VALID, the code-signing vnode/cs_blob plumbing absent in our tree, etc.>
-#   * THE FIX (this rung): STAGE90_XNU_<TOPIC> (placeholder) - <forensics-1003: the exact edit and
-#     the file(s) it touches (POOL file => rides EXTRA + the env export, like 1001's
-#     STAGE90_XNU_SUBMAP_PMAP_SKIP; ASSEMBLY-layer => rebuild tools/assemble_arm_layer.sh with the
-#     switch exported, like 1000/1002's USVC)>. Staged by tools/stage_d13_<topic>.sh.
-#   * THE ENTRY BIN MUST MOVE (b04976fe -> the new sha8) because the change reaches the linked image.
+# THE SWITCH: STAGE90_XNU_STALL=1 (the one new switch). It reaches `pe_msm8974.c`'s compile as
+# `-DSTAGE90_XNU_STALL` via `XNU_KERNEL_EXTRA_DEFINES` (== `$EXTRA`) - the platform block path - and is
+# recorded in the arm. NO tree edit, NO stage driver: the recorder is in `src/entry/entry_stubs.c` and
+# the call site in `src/platform/darwin13/pe_msm8974.c`, both gated so STALL=0 is byte-identical.
+# THE ENTRY BIN MUST MOVE (b04976fe -> the new sha8) because the call site reaches `pe_msm8974.o`,
+# which the entry link carries.
 #
 # THE SWITCH SET is 1002's VERBATIM (all checker/witness/USB-ladder switches, RESIDENT, USVC and
-# SUBMAP_PMAP_SKIP stay 1) plus STAGE90_XNU_<TOPIC>=1 (TODO(1003): the one new switch).
+# SUBMAP_PMAP_SKIP stay 1) plus STAGE90_XNU_STALL=1 (the one new switch).
 #
 # ALL 1002 INSTRUMENTS STAY (the tick sampler/summaries, the cap-exempt pet/anomaly channels, the
 # user-SVC frontier - USVC=1 - the 991 memq_hint guard, the 1001 submap pmap-enter skip, and the
@@ -97,11 +100,8 @@ cd "$(dirname "$0")/.."
 XNU_TREE=$PWD/external/xnu-hd2-darwin13/xnu
 REC=out/stage90/xnu_arm_entry-config.txt
 
-echo "== 1003: the code-signing page-validation wall (cs_invalid_page / clearing CS_VALID for launchd at 0x2f7f6000) - 1002's set verbatim + ONE new switch STAGE90_XNU_<TOPIC> (TODO(1003): set from forensics-1003) =="
-echo "-- 1002's arm was armed-d13-b04976fe (PRESSED 2026-10-13: the USVC-hook r3-save fix took BY VALUE - the 230x dyld abort at 0x4 is GONE and the frontier MOVED to the code-signing page-validation wall; adjudication in records/1002-press-read.txt); 1002's set verbatim --"
-# TODO(1003): the frontier line above is the settled 1002 reading; forensics-1003 supplies the exact
-#             cs_invalid_page root cause (WHY launchd's page 0x2f7f6000 is judged invalid / CS_VALID
-#             cleared) and the precise kernel edit. Keep this echo's wording in sync with the head.
+echo "== 1003: the STALL INSTRUMENT - a per-tick pid-1 user-pc sampler (STAGE90_XNU_STALL), to settle BLOCKED vs SPINNING; 1002's set verbatim + ONE new switch =="
+echo "-- 1002's arm was armed-d13-b04976fe (PRESSED 2026-10-13: the USVC-hook r3-save fix took BY VALUE - the 230x dyld abort at 0x4 is GONE and the frontier MOVED to a user-side stall after 22 SVCs; adjudication in records/1002-press-read.txt, reframe in docs/1003-dyld-stall-design-draft.md); 1002's set verbatim --"
 
 EXTRA=""
 # NOTE: `STAGE90_XNU_HFS_ROOT_RW` is NOT here - it is a tree-layout define carried by the ENVIRONMENT
@@ -130,14 +130,14 @@ EXTRA="$EXTRA -DSTAGE90_XNU_SHREG_GEOM=1"
 # 1000's USVC this one rides BOTH `EXTRA` and the environment export below into
 # `build_xnu_arm_kernel.sh`'s DEFINES ([[mi4-one-value-two-definitions]]).
 EXTRA="$EXTRA -DSTAGE90_XNU_SUBMAP_PMAP_SKIP=1"
-# 1003's NEW switch (TODO(1003): set from forensics-1003). Placeholder name STAGE90_XNU_<TOPIC>.
-# Mirror 1001's SUBMAP_PMAP_SKIP shape IF the change is in a POOL file (then it rides BOTH this
-# `EXTRA` line AND the environment export below into build_xnu_arm_kernel.sh's DEFINES); mirror
-# 1000/1002's USVC shape IF it is ASSEMBLY-layer (then it is read by the ASFLAGS half and by
-# build_entry.sh's EXPORTS, and NO pool C file reads it). Replace the placeholder token everywhere it
-# appears (this file, park_1003.sh, press_1003.sh) with forensics-1003's confirmed name.
-# TODO(1003): set from forensics-1003
-EXTRA="$EXTRA -DSTAGE90_XNU_<TOPIC>=1"
+# 1003's NEW switch: STAGE90_XNU_STALL, the per-tick pid-1 pc sampler. It reaches the board PE's
+# compile (`src/platform/darwin13/pe_msm8974.c`) as `-DSTAGE90_XNU_STALL` via `XNU_KERNEL_EXTRA_DEFINES`
+# (== this `EXTRA`), the same path HFS_ROOT_MEDIA/EMMC_STRATEGY/ROOT_FROM_CARD use - `pe_msm8974.o` is
+# compiled by `build_xnu_arm_kernel.sh`'s platform block with `EXTRA_DEFINES`, NOT by the entry
+# toolchain. The recorder half lives in `src/entry/entry_stubs.c` (compiled by build_entry.sh, which
+# reads `$STALL` for the RECORD only; its body is ungated). NO tree edit and NO stage driver: both
+# halves are src/ files edited directly.
+EXTRA="$EXTRA -DSTAGE90_XNU_STALL=1"
 # 1000's USVC adds NO key HERE: it is read by the ASSEMBLY layer (ASFLAGS via assemble_arm_layer.sh)
 # and by build_entry.sh (the env EXPORTS below), and NO pool C file reads it - the same shape
 # RESIDENT had at 999. 1001's SUBMAP_PMAP_SKIP DOES (pinned just above): vm_map.c rides the pool.
@@ -161,10 +161,11 @@ tools/stage_d13_shreg_geom.sh
 tools/stage_d13_timer_edge.sh
 tools/stage_d13_usvc.sh
 tools/stage_d13_submap_pmap_skip.sh
-# TODO(1003): set from forensics-1003 - the stage driver for the cs_invalid_page / CS_VALID fix.
-# Replace the placeholder driver name with the real one (1001's was tools/stage_d13_submap_pmap_skip.sh;
-# 1000/1002's assembly-layer edits were staged by tools/stage_d13_usvc.sh + tools/patch_d13_usvc.py).
-tools/stage_d13_<topic>.sh
+# 1003 adds NO stage driver. The two halves of the stall instrument are src/ files edited directly:
+# the recorder in `src/entry/entry_stubs.c` (compiled by build_entry.sh) and the ONE call site in
+# `src/platform/darwin13/pe_msm8974.c` (compiled by the platform block under -DSTAGE90_XNU_STALL). No
+# tree file outside src/ is touched - this is a pure MEASUREMENT rung, and the gated `#if` in
+# pe_msm8974.c keeps the tree's own objects byte-identical when STALL=0.
 
 echo "-- HFS (the port is on, hfs files join the pool) --"
 export STAGE90_XNU_HFS=1
@@ -214,13 +215,12 @@ export STAGE90_XNU_RESIDENT=1
 # reaches build_entry.sh through EXPORTS below ([[mi4-one-value-two-definitions]]).
 export STAGE90_XNU_USVC=1
 
-# 1003: the NEW switch (TODO(1003): set from forensics-1003). Export it here ONLY if the change is in
-# the ASSEMBLY layer (like USVC/RESIDENT); if it is a POOL-file change, export it here too (mirroring
-# SUBMAP_PMAP_SKIP's env export at the 991/1001 site above) so build_xnu_arm_kernel.sh's DEFINE gate
-# sees it. Either way the SAME value must reach build_entry.sh through EXPORTS below
-# ([[mi4-one-value-two-definitions]]).
-# TODO(1003): set from forensics-1003
-export STAGE90_XNU_<TOPIC>=1
+# 1003: the NEW switch STAGE90_XNU_STALL. It must be exported (not only in `EXTRA`) for the same
+# reason 991/1001's pool switches are: `build_xnu_arm_kernel.sh` gates the DEFINE of that name on the
+# environment variable, and the platform block's compile (which carries the pe_msm8974.c call site)
+# reads it from there. Export it HERE, before the pool/platform build below - the SAME value reaches
+# build_entry.sh through EXPORTS below ([[mi4-one-value-two-definitions]]).
+export STAGE90_XNU_STALL=1
 
 echo "-- arm asm layer (994: traps_lo.o gets the -3 timebase; 999+am2: machine_routines_asm.o and cswitch.o get the timer-discriminator edge hooks; 1000: traps_lo.o ALSO gets the USVC hook - both switches exported before this line) --"
 XNU_TREE="$XNU_TREE" XNU_KERNEL_CONFIG=STAGE90_XNU tools/assemble_arm_layer.sh
@@ -272,11 +272,11 @@ EXPORTS+=("STAGE90_XNU_USVC=1")
 # 1001's NEW key: the 1000 record does NOT carry it yet - the pin is the only carrier this run, and
 # the record the entry build writes (asserted at the tail) is what parks the arm with it.
 EXPORTS+=("STAGE90_XNU_SUBMAP_PMAP_SKIP=1")
-# 1003's NEW key (TODO(1003): set from forensics-1003). The 1002 record does NOT carry it yet - the
-# pin is the only carrier this run, and the record the entry build writes (asserted at the tail) is
-# what parks the arm with it ([[mi4-one-value-two-definitions]]).
-# TODO(1003): set from forensics-1003
-EXPORTS+=("STAGE90_XNU_<TOPIC>=1")
+# 1003's NEW key STAGE90_XNU_STALL. The 1002 record does NOT carry it yet - the pin is the only
+# carrier this run, and the record the entry build writes (asserted at the tail) is what parks the arm
+# with it ([[mi4-one-value-two-definitions]]). build_entry.sh reads it for the RECORD only; the PE's
+# call site was compiled from the environment export above (== the same value).
+EXPORTS+=("STAGE90_XNU_STALL=1")
 EXPORTS+=("STAGE90_ENTRY_ARM_CHANGE=1")
 EXPORTS+=("XNU_TREE=$XNU_TREE")
 
@@ -580,38 +580,56 @@ t10_src=external/xnu-hd2-darwin13/xnu/osfmk/arm/traps_lo.s
 echo "   (e) the payload constant is unchanged (29 s) and the watchdog arm site still passes 29"
 grep -qE 'mov[a-z]*[[:space:]]+r0, #29' <<<"$arm_site" || { echo "FAIL: the arm site no longer passes 29"; exit 1; }
 # ====================================================================================================
-# THE 1003 DELTA (TODO(1003): set from forensics-1003). The block below is the PARAMETERIZED SKELETON:
-# it must assert the NEW change BY VALUE in the object/linked image that carries it, with the FROZEN
-# 1002 image (armed-d13-b04976fe) as the NEGATIVE CONTROL - a reader that cannot fail certifies nothing.
-# Fill each TODO with forensics-1003's confirmed literals/symbols. The SHAPE mirrors 1001's SUBMAPSKIP
-# delta clause (pool object + linked image + source-side staged shape + frozen-control) and 1002's
-# six-word save clause (object + linked body + source + frozen-control), above.
+# THE 1003 DELTA: the stall instrument, asserted BY VALUE, with the FROZEN 1002 image
+# (armed-d13-b04976fe) as the NEGATIVE CONTROL - a reader that cannot fail certifies nothing.
+#
+# The instrument is two src/ files (NO tree edit): the recorder `entry_note_stall_sample` in
+# `src/entry/entry_stubs.c` (compiled by build_entry.sh into the payload's stub object) and ONE call
+# site in `src/platform/darwin13/pe_msm8974.c` (compiled by the platform block into
+# `$XNU_PLATFORM_OBJ_OUT/pe_msm8974.o`, which the entry link carries). The by-value fingerprint is
+# the FIVE key-name literals `xnu_live_stall_*` (strings) plus the `entry_note_stall_sample` symbol
+# in the linked image. On the frozen 1002 elf all six are ABSENT - the negative control.
 # ====================================================================================================
-echo "-- by value: the 1003 DELTA - the code-signing page-validation fix (TODO(1003): set from forensics-1003) --"
-# TODO(1003): set from forensics-1003 - the object that carries the change (e.g.
-#   out/xnu_kernel_obj_d13/<pool_obj>.o for a pool file, or out/xnu_asm_obj_d13/<asm>.o for assembly),
-#   and the BY-VALUE property (a literal string, a call site count, a guard, an instruction shape).
-#   Example of the 1001 shape to copy:
-#     d3_obj=$(strings -a out/xnu_kernel_obj_d13/<pool_obj>.o 2>/dev/null | grep -c '<NEW_LITERAL>' || true)
-#     [[ "$d3_obj" == "1" ]] || { echo "FAIL: ..."; exit 1; }
-#     python3 tools/check_<topic>.py out/stage90/xnu_arm_entry.elf || { echo "FAIL: ..."; exit 1; }
-echo "   (a) TODO(1003): the POOL/ASSEMBLY object carries the 1003 change by value"
-# TODO(1003): set from forensics-1003
-echo "   (b) TODO(1003): the LINKED image carries the 1003 change by value (a symbol, a literal, a call site)"
-# TODO(1003): set from forensics-1003
-echo "   (c) TODO(1003): the SOURCE-side staged shape in the tree (the guard/patch the stage driver applies)"
-# TODO(1003): set from forensics-1003
-echo "   (d) the fresh record carries STAGE90_XNU_<TOPIC>=1 (the new arm key this run)"
-# TODO(1003): set from forensics-1003
-[[ $(awk -F= '$1=="STAGE90_XNU_<TOPIC>"{print $2}' "$REC") == 1 ]] || { echo "FAIL: the fresh record does not carry STAGE90_XNU_<TOPIC>=1 - the new arm key was not recorded this run, and a park would freeze an arm whose switch the record does not name"; exit 1; }
-echo "-- by value: the FROZEN 1002 elf as the NEGATIVE CONTROL for the 1003 delta (it must NOT carry the 1003 change; a reader that cannot fail certifies nothing) --"
+echo "-- by value: the 1003 DELTA - the per-tick pid-1 pc sampler (STAGE90_XNU_STALL) --"
+pe_obj=out/xnu_platform_obj_d13/pe_msm8974.o
+# (a) the PE OBJECT carries the call site: it references the recorder by name. Read the object's own
+#     undefined-symbol table (the call is to the entry image's symbol), which is what proves the
+#     gated `#if STAGE90_XNU_STALL` block compiled in and the call did not optimize out.
+pe_u=$(arm-none-eabi-nm "$pe_obj" 2>/dev/null | awk '($1=="U" && $2=="entry_note_stall_sample") || ($2=="U" && $3=="entry_note_stall_sample"){print "1"}')
+[[ "$pe_u" == "1" ]] || { echo "FAIL: $pe_obj does not reference entry_note_stall_sample - the -DSTAGE90_XNU_STALL call site did not reach the platform compile (was STAGE90_XNU_STALL exported before build_xnu_arm_kernel.sh, and is -DSTAGE90_XNU_STALL in \$EXTRA?)"; exit 1; }
+echo "   (a) the PE object ($pe_obj) references entry_note_stall_sample (U) - the gated call site compiled in"
+
+# (b) the LINKED image carries the recorder AND the five key literals. The symbol is defined in the
+#     payload; the literals are the evidence a reader will grep the NEXT capture for, so their presence
+#     in THIS image is what makes that capture's keys mean this arm.
+elf=out/stage90/xnu_arm_entry.elf
+stall_sym=$(arm-none-eabi-nm "$elf" 2>/dev/null | grep -cE '^[0-9a-f]+ [Tt] entry_note_stall_sample$' || true)
+[[ "$stall_sym" == "1" ]] || { echo "FAIL: entry_note_stall_sample is not a defined text symbol in $elf (x$stall_sym, want 1; elf mtime $(stat -c %y "$elf" 2>/dev/null)) - the recorder did not reach the linked image"; exit 1; }
+stall_keys=$(strings "$elf" | grep -c 'xnu_live_stall_' || true)
+[[ "$stall_keys" == "7" ]] || { echo "FAIL: the image carries $stall_keys xnu_live_stall_* literals (want 7: _n/_t/_pc/_cpsr/_sp/_lr/_nz)"; exit 1; }
+echo "   (b) the linked image defines entry_note_stall_sample (T) and carries the 7 stall key literals"
+
+# (c) the SOURCE-side shape (there is no stage driver - both halves are src/): exactly ONE gated call
+#     site in pe_msm8974.c and the recorder body present, each gated so STALL=0 changes neither file's
+#     compiled bytes.
+pe_src=src/platform/darwin13/pe_msm8974.c
+call_sites=$(grep -c 'entry_note_stall_sample((const uint32_t \*)context);' "$pe_src" || true)
+[[ "$call_sites" == "1" ]] || { echo "FAIL: $pe_src carries $call_sites call site(s) (want exactly 1)"; exit 1; }
+grep -q '#if STAGE90_XNU_STALL' "$pe_src" || { echo "FAIL: $pe_src has no \`#if STAGE90_XNU_STALL\` guard - the call site is ungated"; exit 1; }
+grep -qE '^entry_note_stall_sample\(const uint32_t \*frame\)' src/entry/entry_stubs.c || { echo "FAIL: the recorder body entry_note_stall_sample is missing from src/entry/entry_stubs.c"; exit 1; }
+echo "   (c) the source shape: 1 gated call site in pe_msm8974.c + the recorder in entry_stubs.c"
+
+# (d) the fresh record carries the new arm key.
+[[ $(awk -F= '$1=="STAGE90_XNU_STALL"{print $2}' "$REC") == 1 ]] || { echo "FAIL: the fresh record does not carry STAGE90_XNU_STALL=1 - the new arm key was not recorded this run, and a park would freeze an arm whose switch the record does not name"; exit 1; }
+echo "   (d) the fresh record carries STAGE90_XNU_STALL=1 (the new arm key this run)"
+
+echo "-- by value: the FROZEN 1002 elf as the NEGATIVE CONTROL (it must NOT carry the 1003 change; a reader that cannot fail certifies nothing) --"
 d3_ctrl=out/stage90/frozen/armed-d13-b04976fe/xnu_arm_entry.elf
 if [[ -f $d3_ctrl ]]; then
-  # TODO(1003): set from forensics-1003 - the reader that must FAIL on the frozen 1002 elf (examples:
-  #   a NEW literal's count must be 0 there; the checker tools/check_<topic>.py must return its
-  #   "not in the image at all" clause). The frozen 1002 elf carries the r3-save fix (so the block
-  #   above PASSES on it) but NOT the 1003 change.
-  echo "   frozen 1002 elf present at $d3_ctrl - wire the 1003 reader's negative-control assertion here"
+  ctl_sym=$(arm-none-eabi-nm "$d3_ctrl" 2>/dev/null | grep -cE '^[0-9a-f]+ [Tt] entry_note_stall_sample$' || true)
+  ctl_keys=$(strings "$d3_ctrl" | grep -c 'xnu_live_stall_' || true)
+  [[ "$ctl_sym" == "0" && "$ctl_keys" == "0" ]] || { echo "FAIL: the frozen 1002 elf already carries the stall instrument (sym x$ctl_sym, keys x$ctl_keys) - the negative control is not a control"; exit 1; }
+  echo "   frozen 1002 elf ($d3_ctrl): entry_note_stall_sample x0, xnu_live_stall_* x0 - the change is NOT in it (control holds)"
 else
   echo "   (frozen 1002 elf not present at $d3_ctrl - the negative control is unavailable this run)"
 fi

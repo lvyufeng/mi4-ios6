@@ -154,6 +154,12 @@ extern void entry_live_write(const char *key, uint32_t value);
 extern void entry_write_kv(const char *key, uint32_t value);
 extern uint32_t entry_live_ready(void);
 
+/* **1003: the stall sampler's recorder (`src/entry/entry_stubs.c`).** `entry_note_stall_sample` takes
+ * the interrupted frame the timer IRQ already holds and publishes `pc`/`cpsr`/`sp`/`lr` on a
+ * powers-of-two ladder. Compiled in ONLY under `STAGE90_XNU_STALL` (the tick site below), so off-arm
+ * this file is byte-identical and the recorder is never referenced. */
+extern void entry_note_stall_sample(const uint32_t *frame);
+
 static volatile unsigned long long msm8974_cntfrq = MSM8974_CNTFRQ_HZ;
 
 /* ---- the D13 clock tick (985) ---- */
@@ -501,6 +507,14 @@ msm8974_handle_interrupt(void *context)
 		++g_msm8974_tick_count;
 		if ((g_msm8974_tick_count & (g_msm8974_tick_count - 1u)) == 0u) {
 			entry_live_write("xnu_live_tick_irq", g_msm8974_tick_count);
+#if STAGE90_XNU_STALL
+			/* **1003: the stall sample, on the tick's own powers-of-two ladder.** Same cadence as
+			 * the `xnu_live_tick_irq` above, so the samples are ~1 ms apart from each other at the
+			 * doubling and get finer as the run goes - and the last samples bracket the frontier.
+			 * `context` is the frame the interrupted CPU was in; a user-mode cpsr means the sample
+			 * is a USER pc, which is the pid-1 question this rung asks. */
+			entry_note_stall_sample((const uint32_t *)context);
+#endif
 		}
 		msm8974_tick_arm();
 		return;

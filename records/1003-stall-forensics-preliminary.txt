@@ -1,0 +1,270 @@
+# 1003 stall forensics - PRELIMINARY pre-map (2026-10-13)
+
+WHO WRITES THIS: by hand, by the stall-forensics agent, READ-ONLY analysis. No file modified
+except this one. Purpose: pre-map the 1002 capture so the 1003 stall adjudication is fast.
+All line numbers are `@:<n>` = lines of
+`out/stage90/captures/recovered-unknown-arm-20261013-110813-last_kmsg.txt` (29,042 lines,
+sha256 f3e8bcdf... , recorded in `records/1002-press-read.txt`).
+The capture is MEMORY-order, not time-order: the console text block sits early (@:201..4114)
+while the KV live channel that FOLLOWS it in time sits at @:23042..29040 and the death stanza
+is the tail. Read position, not sequence, as time.
+
+ONE CORRECTION TO THE DRAFT (docs/1003-dyld-stall-design-draft.md) UP FRONT. The draft says
+"the running user code is NOT /usr/lib/dyld - it is the shared cache". BY VALUE THAT IS WRONG:
+the dyld slide is MEASURED as **0x7C000** (not 0), so dyld's runtime image is
+**[0x2be7c000, 0x2bed4000)**, and every SVC `pc` and `lr` lies inside it. The running code is
+dyld's OWN libsystem-shim region (the Mach-trap wrappers + the syscall shims that live in
+`__TEXT`), not the shared-cache library region. See §6.
+
+--------------------------------------------------------------------------------
+## 1. THE SVC SEQUENCE (xnu_live_usvc_*, pid=1, thr=0xc0bfa000 for all 22)
+
+22 records, n=1..22. `num` is the frame's r12 (= the syscall/mach-trap number; the source
+comment in `src/entry/entry_stubs.c:5248` confirms `num = state[STAGE90_SS_R12/4]`). All
+`cpsr` low byte = 0x10 = ARM User mode → **user mode throughout**; the high nibbles
+(0x6/0x4/0x2/0x0) are the ARM condition-flag field, not mode. `_pc` = the address the trap
+returns to (the instruction after the `svc`), `_lr` = the caller.
+
+| n | @line | num (dec)        | kind                                    | pc        | lr        | cpsr       | r0        |
+|---|-------|------------------|-----------------------------------------|-----------|-----------|------------|-----------|
+| 1 | 23042 | 0xffffffe4 (-28) | mach, task_self_trap (trap 28)          | 2be97538  | 2be972ab  | 60000010   | 2be9d0ac  |
+| 2 | 23050 | 0xffffffe6 (-26) | mach, thread_self_trap (trap 26)        | 2be97520  | 2be972b1  | 60000010   | 00000103  |
+| 3 | 23074 | 0x00000174 (372) | unix, __thread_selfid                   | 2be98270  | 2be963a1  | 60000010   | 2bec4c80  |
+| 4 | 23098 | 0x80000000       | trap dispatch (swi_trap, r3 select)     | 2be96c10  | 2be97283  | 00000010   | 2bec4d60  |
+| 5 | 23179 | 0x00000147 (327) | unix, __issetugid                       | 2be98358  | 2be804eb  | 20000010   | ffffffff  |
+| 6 | 26533 | 0x00000000 (0)   | unix, SYS_syscall (indirect; r0=294)    | 2be98214  | 2be8179b  | 60000010   | 00000126  |
+| 7 | 26549 | 0x00000005 (5)   | unix, open                              | 2be97ecc  | 2be852a9  | 40000010   | 2bd814b4  |
+| 8 | 26830 | 0x00000003 (3)   | unix, read                              | 2be98420  | 2be8106d  | 00000010   | 00000000  |
+| 9 | 27315 | 0x00000153 (339) | unix, fstat64                           | 2be98308  | 2be8113f  | 60000010   | 00000000  |
+|10 | 27331 | 0x00000005 (5)   | unix, open                              | 2be97ecc  | 2be9206f  | 60000010   | 2be9bb27  |
+|11 | 27355 | 0x00000003 (3)   | unix, read                              | 2be98420  | 2be9208b  | 20000010   | 00000001  |
+|12 | 27375 | 0x00000006 (6)   | unix, close                             | 2be982e0  | 2be92093  | 00000010   | 00000001  |
+|13 | 27383 | 0x00000005 (5)   | unix, open                              | 2be97ecc  | 2be9206f  | 40000010   | 2be9bb27  |
+|14 | 27398 | 0x00000003 (3)   | unix, read                              | 2be98420  | 2be9208b  | 20000010   | 00000001  |
+|15 | 27418 | 0x00000006 (6)   | unix, close                             | 2be982e0  | 2be92093  | 00000010   | 00000001  |
+|16 | 27426 | 0x0000005c (92)  | unix, __fcntl                           | 2be97d10  | 2be97957  | 00000010   | 00000000  |
+|17 | 27434 | 0x00000000 (0)   | unix, SYS_syscall (indirect; r0=438)    | 2be98214  | 2be818df  | 60000010   | 000001b6  |
+|18 | 28944 | 0x00000006 (6)   | unix, close                             | 2be982e0  | 2be81523  | 00000010   | 00000000  |
+|19 | 28955 | 0x00000152 (338) | unix, stat64                            | 2be98490  | 2be8527d  | 60000010   | 2be99251  |
+|20 | 28963 | 0xfffffffd (-3)  | mach, mach_absolute_time (timebase)     | 2be97328  | 2be85a9f  | 60000010   | 00000000  |
+|21 | 29025 | 0xfffffffd (-3)  | mach, mach_absolute_time (timebase)     | 2be97328  | 2be85af1  | 60000010   | 00000000  |
+|22 | 29033 | 0xfffffffd (-3)  | mach, mach_absolute_time (timebase)     | 2be97328  | 2be85b11  | 60000010   | 00000000  |
+
+Syscall-vs-trap classification, by the dispatch in `external/xnu-hd2-darwin13/xnu/osfmk/arm/traps_lo.s`
+(`fleh_swi`, :190-289): `cmn r11,#3; beq ios7lab_timebase` catches num=-3; `cmp r11,#0x80000000;
+beq swi_trap` catches num=0x80000000; `rsbs r5,r11,#0; ble swi_unix` sends POSITIVE small nums to
+`_unix_syscall` (unix syscalls) and NEGATIVE nums to `swi_mach` (mach traps, index r5 = -num).
+So: **mach** = n1,2,4,20,21,22; **unix** = the rest (incl. n6/n17 which are the generic
+`syscall()` shim, num=0, real number in r0).
+
+LAST THREE (n=20/21/22): num=0xfffffffd (-3) from the **SAME pc 0x2be97328**, r0=0, cpsr=0x60000010.
+The **lr march** is 0x2be85a9f -> 0x2be85af1 -> 0x2be85b11 (strictly advancing, monotonic).
+-3 is the `ios7lab_timebase` special case: `blx _mach_absolute_time; b swi_exit64`
+(traps_lo.s:285-286). So the three records are three calls to `mach_absolute_time`, made by the
+SAME code region (pc constant), at three successive return sites in its caller.
+
+--------------------------------------------------------------------------------
+## 2. THE SHARED-CACHE MAP (IOS7LAB / IOS7SHREG)
+
+Constants (capture text block):
+- @:4098 `IOS7LAB shared region 0x2c000000..0x40000000; stack below 0x2be00000` -> region base
+  **0x2c000000**, top **0x40000000**.
+- @:4102 `IOS7SHREG check_np pid=1 out=0x2bd819d0`
+- @:4103 `IOS7SHREG check_np ret=12`  (12 = ENOMEM = "region is empty" = dyld's normal go-ahead)
+- @:4104 `IOS7SHREG map_slide pid=1 fd=0 count=4 mappings=0x2bd81848 slide=0x37f6000
+  slide_start=0x3f9a2000 size=0x00089000`
+- @:4109 `IOS7SHREG map_file kr=0`
+- @:4110 `IOS7SHREG slide_enter slide=0x37f6000 src=0x3f9a2000 n=0x89000`
+- @:4111 `IOS7SHREG slide_init kr=0 entry=0 n=0x89000`
+- @:4112 `IOS7SHREG slide_copyin kr=0`
+- @:4113 `IOS7SHREG map_slide ret=0`
+
+So: **base 0x2c000000, slide 0x37f6000, slide_start 0x3f9a2000, size 0x89000**, and the call
+RETURNED 0 (success - 999's success held).
+
+The 4 `cache mapping` lines (dyld's `shared_file_mapping_np` array, printed by the G3 wire):
+- @:4105 m0 va=**2f7f6000** size=**0c266000** offset=**00000000** max=**5** init=**5**
+- @:4106 m1 va=**3ba5e000** size=**01ce0000** offset=**0c266000** max=**23** init=**23**
+- @:4107 m2 va=**3d73e000** size=**022ed000** offset=**0df46000** max=**1** init=**1**
+- @:4108 m3 va=**3fa2b000** size=**00177000** offset=**12bda000** max=**1** init=**1**
+
+io/bus arithmetic (by value):
+- m0 spans [0x2f7f6000, 0x3ba5c000); m0's va - region base = 0x37f6000 = the slide.
+- **0x2f7f6000 is m0's FIRST page and is exactly the `cs_invalid_page(0x2f7f6000)` address**
+  (@:4114) -> the CS fault is the shared cache's page 0 (confirming 1003-draft's red-herring read).
+- m0 init_prot = 5 = R|X (executable) -> the `!cs_validated && VM_PROT_EXECUTE` predicate
+  (`vm_fault.c:2438`) applies to it.
+- m1 init 0x23 = 0x20|0x3 = VM_PROT_SLIDE|R|W; m2/m3 init 1 = R only.
+
+dyld's OWN image range. Measured ANCHOR (capture, not guess): @:4099
+`mini4: the OS starts the process at 0x2be7d028`; @:21665 `xnu_live_entrypt_entry=0x2be7d028`.
+dyld's file entry symbol `__dyld_start` link vmaddr = **0x2be01028** (LC_UNIXTHREAD lr).
+=> runtime - link = 0x2be7d028 - 0x2be01028 = **0x7c000 = the dyld slide** (this string is the
+FIRST boot of a fresh dyld, so it carries no ASLR slide beyond the MH_DYLINKER slide itself).
+dyld runtime image = [0x2be7c000, 0x2bed4000):
+- `__TEXT`    link [0x2be00000,0x2be21000) -> runtime [0x2be7c000,0x2be9d000)
+- `__DATA`    link [0x2be21000,0x2be4a000) -> runtime [0x2be9d000,0x2bec6000)
+- `__LINKEDIT`link [0x2be4a000,0x2be58000) -> runtime [0x2bec6000,0x2bed4000)
+
+All 22 SVC `pc` values (0x2be96c10..0x2be98490) fall in [0x2be7c000,0x2bed4000) -> **all inside
+dyld's own `__TEXT`**. The pc 0x2be97328 likewise (see §6). **None** is in the shared region
+[0x2c000000,0x40000000) or in the gap [0x2be58000,0x2be7c000) (the gap is unmapped/empty here).
+
+--------------------------------------------------------------------------------
+## 3. THE STORAGE SWEEP (xnu_live_storage_rd_*)
+
+- **537 reads**, `rd_ordinal` 0x1 (@:6140) .. **0x219=537** (@:28906); `rd_err=0`,
+  `rd_complete=1` for the ones shown. 187 of them lie in the usvc region (@:23042..28940).
+- **LBA range**: 0x00000001 (@:6132) .. **0x004a3842** (@:28904).
+- **Linear?** Within a run, yes: 512-byte steps (lba+1). But the whole 537 are NOT one
+  monotonic sweep: 17 non-increasing pairs = run boundaries. The runs jump around
+  (…0x4229xx, then 0x412c38+, 0x422ae8+, then the final run). The **last run is a perfect
+  linear sweep**: 0x4a3810 (@:28852 region) .. **0x4a3842, 51 sectors, +1 each**.
+- **Do reads continue after the last usvc? NO.** Last `rd_lba` @:28906; last usvc `n=22` @:29033.
+  Between them (@:28907..29042) there is NO `xnu_live_storage_rd_lba/_ordinal` record at all
+  (only the terminal pet/tick stanza and the final SVC trio). So the kernel is **not** paging
+  during pid 1's silent tail.
+
+Interpretation. Paging DID interleave with the user SVCs (187 reads inside the usvc window,
+roughly one 512 B read per ~10 KV lines), and the last read (@:28906) fires just BEFORE the
+final 4 SVCs (n=19/20/21/22 @:28955+). After that there is nothing. This **argues against**
+"pid 1 asleep waiting on a page-in the kernel is still serving": the kernel serves no page-ins in
+the tail. The last activity is user-side (the mach_absolute_time trio), then silence.
+
+--------------------------------------------------------------------------------
+## 4. THE KERNEL LIVENESS
+
+- `xnu_live_tick_irq`: last direct value **0x40 (64)** @:5484 (the 2^k ladder; the ladder only
+  samples powers of two - [[mi4-measurement-defects]] m999b - so it froze at 64 by construction).
+- `xnu_live_tick_sum_count` (the real tick evidence): **climbs** 0x7f(@:28938) -> 0x85(28977) ->
+  0x89(28986) -> 0x91(28995) -> 0xaf(29004) -> **0x1db(475) @:29022** (the last recorded summary).
+  `tick_sum_anom` climbs 0x0e -> **0x16a @:29023**.
+- `xnu_live_wdt_pet_n` (the direct feed channel): 1,2,3,4,8,0x10,0x20,**0x40** @:29016.
+  `xnu_live_wdt_pet_calls` 0x250 -> **0xa8ab (43,179) @:29017**.
+  `xnu_live_wdt_pet_countdown` last **0x74039 @:29018** (~475,000 ticks, healthy, never near 0).
+  `xnu_live_wdt_pets` **0x61 = 97 feeds** @:29021.
+- `xnu_live_wdt_countdown` last 0x867b @:29020; `wdt_sts` 0x10cf6.
+- **panic count = 0** (whole capture). **`sigkill` count = 0.** `usermode data abort at 0x4`
+  = **0** (1001: x230). `EXC_BAD_INSTRUCTION` = 0. `cs_invalid_page` = **exactly 1** (@:4114).
+  The only "abort" strings are the early-boot handler banners (@:201, @:3443) and the
+  "Pthread support ABORTS when sync kernel primitives misused" warning (@:4057), none of which
+  is this run's death.
+- `xnu_live_usb_*` = 0; no "the CPU slept".
+
+**Verdict: the kernel was demonstrably ALIVE at the end** - the read door kept feeding the SoC
+watchdog (97 feeds, countdown ~0x74039), tick summaries climbed to 475/anom 362, no panic, no
+CS_KILL. The device did NOT self-return (RUNNER EXIT 2) precisely because the door kept the dog
+fed. The capture's tail line `No errors detected` is the CARRIER's fixed tail (per 1002-press-read
+Identity note), not this run's reading.
+
+--------------------------------------------------------------------------------
+## 5. THE TWO HYPOTHESES, PRE-COMMITTED
+
+The 1003 instrument samples the INTERRUPTED pid-1 frame per tick: keys `xnu_live_stall_n/_t/_pc/
+_cpsr/_sp/_lr/_nz`. The MODE is in `_cpsr & 0x1f`: **0x10 = User**, 0x11 FIQ, 0x12 IRQ, 0x13
+Supervisor(kernel), 0x17 Abort, 0x1b Undefined, 0x1f System. Kernel addresses are 0x8000xxxx/
+0xc0xxxxxx (top-half); user/dyld addresses are 0x2bxxxxxx..0x3fxxxxxx. `_nz` = count of non-zero
+saved words (0 on every sample => saved-state offsets wrong, a MEASUREMENT defect).
+
+### HYPOTHESIS A - SPINNING (user-space)
+Sampled frames: `_cpsr & 0x1f == 0x10` (User) on every sample; `_pc` in the user map
+(most likely **0x2be9xxxx**, i.e. dyld's runtime `__TEXT` [0x2be7c000,0x2bed4000), or the
+shared region [0x2c000000,0x40000000)); `_pc` ADVANCES or REPEATS over consecutive samples.
+A REPEATING user `_pc` = a tight loop; an advancing `_pc` = forward progress (not a stall).
+=> The bug is in **user-space initialization in dyld**, specifically the code that follows the
+caller of the -3 trio.
+NEXT LOOK: dyld `ImageLoader::link` (link 0x2be09a18, size 0x28c; the -3 caller at link
+0x2be09b11 = runner link+0xa9, runtime 0x2be85b11) and whatever it loops on after the 3rd
+`mach_absolute_time`. Also the **commpage validity byte at 0xffff4090** (see §6): if it is 0,
+`_mach_absolute_time` takes the SVC slow path on every call - check whether the commpage alias
+(990-993 rung) actually publishes a valid mach_absolute_time structure. Also dyld's
+hash-table/`addImagesToAllImages` symbolication state (link 0x2be08a98).
+
+### HYPOTHESIS B - ASLEEP (kernel)
+Sampled frames: `_cpsr & 0x1f != 0x10` (kernel mode, typically 0x13 Supervisor) on EVERY sample;
+`_pc` in the kernel (0x8000xxxx/0xc0xxxxxx); often the SAME kernel pc repeatedly (blocked on a
+wait) with the thread parked.
+=> The bug is a **kernel wait that never completes** - a page-in, a lock deadline, or an IPC
+timeout - i.e. the shared-cache page-in / `cs_validate_page` / `lck_mtx_sleep_deadline` path.
+NEXT LOOK: `osfmk/vm/vm_fault.c` (the fault/`cs_validated` path around :2438), the page-in
+(`ubc_subr.c` cs validation, `pmap_enter_options`), and `lck_mtx_sleep_deadline` /
+`thread_call` (985/986's mutex/lost-wakeup class). NOTE the tension: §3 shows the kernel serves
+NO page-ins in the tail, so a "blocked on a page-in" story would require the block to be
+somewhere OTHER than the storage read door (e.g. waiting on a page that never arrives from a
+not-yet-serviced request, or a CS-validation wait).
+CAVEAT to pre-commit: a sampler that always catches the tick interrupt could also land on the
+IDLE thread or the IRQ prologue; disambiguate by `_sp` (kernel stacks) and by whether `_pc`
+varies vs is fixed at the fault/idle pc.
+
+If BOTH modes appear (some samples User, some kernel) the thread is making progress through
+syscalls - contradicting the "no SVCs after n=22" record, which would itself be a finding.
+
+--------------------------------------------------------------------------------
+## 6. THE 0x2be97328 IDENTIFICATION (resolved)
+
+**0x2be97328 IS IN /usr/lib/dyld.** runtime 0x2be97328 - slide 0x7c000 = link **0x2be1b328** =
+`_mach_absolute_time` **+0x68** (symbol link 0x2be1b2c0, vmsize 0x6c) -> inside dyld `__TEXT`
+[0x2be00000,0x2be21000). NOT the shared cache, NOT the gap.
+
+By value, disassembling the real `/usr/lib/dyld` (extracted 196,576 B from
+`/mnt/data/ios7-payload/v2/ios7/rootfs.hfs` IOS7MIN/usr/lib/dyld; ARMv7, dyld-324.1), the whole
+function (ARM mode) is:
+```
+2be1b2c0: movw ip,#0x4088 ; movt ip,#0xffff     ; ip = 0xffff4088 = _COMM_PAGE + 0x88
+2be1b2c8: ldrb r0,[ip,#8]                        ; read validity byte @ 0xffff4090
+2be1b2cc: cmp r0,#0 ; beq 0x2be1b320
+2be1b2d4: isb sy
+2be1b2d8: push {r4,r5,r7,lr} ...
+2be1b2e0: ldr r4,[ip] ; ldr r5,[ip,#4]           ; commpage secs/ticks (seqlock pair)
+2be1b2e8: mrrc p15,0,r3,r1,c14                   ; CNTVCT
+2be1b2ec: mrrc p15,0,r0,r3,c14
+2be1b2f0: mrrc p15,0,r3,r2,c14
+2be1b2f4: cmp r1,r2 ; bne 0x2be1b2e0             ; retry until stable  <-- SEQLOCK LOOP
+...       (echo the pair, orr, bne loop)
+2be1b314: adds r0,r0,r2 ; adcs r1,r1,r3
+2be1b31c: pop {r4,r5,r7,pc}                       ; FAST RETURN
+2be1b320: mvn ip,#2                              ; ip = -3
+2be1b324: svc #0x80                               ; <-- SLOW PATH: SVC with r12 = -3
+2be1b328: bx lr                                   ; <-- pc 0x2be97328 (runtime): the RETURN
+```
+So `_mach_absolute_time` is the STANDARD libsystem implementation: it reads a commpage
+mach_absolute_time structure at `_COMM_PAGE + 0x88` (0xffff4088), validates it via the byte at
+`+8` (0xffff4090), and if valid computes the 64-bit time itself (seqlock over CNTVCT+commpage);
+**if the validity byte is 0 it falls through to `svc #0x80` with r12 = -3**, which is exactly
+the kernel `ios7lab_timebase` path in traps_lo.s:285 -> `blx _mach_absolute_time` (kernel).
+
+Therefore the recorded `pc = 0x2be97328` is the return address 4 bytes AFTER the `svc #0x80`
+(the ARM `svc` return address convention), i.e. the call site in dyld's own image; but it
+behaves as an ADDRESS of the running code because the SAME `_mach_absolute_time` was called
+three times from the same dyld call site. The three are the same user `svc`.
+
+The SIGNIFICANCE for 1003: **the -3 trap is NOT a raw mach trap; it is libsystem's commpage
+FALLBACK**, taken because the commpage validity byte at **0xffff4090 is (presumably) ZERO** in
+this image. That ties the frontier straight to the commpage alias rungs 990-993. In 991 the
+frontier WAS `231x translation fault @_COMM_PAGE+0x90` (i.e. 0xffff4090!) - the same byte. So
+the running question is: after 992/993 made the commpage alias map "the same page, user
+read-only, XN" (@:4019-4020), is the mach_absolute_time structure at 0xffff4088 actually
+PUBLISHED (validity byte = 1) or still 0? If it is 0, every `mach_absolute_time` call takes the
+SVC path - and a user-space wait built on `mach_absolute_time` (or on `mach_wait_until` /
+deadline loops) would re-enter the kernel constantly. Whether that is a SPIN or an ASLEEP
+depends on the kernel's -3 handler returning correctly.
+
+The lr trio resolves (link, ARM/Thumb-aware) to:
+- lr 0x2be85a9f -> link 0x2be09a9f = `dyld::ImageLoader::link(...)` +0x37
+- lr 0x2be85af1 -> link 0x2be09af1 = `dyld::ImageLoader::link(...)` +0x89
+- lr 0x2be85b11 -> link 0x2be09b11 = `dyld::ImageLoader::link(...)` +0xa9
+so the three mach_absolute_time calls are all inside a single `ImageLoader::link` call - dyld is
+**linking an image** when it stalls, and it polls the clock between linking steps (the
+`ImageLoader::link` body at link 0x2be09a9f/0x2be09af1/0x2be09b11 does `blx _mach_absolute_time`
+per the disassembly at link 0x2be09a9c/0x2be09aec/0x2be09b0c).
+
+--------------------------------------------------------------------------------
+## APPENDIX - what 1003 will most likely read, tied to this pre-map
+
+- The last user activity (n=22) is dyld's `ImageLoader::link` polling `mach_absolute_time`
+  (libsystem commpage fallback via SVC -3) while linking an image, three times, then nothing.
+- The kernel is alive (97 watchdog feeds, ticks to 475) and NOT paging in the tail.
+- So the 1003 samples either catch pid 1 in USER mode looping in dyld (SPINNING - look at
+  `ImageLoader::link` and the commpage 0xffff4090 validity) or in KERNEL mode parked in a
+  wait (ASLEEP - look at vm_fault/CS-validation/lock). The `_pc` and the cpsr mode byte decide
+  it in one glance; `_nz>0` on the samples says the saved-state offsets are right.

@@ -57,50 +57,76 @@ of raw CNTVCT @19.2 MHz — just the SDHCI reset poll; `dr_timeout=0`, `dr_done=
 reaches 537 with 97 feeds direct-published. The 999→1002 delta (r3-save) removed the 1001 abort,
 so 1002 runs FURTHER (22 SVCs where 999 recorded none) into the same shared-cache region.
 
-## Resolved by value: the running user code is NOT /usr/lib/dyld — it is the shared cache
+## CORRECTION (2026-10-13, records/1003-stall-forensics-preliminary.txt): the running code IS dyld
 
-Extracted the real iOS 7.1.2 `/usr/lib/dyld` from `/mnt/data/ios7-payload/v2/ios7/rootfs.hfs`
-(196,576 B; `7z e ... IOS7MIN/usr/lib/dyld`). Its Mach-O: `__TEXT vmaddr=0x2be00000 vmsize=0x21000`
-(ends 0x2be21000), `__DATA 0x2be21000`, `__LINKEDIT 0x2be4a000 .. 0x2be58000`. So dyld's whole image
-is 0x2be00000..0x2be58000. The 1002 SVC `pc` values (0x2be96c10..0x2be98490) and the `_cerror_nocancel`
-symbol from 1001 (vmaddr 0x2be1b8d4, in dyld __TEXT) show: 1001's fault WAS in dyld (offset 0x1b8d4),
-but the 1002 SVCs run at 0x2be9xxxx = **past dyld's image end** — the code is the shared-cache /
-libSystem region mapped just above dyld. So 1002 advanced the boot OUT of dyld's own code and INTO
-the shared-cache library code, where it then stalled on `mach_absolute_time` (pc=0x2be97328).
+An earlier reading of this doc concluded the 1002 SVC pcs (`0x2be9xxxx`) were "past dyld's image end,
+so the running code is the shared cache". **That was wrong — it assumed slide 0.** Dyld is
+`MH_DYLINKER`, slid per boot; the 1002 capture MEASURES the slide as **0x7C000** (`@:4099`
+`the OS starts the process at 0x2be7d028` − `__dyld_start` link `0x2be01028`). So dyld's runtime
+image is **[0x2be7c000, 0x2bed4000)**, and all 22 SVC pcs (0x2be96c10..0x2be98490) fall inside dyld's
+own `__TEXT`. Resolved through the slide, all 22 map to exact dyld symbols.
+
+The stall pc **0x2be97328 − 0x7c000 = link 0x2be1b328 = `_mach_absolute_time` + 0x68** — the return
+address 4 B after an `svc #0x80` with r12 = −3. By value (disassembling the real dyld, dyld-324.1,
+from `rootfs.hfs`), `_mach_absolute_time` reads a commpage structure at `_COMM_PAGE + 0x88`
+(0xffff4088), validates it via the byte at **+8 = 0xffff4090**, and **if that byte is 0 it falls
+through to `svc #0x80` with r12 = −3** — the kernel `ios7lab_timebase` path. So the −3 trio is
+**libsystem's commpage FALLBACK**, i.e. the commpage mach_absolute_time structure's validity byte at
+`0xffff4090` reads 0. This ties the frontier straight to 990–993's commpage rungs (991 died at
+exactly `_COMM_PAGE + 0x90`). The three calls' `lr` values resolve to `dyld::ImageLoader::link`
++0x37/+0x89/+0xa9 — **dyld is linking an image and polling the clock between steps when it stalls.**
 
 ## Open mechanism questions (the agents are answering these)
 
-1. What is the running code at pc=0x2be97328? It is NOT dyld (dyld ends at 0x2be58000); it is the
-   shared-cache / libSystem region mapped just above dyld. The 3 `mach_absolute_time` calls from one
-   pc mean the running program is looping on `mach_absolute_time` — a spin.
-2. Is pid 1 (a) blocked in the kernel (asleep on a page-in / IPC that never completes) or
-   (b) spinning in user code? The capture has no direct probe; a per-thread last-syscall or a
-   sampled pid-1 pc over time would settle it.
-3. Why only ONE `cs_invalid_page` (page 0) while 537 pages are being paged in? If every shared-cache
-   code page were unvalidated it would print ~537×. So validation SUCCEEDS for pages 1..N and fails
-   only for page 0 (the cache header, which sits in a separate mapping — cache mapping 0 is DATA
-   prot=0/0, while the code mappings carry R+X). So `cs_invalid_page` is a RED HERRING: an
-   unvalidated non-executable data/header page faulted for execute, or the header genuinely
-   uncovered by the code directory. It did NOT stop the boot.
-4. The machine is NOT storage-bound: 537 × ~113 µs ≈ 61 ms of SDHCI time total, yet the reads are
-   spread over ~23 min ⇒ ~2.7 s between page-ins. The bottleneck is in the VM/user code BETWEEN
-   reads, not in the driver.
+1. What is the running code at pc=0x2be97328? **RESOLVED** (forensics §6): it is dyld's own
+   `_mach_absolute_time` (libsystem commpage shim, slid to 0x2be97328), taking the `svc #0x80`/−3
+   fallback because the commpage validity byte at **0xffff4090** reads 0. The caller is
+   `dyld::ImageLoader::link` (lr trio +0x37/+0x89/+0xa9).
+2. Is pid 1 (a) blocked in the kernel or (b) spinning in user code? The capture has no direct
+   probe; **1003's per-tick stall sample decides it** (user pc advancing/repeating = SPINNING;
+   every sample a kernel pc = ASLEEP).
+3. Why only ONE `cs_invalid_page` (page 0) while 537 pages are being paged in? Because validation
+   SUCCEEDS for pages 1..N and fails only for cache mapping m0's first page (0x2f7f6000, the
+   `shared_file_mapping_np` m0 header) — so `cs_invalid_page` is a RED HERRING that did not stop
+   the boot. Confirmed by value: m0's va − region base = 0x37f6000 = the slide.
+4. Is the machine storage-bound? No: §3 of the forensics report shows the storage reads **STOP**
+   before pid 1's silent tail (last read `@:28906`, last SVC `@:29033`, nothing between) — the
+   kernel serves no page-ins during the stall. So a "blocked on a page-in" story is ruled out.
 
 ## DECISION: 1003 = the STALL INSTRUMENT (low-risk, no behaviour change)
 
 The stall mechanism (user spin vs kernel block) is NOT determined by the existing capture. The
 highest-value, lowest-risk next rung is a NEW instrument (mirroring 1002's shape: no new
-behaviour, gated by a `STAGE90_XNU_*` switch, verified by value) that samples, for pid 1:
+behaviour, gated by a `STAGE90_XNU_STALL` switch, verified by value) that samples the INTERRUPTED
+pid-1 frame at a fixed tick cadence. Concretely:
 
-- its current **user pc** at a fixed tick cadence (so the record either advances = user spin, or
-  freezes = blocked/looping at one pc);
-- the **last syscall number** seen (already have `xnu_live_usvc_*`);
-- whether the storage read door advanced between samples (page-in progress vs idle).
+- **The sample** is taken in `msm8974_handle_interrupt` (`src/platform/darwin13/pe_msm8974.c`), on the
+  tick's powers-of-two ladder, under `#if STAGE90_XNU_STALL`, calling
+  `entry_note_stall_sample((const uint32_t *)context)` with the saved-state frame the timer passes to
+  the handler.
+- **The recorder** `entry_note_stall_sample(const uint32_t *frame)` lives in
+  `src/entry/entry_stubs.c` and publishes, via `entry_write_kv`, the 7 keys `xnu_live_stall_n`
+  (counter), `_t` (tick), `_pc`, `_cpsr`, `_sp`, `_lr` and `_nz` (count of non-zero words in the
+  frame — a self-check that the offsets in `entry_saved_state.h` are right).
 
-Self-testing reading: at the frontier the sampled pc either changes over consecutive samples (the
-program is running) or repeats identically (it is wedged at one instruction). Falsifier: if the pc
-advances monotonically while the syscall count stays flat, the stall is a pure user-space loop and
-the fix is in the shared-cache init path, not the kernel.
+The reading: at the frontier the sampled pc either changes over consecutive samples (the program is
+running = SPINNING) or is a KERNEL pc on every sample (pid 1 is ASLEEP/blocked in the kernel), and
+the pc says WHERE. Self-testing; the run is EXPECTED to still stall (1003 changes no kernel
+behaviour). Falsifiers: no `xnu_live_stall_*` keys at all ⇒ the instrument did not reach the image
+(rebuild); all samples `_nz=0` ⇒ the saved-state offset is wrong (a MEASUREMENT defect,
+[[mi4-measurement-defects]]).
 
 This is deliberately NOT a CS-blob structural rung: `cs_invalid_page` is tolerated and singular, so
 chasing CS now would be treating a red herring as the frontier ([[mi4-measurement-defects]]).
+
+## 1003 artifacts
+
+- `scripts/build_1003.sh` — threads `STAGE90_XNU_STALL=1` into the entry payload + platform object;
+  the delta clause asserts the instrument by value (object `U` + linked `T` + 7 key literals + 1
+  gated source call site) with the frozen 1002 elf (`armed-d13-b04976fe`) as the negative control.
+- `scripts/park_1003.sh` — refuses the pressed arms; re-asserts the 1002 six-word r3-save window
+  (regression) and the stall instrument by value before parking.
+- `scripts/press_1003.sh` — the frozen pre-registration: `[0]` the instrument in the image, `[0b]` the
+  1002 r3-save regression, `[F]` the stall reading, plus the frozen regression guards.
+- `tools/check_1003_capture.py` — adds the `[S]` stall section (classify the sampled pcs), keeps the
+  `[F]`/`[0]`/`[0b]` sections and the regression guards.

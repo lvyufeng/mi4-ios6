@@ -12,8 +12,12 @@ then MOVED to a NEW/OLD wall - the CODE-SIGNING page-validation path, the same w
 
     CODE SIGNING: cs_invalid_page(0x2f7f6000): p=1[launchd] clearing CS_VALID
 
-1003's ONE change is on that wall (TODO(1003): set from forensics-1003 - the confirmed root cause and
-edit; switch `STAGE90_XNU_<TOPIC>`).  1003's switch set is 1002's VERBATIM (`USVC=1` and
+1003's ONE change is the STALL INSTRUMENT, a pure MEASUREMENT (switch `STAGE90_XNU_STALL`): a per-tick
+sample of the interrupted pid-1 frame, recorded by `entry_note_stall_sample` (src/entry/entry_stubs.c)
+at ONE gated call site in `msm8974_handle_interrupt`'s powers-of-two ladder (src/platform/darwin13/
+pe_msm8974.c), read in section [S].  It answers the one question the 1002 read left open - whether pid 1
+is SPINNING in user space or ASLEEP - and changes no kernel behaviour, so the stall is the EXPECTED
+outcome.  1003's switch set is 1002's VERBATIM (`USVC=1` and
 `SUBMAP_PMAP_SKIP=1` stay on as regressions - the frontier must not re-litigate the 1001/1002 deaths)
 plus the one new switch.
 
@@ -40,10 +44,20 @@ reads THAT file):
       `launchd[1]: usermode data abort, EXC_BAD_ACCESS at 0x00000004` in the WHOLE capture must STILL
       be 0 (1002 confirmed it).  A recurrence here is a REGRESSION of the 1002 fix (the USVC hook was
       reverted or the assembly layer not rebuilt) - REBUILD, not a 1003 reading.
-  [F] THE 1003 RUNG'S OWN FRONTIER - THE CODE-SIGNING PAGE-VALIDATION WALL.  Count `cs_invalid_page`
-      lines, the exact `0x2f7f6000`, and whether the boot SURVIVED PAST it.  TODO(1003): set from
-      forensics-1003 - the expected reading after the fix (the boot survives past cs_invalid_page for
-      launchd, or the wall moves again) and the falsifier.
+  [S] THE STALL SAMPLE - THE 1003 RUNG ITSELF (the reason this rung exists).  The per-tick sample of
+      the interrupted pid-1 frame, published as `xnu_live_stall_n` / _t / _pc / _cpsr / _sp / _lr /
+      _nz on the tick's powers-of-two ladder.  Classifies each sample's pc/cpsr as USER vs KERNEL, and
+      reports SPINNING (user pc advancing / looping) vs ASLEEP (all-kernel) - a MEASUREMENT by design:
+      the stall is the EXPECTED outcome, so [S] FAILS only on ZERO samples (the instrument did not
+      reach the image) or on all-`_nz`=0 (a wrong saved-state offset - a MEASUREMENT defect).
+  [F] THE 1003 RUNG'S FRONTIER - THE CODE-SIGNING PAGE-VALIDATION WALL, AND WHY IT IS *NOT* THE STALL.
+      `cs_invalid_page(0x2f7f6000): p=1[launchd] clearing CS_VALID` is a TOLERATED warning (CS_VALID
+      cleared, retval 0 - the fault PROCEEDS), recorded ONCE in the 1002 capture and NOT the frontier
+      (the frontier is the pid-1 user-space STALL, measured in [S]).
+
+  [S] AND [F] TOGETHER are the 1003 reading: the boot is EXPECTED to run into pid-1 user mode, print
+      `map_slide`, run its SVCs, and stall with the kernel alive ~23 min; the ONE tolerated
+      `cs_invalid_page` sits mid-run and is NOT a failure.
   (2) SUBMAPSKIP - UNCHANGED FROM 1001.  TEXT channel `SUBMAPSKIP: obj=<ptr> start=<ptr> end=<ptr>
       size=<ptr> lr=<ptr>`, BOUNDED (max 8).  EXPECTED >= 1; most likely EXACTLY 2, obj = 999's two
       VMHINT991 objects 0xc0005b48 / 0xc0005ab0.  ABSENCE while the gate holds = the skip did not
@@ -115,17 +129,33 @@ ABORT_LIT = "usermode data abort, EXC_BAD_ACCESS at 0x00000004"
 CHECK_NP_LIT = "IOS7SHREG check_np ret=12"     # the anchor [R] hangs the first-line reading on
 MAP_SLIDE_LIT = "IOS7SHREG map_slide"          # the line 999 prints NEXT (1002's expected reading)
 
-# [F] THE 1003 RUNG'S OWN FRONTIER - the CODE-SIGNING page-validation wall (the same wall 999 stopped
-# on).  The 1002 press read names these by value; 1003's change is aimed at this path.  The reader
-# never assumes the console's colour codes break the literal (they do not - measured on the 1002
-# capture): a substring count is exact.
+# [F] THE 1003 RUNG'S FRONTIER - the CODE-SIGNING page-validation wall.  The 1002 press read names it
+# by value: `CODE SIGNING: cs_invalid_page(0x2f7f6000): p=1[launchd] clearing CS_VALID` - the SAME
+# wall 999 stopped on.  BUT 1003's reading (records/1002-press-read.txt, section [6], and scripts/
+# press_1003.sh (F)) is that this wall is TOLERATED (CS_VALID cleared, retval 0 - the fault PROCEEDS)
+# and is NOT the frontier: the frontier is the pid-1 user-space STALL.  It appears EXACTLY ONCE in the
+# 1002 capture (measured: 1, @:4114), mid-run, and the boot SURVIVES past it.  [F] reads it by value
+# and, coherent with (F), treats the ONE tolerated occurrence as the expected reading - never a
+# failure.  A recurrence of MANY (the wall ceasing to tolerate) would be the real F (a reading).
 CS_INVALID_LIT = "cs_invalid_page"
-CS_PAGE_1002 = "0x2f7f6000"                # the page the 1002 frontier named
+CS_PAGE_1002 = "0x2f7f6000"                # the page the 1002 frontier named (tolerated, once)
 CS_CLEAR_LIT = "clearing CS_VALID"
-# TODO(1003): set from forensics-1003 - the exact pid/tag the fix targets (1002's was `p=1[launchd]`),
-# the EXPECTED survivor reading after the fix (e.g. cs_invalid_page does not recur for launchd), and
-# the falsifier.  The frozen pre-reg block in scripts/press_1003.sh is the authority at run time.
-CS_PID_1002 = "p=1[launchd]"
+CS_PID_1002 = "p=1[launchd]"               # the pid tag (launchd) - a single tolerated occurrence
+CS_TOLERATED = 1                           # the 1002 capture measured cs_invalid_page EXACTLY ONCE
+
+# [S] THE STALL SAMPLE - the 1003 rung itself.  The per-tick sample of the interrupted pid-1 frame,
+# published on the tick's powers-of-two ladder (the SAME cadence as `xnu_live_tick_irq`) by
+# `entry_note_stall_sample`.  Seven keys, one per field.  The classification is by cpsr's mode bits
+# (0x10 = USR, else kernel), cross-checked against the pc's half.  USER_MODE_CPSR is the USR-mode/T
+# value the 1002 SVC tail carried (0x60000010); a kernel sample carries SVC mode (>= 0x80000000).
+STALL_KEYS = ("n", "t", "pc", "cpsr", "sp", "lr", "nz")
+USER_MODE_CPSR = 0x60000010                 # pid 1's user cpsr (the 1002 SVC tail's value)
+STALL_1002_PC = 0x2be97328                  # the pc the three 1002 mach_absolute_time SVCs came from
+DYLD_BASE = 0x2be00000                      # dyld's own image (below the shared cache)
+DYLD_END = 0x2be58000
+SHARED_CACHE_BASE = 0x2c000000              # the dyld shared-cache window base
+SHARED_CACHE_SLIDE = 0x37f6000              # ... + its slide (the 1002/1003 mapping)
+SS_WORDS = 19                               # STAGE90_SS_SIZE/4 on D13 (the frame the sampler walks)
 
 # 999's VMHINT991 objects, by value (999 capture @:4096-97 of the 1001 record; 1000 record, "The death,
 # by value"): two FREED vm_map-zone elements (w04=0xbaddecaf = ZALLOC's ZP_NOT_POISONED) that the
@@ -354,13 +384,34 @@ class Capture:
                 out[-1]["pets"] = val
         return out
 
+    def stall_samples(self):
+        """[S] THE STALL SAMPLE, one per published tick.  `entry_note_stall_sample` writes the seven
+        keys in one block, `_n` -> `_t` -> `_pc` -> `_cpsr` -> `_sp` -> `_lr` -> `_nz`, in that order
+        (entry_stubs.c:2692-98), so a sample is that run of keys.  `_n` opens it (the sample counter);
+        the DICT is filled by the following field keys, the first `_n` after a completed sample opens
+        the next.  A `_n` never reads a NAME (the reader keeps raw text), so this is a straight walk."""
+        out, cur = [], None
+        for ln, key, raw, val in self.toks:
+            if key == "xnu_live_stall_n":
+                if cur is not None:
+                    out.append(cur)
+                cur = {"ln": ln, "f": {"n": (ln, val)}, "order": ["n"]}
+            elif cur is not None and key.startswith("xnu_live_stall_"):
+                fk = key[len("xnu_live_stall_"):]
+                if fk in STALL_KEYS:
+                    cur["f"][fk] = (ln, val)
+                    cur["order"].append(fk)
+        if cur is not None:
+            out.append(cur)
+        return out
+
 
 def authority_line():
     """Which 1003 pre-registration this run's expectations can be checked against - by value, at run
     time. The tool must not pretend a frozen text exists (mi4-self-written-record-is-not-a-constraint),
     and it must say which one it found: the frozen block's (4) gate is the THREE-way conjunction this
     tool evaluates."""
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "scripts", "press_1002.sh")
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "scripts", "press_1003.sh")
     try:
         with open(p, "r", errors="replace") as fh:
             text = fh.read()
@@ -481,7 +532,7 @@ def s_identity(cap):
         say("OBS", "xnu_live_cap header: %s%s" % (", ".join(fmt(v) for v in vals),
             "  (the 999/1000/1001/1002 cap; 0x4000 = a pre-999 image)" if vals == [0x6000] else ""))
         if 0x4000 in vals:
-            hard("xnu_live_cap=0x00004000 - a PRE-999 image; not the 1002 arm")
+            hard("xnu_live_cap=0x00004000 - a PRE-999 image; not the 1003 arm")
     else:
         say("OBS", "no xnu_live_cap header token (older image or the header itself was lost)")
     census = {}
@@ -999,18 +1050,158 @@ def s_rung(cap):
              absence_based=True)
 
 
+def s_stall(cap):
+    """[S] THE STALL SAMPLE - THE 1003 RUNG ITSELF (the pure MEASUREMENT).
+
+    The per-tick sample of the INTERRUPTED pid-1 frame, published by `entry_note_stall_sample` on the
+    tick's powers-of-two ladder (the SAME cadence as `xnu_live_tick_irq`) as seven keys:
+    `xnu_live_stall_n` (counter) / `_t` (the tick number) / `_pc` / `_cpsr` / `_sp` / `_lr` / `_nz`
+    (count of non-zero words in the saved-state frame - the self-check).
+
+    THE CADENCE IS SPARSE BY DESIGN (the tick is 1 kHz; the ladder is 1,2,4,...,2^k, so consecutive
+    samples sit ~2^k ms apart and get sparser): few samples, or a large `_t` gap between them, is NOT
+    a fault - over a ~23 min alive window there are ~20 samples.  The LAST few bracket the frontier.
+
+    THE CLASSIFICATION (by cpsr's mode bits FIRST, the pc as corroboration): a USER sample has cpsr
+    mode bits 0x10 (USR/T, e.g. 0x60000010) and a user pc (< 0x80000000); a KERNEL sample has cpsr
+    >= 0x80000000 (SVC mode) and a kernel pc (>= 0x80000000).  Disjoint readings:
+      * user pcs that ADVANCE across samples, or REPEAT on one small loop => pid 1 is SPINNING in user
+        space, and the pc says WHERE (dyld's own image 0x2be00000..0x2be58000, or above it the
+        shared-cache window 0x2c000000 + slide 0x37f6000; the 1002 stall pc was 0x2be97328);
+      * every sample a kernel pc => pid 1 is ASLEEP/blocked, and the kernel pc says IN WAIT.
+
+    THIS IS A MEASUREMENT: the stall is the EXPECTED outcome (1003 changes no kernel behaviour), so a
+    still-stalled run is NOT a failure.  FAIL ONLY ON: (a) ZERO samples => the instrument did not
+    reach the image (rebuild); (b) EVERY sample `_nz` = 0 => the saved-state frame was read all-zero -
+    the frame pointer/offset is wrong (a MEASUREMENT defect - adjudicate against entry_saved_state.h).
+    """
+    print("\n== [S] THE STALL SAMPLE - the per-tick pid-1 frame (the 1003 MEASUREMENT rung) ==")
+    recs = cap.stall_samples()
+    n_tok = cap.family_count("xnu_live_stall_")
+    if not recs:
+        # (a) THE FALSIFIER: the instrument did not reach the image.
+        hard("ZERO `xnu_live_stall_*` records - the STALL instrument did not reach the image: this is "
+             "the 1003 rung's own FALSIFIER (pre-reg (0)/(F)); REBUILD with STAGE90_XNU_STALL=1 "
+             "exported before build_xnu_arm_kernel.sh, do not judge the frontier from this capture")
+        if n_tok:
+            soft("xnu_live_stall_* tokens x%d but no `_n` record - the record shape broke; the reader "
+                 "cannot walk the samples" % n_tok)
+        return
+    ns = [r["f"].get("n", (0, None))[1] for r in recs]
+    say("OBS", "samples x%d (n %s .. %s; the ladder is SPARSE by design - consecutive samples sit "
+               "~2^k ms apart and get sparser)" % (
+                   len(recs), fmt(ns[0]), fmt(ns[-1])))
+    # The per-sample table, by value - the pc/cpsr/nz triple is the reading.
+    user_n = kern_n = 0
+    pcs, cpsrs, nzs = [], [], []
+    for r in recs:
+        ln = r["ln"]
+        f = r["f"]
+        n = f.get("n", (None, None))[1]
+        t = f.get("t", (None, None))[1]
+        pc = f.get("pc", (None, None))[1]
+        cpsr = f.get("cpsr", (None, None))[1]
+        sp = f.get("sp", (None, None))[1]
+        lr = f.get("lr", (None, None))[1]
+        nz = f.get("nz", (None, None))[1]
+        missing = [k for k in STALL_KEYS if k not in f]
+        if missing:
+            soft("stall sample n=%s @:%d is missing fields (%s) - the 7-key block shape broke" % (
+                fmt(n), ln, ",".join(missing)))
+        # CLASSIFY: cpsr mode bits first, pc corroborates.
+        mode = (cpsr & 0x1F) if cpsr is not None else None
+        is_user = (mode == 0x10) or (pc is not None and pc < 0x80000000)
+        if nz is not None:
+            nzs.append(nz)
+        if pc is not None:
+            pcs.append(pc)
+        if cpsr is not None:
+            cpsrs.append(cpsr)
+        if is_user:
+            user_n += 1
+            where = _stall_region(pc)
+        else:
+            kern_n += 1
+            where = "kernel (%s)" % ("SVC mode" if (cpsr is not None and cpsr >= 0x80000000)
+                                     else "cpsr mode 0x%x" % (mode if mode is not None else 0))
+        say("OBS", "  @:%d n=%s t=%s pc=%s cpsr=%s sp=%s lr=%s nz=%s  -> %s  [%s]" % (
+            ln, fmt(n), fmt(t), fmt(pc), fmt(cpsr), fmt(sp), fmt(lr), fmt(nz),
+            "USER" if is_user else "KERNEL", where))
+    # ---- THE SELF-CHECK: `_nz` = the count of non-zero words in the frame (STAGE90_SS_SIZE/4 = 19).
+    if nzs and all(v == 0 for v in nzs):
+        # (b) the ONE MEASUREMENT defect: an all-zero frame cannot be a real interrupted frame.
+        hard("EVERY stall sample carries `_nz`=0 - the saved-state frame read ALL ZERO: an interrupted "
+             "frame is never empty (it holds pc/cpsr/sp/lr at least), so the frame pointer or the "
+             "STAGE90_SS_* offsets are WRONG. This is a MEASUREMENT defect, not a frontier reading: "
+             "adjudicate the offsets against src/entry/entry_saved_state.h before any [S] conclusion")
+    else:
+        say("PASS", "`_nz` > 0 on every sample (values %s; the frame carries %d words) - the "
+                    "interrupted-frame reader read a REAL frame" % (
+                        " ".join(fmt(v) for v in nzs[:8]) + (" ..." if len(nzs) > 8 else ""), SS_WORDS))
+    # ---- THE CLASSIFICATION VERDICT (a reading, never a failure).
+    distinct = sorted(set(pcs))
+    say("OBS", "classification: USER pc x%d, KERNEL pc x%d (cpsr mode bits are the primary classifier, "
+               "pc corroborates); distinct pcs x%d" % (user_n, kern_n, len(distinct)))
+    if user_n and user_n >= kern_n:
+        # SPINNING: user pcs that advance or repeat on a small loop.
+        if len(distinct) <= 1:
+            say("READING", "SPINNING (wedged): every sample is the SAME user pc %s - pid 1 is stuck at "
+                           "one user instruction, in %s" % (
+                               fmt(distinct[0]), _stall_region(distinct[0])))
+        else:
+            lo, hi = min(distinct), max(distinct)
+            loop = " (a SMALL loop: span 0x%x)" % (hi - lo) if (hi - lo) <= 0x4000 else \
+                   " (the pcs ADVANCE: span 0x%x)" % (hi - lo)
+            say("READING", "SPINNING: the interrupted frame is USER mode with %d distinct pc(s) %s..%s%s "
+                           "- pid 1 is spinning in user space, NOT asleep" % (
+                               len(distinct), fmt(lo), fmt(hi), loop))
+        say("READING", "  the last user pc %s is in %s; the 1002 stall pc was %s" % (
+            fmt(distinct[-1]), _stall_region(distinct[-1]), fmt(STALL_1002_PC)))
+    elif user_n == 0:
+        say("READING", "ASLEEP/blocked: EVERY sample is a KERNEL pc - pid 1 is not running in user "
+                       "space (it is asleep in the kernel, or the timer fires only while a kernel "
+                       "thread runs); the kernel pcs %s say IN WAIT" % (
+                           " ".join(fmt(v) for v in distinct[:8]) + (" ..." if len(distinct) > 8 else "")))
+    else:
+        soft("MIXED: USER pc x%d, KERNEL pc x%d - neither the all-user SPINNING nor the all-kernel "
+             "ASLEEP shape; report the samples above verbatim (a user pc interleaved with kernel pcs "
+             "is a migration, or a ladder sampled across both)" % (user_n, kern_n))
+    say("OBS", "cpsr values: %s" % (
+        " ".join(fmt(v) for v in sorted(set(cpsrs))[:8]) + (" ..." if len(set(cpsrs)) > 8 else "")))
+    # This section is a MEASUREMENT: it NEVER hard-FAILs merely because the boot still stalls.
+    say("OBS", "this is a MEASUREMENT section: the stall is the EXPECTED outcome of this rung (1003 "
+               "changes no kernel behaviour) - the classification above IS the 1003 finding")
+
+
+def _stall_region(pc):
+    """Name the region a sampled user pc falls in (the 1002/1003 map): dyld's own image
+    (0x2be00000..0x2be58000), else the dyld shared-cache window (base 0x2c000000 + slide 0x37f6000),
+    else the pc's own half.  The 1002 stall pc (0x2be97328) is ABOVE dyld's image end - the
+    shared-cache/libSystem region."""
+    if pc is None:
+        return "unknown"
+    if DYLD_BASE <= pc < DYLD_END:
+        return "dyld image 0x2be00000..0x2be58000"
+    if pc >= SHARED_CACHE_BASE:
+        return "shared cache (base 0x2c000000 + slide 0x37f6000)"
+    if pc >= DYLD_END:
+        return "the 0x2be58000..0x2c000000 gap (above dyld, below the shared cache - where the 1002 " \
+               "stall pc 0x2be97328 sat)"
+    return "low user map (< 0x2be00000)"
+
+
 def s_f(cap):
     """[F] THE 1003 RUNG'S OWN FRONTIER - the CODE-SIGNING page-validation wall.
 
     The 1002 press read names it by value: `CODE SIGNING: cs_invalid_page(0x2f7f6000): p=1[launchd]
-    clearing CS_VALID` - the SAME wall 999 stopped on.  1003's ONE change is aimed at this path.
-    TODO(1003): set from forensics-1003 - the EXPECTED reading after the fix (the boot SURVIVES past
-    `cs_invalid_page` for launchd / the wall MOVES again) and the FALSIFIER (the same page/pid recurs
-    WITH the fix in the image).  This section reads the frontier BY VALUE: the count, the exact page
-    `0x2f7f6000`, the `p=1[launchd]` tag, and whether the boot got PAST it (a record/line after the
-    last cs_invalid_page).  It is PRESENCE-based: a cs_invalid_page that IS there is evidence whatever
-    the run did next, so the reading is reported by value but the VERDICT is death-gated (the wall is
-    printed during the exec, before the exec-done trio's print site)."""
+    clearing CS_VALID` - the SAME wall 999 stopped on.  But 1003's reading (records/1002-press-read.txt
+    section [6]; scripts/press_1003.sh (F)) is that this line is a TOLERATED warning (CS_VALID cleared,
+    retval 0 - the fault PROCEEDS) and NOT the frontier: it appears EXACTLY ONCE (CS_TOLERATED = 1) and
+    the boot gets PAST it.  The frontier is the pid-1 user-space STALL, which [S] measures.  [F] reads
+    it BY VALUE - the count, the exact page `0x2f7f6000`, the `p=1[launchd]` tag, and whether the boot
+    got PAST it (a record/line after the last cs_invalid_page) - and treats the SINGLE tolerated
+    occurrence as the expected reading, never a failure.  It is PRESENCE-based, so a reading is reported
+    by value, but the verdict is death-gated (the wall prints during the exec, before the trio)."""
     print("\n== [F] THE 1003 FRONTIER: the code-signing page-validation wall (cs_invalid_page) ==")
     hits = cap.cs_invalid_hits()
     n = len(hits)
@@ -1044,16 +1235,25 @@ def s_f(cap):
     else:
         say("---", "no `%s` => the wall was not reached (or the fix removed it): read [R] and [0] to "
                    "place this run" % CS_INVALID_LIT)
-    # THE VERDICT (death-gated).  TODO(1003): set from forensics-1003 - flip the expectation here to
-    # whatever the frozen pre-reg says the SURVIVOR reading is.
+    # THE VERDICT.  cs_invalid_page is a TOLERATED warning, and the 1002 capture measured it EXACTLY
+    # ONCE - so the count is reported by value and the expected reading is x1, never a failure.  It is
+    # NOT the frontier (the frontier is the pid-1 stall, [S]): a single tolerated occurrence is the
+    # EXPECTED reading of this rung, not a defect.
     if n == 0:
-        say("OBS", "cs_invalid_page x0 - either the boot never reached the code-signing wall or the "
-                   "fix removed it; the frozen pre-reg says which is the survivor reading")
-    elif GATE_OPEN:
-        say("OBS", "cs_invalid_page x%d WHILE the death gate is OPEN - the boot survived the exec "
-                   "despite the wall; TODO(1003): adjudicate against the frozen pre-reg's expected "
-                   "reading (survivor vs falsifier)" % n)
+        say("OBS", "cs_invalid_page x0 - the wall was not hit (or the code path did not run this boot); "
+                   "1003's expected reading is the SINGLE TOLERATED occurrence measured in the 1002 "
+                   "capture - read [S] for the frontier that IS the reading")
+    elif n == CS_TOLERATED:
+        say("PASS", "cs_invalid_page x%d - the TOLERATED warning the 1002 capture measured (CS_VALID "
+                    "cleared, retval 0, the fault PROCEEDS): the EXPECTED reading, NOT the frontier "
+                    "(the frontier is the pid-1 user-space stall, measured in [S])" % n)
     else:
+        say("READING", "cs_invalid_page x%d (the 1002 capture measured the tolerated warning x%d) - a "
+                       "count above 1 is NOT the tolerated single occurrence; adjudicate against "
+                       "records/1002-press-read.txt and the frozen pre-reg (F) before reading it as "
+                       "anything: a wall that stopped tolerating is a frontier finding, not a regression "
+                       "of 1003" % (n, CS_TOLERATED))
+    if n and not GATE_OPEN:
         print("  [death-gated] cs_invalid_page x%d with the exec-done trio ABSENT - the wall's reach "
               "is a DEATH READING (the wall prints during the exec, before the trio's print site)" % n)
 
@@ -1131,17 +1331,20 @@ def s7_falsifiers(cap):
 
     (8)(a) is the image-side reading of the 1003 change (the press's own pre-flight, read off the elf -
     not a capture reading); (8)(b) is [R]'s regression predicate (the 1002 abort recurrence), reported
-    here by value, never re-fired; (8)(c) is the death-at-the-same-call signature (printed in [3]);
-    (8)(d) is the frontier-advanced reading, whose evidence is the last direct keys and the text
-    channel's last stanza.  TODO(1003): set from forensics-1003 - the code-signing falsifier's exact
-    predicate (a recurrence of `cs_invalid_page(0x2f7f6000)` p=1[launchd] WITH the fix in the image)."""
+    here by value, never re-fired; (8)(c) is the stall's own reading ([S]): the boot still stalling at
+    the same last usvc pc 0x2be97328 is the EXPECTED outcome, and a boot that instead ADVANCES (prints
+    more, reaches a new wall) is the frozen falsifier; (8)(d) is the frontier-advanced reading, whose
+    evidence is the last direct keys and the text channel's last stanza.  The tolerated
+    `cs_invalid_page(0x2f7f6000)` p=1[launchd] (ONCE) is reported by value for [F] but is NOT a
+    falsifier - it is a warning the fault proceeds past."""
     print("\n== [7] FALSIFIERS (frozen 1003 (8)(a)-(d)) ==")
     # ---- (8)(a): the 1003 change in the image. Read off the elf by the press's pre-flight, NOT this
-    # capture - state so, by value. TODO(1003): set from forensics-1003.
+    # capture - state so, by value.
     say("OBS", "(8)(a) the 1003 change's by-value reading is IMAGE-side "
-               "(scripts/press_1003.sh step 2-0) - not derivable from this capture. TODO(1003): set "
-               "from forensics-1003 - name the exact reading; if the change is NOT in the image, the "
-               "layer was not rebuilt and nothing below is a test of the 1003 fix")
+               "(scripts/press_1003.sh step 2-0): the recorder symbol `entry_note_stall_sample` (T) and "
+               "the 7 `xnu_live_stall_*` literals in out/stage90/xnu_arm_entry.elf - not derivable from "
+               "this capture. If the instrument is NOT in the image, the layer was not rebuilt and "
+               "nothing below is a test of the 1003 fix (see [S])")
     # ---- (8)(b): the signed check_np-adjacent 1002 abort - a REGRESSION predicate now, adjudicated
     # in [R], restated here. 1002 CONFIRMED these GONE, so a recurrence is a rebuild signal.
     n_abort = len(cap.abort_hits())
@@ -1150,11 +1353,24 @@ def s7_falsifiers(cap):
         "1002-FIX REGRESSION - adjudicated in [R] (one finding, one hard anomaly): the r3 save was "
         "reverted / the assembly layer was not rebuilt" if n_abort else
         "the 1002 r3-save fix holds (no regression)"))
-    # ---- (8)(c): the 1003 frontier's own reading (see [F]) - TODO(1003): set from forensics-1003.
-    n_cs = cap.lit_count(CS_INVALID_LIT)
-    say("OBS", "(8)(c) the 1003 frontier: `%s` x%d (page `%s` x%d) - adjudicated in [F]; TODO(1003): "
-               "set from forensics-1003 - the frozen expected count and the falsifier" % (
-                   CS_INVALID_LIT, n_cs, CS_PAGE_1002, cap.lit_count(CS_PAGE_1002)))
+    # ---- (8)(c): the STALL's own reading ([S]).  The EXPECTED outcome is the boot STILL stalling
+    # (same last usvc pc 0x2be97328); the falsifier is a boot that ADVANCES instead.  Adjudicated in
+    # [S]; restated here by value, never re-fired.
+    stall = cap.stall_samples()
+    n_stall = len(stall)
+    last_usvc = cap.last("xnu_live_usvc_pc")
+    say("OBS", "(8)(c) the stall instrument: `xnu_live_stall_*` samples x%d (adjudicated in [S]); the "
+               "last `xnu_live_usvc_pc` %s => %s" % (
+                   n_stall, fmt(last_usvc[3]) if last_usvc else "(absent)",
+                   "EXPECTED (the boot still stalls; a stall instrument that reached the image is the "
+                   "measurement this rung was built for)" if n_stall else
+                   "the stall instrument did NOT reach the image - the (8)(a) rebuild signal ([S])"))
+    # ---- the tolerated code-signing wall, by value (its count is coherent: CS_TOLERATED = 1).
+    n_cs = cap.cs_invalid_hits()
+    page_n = cap.text.count(CS_PAGE_1002)
+    say("OBS", "(8)(c) the TOLERATED code-signing wall: `%s` x%d, page `%s` x%d (the 1002 capture "
+               "measured the tolerated warning EXACTLY ONCE; adjudicated in [F], NOT a falsifier)" % (
+                   CS_INVALID_LIT, len(n_cs), CS_PAGE_1002, page_n))
     # ---- the PRESERVED 1001 pre-reg (8)(c): the death AT THE SAME submap call. Its signature is
     # printed in [3]; here the predicate, reported by value (never re-fired).
     sc = [(ln, line.strip()) for ln, line in enumerate(cap.lines, 1)
@@ -1215,9 +1431,9 @@ def main():
     auth, frozen = authority_line()
     print(auth)
     print("spec read here: 1002's switch set VERBATIM (USVC=1, SUBMAP_PMAP_SKIP=1) + the ONE new 1003 "
-          "switch (STAGE90_XNU_<TOPIC>, TBD); the 1003 rung answers the code-signing wall `%s` "
-          "(`%s`); the 1002 regression self-test is ZERO `%s` after `%s`" % (
-              CS_INVALID_LIT, CS_PAGE_1002, ABORT_LIT, CHECK_NP_LIT))
+          "switch STAGE90_XNU_STALL (the per-tick pid-1 stall sampler, section [S]); the tolerated "
+          "code-signing wall `%s` (`%s`) is NOT the frontier; the 1002 regression self-test is ZERO "
+          "`%s` after `%s`" % (CS_INVALID_LIT, CS_PAGE_1002, ABORT_LIT, CHECK_NP_LIT))
     s0_gate(cap)
     s_identity(cap)
     s1_tick(cap)
@@ -1226,6 +1442,7 @@ def main():
     s4_usvc(cap)
     s5_context(cap)
     s_rung(cap)
+    s_stall(cap)
     s_f(cap)
     s6_guards(cap)
     s7_falsifiers(cap)
@@ -1239,7 +1456,7 @@ def main():
     for f in FAILURES:
         print("    - " + f)
     if not frozen:
-        print("  !! NO FROZEN 1002 PRE-REGISTRATION was found at run time - the expectations above "
+        print("  !! NO FROZEN 1003 PRE-REGISTRATION was found at run time - the expectations above "
               "are the task's (see [0]/[R]/[7] for what that changes); a deviation here is to REPORT")
     if SIGNATURES:
         print("  !! %d REBUILD-CLASS SIGNATURE(S) present (not counted, and not a pass either):" %

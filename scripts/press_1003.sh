@@ -1,31 +1,32 @@
 #!/usr/bin/env bash
 # Run this WHEN YOU ARE BACK AT THE DEVICE. 1003 = 1002's switch set VERBATIM (all checker/witness/
 # USB-ladder switches, RESIDENT, USVC and SUBMAP_PMAP_SKIP stay 1) plus ONE new switch
-# STAGE90_XNU_<TOPIC>, and exactly ONE code change on the CODE-SIGNING page-validation wall. 1003 is
-# the FIX rung for the 1002 press frontier.
+# STAGE90_XNU_STALL. 1003 is a MEASUREMENT rung (no kernel behaviour change): it samples pid 1's user
+# pc on the timer tick to settle the frontier the 1002 press read reached.
 #
 # WHY (1002's press read, 2026-10-13, arm armed-d13-b04976fe, records/1002-press-read.txt). 1002 fixed
 # the 1001 frontier - the 230x byte-identical `launchd[1]: usermode data abort, EXC_BAD_ACCESS at
 # 0x00000004` on dyld's `_cerror`/TPIDRURO=0 path - by saving r3 in the USVC hook, and the fix was
-# CONFIRMED: the abort is GONE. The frontier then MOVED to the CODE-SIGNING page-validation wall, the
-# same one 999 stopped on:
+# CONFIRMED: the abort is GONE. The boot then entered pid-1 user mode, ran 22 SVCs, and went silent
+# while the kernel stayed alive ~23 min. The last three SVCs are num=-3 (mach_absolute_time) from the
+# SAME pc 0x2be97328 with `lr` marching - so pid 1 is either SPINNING in user space or ASLEEP. The
+# `CODE SIGNING: cs_invalid_page(0x2f7f6000)` line is a TOLERATED warning (clearing CS_VALID returns 0,
+# the fault proceeds), NOT the frontier. See docs/1003-dyld-stall-design-draft.md.
 #
-#     CODE SIGNING: cs_invalid_page(0x2f7f6000): p=1[launchd] clearing CS_VALID
-#
-# TODO(1003): set from forensics-1003 - the confirmed root cause (WHY launchd's page 0x2f7f6000 is
-# judged invalid / CS_VALID cleared) and the exact kernel edit (the switch STAGE90_XNU_<TOPIC>, the
-# stage driver tools/stage_d13_<topic>.sh, and the layer - POOL or ASSEMBLY).
-# 1003: (a) <the fix>; (b) EVERY 1002 instrument stays on (USVC, SUBMAP_PMAP_SKIP and the 1002 r3-save
-# fix are regressions the frontier must not re-litigate); (c) the rebuild is <the layer that carries
-# the change>.
+# 1003: (a) the stall instrument - a per-tick sample of the interrupted frame's pc/cpsr published as
+# `xnu_live_stall_*` (the recorder entry_note_stall_sample in src/entry/entry_stubs.c + ONE gated call
+# site in src/platform/darwin13/pe_msm8974.c); (b) EVERY 1002 instrument stays on (USVC,
+# SUBMAP_PMAP_SKIP and the 1002 r3-save fix are regressions the frontier must not re-litigate); (c) the
+# rebuild is the ENTRY payload (build_entry.sh) + the PLATFORM object (build_xnu_arm_kernel.sh's
+# platform block, -DSTAGE90_XNU_STALL via XNU_KERNEL_EXTRA_DEFINES); the TREE does NOT move.
 #
 # THE BASE IS NEVER WRITTEN (CARD_COW=1, HDD_WRITE=0) - fully reversible. RESIDENT rung
-# (POST_END_TICKS=0): the frontier has advanced on each of 1001/1002 and the fix is expected to move it
-# again. Budget the same long survival and a power-press; if it dies anywhere the never-fed SoC
-# watchdog may return the phone by itself. The arm carries the full USB ladder (EP1-IN): start the host
-# reader FIRST - its capture is expected EMPTY again (the handed-off kernel never idles, so the ladder
-# never fires); the PRIMARY channel is /proc/last_kmsg, read by scripts/recover_last_kmsg.sh after the
-# device comes back (step 4 - a plain boot of the FLASHED ROM is the carrier, NEVER `fastboot boot`).
+# (POST_END_TICKS=0): the frontier has advanced on each of 1001/1002. Budget the same long survival and
+# a power-press; if it dies anywhere the never-fed SoC watchdog may return the phone by itself. The arm
+# carries the full USB ladder (EP1-IN): start the host reader FIRST - its capture is expected EMPTY
+# again (the handed-off kernel never idles, so the ladder never fires); the PRIMARY channel is
+# /proc/last_kmsg, read by scripts/recover_last_kmsg.sh after the device comes back (step 4 - a plain
+# boot of the FLASHED ROM is the carrier, NEVER `fastboot boot`).
 #
 # Steps: (1) confirm the device is back, (2) write the REAL card image to userdata's head, (3) press,
 # (4) recover the log. Steps 2 and 3 run the project's own gate + runner - never a raw fastboot,
@@ -37,35 +38,49 @@ SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 # ====================================================================================================
 # 1003 PRESS PRE-REGISTRATION (frozen; deviations reported, not reinterpreted)
 # ====================================================================================================
-# SWITCH SET. 1001's verbatim (STAGE90_XNU_DYLD_WITNESS=1, STAGE90_XNU_SHREG_PROBE=1,
+# SWITCH SET. 1002's verbatim (STAGE90_XNU_DYLD_WITNESS=1, STAGE90_XNU_SHREG_PROBE=1,
 # STAGE90_XNU_SHREG_WIRE=1, STAGE90_XNU_SHREG_GEOM=1, STAGE90_XNU_RESIDENT=1, STAGE90_XNU_USVC=1,
 # STAGE90_XNU_SUBMAP_PMAP_SKIP=1, USB ladder PROBE/DEV/ENUM/STREAM=1); CARD_COW=1, HDD_WRITE=0;
-# RESIDENT rung (POST_END_TICKS=0). NEW switch STAGE90_XNU_<TOPIC>=1 (TODO(1003): set from
-# forensics-1003 - the ONE new switch). USVC=1, SUBMAP_PMAP_SKIP=1 AND STAGE90_XNU_<TOPIC>=1 must ALL
-# be in the record (grepped below).
+# RESIDENT rung (POST_END_TICKS=0). NEW switch STAGE90_XNU_STALL=1 (the stall instrument). USVC=1,
+# SUBMAP_PMAP_SKIP=1 AND STAGE90_XNU_STALL=1 must ALL be in the record (grepped below).
 #
-# THE POINTS. The points below are the FROZEN SKELETON. TODO(1003): set from forensics-1003 - fill the
-# frontier-specific content (the code-signing expected reading, the falsifiers) where marked; the
-# POINTS (0)-(8) structure and the frozen regression guards stay identical to 1002.
-# (0) THE 1003 CHANGE IS IN THE IMAGE - READ IT BEFORE ANY JUDGEMENT. TODO(1003): set from
-#     forensics-1003 - the by-value reading of the code-signing fix in the linked image (a literal / a
-#     symbol / a call site), exactly as build_1003.sh's delta clause and scripts/park_1003.sh assert it.
-#     If the change is NOT in the image, NOTHING below may be read as a test of the fix - rebuild.
-#     (Step 2-0 below reads it before the press; edit that step's guard to match the real change.)
+# THE POINTS. The points below are the FROZEN SKELETON for a MEASUREMENT rung; the POINTS (0)-(8)
+# structure and the frozen regression guards stay identical to 1002.
+# (0) THE 1003 CHANGE IS IN THE IMAGE - READ IT BEFORE ANY JUDGEMENT. By value: the recorder symbol
+#     `entry_note_stall_sample` present (T) in out/stage90/xnu_arm_entry.elf AND the 7 `xnu_live_stall_*`
+#     key literals embedded, exactly as build_1003.sh's delta clause and scripts/park_1003.sh assert. If
+#     the instrument is NOT in the image, NOTHING below may be read as a test - rebuild.
+#     (Step 2-0 below reads it before the press.)
 # (0b) THE 1002 r3-SAVE FIX IS A REGRESSION: locore_fleh_swi's prologue must STILL be the six-word
 #     window `push {r0, r1, r2, r3, r8, lr}` / `mov r0, r8` / `bl <entry_note_user_svc>` /
 #     `pop {r0, r1, r2, r3, r8, lr}`. A FOUR-word window means the fix regressed - rebuild.
-# (F) THE FRONTIER UNDER TEST - THE CODE-SIGNING PAGE-VALIDATION WALL. TODO(1003): set from
-#     forensics-1003. The 1002 reading this rung answers: `CODE SIGNING: cs_invalid_page(0x2f7f6000):
-#     p=1[launchd] clearing CS_VALID` (the same wall 999 stopped on). EXPECTED after the fix: <the boot
-#     SURVIVES past that cs_invalid_page for launchd / the wall MOVES again - state the exact
-#     page/pid/expected count>. FALSIFIER: <the same cs_invalid_page(0x2f7f6000) p=1[launchd] rec:urs
-#     with the fix in the image => the fix was not the cause - record the structural item>.
+# (F) THE FRONTIER UNDER TEST - THE PID-1 USER-SPACE STALL, AND THE STALL SAMPLE IS THE READING. The
+#     1002 reading this rung answers: after `IOS7SHREG check_np ret=12` the boot printed `map_slide`,
+#     ran 22 user SVCs (the last three num=-3 from the SAME pc 0x2be97328, lr marching
+#     0x2be85a9f -> 0x2be85af1 -> 0x2be85b11, cpsr 0x60000010), then made NO further syscall while the
+#     kernel stayed alive ~23 min. FORENSICS (records/1003-stall-forensics-preliminary.txt) corrected
+#     the map: dyld is slid 0x7C000, its runtime image is [0x2be7c000,0x2bed4000), and pc 0x2be97328
+#     = dyld's `_mach_absolute_time`+0x68 - the lr's are `dyld::ImageLoader::link` +0x37/+0x89/+0xa9.
+#     The -3 is libsystem's commpage FALLBACK (the validity byte at 0xffff4090 reads 0), by DESIGN,
+#     so the halt is DOWNSTREAM of the three clock polls. `cs_invalid_page(0x2f7f6000)` is a TOLERATED
+#     warning (m0's first page; retval=0) - recorded, NOT the frontier.
+#     THE READING (the stall instrument's per-tick sample, keys xnu_live_stall_n / _t / _pc / _cpsr /
+#     _sp / _lr / _nz, published on the tick's powers-of-two ladder): the sampled pc is the
+#     INTERRUPTED frame's pc.
+#       * a USER pc (xnu_live_stall_cpsr low 5 bits = 0x10, e.g. 0x60000010) whose value ADVANCES
+#         across samples, or REPEATS on one small loop, = pid 1 is SPINNING in user space - and the pc
+#         says WHERE (dyld's runtime [0x2be7c000,0x2bed4000), or the shared region base 0x2c000000).
+#       * EVERY sample a KERNEL pc (0x8000xxxx / cpsr low 5 bits = 0x13) = pid 1 is ASLEEP/blocked
+#         (or the timer fires only while a kernel thread runs) - and the kernel pc says IN WAIT.
+#     Either way this is a pure MEASUREMENT: the run is EXPECTED to still stall (1003 changes no kernel
+#     behaviour). FALSIFIER: no `xnu_live_stall_*` keys at all => the instrument did not reach the image
+#     (rebuild); the samples carry nz=0 => the interrupted-frame reader read the wrong struct (a
+#     MEASUREMENT defect - adjudicate the offset against entry_saved_state.h).
 # (1) THE 1002 SELF-TEST STILL HOLDS - THE 230x ABORT DOES NOT RECUR. After `IOS7SHREG check_np
 #     ret=12`, the count of `launchd[1]: usermode data abort, EXC_BAD_ACCESS at 0x00000004` in the
 #     whole capture must STILL be 0 (1002 confirmed it; a recurrence here is a REGRESSION of the 1002
 #     fix, not a 1003 reading - rebuild). If dyld runs on it reaches `IOS7LAB cache mapping` x4 /
-#     `IOS7SHREG map_file kr=0` / `IOS7SHREG map_slide ret=0` and then the code-signing wall (F).
+#     `IOS7SHREG map_file kr=0` / `IOS7SHREG map_slide ret=0` and then the pid-1 stall (F).
 # (2) SUBMAPSKIP - UNCHANGED FROM 1001 (the fix must stay on). TEXT channel: `SUBMAPSKIP: obj=<ptr>
 #     start=<ptr> end=<ptr> size=<ptr> lr=<ptr>`, BOUNDED (max 8). EXPECTED: >= 1; most likely EXACTLY
 #     2, obj = 999's two VMHINT991 objects 0xc0005b48 / 0xc0005ab0. ABSENCE while the (4) gate holds =
@@ -94,10 +109,12 @@ SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 # (8) WHAT WOULD MAKE THIS RUNG WRONG (falsifiers, frozen): (a) the (0) change is NOT in the image =>
 #     the layer was not rebuilt (the fix is not in the image) - REBUILD; (b) the 230x `usermode data
 #     abort at 0x4` recurs past `check_np ret=12` => the 1002 r3-save fix REGRESSED - rebuild, not a
-#     1003 reading; (c) the SAME `cs_invalid_page(0x2f7f6000): p=1[launchd]` recurs WITH the fix in the
-#     image => TODO(1003): set from forensics-1003 - the fix was not the cause, record the structural
-#     item; (d) death ELSEWHERE, later => the frontier ADVANCED - record by value (last direct keys,
-#     then the text channel's last stanza). The FROZEN REGRESSION GUARDS - the geometry line exactly
+#     1003 reading; (c) the boot does NOT stall and instead advances (prints more, reaches a new wall) -
+#     THEN the 1002 stall was not deterministic (the frontier is a NEW wall: record its last direct keys
+#     and text stanza by value); a stall that reproduces EXACTLY (same last usvc pc 0x2be97328) is the
+#     EXPECTED outcome of this measurement rung; (d) death ELSEWHERE, later => the frontier ADVANCED -
+#     record by value (last direct keys, then the text channel's last stanza). The FROZEN REGRESSION
+#     GUARDS - the geometry line exactly
 #     once, `IOS7LAB cache mapping` x4, the shared region x1, `check_np ret=12` x1, `IOS7SHREG map_file
 #     kr=0`, `IOS7SHREG map_slide ret=0` - are re-verified only under the survival gate of (4). The
 #     1002 capture (records/1002-press-read.txt) is the comparison baseline by value.
@@ -123,7 +140,7 @@ fi
 EXPECT_ARM=armed-d13-$(sha256sum out/stage90/xnu_arm_entry.bin | cut -c1-8)
 [[ $EXPECT_ARM == armed-d13-b04976fe ]] && {
   echo "REFUSING: out/stage90 holds 1002's arm (b04976fe) - already pressed 2026-10-13 (the r3 fix"
-  echo "took; the frontier moved to the code-signing wall cs_invalid_page; adjudicated in"
+  echo "took; the frontier moved to the pid-1 user-space stall after 22 SVCs; adjudicated in"
   echo "records/1002-press-read.txt)."
   echo "Build 1003 (scripts/build_1003.sh) first."; exit 1; }
 [[ $EXPECT_ARM == armed-d13-6ab42af7 ]] && {
@@ -178,20 +195,18 @@ STAGE90_XNU_SHREG_GEOM the geometry/stack half (kept from 998/999; G1 held)
 STAGE90_XNU_RESIDENT the WDT door feed's gate AND the tick probes (999's, kept)
 STAGE90_XNU_USVC the SVC frontier hook - 1002's r3-save fix lives INSIDE it (must stay on)
 STAGE90_XNU_SUBMAP_PMAP_SKIP the is_submap guard in vm_map_enter's tail (1001's; kept so the 1001 death is not re-litigated)
-STAGE90_XNU_<TOPIC> the 1003 code-signing page-validation fix (TODO(1003): set from forensics-1003 - the ONE new switch)
+STAGE90_XNU_STALL the pid-1 stall instrument (1003's; a pure measurement rung)
 EOF
-echo "   (record carries the 1002 verbatim switch set PLUS the new STAGE90_XNU_<TOPIC>; USVC and SUBMAP_PMAP_SKIP both on)"
+echo "   (record carries the 1002 verbatim switch set PLUS the new STAGE90_XNU_STALL; USVC and SUBMAP_PMAP_SKIP both on)"
 
-echo "== 2-0. the 1003 FIX in the image (read by value BEFORE the press) + the 1002 r3-save fix as a regression =="
-# (0) THE 1003 CHANGE IS IN THE IMAGE. TODO(1003): set from forensics-1003 - replace the placeholder
-#     guard below with the by-value reading of the code-signing fix (a literal / a symbol / a call
-#     site), exactly as build_1003.sh's delta clause and scripts/park_1003.sh assert it. Until this is
-#     filled, the guard below only reads the 1002 r3-save window (the regression) - it does NOT yet
-#     certify the 1003 change, and NOTHING may be read as a test of the 1003 fix.
-# TODO(1003): set from forensics-1003
-#   _d3=<the by-value reader of the 1003 change, e.g. a nm/strings/objdump count>
-#   [[ "$_d3" == <expected> ]] || { echo "REFUSING: the 1003 fix is NOT in the image - rebuild"; exit 1; }
-echo "   (0) TODO(1003): the 1003 change's by-value image guard is a PLACEHOLDER - fill it from forensics-1003"
+echo "== 2-0. the 1003 stall instrument in the image (read by value BEFORE the press) + the 1002 r3-save fix as a regression =="
+# (0) THE 1003 CHANGE IS IN THE IMAGE: the recorder symbol present AND the 7 `xnu_live_stall_*` key
+#     literals embedded, exactly as build_1003.sh's delta clause and scripts/park_1003.sh assert it.
+_d3_sym=$(arm-none-eabi-nm out/stage90/xnu_arm_entry.elf | grep -cE '^[0-9a-f]+ [Tt] entry_note_stall_sample$' || true)
+_d3_keys=$(strings out/stage90/xnu_arm_entry.elf | grep -c 'xnu_live_stall_' || true)
+echo "   (0) entry_note_stall_sample x$_d3_sym (want 1), xnu_live_stall_* literals x$_d3_keys (want 7)"
+[[ "$_d3_sym" == 1 && "$_d3_keys" == 7 ]] || {
+  echo "REFUSING: the 1003 stall instrument is NOT in the image (sym x$_d3_sym want 1, keys x$_d3_keys want 7) - rebuild"; exit 1; }
 # (0b) THE 1002 r3-SAVE FIX IS A REGRESSION. The prologue of locore_fleh_swi must STILL be the
 #      six-word window.
 _ls=$(arm-none-eabi-nm out/stage90/xnu_arm_entry.elf | awk '$3=="locore_fleh_swi"{print "0x" $1; found=1} END{exit(found?0:1)}') || {

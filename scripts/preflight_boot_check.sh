@@ -743,7 +743,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_SHREG_WIRE
                 STAGE90_XNU_SHREG_GEOM
                 STAGE90_XNU_USVC
-                STAGE90_XNU_SUBMAP_PMAP_SKIP)
+                STAGE90_XNU_SUBMAP_PMAP_SKIP
+                STAGE90_XNU_STALL)
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this
@@ -1129,6 +1130,17 @@ do
   # emits the line unconditionally.
   if [[ -z $_v && $_k == STAGE90_XNU_SUBMAP_PMAP_SKIP ]]; then
     printf '  %s=(absent, and a record that does not name the submap pmap-enter skip is a pre-1001 arm - the only value any pre-1001 build could have written)\n' "$_k"
+    continue
+  fi
+  # **1003's one new switch: absent names the pre-stall-instrument arm.** `STAGE90_XNU_STALL` reached
+  # the record only in 1003; every arm parked before it was built from a tree whose `pe_msm8974.c` had
+  # no sampler call site and whose image defined no `entry_note_stall_sample`, so an absent key is not
+  # a missing value but the value. Demanding the key would make every pre-1003 park unpressable (882's
+  # defect, twenty-one times repaired now). A post-1003 record can never reach this branch:
+  # `build_entry.sh` validates the switch at its own assignment (0/1 only) and emits the line
+  # unconditionally.
+  if [[ -z $_v && $_k == STAGE90_XNU_STALL ]]; then
+    printf '  %s=(absent, and a record that does not name the pid-1 stall sampler is a pre-1003 arm - the only value any pre-1003 build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \

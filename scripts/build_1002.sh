@@ -89,7 +89,7 @@ XNU_TREE=$PWD/external/xnu-hd2-darwin13/xnu
 REC=out/stage90/xnu_arm_entry-config.txt
 
 echo "== 1002: the NEW frontier of the 1001 read - the USVC hook's r3 clobber (NO new switch, ONE code change: the hook's save set gains r3) =="
-echo "-- 1001's arm was armed-d13-6ab42af7 (PRESSED 2026-10-13: the SUBMAPSKIP fix took by value, the boot ADVANCED into pid-1 dyld, then faulted 230x at 0x4 reading TPIDRURO=0 on dyld's `_cerror` errno path; device self-recovered via the never-fed ~29 s SoC watchdog); 1001's set verbatim --"
+echo "-- 1001's arm was armed-d13-6ab42af7 (PRESSED 2026-10-13: the SUBMAPSKIP fix took by value, the boot ADVANCED into pid-1 dyld, then faulted 230x at 0x4 reading TPIDRURO=0 on dyld's \`_cerror\` errno path; device self-recovered via the never-fed ~29 s SoC watchdog); 1001's set verbatim --"
 
 EXTRA=""
 # NOTE: `STAGE90_XNU_HFS_ROOT_RW` is NOT here - it is a tree-layout define carried by the ENVIRONMENT

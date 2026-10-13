@@ -2619,6 +2619,85 @@ void entry_write_kv(const char *key, uint32_t value)
     __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
 }
 
+/* ------------------------------------------- 1003: the stall instrument (a pid-1 pc sampler) */
+/*
+ * **1003: WHAT THE 1002 PRESS COULD NOT ANSWER BY VALUE - IS pid 1 BLOCKED OR SPINNING?**
+ *
+ * 1002's press read (`records/1002-press-read.txt`) established the fix and moved the frontier: after
+ * `IOS7SHREG check_np ret=12` the boot prints `map_slide`, the 230x abort is gone, and the user side
+ * runs 22 syscalls - the LAST three (`n=20/21/22`, `num=0xfffffffd`=-3=`mach_absolute_time`) from the
+ * SAME pc `0x2be97328` with `lr` marching (`0x2be85a9f -> 0x2be85af1 -> 0x2be85b11`). Then the user
+ * side makes NO further syscall while the kernel stays alive ~23 min (43,179 watchdog pets, tick
+ * summaries climbing) and the storage door serves 537 reads (last ~40 a perfect linear sweep). The
+ * capture CANNOT settle the mechanism: an SVC is a syscall, and a spin that makes no syscall leaves
+ * no more SVC records, so "no more SVCs" is equally consistent with (i) pid 1 ASLEEP in the kernel
+ * (blocked on a page-in or IPC that never completes) and (ii) pid 1 SPINNING in user mode (the
+ * `mach_absolute_time` poll of an emulated timebase). Every kernel-side suspect was checked and
+ * exonerated by value: `rtclock_bus_configure` ran (`[RTCLOCK] Frequency = 19.2 MHz` at capture
+ * :4010, so `rtclock_sec_divisor != 0` and `mach_absolute_time()` advances), `cs_validate_page`'s
+ * SHA1 is compile-stubbed to ACCEPT (`ubc_subr.c` `_NOTYET` -> both hashes bzero'd), the read door
+ * completes every op (`rd_complete=1`, `rd_err=0`, `rd_timeout=0`). The question is therefore a
+ * MEASUREMENT, not an inference - and this is the recorder that takes it.
+ *
+ * **The instrument: a per-tick sample of pid 1's user pc.** The board PE's timer IRQ
+ * (`src/platform/darwin13/pe_msm8974.c`, `msm8974_handle_interrupt`, `MSM8974_GIC_TIMER_INTID`)
+ * already runs `rtclock_intr((arm_saved_state_t *)context)` with the INTERRUPTED context - the
+ * register frame of whatever the CPU was doing when the tick fired. Sampling that frame's `pc`/
+ * `cpsr` on a powers-of-two ladder (like `xnu_live_tick_irq`) yields a short autonomous history:
+ *
+ *   - the sampled pcs ADVANCE (`A -> B -> C`, all in the dyld/shared-cache span, differing across
+ *     samples) => pid 1 is RUNNING in user mode = a user-space spin (candidate: a
+ *     `mach_absolute_time` poll, since that is the one syscall it kept making / the one primitive a
+ *     usleep/monotonic-wait is built on);
+ *   - the sampled pcs are all the user pc AND IDENTICAL => pid 1 is wedged at one user instruction;
+ *   - every sample is the KERNEL (a `0x8000xxxx` pc, or cpsr not in USR/`0x10`) => pid 1 is not
+ *     running at all - it is ASLEEP in the kernel, and the last syscall (`-3` at `0x2be97328`) is
+ *     where it went to sleep.
+ *
+ * Those three readings are disjoint, which is what makes the sample decisive where the SVC tail was
+ * not. The sample is gated so it costs nothing off-arm: the PE calls this only under
+ * `STAGE90_XNU_STALL` (its own compile switch), and this body is inert unless `entry_live_ready()`.
+ *
+ * **Why powers of two.** A per-tick record would fill the channel in a second. The ladder publishes
+ * on ticks 1,2,4,...,2^k (`xnu_live_stall_n` is the tick count itself), so a 23-minute run costs ~
+ * 20 samples - one every doubling - and the LAST samples sit closest together in time, exactly where
+ * the frontier is. `_t` is a 1-based sample ordinal so a reader can index the ladder by sample number
+ * rather than by deriving `log2`.
+ */
+uint32_t g_stall_samples;
+
+void
+entry_note_stall_sample(const uint32_t *frame)
+{
+    uint32_t n;
+    uint32_t pc, cpsr;
+
+    if (entry_live_ready() == 0u)
+        return;
+    if (frame == 0)
+        return;
+
+    n = ++g_stall_samples;
+
+    pc   = frame[STAGE90_SS_PC   / 4];
+    cpsr = frame[STAGE90_SS_CPSR / 4];
+
+    /* occupancy: how many uint32 words of this frame are non-zero (an impossible frame is all-zero) */
+    uint32_t nz = 0u;
+    for (uint32_t i = 0u; i < (STAGE90_SS_SIZE / 4u); i++) {
+        if (frame[i] != 0u)
+            nz++;
+    }
+
+    entry_write_kv("xnu_live_stall_n", g_stall_samples);
+    entry_write_kv("xnu_live_stall_t", n);
+    entry_write_kv("xnu_live_stall_pc", pc);
+    entry_write_kv("xnu_live_stall_cpsr", cpsr);
+    entry_write_kv("xnu_live_stall_sp", frame[STAGE90_SS_SP / 4]);
+    entry_write_kv("xnu_live_stall_lr", frame[STAGE90_SS_LR / 4]);
+    entry_write_kv("xnu_live_stall_nz", nz);
+}
+
 /* ------------------------------------------- Experiment 458: the OS's own console into the log */
 /*
  * 457 read the OS's IOKit state through wrappers, but every word of it was *this* instrument's: the

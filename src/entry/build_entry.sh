@@ -1110,6 +1110,22 @@ case "$SUBMAP_PMAP_SKIP" in
     *) echo "REFUSING: STAGE90_XNU_SUBMAP_PMAP_SKIP='$SUBMAP_PMAP_SKIP' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **1003: the stall instrument - a per-tick pid-1 user-pc sample.** With `STAGE90_XNU_STALL=1`, the
+# board PE's timer IRQ (`src/platform/darwin13/pe_msm8974.c`) calls `entry_note_stall_sample(context)`
+# on the `xnu_live_tick_irq` powers-of-two ladder, and the recorder (in `src/entry/entry_stubs.c`)
+# publishes `xnu_live_stall_*` - the interrupted frame's `pc`/`cpsr`/`sp`/`lr` and a non-zero-word
+# occupancy. This is a pure MEASUREMENT rung: no kernel behaviour changes, so the frontier cannot
+# move because of it. Its purpose is the one thing the 1002 capture could not answer by value -
+# whether pid 1 is BLOCKED (asleep; every sample a kernel pc) or SPINNING (a user pc that advances or
+# repeats) - because an SVC is a syscall and a spin makes none. The switch reaches the PE's compile
+# as `-DSTAGE90_XNU_STALL`; it is compiled into `pe_msm8974.o` (an ENTRY-payload object, in the
+# link), so it is carried in the record LIKE any entry switch.
+STALL=${STAGE90_XNU_STALL:-0}
+case "$STALL" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_STALL='$STALL' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
 # commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
@@ -1624,6 +1640,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_SHREG_PROBE
                 STAGE90_XNU_SHREG_WIRE
                 STAGE90_XNU_SHREG_GEOM
+                STAGE90_XNU_STALL
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1842,6 +1859,12 @@ do
         # `thread_userstack`/`thread_userstackdefault` and refuses a link whose geometry/stack are
         # still the tree's defaults (0x30000000/0x10000000, USRSTACK 0x2FE00000).
         STAGE90_XNU_SHREG_GEOM)       _v=$SHREG_GEOM ;;
+        # 1003: the per-tick pid-1 pc sampler. It reaches the board PE's compile as
+        # `-DSTAGE90_XNU_STALL` - carried by the caller's `XNU_KERNEL_EXTRA_DEFINES` (== `$EXTRA`), the
+        # same path `STAGE90_XNU_HFS_ROOT_MEDIA`/`EMMC_STRATEGY`/`ROOT_FROM_CARD` use, so the record
+        # and the PE object cannot be built from two spellings of this switch. Read from `$STALL`,
+        # validated 0/1 at its own assignment above this loop.
+        STAGE90_XNU_STALL)            _v=$STALL ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -39518,6 +39541,13 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # record that omitted this key would let that image pass as a frontier arm. Written as the
     # RESOLVED `$USVC`, not `${STAGE90_XNU_USVC}`, for 882's reason.
     echo "STAGE90_XNU_USVC=$USVC"
+    # **1003's switch, written here for the same reason the USVC line above states**: this writer is the
+    # one site a name-keyed diff does not visit and the only site the gate reads, and STALL is an ARM
+    # key (it shapes the platform object `pe_msm8974.o` and the entry payload's recorder). OFF, the
+    # image is byte-identical to a build with no sampler and CANNOT produce a single `xnu_live_stall_*`
+    # record; a record that omitted this key would let a stall-free image pass as the 1003 frontier arm.
+    # Written as the RESOLVED `$STALL`, not `${STAGE90_XNU_STALL}`, for 882's reason.
+    echo "STAGE90_XNU_STALL=$STALL"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line
