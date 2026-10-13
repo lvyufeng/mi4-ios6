@@ -30973,7 +30973,8 @@ verify_trace_symbols() {
     # lost. Five properties, read out of THIS link:
     #   (1) `ENTRY_LIVE_CAP` 16384 -> 24576: `entry_live_write`'s cap compare is against 24576 and the
     #       old 16384 compare is GONE from its body. The tombstone value moves with it (0x6000).
-    #   (2) the read dump THINS past ordinal 256. This one has no clean image signature (every
+    #   (2) the read dump THINS past its own ordinal (256 when this clause landed - pin the
+    #       current value by value in the 1000-era build). This one has no clean image signature (every
     #       `ST_LIVE_RD` still emits the guarded call), so it is read SOURCE-side - and legitimately:
     #       this script compiles entry_storage.c itself two lines above, so a revert is a property of
     #       the file being built, not of a stale object. 70 `ST_LIVE_RD(` statement uses and the 8

@@ -2283,7 +2283,8 @@ uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_before_out,
  * the 128 KB OS block the console still has ~0.65 MB of headroom inside its 2 MB: 904's rule stands - a
  * cap that approached the buffer would hand the cut back to the silent `entry_write_kv` bound, the
  * harder failure to read. What pays for the multi-hundred-read dyld era is the read dump's own thinning
- * (999: a read past ordinal 256 publishes six cells, ~280 B, instead of ~78 cells, ~4.2 KB).
+ * (999 put the switch at ordinal 256; 1000 moved it to 64 after 999's 218-read boot showed that era
+ * has not arrived: a read past the ordinal publishes six cells, ~280 B, instead of ~78, ~4.2 KB).
  */
 #define ENTRY_LIVE_CAP 24576u
 

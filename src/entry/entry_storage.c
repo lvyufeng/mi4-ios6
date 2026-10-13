@@ -7303,11 +7303,19 @@ static __attribute__((noinline, noclone)) void st_read_single_block(uint32_t int
     /*
      * **999: THE READ'S DUMP WIDTH, DECIDED ONCE FOR THE WHOLE READ.** `st_read_count` is the
      * PRE-increment ordinal at this point (the bump is below, just before the command), so reads
-     * 1..256 publish every cell and 257.. only the six the reader locates a read by. `const`
+     * 1..64 publish every cell and 65.. only the six the reader locates a read by. `const`
      * because a flag that could change mid-read would let a dump interleave two widths - the
      * ordinal this is decided on IS the ordinal the read publishes. See `ST_LIVE_RD`.
+     * **1000: THE ORDINAL MOVED 256 -> 64.** 256 was picked for a "multi-hundred-read dyld era"
+     * and 999 measured that era has not arrived: 218 reads in the whole boot, so the switch never
+     * fired and the full-width dump spent the cap before exec (`xnu_live_capped` @capture :28714,
+     * beside the exec trio). At ~78 cells a full read and ~6 a thinned one, 64 keeps the SDHCI
+     * protocol dump for the boot's bring-up reads and carries every read after them at ~14x the
+     * density - the post-exec storage loop (999: 30 min of I/O, all past the cap) becomes visible
+     * in the counted channel. Asserted by value in `build_1000.sh`; parsed, not restated, by
+     * `tools/read_storage_key_order.py`.
      */
-    const uint32_t rd_full_ = (st_read_count < 256u);
+    const uint32_t rd_full_ = (st_read_count < 64u);
 #endif
 
     ST_LIVE("xnu_live_storage_rd_calls", 1u);

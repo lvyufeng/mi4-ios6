@@ -29,7 +29,8 @@ What it will not do, on purpose:
     ordering UNKNOWN too (`mi4-a-status-is-a-verdict-only-if-its-producer-delivered-one`).
   * **It does not fold a C-level condition into the preprocessor guard.** Since 999 the read
     body publishes its extended cells through `ST_LIVE_RD`, a macro whose body is silent when
-    the read's own `rd_full_` flag is clear (`st_read_single_block`: reads past ordinal 256
+    the read's own `rd_full_` flag is clear (`st_read_single_block`: reads past the flag's own
+    ordinal - parsed from the source here, never restated; 999 built 256, 1000 moved it to 64 -
     publish six cells, not ~78). Those cells are still recorded here - their MOMENT is the same
     call - with `thinned: 1` and a printed note; whether a *given read* carries them is a
     runtime question this preprocessor-level model refuses to answer, the same way it refuses a
@@ -366,6 +367,14 @@ def ladder_domain(source):
                     return int(m_lo.group(1)), int(m_hi.group(1)), cond.strip()
                 return None
     return None
+
+
+def rd_thin_ordinal(source):
+    """The ordinal `st_read_single_block`'s `rd_full_` flag thins past, read from the source
+    being modelled: 999 built 256, 1000 moved it to 64 - a number this tool looks up, never one
+    it carries (the same discipline as the ladder bound it refuses to restate)."""
+    m = re.search(r"rd_full_\s*=\s*\(st_read_count\s*<\s*(\d+)u\)", source)
+    return int(m.group(1)) if m else None
 
 
 def live_rung(path):
@@ -718,9 +727,11 @@ def cmd_key(model, names, rung):
         if detail["emission_guard"]:
             print(f"      guard: {' && '.join(detail['emission_guard'])}")
         if detail.get("thinned"):
+            t = model.get("thin_ordinal")
             print("      thinned: published through ST_LIVE_RD - absent from any read past ordinal "
-                  "256 (`rd_full_`), a runtime condition this preprocessor-level model does not fold "
-                  "into the guard vocabulary")
+                  f"{t if t is not None else '?'} (`rd_full_`, read from the source being modelled), "
+                  "a runtime condition this preprocessor-level model does not fold into the guard "
+                  "vocabulary")
         if detail["registered"]:
             print(f"      reached by registration of {', '.join(detail['registered'])} "
                   f"- the moment is an interval, not a point")
@@ -852,6 +863,7 @@ def main(argv=None):
               f"that does not compile.{extra}", file=sys.stderr)
         return 2
     model = parse(source)
+    model["thin_ordinal"] = rd_thin_ordinal(source)
     if not model["keys"]:
         print(f"REFUSED: no ST_LIVE key found in {args.src} - the wrong file, or the macro "
               f"changed shape, and either way this tool has no reading to give.", file=sys.stderr)
