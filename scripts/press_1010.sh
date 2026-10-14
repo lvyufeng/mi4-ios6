@@ -327,17 +327,19 @@ _ab_pte=$(grep -cE '[[:space:]](b|bl)[[:space:]]+[0-9a-f]+ <entry_note_abt_pte>'
 echo "   (0) __wrap_sleh_abort calls entry_note_abt_pte: $_ab_pte (want 1)"
 [[ "$_ab_pte" == 1 ]] || {
   echo "REFUSING: __wrap_sleh_abort does not call entry_note_abt_pte exactly once (0 = the call site moved; >1 = it runs twice) - rebuild"; exit 1; }
-# The vm_fault wrapper's PASS-THROUGH is the §8.1 rule made a check: it must call BOTH __real_vm_fault
-# (pass-through) AND entry_note_abt_vmf (the (B) record).
+# The vm_fault wrapper's PASS-THROUGH is the §8.1 rule made a check: it must call BOTH the real
+# vm_fault body (the pass-through) AND entry_note_abt_vmf (the (B) record).
+#     NOTE: `--wrap=vm_fault` renames `__real_vm_fault` -> `vm_fault` for the linked reference, so the
+#     disassembly has `bl <vm_fault>`, never `<__real_vm_fault>` (MEASURED this build).
 _wfa=$(awk '$3=="__wrap_vm_fault"{print "0x" $1; found=1} END{exit(found?0:1)}' <<<"$_abt_nm") || {
   echo "REFUSING: __wrap_vm_fault is not in the image - the vm_fault-return witness is gone"; exit 1; }
 _wfx=$(arm-none-eabi-nm -n out/stage90/xnu_arm_entry.elf | awk -v s="${_wfa#0x}" 'BEGIN{sv=strtonum("0x" s)}{a=strtonum("0x" $1)} a>sv && $2 ~ /^[Tt]$/ {if(!d){print "0x" $1; d=1}}')
 _wfb=$(arm-none-eabi-objdump -d out/stage90/xnu_arm_entry.elf --start-address="$_wfa" --stop-address="${_wfx:-0xffffffff}")
-grep -qE '__real_vm_fault' <<<"$_wfb" || {
-  echo "REFUSING: __wrap_vm_fault does not call __real_vm_fault - it is not a pass-through (docs/1010-design.md §8.1) - rebuild"; exit 1; }
+grep -qE 'bl[[:space:]]+[0-9a-f]+ <vm_fault>' <<<"$_wfb" || {
+  echo "REFUSING: __wrap_vm_fault does not call the real vm_fault body - it is not a pass-through (docs/1010-design.md §8.1) - rebuild"; exit 1; }
 grep -qE 'bl[[:space:]]+[0-9a-f]+ <entry_note_abt_vmf>' <<<"$_wfb" || {
   echo "REFUSING: __wrap_vm_fault does not call entry_note_abt_vmf - the (B) record never fires - rebuild"; exit 1; }
-echo "   (0) __wrap_vm_fault calls __real_vm_fault AND entry_note_abt_vmf (the §8.1 pass-through made a check)"
+echo "   (0) __wrap_vm_fault calls the real vm_fault AND entry_note_abt_vmf (the §8.1 pass-through made a check)"
 # (0a) THE 1009 FAULTING-PC IDENTITY IS A REGRESSION: the `entry_note_abt_pc` DEFINED text symbol AND
 #      exactly one `b|bl <entry_note_abt_pc>` inside `__wrap_sleh_abort` (its seven pc key literals are
 #      inside the (0) THIRTY (30)).  1010's set is 1009's verbatim.
