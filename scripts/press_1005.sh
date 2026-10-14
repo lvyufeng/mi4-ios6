@@ -214,8 +214,13 @@ _cad_lit=$(strings out/stage90/xnu_arm_entry.elf | grep -c 'xnu_live_cadence_' |
 echo "   (0) xnu_live_cadence_* literals x$_cad_lit (want 4: t/sync/tick/irq)"
 [[ "$_cad_lit" == 4 ]] || {
   echo "REFUSING: the 1005 cadence store is NOT in the image (literals x$_cad_lit want 4) - rebuild"; exit 1; }
+# NOTE: `nm | grep -q` under `set -o pipefail` is a trap - `grep -q` exits on the first match,
+# SIGPIPEs `nm`, and the pipeline's status becomes 141, vetoing a match that exists (the 487/998
+# SIGPIPE lesson; the same bug cost this press one false refusal at step 2-0). Capture `nm` ONCE into
+# a variable and grep the variable: no pipeline, no SIGPIPE.
+_cad_nm=$(arm-none-eabi-nm out/stage90/xnu_arm_entry.elf)
 for _cad_sym in entry_board_tick_count entry_board_irq_count entry_cadence_sample entry_cadence_summary; do
-  arm-none-eabi-nm out/stage90/xnu_arm_entry.elf | grep -qE "^[0-9a-f]+ [Tt] $_cad_sym\$" || {
+  grep -qE "^[0-9a-f]+ [Tt] $_cad_sym\$" <<<"$_cad_nm" || {
     echo "REFUSING: $_cad_sym is not a DEFINED text symbol in the image - an object did not rebuild or a stand-in was linked - rebuild"; exit 1; }
 done
 echo "   (0) the four cadence symbols are DEFINED T/t in the image"
