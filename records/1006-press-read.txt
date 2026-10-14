@@ -18,8 +18,15 @@ certified without the rung's own instrument.
 `entry_freeze_sample` is the FIRST statement of `__wrap_machine_idle` (`entry_trace.c:2308`, verified
 by value: the sole image-wide `bl <entry_freeze_sample>` is at `__wrap_machine_idle+0x1c`, *before*
 `entry_note_idle` at `+0x5c`). It publishes its first-four baseline through `entry_write_kv` — the
-**direct, uncapped** channel. So its total absence is not the record cap (24576): **the wrapper was
-never entered — the D13 kernel never calls `machine_idle`.**
+**direct, uncapped** channel. So its total absence is not the record cap (24576).
+
+(Named honestly, adversarially verified — `docs/1006-verification.md`: the frzbase keys are NOT
+strictly unconditional. They sit behind `if (entry_live_ready() == 0u) return;` (`entry_stubs.c:5356`),
+and `entry_live_ready()` is 1 only after the first `entry_live_write`. So "frzbase absent" *alone*
+has a second possible cause. The chain closes because the channel is independently shown up before the
+exec tail — `xnu_live_exec_done_seq=1` with `probe_state=1` — so the gate was open by the time any idle
+pass would have published. With the gate open and the keys still absent, there is one reading left:
+**the wrapper was never entered — the D13 kernel never calls `machine_idle`.**)
 
 **Corroborated independently by rung 512's own idle witness:** `xnu_live_idle_seq`/`_caller`/… is
 present in BOTH the 1006 elf and the frozen 1005 elf, and is **absent in every recent D13 capture**
