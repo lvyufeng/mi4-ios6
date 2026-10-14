@@ -138,4 +138,6 @@ The storm's fault address is the missing reading. Publish `xnu_live_abt_far` (th
 `xnu_live_abt_type` on the **direct** channel for the storm rows — read the coprocessor pair the same
 way `__wrap_sleh_abort` already does for `sleh` — so the 18.7 s abort's `far` is named. Pair it with a
 rate limiter (`far` published only where `call` sets a new max, or on the powers-of-two ladder) to
-keep the direct channel bounded.
+keep the direct channel bounded. **Designed in `docs/1008-design.md`** (new switch `STAGE90_XNU_ABT_FAR`:
+the maxcall latch + the same powers-of-two ladder, ≤133 records ≈ 4 KB; the `(S) SPREAD` vs `(R) REPEAT`
+classifier, which separates "2.1 M distinct faults" from "one fault retried 2.1 M times").
