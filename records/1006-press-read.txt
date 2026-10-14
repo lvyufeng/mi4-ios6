@@ -1,0 +1,81 @@
+# 1006 press read — `armed-d13-31bdebf3`
+
+**Captures.** The press booted via `fastboot boot` (never flash) at 2026-10-14 ~03:40; the runner
+returned 2 (the expected resident non-return); the device was dark; the operator power-pressed it
+back at 04:09; the watcher read the previous boot. Recovered log:
+
+`out/stage90/captures/recovered-unknown-arm-20261014-040919-last_kmsg.txt` (1,396,170 B, 29,253 lines).
+
+Adjudicated with `python3 tools/check_1006_capture.py <capture>` (default gate, no waiver).
+
+## VERDICT
+
+**The 1006 freeze witness produced ZERO records: `xnu_live_freeze_` x0, `xnu_live_frzbase_` x0.**
+The `[W]` section refuses to certify (HARD ANOMALY, EXIT=1) — correctly: a 1006 pass cannot be
+certified without the rung's own instrument.
+
+**The cause is measured, not inferred, and it is a READING of the rung (not a build failure):**
+`entry_freeze_sample` is the FIRST statement of `__wrap_machine_idle` (`entry_trace.c:2308`, verified
+by value: the sole image-wide `bl <entry_freeze_sample>` is at `__wrap_machine_idle+0x1c`, *before*
+`entry_note_idle` at `+0x5c`). It publishes its first-four baseline through `entry_write_kv` — the
+**direct, uncapped** channel. So its total absence is not the record cap (24576): **the wrapper was
+never entered — the D13 kernel never calls `machine_idle`.**
+
+**Corroborated independently by rung 512's own idle witness:** `xnu_live_idle_seq`/`_caller`/… is
+present in BOTH the 1006 elf and the frozen 1005 elf, and is **absent in every recent D13 capture**
+(the 1006 press, the 1005 press 020404, and 20261013-160126/145121/110813). Only 983 (2026-10-11), the
+last run before XNU got deep enough to exec real `launchd`, still idled (`idle_seq=1`). **The whole
+recent D13 frontier — the exec-and-walk tail — runs entirely in NON-IDLE context.**
+
+This is rung 512's falsifier (a), said out loud on the console:
+
+> `xnu_live_idle_*` absent while the run advances — the process is parking and the kernel is still not
+> idle, which would mean something else in this system is runnable and is the *finding*.
+
+## What this does and does NOT say
+
+- **DOES say:** the ~24.4 s freeze did **not** overlap the idle path. The witness's central design
+  question — "was the CPU in a `wfi` that slept through the freeze, or in a long non-idle kernel
+  stretch?" — is answered: **non-idle**. The freeze is spent in kernel work (fault/abort path), not in
+  an idle/park (candidate (iii)/(iv) of the design's classifier, read via ABSENCE).
+- **Does NOT say** which of the classifier's GIC/CPSR states held during the freeze — the sampler
+  never fired, so `xnu_live_freeze_cpsr/ien/pend/ctlr` are unread. That reading needs a
+  NON-idle-path witness (a sampler on the abort/fault path, or a periodic timer-IRQ probe).
+- The tick still collapsed and burst: `maxd = 0x1be87a47 = 468,220,487 counts = 24.386 s` (19.2 MHz),
+  `count` 135 → 477 across the burst — the 1005 shape, reproduced on a fresh boot.
+
+## The terminal stall frame (resolved by value — `docs/1006-terminal-frame-analysis.md`)
+
+The stall sampler's repeating frame is `pc=0x8001b48d  lr=0x8046b95c  cpsr=0x60000113` (and the
+`enable_interrupts+5` / `sleh_abort+0x468` form). Resolved:
+
+- `0x8001b32d` = `enable_interrupts+0x5` — the `push` just after the `cpsie i` (`0x8001b328`).
+- `0x8001b48d` = **`ml_cause_interrupt+0xd`** — the interrupt-control path.
+- `0x8046b95c` = `sleh_abort+0x468` — a **forward branch** (`ea000058  b 8046bac4`), NOT a return.
+- `cpsr=0x60000113`: I-bit=(0x113>>7)&1=**0** (IRQs ENABLED), A-bit=1. The earlier "I=1" reading was an
+  arithmetic error.
+
+**The fault-return self-loop hypothesis is REFUTED**: there is no `bx lr`/`mov pc,…` at `0x8046b95c`
+sending control back to `0x8001b32c`; the `bl ml_set_interrupts_enabled` has a normal return. The
+pc/lr pair is a normal call on pid-1's thread freshly caught by the timer IRQ. The frame sits in
+`sleh_abort`'s `vm_fault` path, consistent with 1004's WALK.
+
+## The image-identity caveat (honest)
+
+The capture carries no entry-image arm sha (`stage90_xnu_link_elf_sha32=0xa986a0b4` hashes the
+**pool** link elf, which 1006 did not change, so it cannot discriminate 1005 from 1006; the pool
+C++/asm graph is identical). **The reading above does not depend on it**: rung 512's idle witness is
+present in both the 1005 and 1006 entry elves (verified by `strings`), and it is absent, so the
+"never idles" conclusion holds for either image. If a positive 1006-ran test is wanted, it needs a
+witness that fires on a NON-idle path.
+
+## Frontier moved
+
+The task for the next rung: **witness the freeze on the path it actually rides** — the
+abort/fault/interrupt-control path (`ml_cause_interrupt` / `sleh_abort` / `vm_fault`), not the idle
+path. The 1006 instrument is correct and reproducible; it simply probes a path this boot never enters.
+Design §6's fault-loop candidate is refuted; the live candidate is a long bounded stretch in
+`sleh_abort`'s `vm_fault` return path (1004's WALK with the `sleh_back` gap 39/40).
+
+**No brick.** `fastboot boot` only; device returned in adb (`4a2fe00b`); `33e80afe` never appeared.
+Medium unchanged (CARD_COW=1, HDD_WRITE=0).
