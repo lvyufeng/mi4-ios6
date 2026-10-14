@@ -307,7 +307,7 @@ if [[ $D13_TRACE -eq 1 ]]; then
     # trace object compiles on its own command line, `:2332-2333`). Same env var and same 0 default as
     # the `$CADENCE` validated below, so the two spellings are one value; the append is here because
     # `entry_trace.c`'s compile reads this array, and the switch must be in it before the compile.
-    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}" -DSTAGE90_XNU_ABT_FAR="${STAGE90_XNU_ABT_FAR:-0}")
+    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}" -DSTAGE90_XNU_ABT_FAR="${STAGE90_XNU_ABT_FAR:-0}" -DSTAGE90_XNU_ABT_PC="${STAGE90_XNU_ABT_PC:-0}")
 else
     # **946: 4570's list drops the one name D13's keeps.** `timer_call_enter1` is in the literal above so
     # `tools/check_timer_sources.py` can read the tree's wrap set out of the source; here the *other* tree
@@ -1208,6 +1208,26 @@ if [[ $ABTFAR -eq 1 && $ABTSPAN -ne 1 ]]; then
     exit 1
 fi
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_ABT_FAR="$ABTFAR")
+
+# **1009: the faulting PC + FSR.** The recorder `entry_note_abt_pc` (entry_stubs.c) and its ONE call
+# (entry_trace.c) are both entry-toolchain objects, threaded through `STUB_DEFINES` (here) and
+# `STUB_DEFINES_TRACE` (appended at its own assignment above); OFF (ABT_PC=0), the guard deletes the
+# recorder and the call and both files are the exact 1008 token set. **The 1009 call sits after the
+# 1008 call and reads the frame the 1008 span already bracketed**; the guard is the CONJUNCTION
+# `ABT_FAR && ABT_PC`, so with `ABT_PC=1` and `ABT_FAR=0` the recorder is never reached (nothing to
+# refuse for correctness) - but the arm would carry a switch that measures nothing, so the build
+# REFUSES that pair (docs/1009-design.md §4).
+ABTPC=${STAGE90_XNU_ABT_PC:-0}
+case "$ABTPC" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_ABT_PC='$ABTPC' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $ABTPC -eq 1 && $ABTFAR -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_ABT_PC=1 requires STAGE90_XNU_ABT_FAR=1 - the 1009 call sits after the 1008 call (its guard is the conjunction ABT_FAR && ABT_PC), so ABT_FAR=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_ABT_PC="$ABTPC")
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
 # commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
@@ -1728,6 +1748,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_FREEZE_WITNESS
                 STAGE90_XNU_ABT_SPAN
                 STAGE90_XNU_ABT_FAR
+                STAGE90_XNU_ABT_PC
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1974,6 +1995,11 @@ do
         # objects cannot be built from two spellings. Read from `$ABTFAR`, validated 0/1 (and
         # cross-refused against `$ABTSPAN`) at its own assignment above this loop.
         STAGE90_XNU_ABT_FAR)         _v=$ABTFAR ;;
+        # 1009: the faulting PC + FSR. Its two consumers are `entry_stubs.c` (via `STUB_DEFINES`) and
+        # `entry_trace.c` (via `STUB_DEFINES_TRACE`), both compiled here, so the record and the objects
+        # cannot be built from two spellings. Read from `$ABTPC`, validated 0/1 (and cross-refused
+        # against `$ABTFAR`) at its own assignment above this loop.
+        STAGE90_XNU_ABT_PC)          _v=$ABTPC ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -39683,6 +39709,8 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "STAGE90_XNU_ABT_SPAN=$ABTSPAN"
     # **1008: the abort-fault identity.** Written as the RESOLVED `$ABTFAR`, for 882's reason.
     echo "STAGE90_XNU_ABT_FAR=$ABTFAR"
+    # **1009: the faulting PC + FSR.** Written as the RESOLVED `$ABTPC`, for 882's reason.
+    echo "STAGE90_XNU_ABT_PC=$ABTPC"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

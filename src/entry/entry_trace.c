@@ -5674,6 +5674,14 @@ extern void entry_note_abt_span(uint32_t t0, uint32_t call);
 #if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR
 extern void entry_note_abt_far(uint32_t call, uint32_t far, uint32_t type);
 #endif
+/*
+ * 1009: the faulting PC + FSR recorder. Its own guard (the conjunction ABT_FAR && ABT_PC, so the
+ * declaration is only live where the call is), SEPARATE from the far's so 1008's ABT_FAR guard count
+ * (2: extern + call) is undisturbed (docs/1009-design.md §3.3).
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC
+extern void entry_note_abt_pc(uint32_t pc, uint32_t fsr, uint32_t cpsr, uint32_t far);
+#endif
 
 void __real_sleh_abort(void *regs, int type);
 
@@ -5739,6 +5747,18 @@ void __wrap_sleh_abort(void *regs, int type)
 #endif
 #if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR
     entry_note_abt_far(entry_counter() - t0, far_, (uint32_t)type);
+#endif
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC
+    /*
+     * 1009: the FAULTING instruction and status. `regs` is the saved-state frame the abort vector
+     * built (`entry_saved_state.h`); its `pc`/`cpsr` slots are the same ones the `redirected` check
+     * reads (STAGE90_SS_PC / STAGE90_SS_CPSR). `fsr`/`far_` are the pair this wrapper read at
+     * :5688/:5695 (their coprocessor pair chosen by `type`) - nothing new is read from cp15 here.
+     */
+    entry_note_abt_pc(((const uint32_t *)(uintptr_t)regs)[STAGE90_SS_PC / 4],
+                      fsr,
+                      ((const uint32_t *)(uintptr_t)regs)[STAGE90_SS_CPSR / 4],
+                      far_);
 #endif
 }
 

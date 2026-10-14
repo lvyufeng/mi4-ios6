@@ -2000,6 +2000,63 @@ entry_note_abt_far(uint32_t call, uint32_t far, uint32_t type)
 #endif
 
 /*
+ * -------------------------------------------- 1009: the faulting PC and the FSR
+ *
+ * 1008 named WHERE the storm faults: the ladder `far` collapses onto the CONSTANT `0x0007b000`
+ * (type 4, DATA abort) from ordinal 0x400 through 0x200000, ~2.09 M retries (records/1008-press-read.txt).
+ * A constant `far` with a constant `type` says the SAME faulting access re-executes, but not WHICH
+ * instruction, and not whether the FSR's per-fault STATUS changes across the retries - the two the
+ * port's return path (`trap.c:510 sleh_abort`) turns on. 1009 forwards the faulting PC (`regs->pc`,
+ * already in the wrapper), the fault CPSR (`regs->cpsr`, the mode the abort ran in) and the DFSR
+ * (`fsr`, already read at entry_trace.c:5688) to the DIRECT channel - the same by-value rule 1008
+ * follows (docs/1008-design.md §4.3), because `entry_stubs.c` reads neither cp15 nor the frame.
+ *
+ * **The trigger set is 1008's ladder VERBATIM, extended to the tail.** 1008's ladder
+ * (`n <= 4 || n a power of two`) sampled ordinals 0x400…0x200000 - the whole REPEAT - so the same
+ * ordinals already name the tail; 1009 attaches pc/fsr to those SAME rows rather than adding a
+ * second ladder (one launch, one set of samples). The change-count (`far`/`pc`/`fsr` seen distinct
+ * so far, monotone, bounded) is the REPEAT-vs-SPREAD decision 1008's set-based reader could not make.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC
+void entry_write_kv(const char *key, uint32_t value);   /* identically to :1920 */
+
+static uint32_t g_abtpc_n;
+static uint32_t g_abtpc_lastfar;
+static uint32_t g_abtpc_lastfsr;
+static uint32_t g_abtpc_nfar;      /* CHANGES in `far` seen so far (monotone, bounded) */
+static uint32_t g_abtpc_nfsr;      /* CHANGES in `fsr` seen so far (monotone, bounded) */
+
+void
+entry_note_abt_pc(uint32_t pc, uint32_t fsr, uint32_t cpsr, uint32_t far)
+{
+    uint32_t n = ++g_abtpc_n;
+
+    /*
+     * The LADDER rows (1008's set VERBATIM, so the tail is already sampled): pc/fsr/cpsr/`far` at
+     * each powers-of-two ordinal. The `_pcfar` twin lets the reader pair THIS row's `pc` with 1008's
+     * `_far` at the SAME ordinal without depending on record order across two recorders.
+     */
+    if (n <= 4u || (n & (n - 1u)) == 0u) {
+        entry_write_kv("xnu_live_abt_pcn",    n);
+        entry_write_kv("xnu_live_abt_pc",     pc);      /* the FAULTING instruction */
+        entry_write_kv("xnu_live_abt_fsr",    fsr);     /* DFSR c5,c0,0: WnR + status */
+        entry_write_kv("xnu_live_abt_abtcpsr", cpsr);   /* the MODE the abort ran in */
+        entry_write_kv("xnu_live_abt_pcfar",  far);     /* pairs with 1008's `_far` at THIS ordinal */
+    }
+
+    /*
+     * The CHANGE-COUNTS - written WHERE THEY CHANGE (the `g_sleh_armed` rule): bounded by the number
+     * of DISTINCT values (<= ~12 for `far`, a handful for `fsr`), NOT by the abort count. `nfar==1`
+     * and `nfsr==1` held across the tail IS the REPEAT statement 1008's set-based reader missed: one
+     * faulting address, one fault status, retried ~2.1 M times.
+     */
+    if (n == 1u) { g_abtpc_lastfar = far; g_abtpc_lastfsr = fsr; }
+    if (far != g_abtpc_lastfar) { g_abtpc_lastfar = far; g_abtpc_nfar++; entry_write_kv("xnu_live_abt_nfar", g_abtpc_nfar); }
+    if (fsr != g_abtpc_lastfsr) { g_abtpc_lastfsr = fsr; g_abtpc_nfsr++; entry_write_kv("xnu_live_abt_nfsr", g_abtpc_nfsr); }
+}
+#endif
+
+/*
  * Set by the IRQ vector so the epilogue knows to name the interrupt it stopped on.
  *
  * Experiment 308's run ended on `exception: irq` and the report could not say *which* interrupt:
