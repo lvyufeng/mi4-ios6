@@ -2140,6 +2140,12 @@ extern void entry_tick_summary(void);
 #if defined(STAGE90_XNU_CADENCE) && STAGE90_XNU_CADENCE
 extern void entry_cadence_summary(void);
 #endif
+/* **1006: the idle-path freeze sampler**, defined in `entry_stubs.c` beside the cadence block;
+ * declared here for the reason the three above are. Gated so FREEZE_WITNESS=0 compiles this file
+ * unchanged. */
+#if defined(STAGE90_XNU_FREEZE_WITNESS) && STAGE90_XNU_FREEZE_WITNESS
+extern void entry_freeze_sample(void);
+#endif
 
 static uint32_t g_wdt_installed;      /* the pet has a mapping it can vouch for */
 static uint32_t g_wdt_pets;
@@ -2293,6 +2299,14 @@ void __wrap_machine_idle(void)
 #endif
 
     __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
+
+#if defined(STAGE90_XNU_FREEZE_WITNESS) && STAGE90_XNU_FREEZE_WITNESS
+    /* **1006: the idle-path freeze witness, at the very head of the pass.** Entered BEFORE
+     * `__real_machine_idle` (below), so the `entry_counter()` delta this reads between two passes is
+     * the dwell of the previous pass including its `wfi` - and the freeze cannot stop `entry_counter`.
+     * Before `entry_note_idle` so the reading is independent of that record's own gating. */
+    entry_freeze_sample();
+#endif
 
     now = current_proc();
     if (now != 0)

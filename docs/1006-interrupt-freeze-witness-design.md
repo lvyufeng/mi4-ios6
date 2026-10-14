@@ -140,9 +140,15 @@ recorders) and is **called at the TOP of `__wrap_machine_idle`** (`entry_trace.c
 
 1. `now = entry_counter()` (the free-running generic timer, `mrrc`).
 2. `d = now - g_freeze_last`; `g_freeze_last = now`; `c = ++g_idle_passes`.
-3. **Baseline (always):** on the first four calls (`c <= 4`) publish `xnu_live_idle_n`/`xnu_live_idle_d`
+3. **Baseline (always):** on the first four calls (`c <= 4`) publish `xnu_live_frzbase_n`/`xnu_live_frzbase_d`
    — the *unfiltered* idle-pass deltas, so the run measures its own idle period and the §7 threshold
-   can be judged against a reading, not an assumption.
+   can be judged against a reading, not an assumption. **The prefix is `frzbase`, NOT `idle`:** a
+   `xnu_live_idle_*` family already exists (rung 512's idle witness: `_seq/_caller/_thread/_pid/_cpsr/
+   _now/_en`), so a count over `xnu_live_idle_` would sum two different instruments' literals (7 + 2)
+   and two ordinals (`_n` here, `_seq` there) would answer to one name — the
+   [[mi4-one-value-two-definitions]] shape. A distinct, non-containing prefix keeps every
+   `strings | grep -c` exact. (Found in review: the first cut used `xnu_live_idle_` and the build's
+   `grep -c 'xnu_live_idle_' == 2` clause would have failed on 9.)
 4. **Freeze (gated on `d > MSM8974_FREEZE_MIN`, ladder `n <= 4` then powers of two):** publish
    - `xnu_live_freeze_n` (ordinal), `xnu_live_freeze_d` (`d`),
    - `xnu_live_freeze_cpsr` (CPSR here; the I-bit is `(cpsr >> 7) & 1`),

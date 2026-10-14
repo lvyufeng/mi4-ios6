@@ -5320,6 +5320,75 @@ entry_cadence_summary(void)
 }
 #endif
 
+#if defined(STAGE90_XNU_FREEZE_WITNESS) && STAGE90_XNU_FREEZE_WITNESS
+/*
+ * **1006: the idle-path freeze witness.** Ridden from `__wrap_machine_idle`'s head (entry_trace.c),
+ * this times the dwell of each idle pass with the free-running generic timer `entry_counter()` -
+ * which the freeze cannot stop - and, when a pass dwelled longer than `MSM8974_FREEZE_MIN`, publishes
+ * the elapsed counts, the CPSR, and the GIC state (line enabled / pending, distributor on). The point
+ * (design `docs/1006-interrupt-freeze-witness-design.md`, §4): the freeze stops the tick IRQ and the
+ * SVC path, so the witness cannot ride either; the idle path is entered without a tick or a syscall,
+ * and a `wfi` that slept through the freeze (or a non-idle fault loop, which also re-enters idle)
+ * leaves a `d` of tens of millions of counts here. This is a pure MEASUREMENT - no kernel behaviour
+ * changes.
+ *
+ * **The first four passes publish UNFILTERED** (`xnu_live_frzbase_*`), so the run measures its own idle
+ * period and `MSM8974_FREEZE_MIN` is judged against a reading rather than assumed - the reason the
+ * design refuses to size the threshold from the pet-feed deltas ([[mi4-measurement-defects]]).
+ *
+ * **The baseline keys are `xnu_live_frzbase_*`, NOT `xnu_live_idle_*`** ([[mi4-one-value-two-definitions]]):
+ * a `xnu_live_idle_*` family already exists (rung 512's idle witness, `_seq/_caller/_thread/_pid/_cpsr/
+ * _now/_en`), and a `strings | grep -c 'xnu_live_idle_'` would then count 7+2 literals under a name two
+ * ordinals (`_n` here, `_seq` there) answer to. A distinct, non-containing prefix keeps the count exact.
+ */
+extern uint32_t entry_counter(void);
+extern void entry_gic_freeze_state(uint32_t *out);
+
+/* ~1 ms (19.2 MHz) - well above an idle pass, ~4 orders below the ~24.4 s freeze; published in the
+ * record so the reading is not hostage to it (§7). */
+#define MSM8974_FREEZE_MIN 0x00004b00u
+
+static uint32_t g_idle_passes;
+static uint32_t g_freeze_last;
+static uint32_t g_freeze_n;
+
+void
+entry_freeze_sample(void)
+{
+    uint32_t now = entry_counter();
+    uint32_t d = now - g_freeze_last;
+    uint32_t c;
+
+    g_freeze_last = now;
+    c = ++g_idle_passes;
+    if (entry_live_ready() == 0u)
+        return;
+
+    /* The unfiltered baseline: the first four idle-pass deltas, so the threshold is judged by value. */
+    if (c <= 4u) {
+        entry_write_kv("xnu_live_frzbase_n", c);
+        entry_write_kv("xnu_live_frzbase_d", d);
+    }
+
+    if (d <= MSM8974_FREEZE_MIN)
+        return;
+
+    g_freeze_n++;
+    if (g_freeze_n <= 4u || (g_freeze_n & (g_freeze_n - 1u)) == 0u) {
+        uint32_t g[3] = { 0u, 0u, 0u };
+        uint32_t cpsr;
+        __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
+        entry_gic_freeze_state(g);
+        entry_write_kv("xnu_live_freeze_n", g_freeze_n);
+        entry_write_kv("xnu_live_freeze_d", d);
+        entry_write_kv("xnu_live_freeze_cpsr", cpsr);
+        entry_write_kv("xnu_live_freeze_ien", g[0]);
+        entry_write_kv("xnu_live_freeze_pend", g[1]);
+        entry_write_kv("xnu_live_freeze_ctlr", g[2]);
+    }
+}
+#endif
+
 #define USVC_FULL_N 64u      /* the full-field window; past it the ladder writes `_n`/`_num` only */
 
 /* `int proc_pid(proc_t)` and `proc_t current_proc(void)` in this file's `void *` spelling of a XNU

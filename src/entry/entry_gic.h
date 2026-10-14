@@ -231,6 +231,32 @@ void     gicd_write(uint32_t off, uint32_t value);
 uint32_t gicc_read(uint32_t off);
 void     gicc_write(uint32_t off, uint32_t value);
 
+/*
+ * **1006: the frozen-freeze GIC-state read, for the idle-path freeze witness.**
+ *
+ * The witness (`entry_stubs.c`'s `entry_freeze_sample`) runs at `__wrap_machine_idle`'s head and, when
+ * an idle pass dwelled longer than `MSM8974_FREEZE_MIN`, records whether the timer line was ENABLED,
+ * PENDING and whether the whole distributor was on - the three readings that separate a long
+ * non-interruptible stretch of kernel code from a GIC that re-masked the line.
+ *
+ * **It is one function in `entry_irq.c`, not volatile pointer arithmetic in `entry_stubs.c`, for the
+ * reason the paragraph above `gicd_read` gives**: those four accessors are the *only* place the GIC is
+ * addressed, and a second copy is this project's most repeated defect. It returns through
+ * out-parameters so `entry_stubs.c` needs no include of this header - the same shape that file already
+ * uses to reach `proc_pid`/`current_proc`.
+ *
+ * The reads go through `gicd_read`, which adds `g_irq_gic_dist_va` - so the helper is correct BOTH
+ * before the 982 remap (the raw `0xf9000000` window, VA offset 0) and after it (the board PE's mapped
+ * VA). A raw constant would fault once XNU owns the page tables, which is exactly when this witness
+ * most needs to read. Before the distributor is mapped the helper writes only the three raw offsets
+ * it can read and leaves the out-parameters; the caller publishes them unchanged.
+ *
+ * `out[0]` = `GICD_ISENABLER0` bit 20, `out[1]` = `GICD_ISPENDR0` bit 20, `out[2]` = `GICD_CTLR`.
+ */
+#if defined(STAGE90_XNU_FREEZE_WITNESS) && STAGE90_XNU_FREEZE_WITNESS
+void entry_gic_freeze_state(uint32_t *out);
+#endif
+
 /* The second-level handler `ml_install_interrupt_handler` is handed, in Apple's own ABI - the four
  * registers `fleh_irq_handler` loads out of `cpu_data` before `blx r5` are r0..r3, and this signature
  * is that call. Declared here so the installation and the definition cannot drift. */

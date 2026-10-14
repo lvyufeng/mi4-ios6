@@ -307,7 +307,7 @@ if [[ $D13_TRACE -eq 1 ]]; then
     # trace object compiles on its own command line, `:2332-2333`). Same env var and same 0 default as
     # the `$CADENCE` validated below, so the two spellings are one value; the append is here because
     # `entry_trace.c`'s compile reads this array, and the switch must be in it before the compile.
-    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}")
+    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}")
 else
     # **946: 4570's list drops the one name D13's keeps.** `timer_call_enter1` is in the literal above so
     # `tools/check_timer_sources.py` can read the tree's wrap set out of the source; here the *other* tree
@@ -1162,6 +1162,20 @@ case "$CADENCE" in
        exit 1 ;;
 esac
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_CADENCE="$CADENCE")
+# **1006: the idle-path freeze witness.** `STAGE90_XNU_FREEZE_WITNESS=1` gives `entry_stubs.c`
+# `entry_freeze_sample` (times the idle-pass/wfi dwell with the free-running generic timer and reads
+# the CPSR + GIC state when the dwell exceeds `MSM8974_FREEZE_MIN`) and makes `entry_trace.c`'s
+# `__wrap_machine_idle` call it at its head. Same split as CADENCE: `entry_stubs.c` through
+# `STUB_DEFINES` (here), `entry_trace.c` through `STUB_DEFINES_TRACE` (appended at its own assignment
+# above). OFF, every `#if` is `defined()`-first and every omitted region is byte-identical
+# ([[mi4-off-option-two-spellings]]).
+FREEZE=${STAGE90_XNU_FREEZE_WITNESS:-0}
+case "$FREEZE" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_FREEZE_WITNESS='$FREEZE' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_FREEZE_WITNESS="$FREEZE")
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
 # commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
@@ -1679,6 +1693,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_STALL
                 STAGE90_XNU_ABORT_TRACE
                 STAGE90_XNU_CADENCE
+                STAGE90_XNU_FREEZE_WITNESS
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1914,6 +1929,11 @@ do
         # record and the objects cannot be built from two spellings. Read from `$CADENCE`, validated
         # 0/1 at its own assignment above this loop.
         STAGE90_XNU_CADENCE)         _v=$CADENCE ;;
+        # 1006: the idle-path freeze witness. Its two consumers are `entry_stubs.c` (via
+        # `STUB_DEFINES`) and `entry_trace.c` (via `STUB_DEFINES_TRACE`), both compiled here, so the
+        # record and the objects cannot be built from two spellings. Read from `$FREEZE`, validated
+        # 0/1 at its own assignment above this loop.
+        STAGE90_XNU_FREEZE_WITNESS)  _v=$FREEZE ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -39613,6 +39633,12 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # image pass as the 1005 cadence arm. Written as the RESOLVED `$CADENCE`, not `${STAGE90_XNU_CADENCE}`,
     # for 882's reason.
     echo "STAGE90_XNU_CADENCE=$CADENCE"
+    # **1006's switch, written here for the same reason the two above state**: this writer is the one
+    # site a name-keyed diff does not visit and the only site the gate ever reads, and FREEZE_WITNESS is
+    # an ARM key - it adds the idle-path freeze sampler and the GIC-state read at the freeze's edge.
+    # OFF, the image is byte-for-byte a build without the witness. Written as the RESOLVED `$FREEZE`,
+    # not `${STAGE90_XNU_FREEZE_WITNESS}`, for 882's reason.
+    echo "STAGE90_XNU_FREEZE_WITNESS=$FREEZE"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

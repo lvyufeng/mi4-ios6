@@ -126,6 +126,25 @@ void gicc_write(uint32_t off, uint32_t value)
     __asm__ volatile ("dsb sy" ::: "memory");
 }
 
+#if defined(STAGE90_XNU_FREEZE_WITNESS) && STAGE90_XNU_FREEZE_WITNESS
+/* **1006: the freeze witness's GIC-state read.** Called from `__wrap_machine_idle` (through
+ * `entry_freeze_sample`) only when an idle pass dwelled longer than the freeze threshold. Reads the
+ * three registers that separate "the CPU was running and not taking an enabled, pending line" from
+ * "the GIC took the line down": the timer line's enable bit, its pending bit, and the whole
+ * distributor's enable. Read through the shared `gicd_read` so it is correct before AND after the 982
+ * remap (that accessor adds `g_irq_gic_dist_va`). A read-only bank, so no write is needed; the value
+ * follows the accessor's own rule and this is host-side reasoning about a device - the RUN is the
+ * reading. See `entry_gic.h` for why this lives here and not in the caller. */
+void entry_gic_freeze_state(uint32_t *out)
+{
+    const uint32_t timer_bit = 1u << (STAGE90_GIC_TIMER_INTID % 32u);
+
+    out[0] = gicd_read(STAGE90_GICD_ISENABLER0) & timer_bit;
+    out[1] = gicd_read(STAGE90_GICD_ISPENDR0)   & timer_bit;
+    out[2] = gicd_read(STAGE90_GICD_CTLR);
+}
+#endif
+
 /* --------------------------------------------------------------------------------------------- */
 /* The build's one switch, and why it is a source constant                                        */
 /* --------------------------------------------------------------------------------------------- */
