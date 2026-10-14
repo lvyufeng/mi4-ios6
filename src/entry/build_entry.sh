@@ -221,6 +221,14 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=OSKextRemoveKextBootstrap --wrap=kdebug_free_early_buf
                    --wrap=serial_keyboard_init --wrap=vm_page_init_local_q
                    --wrap=vm_pageout)
+    # **1010's `--wrap=vm_fault` is CONDITIONAL, and that is the point (docs/1010-design.md §8.1).**
+    # `vm_fault` is called from hundreds of objects, so wrapping it rewrites every linker-visible call
+    # in the kernel - a real surface. It is added ONLY when the 1010 switch is on, so the OFF image
+    # carries no `--wrap=vm_fault` at all (the `--wrap=sleh_abort` precedent wraps a symbol called from
+    # a handful of sites; this one is a whole-kernel wrap and must be opt-in). The switch name and its
+    # value are read here for the wrap only; the refusal that `ABT_PTE=1` requires `ABT_FAR=1 &&
+    # ABT_PC=1` is made at the switch's own assignment below.
+    [[ ${STAGE90_XNU_ABT_PTE:-0} -eq 1 ]] && TRACE_LDFLAGS+=(--wrap=vm_fault)
     # The last three are 481's, and all three are *in the traced build only*, which is a property of
     # the step rather than an oversight: the registration and the read-back **are** the instrument.
     # `setPop` records the kernel's own deadline arithmetic, `PE_init_platform` is the hook that
@@ -307,7 +315,7 @@ if [[ $D13_TRACE -eq 1 ]]; then
     # trace object compiles on its own command line, `:2332-2333`). Same env var and same 0 default as
     # the `$CADENCE` validated below, so the two spellings are one value; the append is here because
     # `entry_trace.c`'s compile reads this array, and the switch must be in it before the compile.
-    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}" -DSTAGE90_XNU_ABT_FAR="${STAGE90_XNU_ABT_FAR:-0}" -DSTAGE90_XNU_ABT_PC="${STAGE90_XNU_ABT_PC:-0}")
+    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}" -DSTAGE90_XNU_ABT_FAR="${STAGE90_XNU_ABT_FAR:-0}" -DSTAGE90_XNU_ABT_PC="${STAGE90_XNU_ABT_PC:-0}" -DSTAGE90_XNU_ABT_PTE="${STAGE90_XNU_ABT_PTE:-0}")
 else
     # **946: 4570's list drops the one name D13's keeps.** `timer_call_enter1` is in the literal above so
     # `tools/check_timer_sources.py` can read the tree's wrap set out of the source; here the *other* tree
@@ -1228,6 +1236,30 @@ if [[ $ABTPC -eq 1 && $ABTFAR -ne 1 ]]; then
     exit 1
 fi
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_ABT_PC="$ABTPC")
+
+# **1010: the L2 descriptor + the vm_fault return.** The recorder `entry_note_abt_pte` +
+# `entry_note_abt_vmf` (entry_stubs.c) and their ONE call each (entry_trace.c: the abort wrapper's
+# `entry_note_abt_pte(far_)`, and the NEW `__wrap_vm_fault`'s `entry_note_abt_vmf(r, vaddr, fault_type)`)
+# are all entry-toolchain objects, threaded through `STUB_DEFINES` (here) and `STUB_DEFINES_TRACE`
+# (appended at its own assignment above); OFF (ABT_PTE=0), the guard deletes the recorders and the calls
+# and both files are the exact 1009 token set. **The 1010 call sits after the 1009 call** (its guard is
+# the CONJUNCTION `ABT_FAR && ABT_PC && ABT_PTE`), so the build REFUSES `ABT_PTE=1` with `ABT_FAR=0` OR
+# `ABT_PC=0` - a switch that measures nothing is refused by construction (docs/1010-design.md §3.1/§4).
+ABTPTE=${STAGE90_XNU_ABT_PTE:-0}
+case "$ABTPTE" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_ABT_PTE='$ABTPTE' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $ABTPTE -eq 1 && $ABTFAR -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_ABT_PTE=1 requires STAGE90_XNU_ABT_FAR=1 - the 1010 recorder's guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE, so ABT_FAR=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $ABTPTE -eq 1 && $ABTPC -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_ABT_PTE=1 requires STAGE90_XNU_ABT_PC=1 - the 1010 recorder's guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE, so ABT_PC=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_ABT_PTE="$ABTPTE")
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
 # commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
@@ -1749,6 +1781,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_ABT_SPAN
                 STAGE90_XNU_ABT_FAR
                 STAGE90_XNU_ABT_PC
+                STAGE90_XNU_ABT_PTE
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -2000,6 +2033,11 @@ do
         # cannot be built from two spellings. Read from `$ABTPC`, validated 0/1 (and cross-refused
         # against `$ABTFAR`) at its own assignment above this loop.
         STAGE90_XNU_ABT_PC)          _v=$ABTPC ;;
+        # 1010: the L2 descriptor + the vm_fault return. Its two consumers are `entry_stubs.c` (via
+        # `STUB_DEFINES`) and `entry_trace.c` (via `STUB_DEFINES_TRACE`), both compiled here, so the
+        # record and the objects cannot be built from two spellings. Read from `$ABTPTE`, validated 0/1
+        # (and cross-refused against BOTH `$ABTFAR` and `$ABTPC`) at its own assignment above this loop.
+        STAGE90_XNU_ABT_PTE)         _v=$ABTPTE ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -39711,6 +39749,9 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "STAGE90_XNU_ABT_FAR=$ABTFAR"
     # **1009: the faulting PC + FSR.** Written as the RESOLVED `$ABTPC`, for 882's reason.
     echo "STAGE90_XNU_ABT_PC=$ABTPC"
+    # **1010: the L2 descriptor + the vm_fault return.** Written as the RESOLVED `$ABTPTE`, for 882's
+    # reason.
+    echo "STAGE90_XNU_ABT_PTE=$ABTPTE"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

@@ -5682,6 +5682,15 @@ extern void entry_note_abt_far(uint32_t call, uint32_t far, uint32_t type);
 #if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC
 extern void entry_note_abt_pc(uint32_t pc, uint32_t fsr, uint32_t cpsr, uint32_t far);
 #endif
+/*
+ * 1010: the L2-descriptor recorder (A). Its own guard (the CONJUNCTION ABT_FAR && ABT_PC && ABT_PTE,
+ * so the declaration is only live where the call is), SEPARATE from 1009's so the ABT_PC guard count
+ * (2: extern + call) is undisturbed.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE
+extern void entry_note_abt_pte(uint32_t va);
+extern void entry_note_abt_vmf(uint32_t ret, uint32_t va, uint32_t prot);
+#endif
 
 void __real_sleh_abort(void *regs, int type);
 
@@ -5760,7 +5769,54 @@ void __wrap_sleh_abort(void *regs, int type)
                       ((const uint32_t *)(uintptr_t)regs)[STAGE90_SS_CPSR / 4],
                       far_);
 #endif
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE
+    /*
+     * 1010 (A): walk TTBR0 to the L2 small-page descriptor for THIS abort's `far_` and publish it.
+     * `far_` is the pair this wrapper read at :5688/:5695 (its coprocessor pair chosen by `type`) -
+     * nothing new is read from cp15 here; the walk reads TTBR0/TTBCR itself (entry_stubs.c). It also
+     * ARMS the latch the `vm_fault` wrapper reads, so (B) publishes only THIS abort's `vm_fault` return.
+     */
+    entry_note_abt_pte(far_);
+#endif
 }
+
+/*
+ * ================================================================================================
+ * 1010 (B): what `vm_fault` returned for the storm's abort
+ * ================================================================================================
+ *
+ * `kern_return_t vm_fault(vm_map_t map, vm_map_offset_t vaddr, vm_prot_t fault_type,
+ * boolean_t change_wiring, int interruptible, pmap_t pmap, vm_map_offset_t pmap_addr)`
+ * (`osfmk/vm/vm_fault.h:90-97`). On this 32-bit target every argument is a word (`vm_map_offset_t`
+ * is `uint32_t`, `mach/arm/vm_types.h:111`; `vm_prot_t`/`boolean_t`/`int`/`pmap_t` are 32-bit), so
+ * there is no register-pair question.
+ *
+ * **THE RULE (docs/1010-design.md §8.1).** `--wrap=vm_fault` rewrites EVERY linker-visible call to
+ * `vm_fault` in the whole kernel - the `--wrap=sleh_abort` precedent wraps a symbol called from a
+ * handful of sites; `vm_fault` is called from hundreds of objects, and this build's own pool shows
+ * five callers plus the definition. That is a real surface, and it violates "instrumentation only" if
+ * the wrapper is anything but a **PURE PASS-THROUGH** on the non-abort case. So this wrapper returns
+ * `__real_vm_fault(...)` unconditionally and calls `entry_note_abt_vmf` behind the LATCH ONLY:
+ * `entry_note_abt_pte` (A), which runs ONLY from `__wrap_sleh_abort`, sets the latch, and
+ * `entry_note_abt_vmf` reads-and-clears it - so a `vm_fault` return is recorded ONLY when the last
+ * abort was the storm's, and 2.1 M retries do not fill the channel. The `--wrap` itself is added to
+ * `TRACE_LDFLAGS` ONLY when `STAGE90_XNU_ABT_PTE=1` (build_entry.sh), so the OFF image carries no
+ * `--wrap=vm_fault` at all.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE
+uint32_t __real_vm_fault(void *map, uint32_t vaddr, uint32_t fault_type, uint32_t change_wiring,
+                         int interruptible, void *pmap, uint32_t pmap_addr);
+
+uint32_t __wrap_vm_fault(void *map, uint32_t vaddr, uint32_t fault_type, uint32_t change_wiring,
+                         int interruptible, void *pmap, uint32_t pmap_addr)
+{
+    uint32_t r = __real_vm_fault(map, vaddr, fault_type, change_wiring, interruptible, pmap, pmap_addr);
+
+    /* The pass-through above is unconditional; only the recording is gated by the latch. */
+    entry_note_abt_vmf(r, vaddr, fault_type);
+    return r;
+}
+#endif
 
 /* ------------------------------------------------- what the exec said when it gave up (471) */
 /*

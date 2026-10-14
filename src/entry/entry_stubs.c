@@ -2057,6 +2057,206 @@ entry_note_abt_pc(uint32_t pc, uint32_t fsr, uint32_t cpsr, uint32_t far)
 #endif
 
 /*
+ * -------------------------------------------- 1010: the L2 descriptor and the vm_fault return
+ *
+ * 1009 named the storm BY VALUE: from ordinal 0x400 through 0x200000 (~2.09 M aborts) the faulting
+ * instruction is CONSTANT (`pc=0x2be8a1a0`, in the dyld shared cache), the DFSR is CONSTANT
+ * (`fsr=0x0000080f` - WnR=1 (a write) | FS=0xf, "permission fault, level 2"), the abort ran in USER
+ * mode (`cpsr=0x60000030`), and `far=0x9a000` is a LOW user VA (below the TTBR0 split `0x40000000`,
+ * in one of launchd's own COW/data segments - the PC merely lives in the shared cache). The store at
+ * that PC to that VA is re-executed ~2 M times.
+ *
+ * **What 1009 does NOT say is WHY the write permission fault is never dismissed.** The port's handler
+ * (`osfmk/arm/trap.c:812 sleh_abort`, user data-abort branch) PRINTS on the failure branch (`:871
+ * "usermode data abort, EXC_BAD_ACCESS ..."`) and is SILENT on the retry branch (`:906
+ * ml_set_interrupts_enabled(TRUE); return;`). The capture shows the silent branch: the last XNU
+ * console line in the whole run is `cs_invalid_page(0x2e1a9000) clearing CS_VALID` and NOT ONE
+ * `usermode data abort` line appears over 2.1 M faults. So `code == KERN_SUCCESS || KERN_ABORTED`:
+ * `vm_fault` claims it satisfied the fault, and the hardware keeps permission-faulting the same
+ * writable-requested store - a **vm_map-vs-PTE disagreement**.
+ *
+ * 1010 reads ONE CELL FROM EACH SIDE so the reader can say WHICH side is wrong.
+ *
+ *   (A) `entry_note_abt_pte` walks TTBR0 to the L2 small-page descriptor for the fault VA and
+ *       publishes it. `L2_ACCESS_APX` (bit 9) is the decisive cell: APX=1 means the page is USER
+ *       READ-ONLY, which - beside a WRITE fault - is exactly "vm_fault said success, the PTE is
+ *       read-only" (the code-signing CS-taint / prot-downgrade path, `vm_fault.c:2476-2485` ->
+ *       `arm/pmap.c:1110-1113`). The 1009 console's `cs_invalid_page` line is that path.
+ *   (B) `entry_note_abt_vmf` records what `vm_fault` RETURNED (called from `__wrap_vm_fault`,
+ *       entry_trace.c), so (A)'s PTE and (B)'s return can be read together.
+ *
+ * Both are BY VALUE - the wrapper reads cp15 and the frame; `entry_stubs.c` reads neither - the same
+ * rule 1007/1008/1009 follow (docs/1008-design.md §4.3).
+ *
+ * **THE 1009 MEASUREMENT DEFECT IS NOT REPEATED.** The CONSTANT-vs-CYCLING decision for the storm's
+ * tail is made by the READER on the **TAIL ROWS' OWN `_ptel2`** (the ladder ordinals at/after 0x400),
+ * NEVER on a whole-run aggregate: 1009's set-based reader mistook a whole-run change-count prefix for
+ * the tail's value. `xnu_live_abt_ptenx` is published as an OBSERVATION only (bounded by the number
+ * of DISTINCT descriptors, a handful - not by the ~2.1 M abort count).
+ *
+ * **The walk** (`stage90_read_l2_pte`) is self-contained, pure C, no libc, `uint32_t`; every constant
+ * is cited to this port's own `osfmk/arm/pmap.h` in `docs/1010-pte-walk.md` §1. It picks the table by
+ * **`TTBCR.N`** - the hardware split is `0x40000000` (TTBCR.N=2), NOT the `0x80000000` address-space
+ * boundary - and it must NOT use `entry_live_ttb_base` (that returns TTBR1 for any `n != 0`, wrong for
+ * `far=0x9a000`, docs/1010-pte-walk.md §2/§4). It returns 0 for every shape that is not a small-page
+ * L2 descriptor: a section (or a fault) has no L2 under it, and this port has no supersections.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE
+void entry_write_kv(const char *key, uint32_t value);   /* identically to :1920/:1973 */
+
+/* The only constants the walk reads, each cited to osfmk/arm/pmap.h (docs/1010-pte-walk.md §1). */
+#define ABTPTE_L1_TYPE_MASK    0x3u          /* L1_TYPE_MASK    pmap.h:207 */
+#define ABTPTE_L1_TYPE_COARSE  0x1u          /* L1_TYPE_PTE     pmap.h:210 */
+#define ABTPTE_L1_PTE_MASK     0xfffffc00u   /* L1_PTE_ADDR_MASK pmap.h:202 (coarse base bits[31:10]) */
+#define ABTPTE_L2_SMALL_PAGE   0x2u          /* L2_SMALL_PAGE   pmap.h:226 (bits[1:0]=0b10) */
+
+/*
+ * `uint32_t stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used);`
+ * Reads TTBR0/TTBCR, picks the table by TTBCR.N, indexes L1 by VA[31:20], requires a COARSE L1
+ * descriptor, indexes L2 by VA[19:12], and returns the raw SMALL-PAGE L2 word (`& 3 == 2`) else 0.
+ * `*out_l1_desc` gets the raw L1 word; `*out_ttbr0_used` is 1 iff TTBR0 answered.
+ */
+uint32_t
+stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used)
+{
+    uint32_t ttbr0, ttbcr, n, base, l1e, l2base, l2e;
+    uintptr_t l1p, l2p;
+
+    if (out_l1_desc != 0)    *out_l1_desc = 0u;
+    if (out_ttbr0_used != 0) *out_ttbr0_used = 0u;
+
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));   /* TTBR0 (pmap.c:1295) */
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));   /* TTBCR (trap.c:453) */
+
+    n = ttbcr & 7u;
+
+    /*
+     * The hardware split: TTBCR.N = n means TTBR0 owns [0, 2^(32-n)). This port programs N=2
+     * (`set_mmu_ttbcr(2)`, arm_vm_init.c:475), so TTBR0 owns [0, 0x40000000) and TTBR1 owns the rest.
+     * A VA below the split is walked via TTBR0; one at/above it via TTBR1, which this instrument does
+     * not read (every address it is about is below the split - `far=0x9a000`).
+     */
+    if (n == 0u)
+        base = ttbr0;                             /* N=0: TTBR0 answers every address */
+    else if (va < (1u << (32u - n)))
+        base = ttbr0;                             /* the low window */
+    else
+        return 0u;                                /* the high window (TTBR1) - out of scope */
+
+    base &= ABTPTE_L1_PTE_MASK;                   /* TTBR0 base: low 14 bits are walk attributes */
+    if (base == 0u)
+        return 0u;
+
+    /* L1 index = VA[31:20] (tte_offset, pmap.h:198); L2 index = VA[19:12] (pte_offset, pmap.h:199). */
+    l1p = (uintptr_t)base + (((va >> 20) & 0xfffu) << 2);
+    l1e = *(const volatile uint32_t *)l1p;
+    if (out_l1_desc != 0)
+        *out_l1_desc = l1e;
+
+    /* Only a COARSE L1 descriptor (type 1) has an L2 under it; a section (type 2) or a fault (type 0)
+     * has none, so there is no L2 descriptor to read (and the MMU would not fault here at level 2). */
+    if ((l1e & ABTPTE_L1_TYPE_MASK) != ABTPTE_L1_TYPE_COARSE)
+        return 0u;
+
+    l2base = l1e & ABTPTE_L1_PTE_MASK;
+    if (l2base == 0u)
+        return 0u;
+
+    l2p = (uintptr_t)l2base + (((va >> 12) & 0xffu) << 2);
+    l2e = *(const volatile uint32_t *)l2p;
+
+    /* A small-page leaf (bits[1:0]=0b10) is the only L2 entry that carries this page's AP bits; any
+     * other shape (64K-large 0b01, absent 0b00, invalid 0b11) means the walk found no small page. */
+    if ((l2e & ABTPTE_L1_TYPE_MASK) != ABTPTE_L2_SMALL_PAGE)
+        return 0u;
+
+    if (out_ttbr0_used != 0)
+        *out_ttbr0_used = 1u;
+    return l2e;
+}
+
+static uint32_t g_abtpte_n;
+static uint32_t g_abtpte_lastl2;
+static uint32_t g_abtpte_ptenx;    /* DISTINCT raw L2 descriptors seen so far (monotone, bounded) */
+
+/*
+ * The latch (B) reads. `entry_note_abt_pte` is called ONLY from `__wrap_sleh_abort`, so it sets this
+ * unconditionally: the NEXT `vm_fault` return belongs to THIS abort. The vm_fault wrapper reads and
+ * clears it, so the ~2.1 M retries do not fill the channel - the values published once are the ones
+ * that matter (docs/1010-design.md §3.3).
+ */
+static uint32_t g_abtpte_latch;
+
+void
+entry_note_abt_pte(uint32_t va)
+{
+    uint32_t n = ++g_abtpte_n;
+    uint32_t l1 = 0u, u = 0u, l2, ttbr;
+
+    l2 = stage90_read_l2_pte(va, &l1, &u);
+
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr));   /* the TTBR0 word actually used */
+
+    g_abtpte_latch = 1u;    /* arm the (B) recorder for the vm_fault this abort's handler will make */
+
+    /*
+     * The LADDER rows - 1008/1009's set VERBATIM (the tail is already sampled), so `_ptel2` at a
+     * given ordinal pairs with 1009's `_pc`/`_pcfar` at the SAME ordinal.
+     */
+    if (n <= 4u || (n & (n - 1u)) == 0u) {
+        entry_write_kv("xnu_live_abt_pten",    n);      /* the ordinal */
+        entry_write_kv("xnu_live_abt_pteva",   va);     /* the fault VA (far_) */
+        entry_write_kv("xnu_live_abt_ptel2",   l2);     /* the raw L2 small-page descriptor */
+        entry_write_kv("xnu_live_abt_ptel1",   l1);     /* the raw L1 descriptor (a bad walk shows here) */
+        entry_write_kv("xnu_live_abt_ptettbr", ttbr);   /* the TTBR0 word the walk used */
+        entry_write_kv("xnu_live_abt_pteu",    u);      /* 1 = TTBR0 answered */
+    }
+
+    /*
+     * The change-count - written WHERE IT CHANGES (the `g_sleh_armed` rule): bounded by the number of
+     * DISTINCT descriptors, NOT by the abort count. **This is an OBSERVATION only** - the reader must
+     * decide CONSTANT-vs-CYCLING on the TAIL ROWS' OWN `_ptel2`, never on this whole-run aggregate
+     * (the 1009 defect, not repeated).
+     */
+    if (n == 1u) { g_abtpte_lastl2 = l2; }
+    if (l2 != g_abtpte_lastl2) { g_abtpte_lastl2 = l2; g_abtpte_ptenx++; entry_write_kv("xnu_live_abt_ptenx", g_abtpte_ptenx); }
+}
+
+/*
+ * 1010 (B): what `vm_fault` returned. Called from `__wrap_vm_fault` (entry_trace.c) - a PURE
+ * PASS-THROUGH except behind the latch (docs/1010-design.md §8.1) - so only the FIRST FEW returns
+ * (plus a bounded change-count on `ret`) are published, and only while the latch says the last abort
+ * was the one the storm is about.
+ */
+static uint32_t g_abtpte_vmfn;
+static uint32_t g_abtpte_vmflastret;
+static uint32_t g_abtpte_vmfnret;  /* DISTINCT `ret` values seen so far (monotone, bounded) */
+#define ABTPTE_VMF_FIRST 4u
+
+void
+entry_note_abt_vmf(uint32_t ret, uint32_t va, uint32_t prot)
+{
+    uint32_t n;
+
+    if (g_abtpte_latch == 0u)
+        return;                 /* not the abort the storm is about - do not fill the channel */
+    g_abtpte_latch = 0u;        /* one vm_fault return per latched abort */
+
+    n = ++g_abtpte_vmfn;
+
+    if (n <= ABTPTE_VMF_FIRST) {
+        entry_write_kv("xnu_live_abt_vmfn",   n);       /* the ordinal */
+        entry_write_kv("xnu_live_abt_vmfret", ret);     /* the KERN_* code vm_fault returned */
+        entry_write_kv("xnu_live_abt_vmfva",  va);      /* the va it was called with */
+        entry_write_kv("xnu_live_abt_vmfprot", prot);   /* the fault_type (VM_PROT_*) it was called with */
+    }
+
+    if (n == 1u) { g_abtpte_vmflastret = ret; }
+    if (ret != g_abtpte_vmflastret) { g_abtpte_vmflastret = ret; g_abtpte_vmfnret++; entry_write_kv("xnu_live_abt_vmfnret", g_abtpte_vmfnret); }
+}
+#endif
+
+/*
  * Set by the IRQ vector so the epilogue knows to name the interrupt it stopped on.
  *
  * Experiment 308's run ended on `exception: irq` and the report could not say *which* interrupt:
