@@ -10,7 +10,7 @@ ordinal `0x400` through `0x200000` (~2.09 M aborts) the ladder is **constant** �
 | `xnu_live_abt_pc` (`pcn 0x400…0x200000`) | `0x2be8a1a0` | the faulting instruction, in the dyld shared cache (`0x2be…`) |
 | `xnu_live_abt_fsr` | `0x0000080f` | **WnR=1 (write) \| fault-status 7 = PERMISSION fault** |
 | `xnu_live_abt_abtcpsr` | `0x60000030` | **USER mode (0x10)**, IRQ enabled |
-| `xnu_live_abt_pcfar` | `0x0009a000` | a **low user VA**, below the `0x80000000` split |
+| `xnu_live_abt_pcfar` | `0x0009a000` | a **low user VA**, below the TTBR0 split `0x40000000` (and below the `0x80000000` address-space boundary) |
 
 So the store at `pc=0x2be8a1a0` to user VA `far=0x9a000` takes a **WRITE permission fault
 (`dfsr=0x80f`)** and is **re-executed ~2 M times**. The fault address slides between runs (1008 read
@@ -53,8 +53,10 @@ side is wrong*, not just that they disagree.
 ### 2.1 (A) the PTE side — the L2 descriptor the MMU faulted on
 
 The wrapper runs in kernel/SVC mode with the MMU on and (for a fault taken in USER mode) **TTBR0 = the
-faulting process's page table**. Between the cp15 reads and `__real_sleh_abort`, walk TTBR0 to the
-**L2 small-page descriptor for `far_`** and publish its raw word. The descriptor's bits decide the
+faulting process's page table**. Between the cp15 reads and `__real_sleh_abort`, walk **TTBR0** to the
+**L2 small-page descriptor for `far_`** and publish its raw word. The walk keys the table on
+**TTBCR.N = 2** (TTBR0 owns `[0, 0x40000000)` — **not** the `0x80000000` *address-space* boundary;
+`docs/1010-pte-walk.md §2`), reads TTBR0/TTBCR/TTBR1 by cp15, and the descriptor's bits decide the
 PTE side:
 
 - bits `[1:0]` — `0b10` = small page (any other = absent/section → **no mapping**: the PTE side is
@@ -193,8 +195,32 @@ Rung 1010 is **instrumentation only** (no new device behaviour, low blast radius
   the tail — the wrapper's own keys are **not** an independent witness of handler behaviour over the
   storm. The console (`cs_invalid_page` last at `:4130`) is. Do not read the `sleh` rows as the
   storm's behaviour.
-- **The L2 walk must be read off this port's `pmap.c`/`arm_vm_init.c` by value** — the constants
-  (`L2_ADDR_MASK`, `L2_SMALL_PAGE` = 0x2, `L2_ACCESS_USER` = bit 5, `L2_ACCESS_APX` = bit 9,
-  `L2_ACCESS_PRW` = 0x10, `L2_NX_BIT`, the 0x80000000 split) are cited in §3.2; the extraction agent
-  produces the exact walk and it is committed as `docs/1010-pte-walk.md` **before** the build, so the
-  walk's correctness is a reviewed artifact, not an inline guess.
+- **The L2 walk is extracted and committed as `docs/1010-pte-walk.md`** — its constants
+  (`L2_ADDR_MASK` 0xfffff000, `L2_SMALL_PAGE` 0x2, `L2_ACCESS_USER` bit 5, `L2_ACCESS_APX` bit 9,
+  `L2_ACCESS_PRW` 0x10, `L2_NX_BIT` 0x1, `L1_TYPE_COARSE` 1), its **TTBR split `0x40000000`
+  (TTBCR.N=2) — NOT `0x80000000`**, and its walk are all cited to `file:line` there. The walk must
+  key on **TTBCR.N**, never on `0x80000000`, and must not use `entry_live_ttb_base` (it returns TTBR1
+  for any `n != 0`, which is wrong for `far=0x9a000`).
+
+### 8.1 (B)'s wiring — the surface risk, and the rule
+
+`--wrap=vm_fault` rewrites **every linker-visible call** to `vm_fault` in the whole kernel (the
+`--wrap=sleh_abort` precedent only wraps a symbol called from a handful of sites; `vm_fault` is
+called from hundreds of objects). That is a real surface, and it violates "instrumentation only" if
+the wrapper is anything but a pure pass-through on the non-abort case. Two rules:
+
+1. **Prefer a call-site hook over a global wrap.** The one call that matters is `trap.c:829`. This is
+   **our port tree** (`external/xnu-hd2-darwin13`), patched by the same staged-edit mechanism as the
+   other XNU rows; adding a `entry_note_abt_vmf(code, dfar, prot)` call under a `#if STAGE90_XNU_ABT_PTE`
+   right after `:833` is narrower than a kernel-wide wrap and touches nothing else. If the patch
+   mechanism is used, the OFF tree must be byte-identical (the staged-edit checker enforces it).
+2. **If a `--wrap=vm_fault` is used instead**, the OFF image must carry **no** `--wrap=vm_fault` (the
+   `TRACE_LDFLAGS` block, `build_entry.sh:169-224`, is only built under `ENTRY_TRACE`), and the ON
+   wrapper must be a pure pass-through (`return __real_vm_fault(...)`) **except** when the latched
+   "last abort was a USER write permission fault" flag is set — proven by a build clause that the
+   wrapper's only `entry_note_*` call is behind that latch.
+
+(A) is the **primary** measurement and needs neither: it reads the page table directly and, combined
+with the handler-silence fact (`vm_fault` returned success/aborted), already names the PTE side for
+three of the four §2.2 rows. (B) only splits `KERN_SUCCESS` from `KERN_ABORTED`; if wiring it proves
+to broaden the surface, it is dropped and the reader reports what (A) + the silence alone decide.
