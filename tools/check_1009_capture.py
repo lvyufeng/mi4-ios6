@@ -418,6 +418,13 @@ ABT3_LADDER_HEAD = 4                          # the first-four-in-full rule (n <
 # byte for a kernel SVC abort is `0x13` (design §5); a value outside the eight ARM mode codes means
 # the forwarded `cpsr` is not an ARM CPSR - an INSTRUMENT defect.
 ABT3_MODE_MASK = 0x1f
+# The TAIL definition for the classifier: the ladder ordinals from here up are the RETRY TAIL (the
+# storm proper), not the walked prefix.  1008's ladder head (ordinals 1..0x200) walks dyld's image;
+# the storm settles by ~ordinal 0x200 and the tail (0x400..0x200000) is the run's steady state.  The
+# classifier reads the ladder ROWS at/below this ordinal (their `pcfar`/`fsr`/`abtcpsr` constancy),
+# NOT the whole-run change-counts - which count changes from abort 1 and can never describe the tail
+# ([[mi4-measurement-defects]]: a whole-run statistic is not a tail statistic).
+ABT3_TAIL_MIN_PCN = 0x400
 ABT3_ARM_MODES = (0x10, 0x11, 0x12, 0x13, 0x17, 0x1b, 0x1f)
 ABT3_MODE_NAMES = {0x10: "USER", 0x11: "FIQ", 0x12: "IRQ", 0x13: "SVC",
                    0x17: "ABORT", 0x1b: "UNDEF", 0x1f: "SYSTEM"}
@@ -2650,39 +2657,64 @@ def s_abt3(cap):
         say("OBS", "the pc ladder carries NO ordinal (`pcn`) - the tail pc is unavailable; read the "
                    "raw keys by value")
 
-    # ---- (abt3-8) THE CLASSIFIER - the point of 1009.  Decided by value over the TAIL via the two
-    # change-counts (design §5).  EVERY branch is GUARDED on a truthy evidence set: a change-count of
-    # `None` (absent) or an EMPTY pc ladder prints an OBS, never a confident REPEAT/CYCLING/SPREAD -
-    # this is the defect fixed in the 1008 reader at `00f3ca1` (a SPREAD certified over zero samples).
-    if nfar is None or nfsr is None:
-        say("OBS", "a change-count is ABSENT (`nfar`=%s, `nfsr`=%s): the tail cannot be classified "
-                   "by value - read the raw keys by value (the REPEAT/CYCLING/SPREAD verdict needs "
-                   "BOTH change-counts)" % (fmt(nfar), fmt(nfsr)))
-    elif not rows:
-        say("OBS", "the pc ladder carries NO rows: the change-counts (`nfar`=%s, `nfsr`=%s) are read "
-                   "but there is no ladder sample to classify - a branch over zero samples is not a "
-                   "verdict ([[mi4-silence-is-a-reading-only-if-success-is-silent]])" % (
-                       fmt(nfar), fmt(nfsr)))
-    elif nfar == 1 and nfsr == 1:
-        say("VERDICT", "(R) REPEAT (by value) - `%s`==1 AND `%s`==1 across the tail: ONE faulting "
-                       "address, ONE status, RETRIED ~2.1 M times. This is the DECISIVE statement the "
-                       "1008 reader could not make (it counted the ladder SET and returned MIXED, "
-                       "blind to the tail being 61x the prefix). The fault is the SAME one re-run"
-            % (ABT3_NFAR_KEY, ABT3_NFSR_KEY))
-    elif nfar == 1 and nfsr > 1:
-        say("VERDICT", "(C) CYCLING-STATUS - `%s`==1 AND `%s`==%s: the faulting ADDRESS is constant but "
-                       "the DFSR CYCLES (the retries are NOT identical - the same address faults with "
-                       "a different fault-status code / WnR): not one fault re-run, but a small "
-                       "status loop at one address" % (ABT3_NFAR_KEY, ABT3_NFSR_KEY, fmt(nfsr)))
-    elif nfar > 1:
-        say("VERDICT", "(S) SPREAD - `%s`==%s (> 1): the tail SPREADS over multiple fault addresses - "
-                       "1008's constant-far reading was a SAMPLING ARTIFACT (the ladder set mixes the "
-                       "walked prefix and the tail); the storm demand-faults page by page. This "
-                       "REFUTES the single-address retry-loop reading (design §6 falsifier)"
-            % (ABT3_NFAR_KEY, fmt(nfar)))
+    # ---- (abt3-8) THE CLASSIFIER - the point of 1009.  Decided by value over the TAIL LADDER ROWS.
+    #
+    # **THE DEFECT THIS FIXES (measured, 1009's own run).**  The design (docs/1009-design.md §5) said
+    # classify on the change-counts `nfar`/`nfsr`.  But those are encoded as WHOLE-RUN running maxima
+    # (written from abort 1, monotone - a running max cannot be rescaled): 1009's run reads nfar=832,
+    # nfsr=49, the CHANGES counted from the start through the 12-distinct-value dyld walk.  `nfar>1`
+    # is therefore true from the walk onward and can NEVER say REPEAT even when the tail is one
+    # constant fault - the first run of this reader reported SPREAD over a tail that is, in fact,
+    # perfectly constant ([[mi4-measurement-defects]]: a whole-run statistic is not a tail statistic;
+    # [[mi4-silence-is-a-reading-only-if-success-is-silent]]).
+    #
+    # The tail IS visible - in the LADDER ROWS' OWN values.  The ladder rows at the tail ordinals
+    # carry `pcfar`/`fsr`/`abtcpsr`; their constancy over the tail IS the REPEAT statement.  The
+    # classifier reads those, and reports the change-counts' `nfar`/`nfsr` as what they are (the
+    # whole-run counts), never as a tail verdict.
+    tail_rows = [r for r in rows
+                 if r["pcn"] is not None and r["pcn"] >= ABT3_TAIL_MIN_PCN and r["pcfar"] is not None]
+    n_unchanged_since = None   # set below for the report: if the tail was already flat before TAIL_MIN
+    if not rows:
+        say("OBS", "the pc ladder carries NO rows: the tail cannot be classified - a branch over zero "
+                   "samples is not a verdict ([[mi4-silence-is-a-reading-only-if-success-is-silent]])")
+    elif len(tail_rows) < 2:
+        say("OBS", "fewer than two ladder rows at/after the tail ordinal %s (x%d): the tail cannot be "
+                   "classified by value - read the raw keys" % (fmt(ABT3_TAIL_MIN_PCN), len(tail_rows)))
     else:
-        say("OBS", "the change-counts fall between the classes (`nfar`=%s, `nfsr`=%s) - read by value; "
-                   "not decisive" % (fmt(nfar), fmt(nfsr)))
+        tail_fars = [r["pcfar"] for r in tail_rows]
+        tail_fsrs = [r["fsr"] for r in tail_rows]
+        tail_pcs2 = [r["pc"] for r in tail_rows]
+        far_const = len(set(tail_fars)) == 1
+        fsr_const = len(set(tail_fsrs)) == 1
+        pc_const = len(set(tail_pcs2)) == 1
+        if far_const and fsr_const:
+            say("VERDICT", "(R) REPEAT (by value) - the x%d ladder rows at/after ordinal %s carry ONE "
+                           "constant `far`=%s AND ONE constant `fsr`=%s%s: ONE faulting address, ONE "
+                           "status, RETRIED for the whole tail. This is the DECISIVE statement the "
+                           "1008 reader could not make (it counted the ladder SET and returned MIXED, "
+                           "blind to the tail being 61x the prefix). The fault is the SAME one re-run."
+                % (len(tail_rows), fmt(ABT3_TAIL_MIN_PCN), fmt(tail_fars[0]), fmt(tail_fsrs[0]),
+                   " (and ONE constant `pc`=%s)" % fmt(tail_pcs2[0]) if pc_const else
+                   " (the `pc` VARIES: %s)" % "[" + ",".join(fmt(p) for p in sorted(set(tail_pcs2))) + "]"))
+        elif far_const and not fsr_const:
+            say("VERDICT", "(C) CYCLING-STATUS - the tail `far` is CONSTANT (%s) but the DFSR CYCLES "
+                           "over the tail: [%s] - the retries are NOT identical (the same address "
+                           "faults with a different fault-status code / WnR): a small status loop at "
+                           "one address, not one fault re-run"
+                % (fmt(tail_fars[0]), ",".join(fmt(f) for f in sorted(set(tail_fsrs)))))
+        else:
+            say("VERDICT", "(S) SPREAD - the tail `far` VARIES over x%d distinct value(s) [%s] "
+                           "(fsr x%d distinct %s): the storm demand-faults page by page - an "
+                           "instruction/trap number is sampled here but the fault ADDRESSES spread "
+                           "(design §6 falsifier; this is what 1008's constant-far reading would "
+                           "have REFUTED had it held)"
+                % (len(set(tail_fars)), ",".join(fmt(f) for f in sorted(set(tail_fars))),
+                   len(set(tail_fsrs)), "CONSTANT" if fsr_const else "varies"))
+    say("OBS", "the change-counts `%s`/`%s` (whole-run running maxima) are %s/%s: they count changes "
+               "from abort 1 through the walked prefix and CANNOT describe the tail - the tail verdict "
+               "above reads the ladder ROWS, not these" % (
+                   ABT3_NFAR_KEY, ABT3_NFSR_KEY, fmt(nfar), fmt(nfsr)))
 
     # ---- (abt3-9) THE PC CONSTANCY FALSIFIER (design §6): the `_pc` at the tail ordinals.  If the
     # tail `pc` is NOT constant, different instructions reference the same `far` (a demand pattern) -
