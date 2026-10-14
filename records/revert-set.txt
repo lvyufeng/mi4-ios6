@@ -14710,3 +14710,48 @@ set=armed-d13-582a19c8 sha256=167c6b4a46aa4a9913038877c86bb8f3f6f11e5b6329398d75
 set=armed-d13-582a19c8 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1004-abort-trace;stage90_fixture.macho
 set=armed-d13-582a19c8 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1004-abort-trace;stage90-build-config.txt
 set=armed-d13-582a19c8 sha256=2728e2dec7eedd705c4b1ffce410f5d8265abf9c66734f2010711198bbc31630 bytes=560 file=SHA256SUMS.txt role=1004-abort-trace;SHA256SUMS.txt
+# armed-d13-ff937225  -  1005: THE CADENCE WITNESS (a timer-independent syscall-path counter beside the tick + a NEW all-interrupts counter, keys xnu_live_cadence_{t,sync,tick,irq}),
+# so "the tick delivery collapsed" partitions into (b1) degraded timer IRQ vs a full stop; + the sleh seq/back atomicity (hygiene).
+# Switch set is 1004-s VERBATIM plus STAGE90_XNU_CADENCE=1 (STALL, ABORT_TRACE, DYLD_WITNESS, SHREG_PROBE,
+# SHREG_WIRE, SHREG_GEOM, RESIDENT, USVC and SUBMAP_PMAP_SKIP all stay 1); the ENTRY BIN moved
+# (582a19c8 -> ff937225); the PAYLOAD moves (it embeds the entry blob; the 29 s watchdog constant is
+# 999-s, unchanged); the TREE does NOT move - 1005 has NO tree edit and NO stage driver (the
+# change is THREE src/ files: pe_msm8974.c the all-interrupts counter + accessors, entry_stubs.c the
+# sample/summary/atomic +, entry_trace.c the pet-s one summary call).
+#
+# THE FRONTIER, BY VALUE (records/1004-press-read.txt): the machine boots, dyld WALKS forward
+# (VERDICT WALK, repeat x0) faulting ~24 of its own pages, then faults the first shared-cache page
+# at far=0x3e8dd000 inside a kernel copyin and SURVIVES it - and then the tick delivery COLLAPSES
+# (xnu_live_tick_sum_maxd reaches 0x1be8b709 ~24.4 s while the machine is still alive).  Every
+# existing tick instrument rides the tick it measures, so 1005 adds a TIMER-INDEPENDENT witness.
+#
+# THE 1005 PRESS PRE-REGISTRATION (frozen once embedded; deviations reported, not interpreted) is
+# written by the TEAM-LEAD into scripts/press_1005.sh: THE READING is the cadence ratio
+# ds/max(dt,1) = (the delta of xnu_live_cadence_sync) over the delta of xnu_live_cadence_tick, with
+# xnu_live_cadence_irq (all interrupts) as the tiebreaker - a RATIO that keeps rising while _irq
+# still climbs = (b1) degraded timer IRQ; a ratio AND _irq BOTH frozen = a full stop.  The frozen
+# regression guards are re-verified only under the survival gate.
+#
+# VERIFIED BY VALUE (build_1005.sh): the linked image carries the 4 xnu_live_cadence_* key literals
+# and the four cadence symbols DEFINED T/t, with NO __atomic_fetch_add libcall (the increments are
+# inline ldrex/strex) and the FROZEN 1004 elf (armed-d13-582a19c8) as the NEGATIVE CONTROL
+# (xnu_live_cadence_ x0, entry_cadence_{sample,summary} x0); the 1004 abort trace (xnu_live_sleh_upc
+# x1), the 1003 stall instrument and the 1002 six-word save set asserted present (regressions).  The
+# 996/997/998/999/1000/1001 checkers rerun ON the 1005 image - the probe checker-s ONE by-design
+# frozen 20 B clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-ff937225 sha256=ff93722580788f33ed185195b9608a68be69fe7d1807db131f86d4b18e4dcb87 bytes=6343764 file=xnu_arm_entry.bin role=1005-cadence;xnu_arm_entry.bin
+set=armed-d13-ff937225 sha256=fa055bca29cb0b8ca13a0668fb60a1085b58212b99ccb55ddad5f9894fb7f551 bytes=7385736 file=xnu_arm_entry.elf role=1005-cadence;xnu_arm_entry.elf
+set=armed-d13-ff937225 sha256=6f96fb39cf379cd7db346c59c31375b71e3463563302ebcc90f602bf9e850bdb bytes=1912 file=xnu_arm_entry.h role=1005-cadence;xnu_arm_entry.h
+set=armed-d13-ff937225 sha256=3abd30d77e6f4ca5b4f5cd860aa8d30005ab3e402be3acd61eec0d418a11a46d bytes=1760 file=xnu_arm_entry-config.txt role=1005-cadence;xnu_arm_entry-config.txt
+set=armed-d13-ff937225 sha256=e603c502045313e3b2d747c68cffb60bce360b879860978581ddb27cfdc5cea7 bytes=3149 file=xnu_arm_entry-sources.txt role=1005-cadence;xnu_arm_entry-sources.txt
+set=armed-d13-ff937225 sha256=e7ac6bf173c25edd5855d86594de4fe091224958f1145f998ba17db0e7487f47 bytes=6839172 file=stage90.bin role=1005-cadence;stage90.bin
+set=armed-d13-ff937225 sha256=df93b68a856ef7d49deab83c3047ea9b97a0955c756bf9da2994f6e47ffc1804 bytes=6901244 file=stage90.elf role=1005-cadence;stage90.elf
+set=armed-d13-ff937225 sha256=421dc5c69689b687928282635a599e3cb3d19af2b49652eb139d4936a5f7b494 bytes=6842368 file=stage90.img role=1005-cadence;stage90.img
+set=armed-d13-ff937225 sha256=94bb179f3a0a9c0cf523ae223d1c092351dec7478b2622fb364229756c6ba1a5 bytes=9363456 file=stage90-qcdt.img role=1005-cadence;stage90-qcdt.img
+set=armed-d13-ff937225 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1005-cadence;stage90_fixture.macho
+set=armed-d13-ff937225 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1005-cadence;stage90-build-config.txt
+set=armed-d13-ff937225 sha256=6d9c313474c1c70f05c464f77fca04ccb1c3e3d00cc665fb78e1564dd41ab0ec bytes=560 file=SHA256SUMS.txt role=1005-cadence;SHA256SUMS.txt
