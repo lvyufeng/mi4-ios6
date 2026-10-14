@@ -1752,6 +1752,19 @@ def s_abt(cap):
     # capture's `xnu_live_tick_sum_maxd`.
     M, M_src = abt_reference_M(cap)
     say("OBS", "M (the freeze under study) = %s, from %s" % (fmt(M), M_src))
+    # ---- (abt4b) THE RUNNING-MAX GUARD.  `xnu_live_tick_sum_maxd` is a RUNNING MAX republished at
+    # every summary (measured: 14 records in the 1007 capture), so `cap.first()` reads a PRE-FREEZE
+    # interim value and every `near_m()` comparison then lands in branch (A) - the defect this rung's
+    # first reading hit ([[mi4-measurement-defects]]: the measurement was the thing that was wrong).
+    # A max only grows, so the LAST record must be >= every earlier one; if it is NOT, the collector is
+    # wrong and M (and the whole classifier) can be silently mis-scaled.  This is a build/read refusal,
+    # not a comment: it makes the trap loud instead of handing back a wrong verdict.
+    _tick = [r[3] for r in cap.all("xnu_live_tick_sum_maxd") if r[3] is not None]
+    if len(_tick) > 1 and M != max(_tick):
+        hard("`abt_reference_M` returned %s but the MAX of the %d `xnu_live_tick_sum_maxd` records "
+             "is %s - the resolver is reading a PRE-FREEZE interim value (a `first()` regression), so "
+             "M is mis-scaled and every near_m() branch is suspect ([[mi4-measurement-defects]])"
+            % (fmt(M), len(_tick), fmt(max(_tick))))
 
     def near_m(v):
         return v is not None and M and (ABT_NEAR_M_LO * M) <= v <= (ABT_NEAR_M_HI * M)
