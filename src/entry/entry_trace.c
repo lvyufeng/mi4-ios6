@@ -5666,6 +5666,14 @@ extern void entry_note_sleh_back(uint32_t redirected);
 #if defined(STAGE90_XNU_ABT_SPAN) && STAGE90_XNU_ABT_SPAN
 extern void entry_note_abt_span(uint32_t t0, uint32_t call);
 #endif
+/*
+ * 1008: the abort-fault identity recorder - the `far`/`type` the wrapper ALREADY read (below,
+ * `:5687-5693`) forwarded to the DIRECT, cap-exempt channel. Its guard is SEPARATE from the span's so
+ * `build_1007.sh`'s ABT_SPAN guard count (4) is undisturbed (docs/1008-design.md §4.1/§4.3).
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR
+extern void entry_note_abt_far(uint32_t call, uint32_t far, uint32_t type);
+#endif
 
 void __real_sleh_abort(void *regs, int type);
 
@@ -5728,6 +5736,9 @@ void __wrap_sleh_abort(void *regs, int type)
     entry_note_sleh_back(redirected);
 #if defined(STAGE90_XNU_ABT_SPAN) && STAGE90_XNU_ABT_SPAN
     entry_note_abt_span(t0, entry_counter() - t0);
+#endif
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR
+    entry_note_abt_far(entry_counter() - t0, far_, (uint32_t)type);
 #endif
 }
 

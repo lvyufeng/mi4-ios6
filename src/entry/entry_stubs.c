@@ -1953,6 +1953,53 @@ entry_note_abt_span(uint32_t t0, uint32_t call)
 #endif
 
 /*
+ * ------------------------------------------------------- 1008: the abort-fault identity
+ *
+ * 1007 localised the ~24.4 s freeze INSIDE one `sleh_abort` (18.7 s) riding a STORM of ~2.1 M
+ * aborts (records/1007-press-read.txt). The storm's fault ADDRESS is in no capture: the live
+ * channel stopped at #40, and 1007's direct-channel recorder publishes only n/seq/gap/call. 1008
+ * forwards the `far`/`type` the wrapper ALREADY read (entry_trace.c:5687-5693) to the DIRECT
+ * (cap-exempt) channel, on a bounded trigger set - the record budget is the whole design
+ * (docs/1008-design.md §3): a per-abort publish is ~124 MB into a 2 MB console.
+ *
+ * **BY VALUE, the §4.3 rule.** `far`/`type` enter as arguments because `entry_stubs.c` cannot read
+ * cp15's fault pair, exactly as 1007 passes the clock (docs/1007-design.md §2.3). `call` is passed
+ * too, so this recorder re-derives the running max that the span recorder derives (:1942) - the
+ * latching rule is the SAME rule, applied to the same sequence of calls.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR
+void entry_write_kv(const char *key, uint32_t value);   /* identically to :1920 */
+
+static uint32_t g_abtfar_n;
+static uint32_t g_abtfar_maxcall;
+static uint32_t g_abtfar_pub;
+#define ABT_FAR_LATCH_MAX 32u
+
+void
+entry_note_abt_far(uint32_t call, uint32_t far, uint32_t type)
+{
+    uint32_t n = ++g_abtfar_n;
+
+    /* (i) The maxcall latch - the fault identity of the abort whose HANDLER took the longest. */
+    if (call > g_abtfar_maxcall) {
+        g_abtfar_maxcall = call;
+        if (g_abtfar_pub < ABT_FAR_LATCH_MAX) {
+            g_abtfar_pub++;
+            entry_write_kv("xnu_live_abt_maxfar",  far);
+            entry_write_kv("xnu_live_abt_maxtype", type);
+        }
+    }
+
+    /* (ii) The storm's address, progressively - the SAME ladder the span recorder uses (:1946). */
+    if (n <= 4u || (n & (n - 1u)) == 0u) {
+        entry_write_kv("xnu_live_abt_farn", n);
+        entry_write_kv("xnu_live_abt_far",  far);
+        entry_write_kv("xnu_live_abt_type", type);
+    }
+}
+#endif
+
+/*
  * Set by the IRQ vector so the epilogue knows to name the interrupt it stopped on.
  *
  * Experiment 308's run ended on `exception: irq` and the report could not say *which* interrupt:
