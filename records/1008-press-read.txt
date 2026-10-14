@@ -1,0 +1,136 @@
+# 1008 press read — `armed-d13-0343ef45`
+
+**Captures.** The press booted via `fastboot boot` (never flash) at 2026-10-14 ~12:16; the runner
+returned 2 (the expected resident non-return); the device was dark; the watcher recovered the previous
+boot when the machine came back on its own. Recovered log:
+
+`out/stage90/captures/recovered-unknown-arm-20261014-124635-last_kmsg.txt` (1,402,065 B, 29,451 lines).
+
+Adjudicated with `python3 tools/check_1008_capture.py <capture>` (default gate, no waiver) — **0 HARD
+ANOMALIES**, `ABORT-FAULT-IDENTITY CERTIFIED`, `ABORT-SPAN CERTIFIED`, `CADENCE CERTIFIED`.
+
+## VERDICT — the storm is a REPEAT at one address, and it is a DATA abort
+
+**The ~2.1 M-abort storm 1007 exposed does not spread. It collapses onto a single fault address,
+`0x0007b000`, and retries it ~2.09 million times. This is a RETRY LOOP, not a demand walk.**
+
+1008's instrument (`STAGE90_XNU_ABT_FAR`, commit `00f6406`) publishes the storm's fault `far` and
+fault `type` on the **direct, cap-exempt** channel (`entry_write_kv`, the same channel 1007 used) in two
+shapes: a **maxcall latch** (`maxfar`/`maxtype`, the `far`/`type` *at the abort that set a new max
+gap*) and a **powers-of-two ladder** (`far`/`farn`/`type` at abort ordinals 1,2,3,4,8,16,…,0x200000).
+
+### The ladder's `far` — 12 distinct values, then a constant
+
+| abort ordinal `farn` | `far` | `type` | reading |
+|---|---|---|---|
+| 1 | `0x00001000` | 4 | dyld image walk begins |
+| 2 | `0xcfdbd000` | 4 | stack region |
+| 3 | `0xcfdfe000` | 4 | |
+| 4 | `0x2bda5f7c` | 4 | dyld `__TEXT` (`0x2be…`) — the 1004 walk |
+| 8 | `0x2bea4004` | 4 | |
+| 0x10 | `0x2be7d018` | 4 | |
+| 0x20 | `0x2be6dfe8` | **3** | one PREFETCH abort |
+| 0x40 | `0x3d7cb000` | 4 | |
+| 0x80 | `0x3d80b000` | 4 | |
+| 0x100 | `0x2f28784c` | 4 | |
+| 0x200 | `0x340e93c8` | 4 | **last distinct value** |
+| **0x400** | **`0x0007b000`** | 4 | **the collapse** |
+| 0x800 … **0x200000** | **`0x0007b000`** | 4 | **constant for every remaining row** |
+
+From abort **0x400** through abort **0x200000** — spanning ~**2.09 million** aborts — `far` is pinned at
+the **same single address `0x0007b000`** and `type` is the **same value 4 at every row**. This is the
+`(R) REPEAT` class, and it is decisive: the fault handler returns, the same faulting access re-executes
+at the same address, and the cycle repeats. **The `far` does not march in the storm.**
+
+`type=4 = STAGE90_T_DATA_ABT` (`entry_saved_state.h:229`) at every storm row: the storm is a **data
+abort** (the lone `type=3` at ordinal 0x20 is the prefetch abort that reads the instruction-side pair
+`c5,c0,1`/`c6,c0,2`).
+
+### The maxcall latch's `far` — a *different* shape (and not the storm)
+
+The latch (`maxfar`/`maxtype`) records the `far`/`type` **at the abort with the largest inter-abort
+gap**. Its published pairs march:
+
+```
+maxcall=0x0000061d maxfar=0x00001000 maxtype=4
+maxcall=0x00fbe0cc maxfar=0x2bea4004 maxtype=4
+maxcall=0x01c51e5c maxfar=0x2be6ee60 maxtype=3
+maxcall=0x01f73252 maxfar=0x3d7b3000 maxtype=4
+maxcall=0x03edaaf1 maxfar=0x3d7c7000 maxtype=4
+maxcall=0x07dbcc6b maxfar=0x3d7db000 maxtype=4
+maxcall=0x0b33b739 maxfar=0x3d803000 maxtype=4
+maxcall=0x12e11970 maxfar=0x2d6756f8 maxtype=4
+maxcall=0x1570c1a7 maxfar=0x2d7fc5e8 maxtype=4   <-- final, 360.1M counts = 18.75 s
+```
+
+`maxfar` ends at `0x2d7fc5e8` (kernel VA, `>= 0x80000000`? no — `0x2d7fc5e8 < 0x80000000`, so it is a
+**user/identity-range** address too), `maxtype=4`. **The latch and the ladder disagree by design:** the
+latch tracks the *slow* abort (the biggest gap — the walk), the ladder tracks the *ordinal* (1,2,4,8…).
+The storm rows sit *past* every max, so the latch's final pair is a **walk** row, while the ladder's
+tail is the **constant**. **The actionable reading is the ladder tail**: the ~18.7 s handler call
+(`maxcall=0x1570c1a7` = 359.7M counts = 18.75 s — corroborating 1007's `0x1570e6a5`, a ~9.6 k-count
+drift) rides the ~2.1 M-abort REPEAT at `0x0007b000`.
+
+### The checker said "MIXED" — and that is itself the finding
+
+The `[ABT2]` classifier reports **MIXED**, because it counts the 12 *distinct* values in the walked
+prefix (`farn ≤ 0x200`) and cannot see that the *tail* (0x400…0x200000, 61× more aborts) is a single
+value. **The MIXED verdict is a property of taking the whole ladder as one sample; the tail is
+decisive.** A reader that reports the *set* of values rather than the *distribution over ordinals*
+labels the collapse "spread". (This is the residual weakness of the 1008 reader; see the next rung.)
+
+## The stall frame — IRQ is ENABLED (corrects 1007)
+
+| key | value | symbol (1008 image) |
+|---|---|---|
+| `xnu_live_stall_pc` | `0x8001b69d` | **`enable_interrupts+0x5`** |
+| `xnu_live_stall_lr` | `0x8046c95c` | **`sleh_abort+0x468`** |
+| `xnu_live_stall_cpsr` | `0x60000113` | Z=1 C=1, SVC mode, **I=0 (IRQ ENABLED)**, A=1 |
+| `xnu_live_stall_sp` | `0xcfdbbef8` | (the SVC stack) |
+| `xnu_live_stall_n` / `_nz` | 0x0f / 0x0f | 15 samples here |
+
+`cpsr=0x60000113` decodes **IRQ-enabled** (bit 7 `I`=0) — **1007's "IRQ masked" was wrong.** The CPU is
+parked in `enable_interrupts` (the routine that clears the `I` bit), with `lr` inside the data-abort
+handler's return path (`sleh_abort+0x468`). This is consistent with the exposed fault: the return path
+re-runs `enable_interrupts`, the same faulting access re-executes, and the loop closes. The 1007
+"IRQ masked ⇒ synchronous storm is consistent" argument used the *wrong* reading; the corrected
+reading (IRQ enabled) points **further up the return path**, at the *faulting instruction itself*.
+
+**The `sleh` tail (`seen=0x28`, the 40-record live-channel residue) is kernel `copyin`/`copyout`:**
+`pc=copyin_guts+0x78`, `lr=copyinmsg+0x2c`, `recover=copyinmsg+0x3c`, next `recover=copyoutstr+0x5c`,
+`far_frame=0x3d7b3000`, `user=0`. The last aborts the *capped* channel showed are the kernel copy
+faults — consistent with 1004's "6 kernel aborts are copyin/out". The storm's far is not in them.
+
+## What this does and does NOT say
+
+- **DOES say:** the ~2.1 M-abort storm is a **single-address RETRY LOOP** at `far=0x0007b000`, a
+  **data** abort (`type=4`), not a spreading demand walk. The ~18.7 s handler call rides it.
+- **DOES say (correction):** 1007's stall frame is **IRQ-ENABLED** (`cpsr` bit 7 = 0), not masked.
+- **DOES NOT say:** *which instruction* faults at `0x7b000`, or *why the handler returns without
+  dismissing the fault*. The far is named; the `pc` of the faulting access is not. `fsr` (the WnR /
+  read-vs-write and the fault-status code) is **not published** — `xnu_live_abt_far` carries `far`/`type`
+  only.
+- **DOES NOT say:** whether `0x7b000` is user or kernel. It is **below** the `0x80000000` split
+  (`VM_KERNEL_BASE_ADDRESS 0x80000000`, `arm_vm_init.c:86`) and below the kernel's `0x80000000` link
+  base — so it is a **low/identity-range** address, not a kernel-VA fault.
+- **No brick:** the machine is alive (`No errors detected`); the run ended in a resident non-return as
+  expected for this arm.
+
+## The reader defect fixed in this rung (adversarial pass, `00f3ca1`)
+
+`tools/check_1008_capture.py:2147` — the `(S) SPREAD` branch fired over **zero** evidence on the
+maxfar-only shape: with an empty `fars` list, `n_uniq == len(fars)` is `0 == 0` (True) and `marching`
+is vacuously True, so a log that published **no ladder at all** would be certified SPREAD. Fixed with
+`elif fars and ...` (a truthy `fars` is load-bearing). Verified by execution both ways. This is
+`[[mi4-silence-is-a-reading-only-if-success-is-silent]]`.
+
+## The next rung (1009)
+
+The storm's faulting **`pc`** and **`fsr`** are the missing readings — the far names *where*, not *what*.
+For the REPEAT row, publish the faulting instruction address (`regs->pc`, or `spsr`-recovered) and the
+DFSR (`c5,c0,0` — WnR bit, fault-status code) on the direct channel, keyed to the REPEAT `far`, so the
+single faulting instruction is named. Pair it with the ladder so the *tail* value (not the set) is
+what the reader classifies: a reader that reports `far` **at the last ladder ordinal** and its
+**change-count** over the tail decides REPEAT vs SPREAD by construction, where the 1008 `[ABT2]`
+`MIXED` reading did not. The frontier after 1008: **the return path re-executes one instruction at
+`0x7b000` ~2.1 M times — find why the handler does not dismiss it.**
