@@ -2144,7 +2144,11 @@ def s_abt2(cap):
                        "`%s`=%s == the FIRST ladder `far`: a retry loop / single-address THRASH, NOT a "
                        "spreading storm. This reading REFUTES the storm interpretation (design §7)"
             % (n_uniq, "[" + ",".join(fmt(f) for f in uniq_fars) + "]", ABT2_MAXFAR_KEY, fmt(maxfar)))
-    elif n_uniq == len(fars) and marching:
+    elif fars and n_uniq == len(fars) and marching:
+        # NOTE: `fars` truthy is LOAD-BEARING - with an EMPTY ladder `n_uniq == len(fars)` is `0 == 0`
+        # (True) and `marching` is vacuously True, so without this guard the branch prints a confident
+        # (S) SPREAD over ZERO evidence (the maxfar-only shape, design §7).  A reader that cannot fail
+        # certifies nothing ([[mi4-silence-is-a-reading-only-if-success-is-silent]]).
         say("VERDICT", "(S) SPREAD - the x%d ladder `far` values are DISTINCT and march forward%s: a "
                        "fault storm of DISTINCT addresses (the boot demand-faulting page by page); "
                        "the 18.7 s abort is one page of it" % (
@@ -2188,8 +2192,8 @@ def s_abt2(cap):
         else:
             say("OBS", "the data-abort `far` split is unavailable - read the ladder by value")
     else:
-        say("OBS", "no classifiable `type` on the ladder (types=%s) - read by value" %
-            "[" + ",".join(map(str, types)) + "]")
+        say("OBS", "no classifiable `type` on the ladder (types=[%s]) - read by value" %
+            ",".join(map(str, types)))
 
     # ---- (abt2-8) THE ONE-LINE VERDICT - the storm's identity (design §6/§7).
     say("VERDICT", "STORM IDENTITY: x%d ladder rows / x%d distinct far / class(prefetch=%d data=%d) / "
