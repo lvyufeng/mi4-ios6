@@ -41,10 +41,11 @@ CONSTANT**: `pc=0x2be8a1a0`, `fsr=0x0000080f`, `abtcpsr=0x60000030`, `far=0x0009
 
 ### The fault, decoded
 
-- **`fsr = 0x0000080f`** — bit 11 (0x800), **WnR = 1: this is a WRITE**. The fault-status code is the
-  low nibble `0x f`? No: D13 decodes the **FSR** as `(0x800 = external)|(0x00f)`; the status is
-  `0b001111`→ the **fault-status code 0b0111 (7) = permission fault** (the low bits `0xf` = WnR(0x8) |
-  status(0x7)). The same `0x…7` appears in the dyld walk rows — a permission fault, and here on a write.
+- **`fsr = 0x0000080f`** — bit 11 (0x800) = **WnR = 1: this is a WRITE**; FS = `0xf` = `0b01111` =
+  **"Permission fault, level 2"** (ARMv7 DFSR: the fault-status field is `bits[4:0]`, so FS=15, *not*
+  "status 7" — the low nibble alone drops FS[4]). A **level-2 (L2 page) permission fault on a write**
+  is exactly what an **APX=1 (user read-only) L2 leaf** produces. (Corrected 2026-10-14; the earlier
+  read mis-decoded the FS.)
 - **`abtcpsr = 0x60000030`** — mode bits `0x30 & 0x1f` = **`0x10` = USER mode**, **IRQ enabled**,
   T bit set (Thumb), Z=0 C=0 N=0. The fault is taken **in userspace**, not in the kernel.
 - **`far = 0x0009a000`** — a low user VA (~630 KB), **below** the `0x80000000` split (`arm_vm_init.c:86`).
@@ -122,3 +123,35 @@ Two mechanisms, one measurement each:
 The frontier after 1009: **a userspace store to a low user page permission-faults (WnR=1) and the
 handler re-runs it ~2 M times — decide whether the page is wrongly read-only (pmap/shared-cache
 mapping) or the user-fault signal path is missing (trap.c).**
+
+## The mechanism, located (analysis, same session — the 1010 hypothesis)
+
+The signal path is **present and complete**: `sleh_abort`'s error branch (`trap.c:834-901`) sets
+`exception_type = EXC_BAD_ACCESS` (`:865`), and `:926-968` calls `doexception` → `exception_triage` →
+`ux_exception` → `psignal` (SIGBUS) → `task_terminate` (`osfmk/kern/exception.c:301`,
+`bsd/uxkern/ux_exception.c:429-485`). It is **never reached** — because the storm takes the silent
+retry branch (`:902-908`), which requires `vm_fault` to return `KERN_SUCCESS`/`KERN_ABORTED`.
+
+So the defect is a **wrong condition, not a missing path**: `vm_fault` returns `KERN_SUCCESS` **while
+the L2 PTE was just made read-only**. The page is downgraded to read-only *inside* `vm_fault`:
+
+- `osfmk/vm/vm_fault.c:2476-2485` — the CS-taint branch: `reject_page == FALSE` ⇒ `kr = KERN_SUCCESS;
+  must_disconnect = !m->cs_tainted; m->cs_tainted = TRUE;`. **It reports success but the page is
+  tainted; `must_disconnect` is FALSE on the retry** (the page is already tainted), so the writeable
+  mapping is never re-established.
+- `vm_fault.c:2353/1881/1904/3855` — `prot &= ~VM_PROT_WRITE` downgrades a write fault's `prot`.
+- `vm_fault.c:2565` → `pmap_enter_options` → `pmap_vm_prot_to_page_flags` (`arm/pmap.c:1110-1113`)
+  writes **APX=1 (user read-only)** for a `prot` without `VM_PROT_WRITE`, at `pmap.c:3280`.
+- The initiating `cs_invalid_page` (`kern_proc.c:2791`) returned 0 — and it is **exactly the last
+  console line** (`:4130`): pid 1, launchd, `clearing CS_VALID`. **The storm is the code-signing
+  CS-taint path re-faulting a write to a page it has just made read-only, forever.**
+
+**Correction to the earlier guess:** `far=0x9a000` is a low VA in one of **launchd's own COW/data
+segments** (below the `0x2be00000` stack), **not** the shared cache; the faulting `pc=0x2be8a1a0`
+merely *lives* in the shared cache — code address and fault address are independent. The shared-cache
+geometry is not the site.
+
+The confirming measurement is rung 1010: publish, on the storm fault, the **L2 descriptor for `far_`**
+(A: `APX=1` confirms the read-only PTE) and the **`vm_fault` return code** (B: `KERN_SUCCESS`). Optionally
+the `vm_fault_enter` tuple (`prot`, `fault_type`, `cs_tainted`, `must_disconnect`) reads the exact
+`vm_fault.c:2476-2485` branch. `docs/1010-design.md`.

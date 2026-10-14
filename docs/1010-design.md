@@ -168,13 +168,33 @@ overflow the channel: the values published once are the ones that matter.
 - The measured `pc`/`far`/`fsr` must **reproduce 1009** (`pc=0x2be8a1a0`, `fsr=0x80f`); a different
   class means 1009's reading was run-specific and is itself re-opened.
 
-## 7. What a fix would then be (out of scope here, named for the record)
+## 7. The located mechanism (source analysis, same session) and what a fix would be
 
-- **(A) PTE-side**: the site whose `pmap_enter`/`pmap_protect` leaves APX set on a page the map calls
-  RW — most likely the **shared-cache / `cs_invalid_page` path** (1009's last console line) or the
-  port's `pmap_vm_prot_to_page_flags` (`pmap.c:1095`).
-- **(B) abort-side**: `vm_fault`'s `KERN_ABORTED` reaching the retry branch — the handler should
-  **deliver** an aborted user fault (signal/return), never spin.
+The signal path is **complete** (`trap.c:865` `EXC_BAD_ACCESS` → `:926-968` `doexception` →
+`exception_triage` → `ux_exception` → `psignal`/SIGBUS → `task_terminate`); it is **never reached**,
+because the storm takes the `KERN_SUCCESS` retry branch. So the defect is a **wrong condition**.
+
+The page is downgraded to read-only **inside `vm_fault`**:
+
+- **`vm_fault.c:2476-2485`** — the code-signing CS-taint branch. `reject_page == FALSE` ⇒
+  `kr = KERN_SUCCESS; must_disconnect = !m->cs_tainted; m->cs_tainted = TRUE;`. It **returns success
+  while tainting the page**, and on the retry `must_disconnect` is FALSE (already tainted), so the
+  writeable mapping is never re-established.
+- `vm_fault.c:2353/1881/1904/3855` — `prot &= ~VM_PROT_WRITE` (write stripped from the fault).
+- `vm_fault.c:2565` → `pmap_enter_options` → `pmap_vm_prot_to_page_flags` (`arm/pmap.c:1110-1113`)
+  writes **APX=1 (user read-only)** for a `prot` without `VM_PROT_WRITE`, at `pmap.c:3280`.
+- The initiating `cs_invalid_page` (`kern_proc.c:2791`) returned 0 (no `INVALID PAGE` console line) —
+  and it is **exactly the last console line** (`:4130`): pid 1, launchd, `clearing CS_VALID`.
+
+**The storm is the code-signing CS-taint path re-faulting a write to a page it has just made
+read-only, forever.** `far=0x9a000` is a low VA in **launchd's own COW/data segments** (below the
+`0x2be00000` stack) — **not** the shared cache; the faulting `pc=0x2be8a1a0` merely *lives* in the
+shared cache (code and fault address are independent).
+
+**The fix (1011+, out of scope here):** either the CS-taint branch must not silently succeed on a
+write fault that cannot be honoured (it should return a non-success so the handler delivers SIGBUS),
+or the write to a code-signed page must be handled without leaving a read-only PTE under a `vm_map`
+that still claims RW. The exact choice waits on 1010's (A)/(B) reading.
 
 Rung 1010 is **instrumentation only** (no new device behaviour, low blast radius); the fix is 1011+.
 
