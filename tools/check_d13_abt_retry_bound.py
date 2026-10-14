@@ -40,7 +40,13 @@ OBJDUMP = "arm-none-eabi-objdump"
 TARGET = "sleh_abort"
 STRING = b"ABT_RETRY_BOUND:"
 VMFAULT = "vm_fault"
-DOEXCEPTION = "doexception"
+# The escalation target, BY VALUE.  `doexception` (`hd2 trap.c:363`) is a two-line wrapper around
+# `exception_triage` and clang INLINES it into `sleh_abort` - so the name `doexception` never appears
+# in sleh_abort's body in the linked image (measured: `doexception` at 0x8046c394 in the frozen elf is
+# a tiny push/ldr/stm/bl/ret, and NO `bl` in sleh_abort targets it; sleh_abort has a direct
+# `bl exception_triage`).  The honest by-value check for "the escalation path survives" is therefore
+# that sleh_abort still reaches `exception_triage`, not the inlined wrapper's name.
+EXCEPTION_TRIAGE = "exception_triage"
 # The frozen 1009 arm (`armed-d13-24997fc5`): the negative control AND the OFF-identity reference.
 FROZEN_ELF = "out/stage90/frozen/armed-d13-24997fc5/xnu_arm_entry.elf"
 FROZEN_ELF_SHA256 = "c66367dfdaa228062df8d6d5a67f998dc453ad52df02adb4e5b1a0072725b3cf"
@@ -311,16 +317,17 @@ def check_on(path):
         ok = False
     else:
         vf, vfhow = reaches(abort, VMFAULT)
-        de, dehow = reaches(abort, DOEXCEPTION)
+        de, dehow = reaches(abort, EXCEPTION_TRIAGE)
         if vf or vfhow:
             print(f"  ok   {TARGET} still reaches <{VMFAULT}> ({vf or vfhow}) - the retry machinery is intact")
         else:
             _fail(f"{TARGET}: no path to <{VMFAULT}> - the fix removed the fault attempt")
             ok = False
         if de or dehow:
-            print(f"  ok   {TARGET} still reaches <{DOEXCEPTION}> ({de or dehow}) - the escalation path is intact")
+            print(f"  ok   {TARGET} still reaches <{EXCEPTION_TRIAGE}> ({de or dehow}) - the escalation "
+                  f"path is intact (doexception is inlined; the call is by value)")
         else:
-            _fail(f"{TARGET}: no path to <{DOEXCEPTION}> - the escalation has nowhere to go")
+            _fail(f"{TARGET}: no path to <{EXCEPTION_TRIAGE}> - the escalation has nowhere to go")
             ok = False
 
     # the bound is a SMALL immediate
