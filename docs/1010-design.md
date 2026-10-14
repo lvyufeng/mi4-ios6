@@ -168,33 +168,47 @@ overflow the channel: the values published once are the ones that matter.
 - The measured `pc`/`far`/`fsr` must **reproduce 1009** (`pc=0x2be8a1a0`, `fsr=0x80f`); a different
   class means 1009's reading was run-specific and is itself re-opened.
 
-## 7. The located mechanism (source analysis, same session) and what a fix would be
+## 7. The candidate mechanism (source analysis) — CORRECTED 2026-10-14, two over-claims withdrawn
 
 The signal path is **complete** (`trap.c:865` `EXC_BAD_ACCESS` → `:926-968` `doexception` →
 `exception_triage` → `ux_exception` → `psignal`/SIGBUS → `task_terminate`); it is **never reached**,
-because the storm takes the `KERN_SUCCESS` retry branch. So the defect is a **wrong condition**.
+because the storm takes the `KERN_SUCCESS` retry branch. So the defect is a **wrong condition** — that
+much stands. The rest of this section is the correction.
 
-The page is downgraded to read-only **inside `vm_fault`**:
+**Correction 1 — the discriminator is `reject_page = cs_invalid_page()`'s return = `CS_HARD`, not
+`cs_tainted`.** `cs_tainted` only gates whether the block at `vm_fault.c:2435` is *entered*;
+`cs_invalid_page` (`bsd/kern/kern_proc.c:2776-2796`) returns 1 **iff** `p->p_csflags & CS_HARD`. For
+launchd (no `CS_HARD`) it clears `CS_VALID` and returns 0, so `reject_page == FALSE` ⇒ `kr =
+KERN_SUCCESS` at `:2478` — a success reported even after resolving a write fault that cannot be
+honoured.
 
-- **`vm_fault.c:2476-2485`** — the code-signing CS-taint branch. `reject_page == FALSE` ⇒
-  `kr = KERN_SUCCESS; must_disconnect = !m->cs_tainted; m->cs_tainted = TRUE;`. It **returns success
-  while tainting the page**, and on the retry `must_disconnect` is FALSE (already tainted), so the
-  writeable mapping is never re-established.
-- `vm_fault.c:2353/1881/1904/3855` — `prot &= ~VM_PROT_WRITE` (write stripped from the fault).
+**Correction 2 — "the storm IS the CS-taint path" is NOT established, and `far=0x9a000` is not
+launchd's COW/data.** Read by value, the demotion sites `vm_fault.c:2353/1881/1904` (`prot &=
+~VM_PROT_WRITE`) fire only when `(fault_type & VM_PROT_WRITE) == 0` — a **write** fault does *not*
+trip them (`:3855` fires only when the object's `copy` moved). So if the PTE is entered read-only, the
+`prot` reaching `pmap_enter_options` (`:2565`) **already lacked `VM_PROT_WRITE` when it left
+`vm_map_lookup_locked`** — i.e. the **`vm_map_entry` denies the write**. That signature is produced
+*identically* whether the `:2435` CS block is entered or skipped (`else`, `kr = KERN_SUCCESS` at
+`:2494`). **The CS block is not required, and the silence does not name it.** `far=0x9a000` sits in
+the hole **below** the shared region (`0x2c000000..0x40000000`, capture `:4114`) — neither the shared
+cache nor launchd's own COW/data; `pc=0x2be8a1a0` is in **`/usr/lib/dyld`'s `__TEXT`** (`0x2be00000` +
+slide `0x7c000`), computing its store target from a register — consistent with a stale/unrebased dyld
+pointer, but code and fault address are independent.
+
+What survives the correction (still true, and still what makes this a defect):
+
 - `vm_fault.c:2565` → `pmap_enter_options` → `pmap_vm_prot_to_page_flags` (`arm/pmap.c:1110-1113`)
   writes **APX=1 (user read-only)** for a `prot` without `VM_PROT_WRITE`, at `pmap.c:3280`.
-- The initiating `cs_invalid_page` (`kern_proc.c:2791`) returned 0 (no `INVALID PAGE` console line) —
-  and it is **exactly the last console line** (`:4130`): pid 1, launchd, `clearing CS_VALID`.
+- The last console line is `CODE SIGNING: cs_invalid_page(0x2e1a9000): p=1[launchd] clearing CS_VALID`
+  (`:4130`) — the CS machinery *was* involved at some point, but this does not prove it is the loop.
+- The defect class is `[[mi4-one-value-two-definitions]]`: the `vm_map`/`prot` says one thing about
+  writability, the L2 PTE (APX) says another, and `vm_fault` returns success regardless.
 
-**The storm is the code-signing CS-taint path re-faulting a write to a page it has just made
-read-only, forever.** `far=0x9a000` is a low VA in **launchd's own COW/data segments** (below the
-`0x2be00000` stack) — **not** the shared cache; the faulting `pc=0x2be8a1a0` merely *lives* in the
-shared cache (code and fault address are independent).
-
-**The fix (1011+, out of scope here):** either the CS-taint branch must not silently succeed on a
-write fault that cannot be honoured (it should return a non-success so the handler delivers SIGBUS),
-or the write to a code-signed page must be handled without leaving a read-only PTE under a `vm_map`
-that still claims RW. The exact choice waits on 1010's (A)/(B) reading.
+**The fix is 1011+ and is CONDITIONAL on 1010's reading** — see `docs/1011-design.md` (ranked
+F1a/F1b/F1c/F2/F4, selected by 1010's (A) L2 descriptor + (B) `vm_fault` return + the `vm_map_entry`'s
+`protection`). If the entry grants `VM_PROT_WRITE` the fault is a prot-strip bug (F1a); if it denies
+WRITE the `vm_map` genuinely denies the write and the honest fix routes it to the exception path
+(SIGBUS) plus a retry bound (F1b+F4). **Do not build anything in `vm_fault.c` until 1010 reads (A)+(B).**
 
 Rung 1010 is **instrumentation only** (no new device behaviour, low blast radius); the fix is 1011+.
 

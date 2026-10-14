@@ -124,34 +124,45 @@ The frontier after 1009: **a userspace store to a low user page permission-fault
 handler re-runs it ~2 M times — decide whether the page is wrongly read-only (pmap/shared-cache
 mapping) or the user-fault signal path is missing (trap.c).**
 
-## The mechanism, located (analysis, same session — the 1010 hypothesis)
+## The mechanism — what is established, and what is NOT (corrected 2026-10-14)
 
-The signal path is **present and complete**: `sleh_abort`'s error branch (`trap.c:834-901`) sets
-`exception_type = EXC_BAD_ACCESS` (`:865`), and `:926-968` calls `doexception` → `exception_triage` →
-`ux_exception` → `psignal` (SIGBUS) → `task_terminate` (`osfmk/kern/exception.c:301`,
-`bsd/uxkern/ux_exception.c:429-485`). It is **never reached** — because the storm takes the silent
-retry branch (`:902-908`), which requires `vm_fault` to return `KERN_SUCCESS`/`KERN_ABORTED`.
+**Established (by the capture):** the signal path is **present and complete** — `sleh_abort`'s error
+branch (`trap.c:834-901`) sets `exception_type = EXC_BAD_ACCESS` (`:865`), and `:926-968` calls
+`doexception` → `exception_triage` → `ux_exception` → `psignal`/SIGBUS → `task_terminate`
+(`osfmk/kern/exception.c:301`, `bsd/uxkern/ux_exception.c:429-485`) — and it is **never reached**,
+because the storm takes the silent retry branch (`:902-908`). That branch requires `vm_fault` to return
+`KERN_SUCCESS`/`KERN_ABORTED`. So the defect is a **wrong condition, not a missing path**: `vm_fault`
+reports success while the hardware keeps faulting the write.
 
-So the defect is a **wrong condition, not a missing path**: `vm_fault` returns `KERN_SUCCESS` **while
-the L2 PTE was just made read-only**. The page is downgraded to read-only *inside* `vm_fault`:
+**NOT established — an earlier draft of this file over-claimed "the storm IS the code-signing CS-taint
+path".** Read by value, that is **one of two mechanisms**, and it is *not* proven by the silence:
 
-- `osfmk/vm/vm_fault.c:2476-2485` — the CS-taint branch: `reject_page == FALSE` ⇒ `kr = KERN_SUCCESS;
-  must_disconnect = !m->cs_tainted; m->cs_tainted = TRUE;`. **It reports success but the page is
-  tainted; `must_disconnect` is FALSE on the retry** (the page is already tainted), so the writeable
-  mapping is never re-established.
-- `vm_fault.c:2353/1881/1904/3855` — `prot &= ~VM_PROT_WRITE` downgrades a write fault's `prot`.
-- `vm_fault.c:2565` → `pmap_enter_options` → `pmap_vm_prot_to_page_flags` (`arm/pmap.c:1110-1113`)
-  writes **APX=1 (user read-only)** for a `prot` without `VM_PROT_WRITE`, at `pmap.c:3280`.
-- The initiating `cs_invalid_page` (`kern_proc.c:2791`) returned 0 — and it is **exactly the last
-  console line** (`:4130`): pid 1, launchd, `clearing CS_VALID`. **The storm is the code-signing
-  CS-taint path re-faulting a write to a page it has just made read-only, forever.**
+- The demotion sites `vm_fault.c:2353/1881/1904` (`prot &= ~VM_PROT_WRITE`) fire only for a **non-write**
+  `fault_type` (`(fault_type & VM_PROT_WRITE) == 0`); a write fault does **not** trip them. So if the
+  PTE is entered read-only, the `prot` reaching `pmap_enter_options` (`:2565`) **already lacked
+  `VM_PROT_WRITE` when it left `vm_map_lookup_locked`** — i.e. the **`vm_map_entry` denies the write**.
+- That is produced *identically* whether the CS block at `vm_fault.c:2435-2485` is entered or not: with
+  the block skipped (`else`, `kr = KERN_SUCCESS` at `:2494`) the same signature results. **The CS block
+  is not required.**
+- Where the CS block *is* entered, the success-vs-error discriminator is **`reject_page =
+  cs_invalid_page()`'s return value = `CS_HARD`** (`bsd/kern/kern_proc.c:2776-2796`), **not** `cs_tainted`
+  (which only gates whether the block is entered). For launchd the `CS_VALID` clear means `reject_page ==
+  FALSE` ⇒ `kr = KERN_SUCCESS` (`:2478`) — a success reported even after resolving a write fault that
+  cannot be honoured.
 
-**Correction to the earlier guess:** `far=0x9a000` is a low VA in one of **launchd's own COW/data
-segments** (below the `0x2be00000` stack), **not** the shared cache; the faulting `pc=0x2be8a1a0`
-merely *lives* in the shared cache — code address and fault address are independent. The shared-cache
-geometry is not the site.
+**Corrections to the earlier draft (both recorded as defects of *this* file, not of the machine):**
 
-The confirming measurement is rung 1010: publish, on the storm fault, the **L2 descriptor for `far_`**
-(A: `APX=1` confirms the read-only PTE) and the **`vm_fault` return code** (B: `KERN_SUCCESS`). Optionally
-the `vm_fault_enter` tuple (`prot`, `fault_type`, `cs_tainted`, `must_disconnect`) reads the exact
-`vm_fault.c:2476-2485` branch. `docs/1010-design.md`.
+- `far=0x9a000` is **not** "one of launchd's own COW/data segments", and **not** the shared cache. It
+  sits in the hole **below** the shared region (`0x2c000000..0x40000000`, capture `:4114`); FS=15 is a
+  **level-2 permission fault** so an L2 descriptor *does* exist for it (present, user-RO). Its owner and
+  PA are named **only** by 1010(A)'s descriptor.
+- `pc=0x2be8a1a0` is in **`/usr/lib/dyld`'s `__TEXT`** (`0x2be00000` + slide `0x7c000`), and the store
+  there computes its target from a register (`mov.w r2, sl, lsr #16` at link `0x2be0a1a0`) — consistent
+  with a **stale/unrebased dyld pointer**, not with the shared cache and not with launchd's own data.
+
+**What 1010 must read (unchanged):** on the storm fault, (A) the **L2 descriptor for `far_`** — is it
+APX=1 (present, user read-only)? and (B) the **`vm_fault` return**. The **deciding third cell** is the
+`vm_map_entry`'s `protection` / `needs_copy` at `:2565`: if it grants `VM_PROT_WRITE` the fault is a
+pmap/prot-strip bug; if it does not, the `vm_map` genuinely denies the write and the honest fix routes
+it to the exception path (SIGBUS), not a spin. Only (A)+(B)+that cell names the fix — the fix design is
+in `docs/1011-design.md`, and it is **conditional on the verdict**. `docs/1010-design.md`.
