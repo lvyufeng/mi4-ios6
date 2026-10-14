@@ -63,7 +63,7 @@ SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 # SUBMAP_PMAP_SKIP=1, ABORT_TRACE=1, FREEZE_WITNESS=1, STAGE90_XNU_ABT_SPAN=1, STAGE90_XNU_ABT_FAR=1,
 # STAGE90_XNU_ABT_PC=1 AND STAGE90_XNU_ABT_PTE=1 must ALL be in the record.
 #
-# (0) THE 1010 CHANGE IS IN THE IMAGE - READ IT BEFORE ANY JUDGEMENT.  By value: the TWENTY-NINE
+# (0) THE 1010 CHANGE IS IN THE IMAGE - READ IT BEFORE ANY JUDGEMENT.  By value: the THIRTY (30)
 #     `xnu_live_abt_` key literals (the 6 span: n/seq/gap/call/maxcall/maxgap; the 5 far:
 #     far/type/farn/maxfar/maxtype; the 7 pc: pcn/pc/fsr/abtcpsr/pcfar/nfar/nfsr; the 12 pte/vmf:
 #     pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx/vmfn/vmfret/vmfva/vmfprot/vmfnret) embedded in
@@ -75,16 +75,16 @@ SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 #     scripts/park_1010.sh assert.  If the change is NOT in the image, NOTHING below may be read as a
 #     test - rebuild.
 # (0a) THE 1009 FAULTING-PC IDENTITY IS A REGRESSION: the seven pc `xnu_live_abt_` key literals (inside
-#     the (0) TWENTY-NINE) AND `entry_note_abt_pc` a DEFINED text symbol AND exactly ONE `b|bl
+#     the (0) THIRTY (30)) AND `entry_note_abt_pc` a DEFINED text symbol AND exactly ONE `b|bl
 #     <entry_note_abt_pc>` inside `__wrap_sleh_abort` (after the far call) must STILL be present (1010's
 #     set is 1009's verbatim).  A x0 means the pc witness was dropped - rebuild.
 # (0b) THE 1008 ABORT-FAULT IDENTITY IS A REGRESSION: the five far `xnu_live_abt_` key literals (inside
-#     the (0) TWENTY-NINE) AND `entry_note_abt_far` a DEFINED text symbol AND exactly ONE `b|bl
+#     the (0) THIRTY (30)) AND `entry_note_abt_far` a DEFINED text symbol AND exactly ONE `b|bl
 #     <entry_note_abt_far>` inside `__wrap_sleh_abort` must STILL be present.  PLUS the §4.3 fix
 #     ([[mi4-1007-abort-span-rung]]): out/stage90/xnu_arm_entry_stubs.o must STILL have NO
 #     `U entry_counter` (the §2.3 terminal stand-in that would END THE RUN on the abort path stays gone).
 # (0c) THE 1007 SPAN WITNESS IS A REGRESSION: the SIX span `xnu_live_abt_` key literals (inside the (0)
-#     TWENTY-NINE) AND `entry_note_abt_span` a DEFINED text symbol AND exactly ONE `b|bl
+#     THIRTY (30)) AND `entry_note_abt_span` a DEFINED text symbol AND exactly ONE `b|bl
 #     <entry_note_abt_span>` inside `__wrap_sleh_abort` must STILL be present.
 # (0d) THE 1006 FREEZE WITNESS IS A REGRESSION: the six `xnu_live_freeze_` key literals (n/d/cpsr/ien/
 #     pend/ctlr) and the two `xnu_live_frzbase_` key literals (n/d) AND the two symbols
@@ -296,14 +296,14 @@ EOF
 echo "   (record carries the 1009 verbatim switch set PLUS the new STAGE90_XNU_ABT_PTE; USVC, SUBMAP_PMAP_SKIP, STALL, ABORT_TRACE, CADENCE, FREEZE_WITNESS, ABT_SPAN, ABT_FAR and ABT_PC all on)"
 
 echo "== 2-0. the 1010 L2-descriptor + vm_fault-return identity in the image (read by value BEFORE the press) + the 1009 pc identity + the 1008 far identity + the 1007 span witness + the 1006 freeze witness + the 1005 cadence witness + the 1004 abort trace + the 1002 r3-save fix as regressions =="
-# (0) THE 1010 CHANGE IS IN THE IMAGE: the TWENTY-NINE `xnu_live_abt_` key literals embedded (the 6 span
+# (0) THE 1010 CHANGE IS IN THE IMAGE: the THIRTY (30) `xnu_live_abt_` key literals embedded (the 6 span
 #     + the 5 far + the 7 pc + the 12 pte/vmf) AND the `entry_note_abt_pte`/`entry_note_abt_vmf`/
 #     `__wrap_vm_fault` DEFINED text symbols AND exactly ONE `b|bl <entry_note_abt_pte>` INSIDE
 #     `__wrap_sleh_abort` ([[mi4-hooks-live-at-calls]]).
 _abt_lit=$(strings out/stage90/xnu_arm_entry.elf | grep -c 'xnu_live_abt_' || true)
-echo "   (0) xnu_live_abt_* literals x$_abt_lit (want 29: 6 span n/seq/gap/call/maxcall/maxgap + 5 far far/type/farn/maxfar/maxtype + 7 pc pcn/pc/fsr/abtcpsr/pcfar/nfar/nfsr + 12 pte/vmf pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx/vmfn/vmfret/vmfva/vmfprot/vmfnret)"
-[[ "$_abt_lit" == 29 ]] || {
-  echo "REFUSING: the 1010 L2-descriptor store is NOT in the image (literals x$_abt_lit want 29) - rebuild"; exit 1; }
+echo "   (0) xnu_live_abt_* literals x$_abt_lit (want 30: 6 span n/seq/gap/call/maxcall/maxgap + 5 far far/type/farn/maxfar/maxtype + 7 pc pcn/pc/fsr/abtcpsr/pcfar/nfar/nfsr + 12 pte/vmf pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx/vmfn/vmfret/vmfva/vmfprot/vmfnret)"
+[[ "$_abt_lit" == 30 ]] || {
+  echo "REFUSING: the 1010 L2-descriptor store is NOT in the image (literals x$_abt_lit want 30) - rebuild"; exit 1; }
 # NOTE: `nm | grep -q` under `set -o pipefail` is a trap - `grep -q` exits on the first match, SIGPIPEs
 # `nm`, and the pipeline's status becomes 141, vetoing a match that exists (the 487/998 SIGPIPE lesson).
 # Capture `nm` ONCE into a variable and grep the variable: no pipeline, no SIGPIPE.
@@ -340,7 +340,7 @@ grep -qE 'bl[[:space:]]+[0-9a-f]+ <entry_note_abt_vmf>' <<<"$_wfb" || {
 echo "   (0) __wrap_vm_fault calls __real_vm_fault AND entry_note_abt_vmf (the §8.1 pass-through made a check)"
 # (0a) THE 1009 FAULTING-PC IDENTITY IS A REGRESSION: the `entry_note_abt_pc` DEFINED text symbol AND
 #      exactly one `b|bl <entry_note_abt_pc>` inside `__wrap_sleh_abort` (its seven pc key literals are
-#      inside the (0) TWENTY-NINE).  1010's set is 1009's verbatim.
+#      inside the (0) THIRTY (30)).  1010's set is 1009's verbatim.
 grep -qE "^[0-9a-f]+ [Tt] entry_note_abt_pc\$" <<<"$_abt_nm" || {
   echo "REFUSING: entry_note_abt_pc is not a DEFINED text symbol in the image - the 1009 recorder was dropped (1010 keeps 1009's set verbatim) - rebuild"; exit 1; }
 _ab_pc=$(grep -cE '[[:space:]](b|bl)[[:space:]]+[0-9a-f]+ <entry_note_abt_pc>' <<<"$_ab_body" || true)
@@ -349,7 +349,7 @@ echo "   (0a) __wrap_sleh_abort calls entry_note_abt_pc: $_ab_pc (want 1)"
   echo "REFUSING: __wrap_sleh_abort does not call entry_note_abt_pc exactly once (0 = the call site moved; >1 = it runs twice) - the 1009 faulting-pc identity regressed - rebuild"; exit 1; }
 # (0b) THE 1008 ABORT-FAULT IDENTITY IS A REGRESSION: the `entry_note_abt_far` DEFINED text symbol AND
 #      exactly one `b|bl <entry_note_abt_far>` inside `__wrap_sleh_abort` (its five far key literals are
-#      inside the (0) TWENTY-NINE).
+#      inside the (0) THIRTY (30)).
 grep -qE "^[0-9a-f]+ [Tt] entry_note_abt_far\$" <<<"$_abt_nm" || {
   echo "REFUSING: entry_note_abt_far is not a DEFINED text symbol in the image - the 1008 recorder was dropped (1010 keeps 1009's set verbatim) - rebuild"; exit 1; }
 _ab_fc=$(grep -cE '[[:space:]](b|bl)[[:space:]]+[0-9a-f]+ <entry_note_abt_far>' <<<"$_ab_body" || true)
@@ -358,7 +358,7 @@ echo "   (0b) __wrap_sleh_abort calls entry_note_abt_far: $_ab_fc (want 1)"
   echo "REFUSING: __wrap_sleh_abort does not call entry_note_abt_far exactly once (0 = the call site moved; >1 = it runs twice) - the 1008 abort-fault identity regressed - rebuild"; exit 1; }
 # (0c) THE 1007 SPAN WITNESS IS A REGRESSION: the `entry_note_abt_span` DEFINED text symbol AND exactly
 #      one `b|bl <entry_note_abt_span>` inside `__wrap_sleh_abort` (its six key literals are inside the
-#      (0) TWENTY-NINE).
+#      (0) THIRTY (30)).
 grep -qE "^[0-9a-f]+ [Tt] entry_note_abt_span\$" <<<"$_abt_nm" || {
   echo "REFUSING: entry_note_abt_span is not a DEFINED text symbol in the image - the 1007 recorder was dropped (1010 keeps 1009's set verbatim) - rebuild"; exit 1; }
 _ab_sc=$(grep -cE '[[:space:]](b|bl)[[:space:]]+[0-9a-f]+ <entry_note_abt_span>' <<<"$_ab_body" || true)
