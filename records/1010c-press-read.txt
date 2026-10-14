@@ -62,23 +62,29 @@ REQUIRES (a section gives FS=5/…, never level-2). So the walk returns early at
 ptealias are ALL 0 at the storm: the window bound and the alias never engaged, because the
 walk had already given up one level up.
 
-WHY: the recorder walks TTBR0 AT ABORT TIME, and XNU has already switched TTBR0 to the
-KERNEL table. `locore.s:1035-1039` (`dataabt_from_user`, `__ARM_USER_PROTECT__` = 1,
-`proc_reg.h:97`):
-        ldr     r3, [r9, ACT_KPTW_TTB]      // Load KERNEL ttb
-        mcr     p15, 0, r3, c2, c0, 0       // Set TTBR0   <-- BEFORE bl sleh_abort
-        mov     r3, #0
-        mcr     p15, 0, r3, c13, c0, 1      // Set CONTEXTIDR
-So `entry_note_abt_pte` (called from `__wrap_sleh_abort`) reads the KERNEL page table
-(`kptw_ttb`), NOT the faulting thread's `uptw_ttb`. The user mapping for `far=0x9a000` is not
-in the kernel table, so its L1 slot reads a section/garbage — the APX leaf is UNREACHABLE
-this way and the walk can never read it. `entry_vectors.s:199` predicted exactly this:
-"TTBR0, TTBR1 … are not in [the record]; a future step that needs the mapping state again
-has to add it to the wrapper." This is a [[mi4-one-value-two-definitions]] instance: "TTBR0"
-means the kernel table by the time the reader looks, the user table to the fault.
+WHY: **STATE OPENLY — the cause is NOT yet established.** The walk reads the L1 at the correct
+BASE (`0x81a8605b & 0xffffc000 = 0x81a84000`) yet slot 0 yields `0xfeedface`. The contrast with
+1010 (records/1010-press-read.txt:55) is decisive: 1010 used the WRONG base mask and read
+`0x81a86000 + 0` → `ptel1=0x81bb1001` (a COARSE descriptor); 1010c uses the CORRECT base
+`0x81a84000 + 0` → `ptel1=0xfeedface`. Same live TTBR0 (`0x81a8605b`), two different bases, and
+the "correct" base yields the garbage. So the question is which physical L1 the abort-time TTBR0
+really points at — NOT settled here.
+
+**A PRIOR CAUSE CLAIM IN THIS RECORD WAS WRONG, AND IS RETRACTED.** An earlier draft attributed
+this to `locore.s:1035-1039` (`dataabt_from_user`) switching TTBR0 to the kernel ttep under
+`__ARM_USER_PROTECT__` before `bl sleh_abort`. That code is in the **4570** tree, NOT the tree
+this image is built from. By value: the D13 build tree `external/xnu-hd2-darwin13/xnu` has
+**ZERO** hits for `__ARM_USER_PROTECT__`/`uptw_ttb`/`kptw_ttb`; the installed handler is
+`traps_lo.s:411` (`data_abort_crash_in_usermode`), which does NOT write TTBR0; and D13's
+`sleh_abort` (`trap.c:451`) only READS TTBR0 for a printf. D13's `struct machine_thread`
+(`thread.h:64-86`) has NO `uptw_ttb` — so "read the faulting thread's ttb" is not even available
+the 4570 way. The correct reading of the cause is left to 1011's (A) cell: publish WHICH base
+answered (`current_thread()→map→pmap→pm_l1_phys`, `entry_saved_state.h:102-105`), rather than
+assume a mechanism. This is [[mi4-one-value-two-definitions]] in a different sense: two trees
+named `locore.s`, and the citation was to the one not built.
 
 The TTBR0-base mask 1010b fixed (0xffffc000) is NOT the issue here; the checker's stale
-[A] VERDICT text still blames that mask and must be corrected (see FOLLOW-UP).
+[A] VERDICT text blamed that mask and was re-keyed to the observable (see FOLLOW-UP).
 
 RESULT 4 — the (B) vm_fault return IS read at the storm.  NEW, DECISIVE.
 -------------------------------------------------------------------------
@@ -95,8 +101,11 @@ retry, 24.4 s freeze, is the faithful consequence.
 
 FALSIFIERS / WHAT IS STILL OPEN
 -------------------------------
-* APX STILL UNREAD. The leaf (bit 9 = APX) is not in this log: the walk read the wrong table.
-  F1a vs F1b remains UNDECIDABLE from 1010c's cells.
+* APX STILL UNREAD. The leaf (bit 9 = APX) is not in this log: the walk's L1 read returned a
+  non-coarse word (`0xfeedface`), so it never reached the L2. F1a vs F1b remains UNDECIDABLE.
+* THE CAUSE OF THE NON-COARSE L1 READ IS OPEN (see RESULT 3): the base mask is correct and the
+  live TTBR0 is the same value 1010 saw; only the base it masks to differs. 1011's (A) cell must
+  MEASURE which base answered before any fix is built on a cause.
 * The DISCRIMINATOR GAP (docs/1011-discriminator-gap.md): the vm_map_entry `protection` — the
   cell that actually separates F1a (entry grants WRITE, a strip lost it) from F1b (entry denies
   WRITE) — is published by NOTHING. The (B) vm_fault return is NOT the discriminator (it reads
@@ -110,13 +119,18 @@ INSTRUMENT DEFECTS (HARD, from check_1010_capture.py)
    site never fired. The checker's own gate; carries over from 1010 and is orthogonal to the
    wrong-table defect.
 2. check_1010_capture.py's [A] VERDICT text is STALE: it blames the 1010b TTBR0-base mask
-   (0xfffffc00 vs 0xffffc000), which 1010c already corrected. The new cause is the wrong TABLE
-   (kernel ttep at abort time). The message must be re-keyed to the observable
-   (ptel1 type != 0b01 ⇒ the walk read a table with no coarse descriptor for this VA).
+   (0xfffffc00 vs 0xffffc000), which 1010c already corrected. The message was re-keyed to the
+   observable (ptel1 type != 0b01 ⇒ the walk read a table with no coarse descriptor for this VA).
 
 NEXT (1011)
 -----------
-The fix path now needs the walk to read the FAULTING THREAD'S table (uptw_ttb) — or, better,
-the entry `protection` cell the audit specs — before F1a/F1b can be decided. F4 (bound the
-identical-retry in trap.c:902-908) stays valid and is already drafted. The new frontier is the
-table the instrument reads, not the mask.
+Two cells, neither built on an assumed cause (design docs/1011-design-v2.md):
+  (E) the vm_map_entry's effective PROTECTION for the faulting VA — the F1a/F1b discriminator.
+      Recommended as (E'): `--wrap=vm_map_lookup_locked`, whose out-param `out_prot` IS the
+      effective entry protection (vm_map.c:9061/9139/9167) — NO struct offsets, NO tree patch.
+      (If raw entry fields are wanted: protection = word@+40 bits[7..9], needs_copy bit 6;
+      NOT the +24/bits[0..2] the earlier audit claimed — see the design's corrigendum.)
+  (A) WHICH page-table base answered — publish current_thread()→map→pmap→pm_l1_phys and compare
+      to the live TTBR0; the faulting-thread ttb is NOT available the 4570 way (D13 has none).
+F4 (bound the identical retry at trap.c:902-908) stays valid and is drafted
+(tools/patch_d13_abt_retry_bound.py). The frontier is the two cells, not the mask.
