@@ -39,7 +39,9 @@ The last `xnu_live_sleh_seen` this log carries is **40** (@:28159) — 968 lines
 disassembly confirms `entry_note_abt_span` reads `g_sleh_seq` directly (`801...= [r4,#120]`,
 `r4=0x8060f000`; `g_sleh_seq` at `0x8060f078`). So `abt_seq` **is** `g_sleh_seq` and both reach
 **2,097,152**: the run took **~2.1 million aborts**, not 40. The live channel hid every one past ~#64
-behind its cap; the direct channel did not.
+behind its cap; the direct channel did not. (0x200000 is the *last published* ladder row, so the count
+is `>= 2^21 = 2,097,152` and `< 2^22 = 4,194,304` — the run would have published a `0x400000` row
+had it reached one. The magnitude is not in doubt; only the exact ordinal is bracketed.)
 
 **This corrects 1004's central claim.** 1004 read `sleh_seq×40` and concluded "40 aborts, a WALK
 through dyld's image". The 40 is where the **capped live channel** stopped, not where the aborts did.
