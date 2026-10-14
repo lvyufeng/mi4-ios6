@@ -1325,7 +1325,10 @@ abt_sp=$(grep -cE 'defined\(STAGE90_XNU_ABT_PC\) && STAGE90_XNU_ABT_PC && define
 abt_tr=$(grep -cE 'defined\(STAGE90_XNU_ABT_PC\) && STAGE90_XNU_ABT_PC && defined\(STAGE90_XNU_ABT_PTE\) && STAGE90_XNU_ABT_PTE$' src/entry/entry_trace.c || true)
 echo "   (a) guards: entry_stubs.c x$abt_sp (want 1 - the walk + both recorders), entry_trace.c x$abt_tr (want 3 - extern decl, vm_fault wrapper, abort call)"
 [[ "$abt_sp" == "1" && "$abt_tr" == "3" ]] || { echo "FAIL: the ABT_PTE guards are not one-per-region (stubs x$abt_sp want 1, trace x$abt_tr want 3: extern decl + vm_fault wrapper + abort call) - a hand edit moved or dropped one"; exit 1; }
-[[ $(grep -cF 'stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used)' "$stub_src" || true) == 1 ]] || { echo "FAIL: the walk 'stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used)' is not DEFINED exactly once in $stub_src"; exit 1; }
+#     NOTE the anchor: the walk's PROTOTYPE also appears in the doc comment above the definition,
+#     so a bare fixed-string count matches the comment AND the definition (2, not 1). Anchor to the
+#     line-start definition (column 0, no trailing `;`) — [[mi4-a-claim-in-a-comment-is-not-a-check]].
+[[ $(grep -cE '^stage90_read_l2_pte\(uint32_t va, uint32_t \*out_l1_desc, uint32_t \*out_ttbr0_used\)$' "$stub_src" || true) == 1 ]] || { echo "FAIL: the walk 'stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used)' is not DEFINED exactly once at line start in $stub_src"; exit 1; }
 [[ $(grep -cF 'entry_note_abt_pte(uint32_t va)' "$stub_src" || true) == 1 ]] || { echo "FAIL: the recorder 'entry_note_abt_pte(uint32_t va)' is not DEFINED exactly once in $stub_src"; exit 1; }
 [[ $(grep -cF 'entry_note_abt_vmf(uint32_t ret, uint32_t va, uint32_t prot)' "$stub_src" || true) == 1 ]] || { echo "FAIL: the recorder 'entry_note_abt_vmf(uint32_t ret, uint32_t va, uint32_t prot)' is not DEFINED exactly once in $stub_src"; exit 1; }
 [[ $(grep -cF 'entry_note_abt_pte(far_);' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: the ONE 1010 call 'entry_note_abt_pte(far_);' is not present exactly once in entry_trace.c"; exit 1; }
@@ -1337,9 +1340,15 @@ echo "   (a) guards: entry_stubs.c x$abt_sp (want 1 - the walk + both recorders)
 # constant is caught at the source.
 [[ $(grep -cF '#define ABTPTE_L1_PTE_MASK     0xfffffc00u' "$stub_src" || true) == 1 ]] || { echo "FAIL: ABTPTE_L1_PTE_MASK is not the pmap.h L1_PTE_ADDR_MASK 0xfffffc00u in $stub_src"; exit 1; }
 [[ $(grep -cF '#define ABTPTE_L2_SMALL_PAGE   0x2u' "$stub_src" || true) == 1 ]] || { echo "FAIL: ABTPTE_L2_SMALL_PAGE is not the pmap.h L2_SMALL_PAGE 0x2u in $stub_src"; exit 1; }
-# The walk must key on TTBCR.N, NOT on the 0x80000000 address-space boundary (docs/1010-pte-walk.md §2).
-[[ $(grep -cF 'n = ttbcr & 7u;' "$stub_src" || true) == 1 ]] || { echo "FAIL: the walk does not read TTBCR.N into 'n' - it must key the table on TTBCR.N"; exit 1; }
-[[ $(grep -cF 'base = ttbr0;' "$stub_src" || true) == 1 ]] || { echo "FAIL: the walk's TTBR0 selection is not 'base = ttbr0;' exactly once"; exit 1; }
+# The walk must key on TTBCR.N, NOT on the 0x80000000 address-space boundary (docs/1010-pte-walk.md
+# §2). These two strings are NOT unique in the file - `n = ttbcr & 7u;` also appears in the PRE-EXISTING
+# `entry_live_ttb_base` (~:2620, the wrong-for-far=0x9a000 helper the design warns about), and
+# `base = ttbr0;` appears TWICE inside the walk's own two branches (N=0 and the low window). So scope
+# the count to the WALK BODY, extracted by its line-start definition, or the clause refuses a correct
+# image ([[mi4-a-claim-in-a-comment-is-not-a-check]], [[mi4-mutation-anchors-are-code-spans]]).
+ab_walk=$(awk '/^stage90_read_l2_pte\(uint32_t va, uint32_t \*out_l1_desc, uint32_t \*out_ttbr0_used\)$/{f=1} f{print} f&&/^}$/{exit}' "$stub_src")
+[[ $(grep -cF 'n = ttbcr & 7u;' <<<"$ab_walk" || true) == 1 ]] || { echo "FAIL: the walk does not read TTBCR.N into 'n' - it must key the table on TTBCR.N (get $(( $(grep -cF 'n = ttbcr & 7u;' <<<"$ab_walk" || true) )))"; exit 1; }
+[[ $(grep -cF 'base = ttbr0;' <<<"$ab_walk" || true) == 2 ]] || { echo "FAIL: the walk's TTBR0 selection is not 'base = ttbr0;' in BOTH branches (N=0 and the low window) - want 2 in the walk body"; exit 1; }
 # The 1009 call must NOT be touched by 1010 (the ABT_PC guard is a prefix of the conjunction).
 [[ $(grep -cF 'entry_note_abt_pc(((const uint32_t *)(uintptr_t)regs)[STAGE90_SS_PC / 4],' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: 1009 is NOT reproducible - the pc call is not present exactly once in entry_trace.c"; exit 1; }
 echo "   (a) the source shape: 1+3 ABT_PTE guards + walk/2 recorders def + 1 abort call + vm_fault wrapper + __real_ + the pmap.h constants + the TTBCR.N key + 1009 intact"
@@ -1353,8 +1362,14 @@ for abt_sym in entry_note_abt_pte entry_note_abt_vmf __wrap_vm_fault; do
   arm-none-eabi-nm "$elf" | grep -E "^[0-9a-f]+ [Tt] $abt_sym\$" || { echo "FAIL: $abt_sym is not a DEFINED text symbol in $elf - an object did not rebuild or a generated stand-in was used"; exit 1; }
 done
 echo "   (b) entry_note_abt_pte, entry_note_abt_vmf and __wrap_vm_fault are DEFINED T/t in the image"
-# The wrapper's PASS-THROUGH is the §8.1 rule made a check: the wrapper's body returns __real_vm_fault's
-# value and calls entry_note_abt_vmf behind the latch - never a bare `return 0`.
+# The wrapper's PASS-THROUGH is the §8.1 rule made a check: the wrapper's body returns the REAL
+# vm_fault's value and calls entry_note_abt_vmf - never a bare `return 0`.
+#     NOTE the symbol the call lands on: `--wrap=vm_fault` renames, for every reference, `vm_fault`
+#     -> `__wrap_vm_fault` and `__real_vm_fault` -> `vm_fault`. So the source's `__real_vm_fault(...)`
+#     call appears in the LINKED disassembly as `bl <vm_fault>` (the real body), NOT as
+#     `<__real_vm_fault>` - grepping for the latter refuses a correct image (MEASURED this build).
+#     Assert the wrapper calls the `vm_fault` body (a distinct address from the wrapper) plus the
+#     recorder.
 abt_wf=$(arm-none-eabi-nm "$elf" | awk '$3=="__wrap_vm_fault"{print "0x" $1; found=1} END{exit(found?0:1)}') || { echo "FAIL: __wrap_vm_fault is not in the image"; exit 1; }
 abt_wfx=$(arm-none-eabi-nm -n "$elf" | awk -v s="${abt_wf#0x}" '
     BEGIN { sv = strtonum("0x" s) }
@@ -1362,10 +1377,10 @@ abt_wfx=$(arm-none-eabi-nm -n "$elf" | awk -v s="${abt_wf#0x}" '
     a > sv && $2 ~ /^[Tt]$/ { if (!d) { print "0x" $1; d = 1 } }')
 abt_wfbody=$(arm-none-eabi-objdump -d "$elf" --start-address="$abt_wf" --stop-address="${abt_wfx:-0xffffffff}")
 echo "   (b) __wrap_vm_fault ($abt_wf..${abt_wfx:-end}):"
-grep -E 'bl.*<|__real_vm_fault|pop.*pc|bx.*lr' <<<"$abt_wfbody" | sed 's/^/       /' | head -8
-grep -qE '<__real_vm_fault>|__real_vm_fault' <<<"$abt_wfbody" || { echo "FAIL: __wrap_vm_fault does not call __real_vm_fault - it is not a pass-through (the §8.1 rule: the wrapper MUST return __real_vm_fault's value on the non-abort case)"; exit 1; }
+grep -E 'bl.*<|pop.*pc|bx.*lr' <<<"$abt_wfbody" | sed 's/^/       /' | head -8
+grep -qE 'bl[[:space:]]+[0-9a-f]+ <vm_fault>' <<<"$abt_wfbody" || { echo "FAIL: __wrap_vm_fault does not call the real vm_fault body - it is not a pass-through (the §8.1 rule: the wrapper MUST return the real vm_fault's value on the non-abort case)"; exit 1; }
 grep -qE 'bl[[:space:]]+[0-9a-f]+ <entry_note_abt_vmf>' <<<"$abt_wfbody" || { echo "FAIL: __wrap_vm_fault does not call entry_note_abt_vmf - the (B) record never fires"; exit 1; }
-echo "   (b) __wrap_vm_fault calls __real_vm_fault (pass-through) AND entry_note_abt_vmf (the (B) record)"
+echo "   (b) __wrap_vm_fault calls the real vm_fault (pass-through) AND entry_note_abt_vmf (the (B) record)"
 
 # (c) CALL SITE (A) - `__wrap_sleh_abort`'s own body carries exactly one branch to `entry_note_abt_pte`,
 #     and image-wide exactly one (accept `b` OR `bl`, the tail-call fix).
