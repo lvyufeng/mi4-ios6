@@ -3052,7 +3052,13 @@ def s_abt4(cap):
     # entry to read; the whole point of the fault.  But for a LEVEL-2 PERMISSION fault (FS=0xf, e.g.
     # `fsr=0x80f` = WnR | FS=15) a PRESENT L2 descriptor is REQUIRED - an absent one produces FS=5/6/7,
     # never FS=15.  So `_ptel2`==0 at an FS=15 fault is IMPOSSIBLE for a correct walk: it is the
-    # INSTRUMENT (the 1010 TTBR0-base-mask defect: 0xfffffc00 read the L1 +0x2000 high), NOT the machine.
+    # INSTRUMENT, NOT the machine.  TWO instrument defects produce this shape and the row's `_ptel1`
+    # separates them: (i) 1010/1010b's TTBR0-BASE MASK (0xfffffc00 read the L1 +0x2000 high); (ii) the
+    # 1010c WRONG-TABLE defect (records/1010c-press-read.txt): the recorder walks TTBR0 AT ABORT TIME,
+    # and `locore.s:1035-1039` has ALREADY switched TTBR0 to the KERNEL ttep before `bl sleh_abort`, so
+    # the walk reads `kptw_ttb`, not the faulting thread's `uptw_ttb`.  A COARSE `_ptel1` (bits[1:0]==1)
+    # is a REAL L1 slot and means (ii); a non-coarse `_ptel1` (section 0b10 / fault 0b00) means the walk
+    # found no L1 descriptor for this VA in the table it read, i.e. it read the WRONG TABLE (ii).
     ABT4_PERM_FS = frozenset((0xf, 0xd, 0xe))   # level-2 permission fault (FAR section / page / other)
     perm_missing = []
     for r in zero_l2:
@@ -3073,13 +3079,22 @@ def s_abt4(cap):
     abt4_walk_invalid = bool(perm_missing)   # a `_ptel2`==0 on an FS=15 fault: the walk, not the page
     if perm_missing:
         r0, fs0, fsv = perm_missing[0]
+        l1v = r0["ptel1"]
+        l1type = (l1v & ABT4_L2_TYPE_MASK) if l1v is not None else None
+        if l1type is not None and l1type != 0b01:
+            cause = ("the walk read a table with NO COARSE L1 descriptor for this VA (`_ptel1`=%s, "
+                     "type bits[1:0]=0b%s) - the WRONG-TABLE defect (records/1010c-press-read.txt): the "
+                     "recorder walks TTBR0 at abort time and locore.s:1035-1039 has already set it to "
+                     "the KERNEL ttep, so it reads kptw_ttb, not the faulting thread's uptw_ttb" % (
+                         fmt(l1v), format(l1type, "02b")))
+        else:
+            cause = ("a COARSE L1 (`_ptel1`=%s) whose L2 does not present the leaf - the 1010b/base-mask "
+                     "class (the base masked 0xfffffc00 instead of 0xffffc000)" % fmt(l1v))
         hard("x%d pte-ladder record(s) carry `_ptel2`=0 (NO L2 LEAF) for a LEVEL-2 PERMISSION fault "
              "(first @:%d pten=%s pteva=%s fsr=0x%x FS=%d) - IMPOSSIBLE for a correct walk: FS=%d REQUIRES "
              "a present L2 descriptor (an absent one gives FS=5/6/7). THE WALK IS THE DEFECT, not the page "
-             "- this is the 1010 TTBR0-base-mask defect (the base must be masked with the BASE mask "
-             "0xffffc000 = ABTPTE_TTBR_BASE_MASK, NOT the L1->L2 mask 0xfffffc00; design §6 falsifier (b), "
-             "[[mi4-stand-in-size-is-not-value]]). Do NOT read the (A) tail as a PTE verdict." % (
-                 len(perm_missing), r0["ln"], fmt(r0["pten"]), fmt(r0["pteva"]), fs0, fsv, fsv))
+             "- %s. Do NOT read the (A) tail as a PTE verdict." % (
+                 len(perm_missing), r0["ln"], fmt(r0["pten"]), fmt(r0["pteva"]), fs0, fsv, fsv, cause))
     elif zero_l2:
         say("OBS", "the `_ptel2`=0 rows all pair to TRANSLATION faults (FS=5/6/7) or have no FS row: an "
                    "absent L2 leaf is the EXPECTED shape for a demand-paging fault, so no instrument "
@@ -3302,9 +3317,13 @@ def s_abt4(cap):
         say("VERDICT", "(A) WALK INVALID - the pte ladder's tail rows carry `_ptel2`=0 (NO L2 LEAF) while "
                        "the paired faults are LEVEL-2 PERMISSION faults (FS=0xf), which REQUIRE a present "
                        "L2 descriptor. The (A) side of the decisive cell CANNOT be read from this log: the "
-                       "walk is the defect (the TTBR0 base masked with 0xfffffc00 instead of 0xffffc000). "
-                       "The mechanism (cs-taint vs prot-deny, F1a/F1b) remains OPEN; the (B) vm_fault "
-                       "return below is still a reading.")
+                       "walk is the defect, NOT the page. Two instrument causes: the 1010/1010b TTBR0-BASE "
+                       "MASK (0xfffffc00 instead of 0xffffc000), or - when `_ptel1` is non-coarse - the "
+                       "1010c WRONG-TABLE defect (the recorder walks TTBR0 AT ABORT TIME and locore.s:"
+                       "1035-1039 has already set it to the KERNEL ttep, so it reads kptw_ttb, not the "
+                       "faulting thread's uptw_ttb; records/1010c-press-read.txt). The mechanism (cs-taint "
+                       "vs prot-deny, F1a/F1b) remains OPEN; the (B) vm_fault return below is still a "
+                       "reading.")
     elif tail_apx is not None and ret_last is not None:
         if tail_apx == 1 and ret_last == ABT4_KERN_SUCCESS:
             say("VERDICT", "*** THE DECISIVE CELL (design §2.2): the L2 PTE at the tail is APX=1 (USER "
@@ -3365,8 +3384,11 @@ def s_abt4(cap):
                    "vm_fault return is still read.")
     elif abt4_walk_invalid:
         say("OBS", "the 1010 (A) L2-DESCRIPTOR gate is NOT certified: the walk read `_ptel2`=0 for a "
-                   "LEVEL-2 PERMISSION fault (impossible for a correct walk - the TTBR0-base-mask defect). "
-                   "Fix the instrument (build 1010b) and re-press; the (B) vm_fault return is still read.")
+                   "LEVEL-2 PERMISSION fault (impossible for a correct walk). If `_ptel1` is COARSE it is "
+                   "the TTBR0-base-mask class (build 1010b); if `_ptel1` is NON-coarse it is the 1010c "
+                   "WRONG-TABLE defect - the recorder walks TTBR0 at abort time, already set to the KERNEL "
+                   "ttep by locore.s:1035-1039 (records/1010c-press-read.txt). Either way: fix the "
+                   "instrument and re-press; the (B) vm_fault return is still read.")
 
 
 def main():

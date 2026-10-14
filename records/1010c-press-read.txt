@@ -1,0 +1,122 @@
+1010c press-read — the walk is WINDOW-BOUNDED and no longer faults, but it reads the WRONG
+PAGE TABLE at the storm (the kernel ttep), so the L2 leaf still cannot be read
+====================================================================================
+
+Arm:      armed-d13-002b0683   (sha256 002b0683d2de2110035dd78bf0c0a5bfadeceedf8fcc1e19d5cf2b029c009d88)
+Image:    out/stage90/xnu_arm_entry.elf, 6347860 bytes, commit b1535d4
+Capture:  out/stage90/captures/recovered-unknown-arm-20261014-194600-last_kmsg.txt
+          (1,452,584 B, recovered via scripts/recover_last_kmsg.sh --read-only after the
+           operator's power press; the carrier is the FLASHED ROM — the log is the previous
+           boot's RAM console)
+Runner:   exit 2 (resident rung did not return) — the machine came back on the power press.
+          No panic. "No errors detected".
+
+WHICH RUN THIS IS (proven, not assumed)
+---------------------------------------
+The capture carries the SIX window keys only a 1010c image publishes:
+  xnu_live_abt_ptewbase=0x80000000  ptewlen=0x1e400000  pteoow  ptealias  ptemapok  pteslot
+and out/stage90/xnu_arm_entry-config.txt names the entry bin's sha256 = 002b0683…, the
+1010c arm. So this IS the 1010c press, not a stale log. (`ptenx` is absent from the LOG only
+because the change-count SITE never fired — see the INSTRUMENT notes; it is in the image.)
+
+WHAT 1010c WAS FOR
+------------------
+1010b made the walk read the "true L1" but then faulted FS=5 OUT OF WINDOW at the L2 deref
+(entry_stubs.c:2184) — the L2 table PA 0x46300000 is outside the entry image's single-span
+identity window [gPhysBase, gPhysBase+mem_size) = [0x80000000, +0x1e400000). 1010c: bound
+BOTH derefs to that window (fail open) and reach an out-of-window L2 via a temporary 1 MB
+section (entry_mmio_section, the 911c mechanism), alias allowed on the ladder ordinals alone.
+
+RESULT 1 — 1010c FIXED the 1010b crash.  CONFIRMED.
+----------------------------------------------------
+The storm runs the FULL ladder this time: `xnu_live_abt_pcn` / `_pten` / `_farn` / `_vmfn`
+reach 0x00200000 (2,097,152) with no FS=5 walk fault and no early death. 1010b died at
+launchd-start with 4 abort records; 1010c rides the whole ~2.1 M-abort storm to the freeze.
+The 1010b defect (an unbounded L2 deref that killed the run) is gone.
+
+RESULT 2 — the ALIAS mechanism WORKS.  CONFIRMED (once).
+--------------------------------------------------------
+At ladder ordinal pten=0x00000004 (pteva=0x2bd86f7c, an OUT-OF-WINDOW L2 case) the raw row is:
+    xnu_live_abt_ptel1=0x46300201      (a COARSE L1 descriptor, type bits 0b01)
+    xnu_live_abt_pteoow=0x00000001     (the walk saw the leaf PA out of window)
+    xnu_live_abt_ptealias=0xa0000000   (the SECOND slot — VA_B)
+    xnu_live_abt_ptemapok=0x00000001   (entry_mmio_section SUCCEEDED)
+    xnu_live_abt_pteslot=0x00000000    (slot_before)
+So the temporary section WAS installed, the alias VA recorded, and the restore ran. The
+mechanism 1010c added is not the defect. (ptel2=0 even here: the aliased word was read but
+did not present as a small-page leaf for THAT va — a separate point, below.)
+
+RESULT 3 — at the STORM the walk reads the WRONG PAGE TABLE.  NEW FRONTIER.
+--------------------------------------------------------------------------
+The storm tail rows (pten >= 0x00000400, far=0x9a000, pc=0x2be8a1a0, fsr=0x0000080f,
+abtcpsr=0x60000030 = USER, IRQ-off) are CONSTANT:
+    xnu_live_abt_ptel1=0xfeedface      <-- an L1 SECTION descriptor (bits[1:0]=0b10)
+    xnu_live_abt_ptel2=0x00000000
+    xnu_live_abt_pteoow=0x00000000
+    xnu_live_abt_ptemapok=0x00000000
+    xnu_live_abt_ptealias=0x00000000
+    xnu_live_abt_ptettbr=0x81a8605b
+`0xfeedface & 3 == 0b10` = a SECTION, not the COARSE L1 an FS=15 (level-2 permission) fault
+REQUIRES (a section gives FS=5/…, never level-2). So the walk returns early at
+`(l1e & 3) != 1` (entry_stubs.c:2291) and never reaches the L2 — hence pteoow/ptemapok/
+ptealias are ALL 0 at the storm: the window bound and the alias never engaged, because the
+walk had already given up one level up.
+
+WHY: the recorder walks TTBR0 AT ABORT TIME, and XNU has already switched TTBR0 to the
+KERNEL table. `locore.s:1035-1039` (`dataabt_from_user`, `__ARM_USER_PROTECT__` = 1,
+`proc_reg.h:97`):
+        ldr     r3, [r9, ACT_KPTW_TTB]      // Load KERNEL ttb
+        mcr     p15, 0, r3, c2, c0, 0       // Set TTBR0   <-- BEFORE bl sleh_abort
+        mov     r3, #0
+        mcr     p15, 0, r3, c13, c0, 1      // Set CONTEXTIDR
+So `entry_note_abt_pte` (called from `__wrap_sleh_abort`) reads the KERNEL page table
+(`kptw_ttb`), NOT the faulting thread's `uptw_ttb`. The user mapping for `far=0x9a000` is not
+in the kernel table, so its L1 slot reads a section/garbage — the APX leaf is UNREACHABLE
+this way and the walk can never read it. `entry_vectors.s:199` predicted exactly this:
+"TTBR0, TTBR1 … are not in [the record]; a future step that needs the mapping state again
+has to add it to the wrapper." This is a [[mi4-one-value-two-definitions]] instance: "TTBR0"
+means the kernel table by the time the reader looks, the user table to the fault.
+
+The TTBR0-base mask 1010b fixed (0xffffc000) is NOT the issue here; the checker's stale
+[A] VERDICT text still blames that mask and must be corrected (see FOLLOW-UP).
+
+RESULT 4 — the (B) vm_fault return IS read at the storm.  NEW, DECISIVE.
+-------------------------------------------------------------------------
+1010/1010b only ever read the (B) cell on the PRE-storm prefix (VAs 0xcfdbd000/0x2bdc3000/…),
+never at the storm (design §1.5 / records/1010-press-read.txt). 1010c's tail rows DO carry it,
+paired to the storm ordinal:
+    xnu_live_abt_vmfret=0x00000000   = KERN_SUCCESS
+    xnu_live_abt_vmfprot=0x00000003  = VM_PROT_READ | VM_PROT_WRITE   (a WRITE fault)
+    xnu_live_abt_vmfva=0x0009a000
+So: **for the user WRITE fault at far=0x9a000, `vm_fault` returns KERN_SUCCESS** — the retry
+precondition is now MEASURED at the storm, not inferred. The handler's `result == KERN_SUCCESS`
+arm (trap.c:571) takes `goto exception_return` and re-runs the faulting instruction: the ~2.1 M
+retry, 24.4 s freeze, is the faithful consequence.
+
+FALSIFIERS / WHAT IS STILL OPEN
+-------------------------------
+* APX STILL UNREAD. The leaf (bit 9 = APX) is not in this log: the walk read the wrong table.
+  F1a vs F1b remains UNDECIDABLE from 1010c's cells.
+* The DISCRIMINATOR GAP (docs/1011-discriminator-gap.md): the vm_map_entry `protection` — the
+  cell that actually separates F1a (entry grants WRITE, a strip lost it) from F1b (entry denies
+  WRITE) — is published by NOTHING. The (B) vm_fault return is NOT the discriminator (it reads
+  KERN_SUCCESS in either case).
+* The only previous "storm vmfret" claim was an INFERENCE from the pre-storm prefix
+  (1010). 1010c replaces the inference with a measurement: vmfret=0 at the storm.
+
+INSTRUMENT DEFECTS (HARD, from check_1010_capture.py)
+-----------------------------------------------------
+1. `xnu_live_abt_ptenx` ABSENT while the pte ladder is PRESENT (x23 rows) — the change-count
+   site never fired. The checker's own gate; carries over from 1010 and is orthogonal to the
+   wrong-table defect.
+2. check_1010_capture.py's [A] VERDICT text is STALE: it blames the 1010b TTBR0-base mask
+   (0xfffffc00 vs 0xffffc000), which 1010c already corrected. The new cause is the wrong TABLE
+   (kernel ttep at abort time). The message must be re-keyed to the observable
+   (ptel1 type != 0b01 ⇒ the walk read a table with no coarse descriptor for this VA).
+
+NEXT (1011)
+-----------
+The fix path now needs the walk to read the FAULTING THREAD'S table (uptw_ttb) — or, better,
+the entry `protection` cell the audit specs — before F1a/F1b can be decided. F4 (bound the
+identical-retry in trap.c:902-908) stays valid and is already drafted. The new frontier is the
+table the instrument reads, not the mask.
