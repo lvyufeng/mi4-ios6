@@ -1,0 +1,122 @@
+# 1005 press read — the cadence witness (armed-d13-ff937225)
+
+Capture: `out/stage90/captures/recovered-unknown-arm-20261014-020404-last_kmsg.txt`
+(1,396,170 B, 29,253 lines; sha256 `245417438a00d7e9…`). Adjudicator:
+`tools/check_1005_capture.py` → **0 HARD ANOMALIES, DEATH GATE OPEN, CADENCE CERTIFIED**, exit 0.
+
+THE PRESS. First attempt REFUSED at step 2-0 (a FALSE refusal, no device action): the
+`arm-none-eabi-nm … | grep -qE` probe ran under `set -o pipefail`; `grep -q` exits on the
+first match, SIGPIPEs `nm` mid-write, and the pipeline status becomes 141 — vetoing a match
+that exists (`entry_board_tick_count` IS in the image; the same check by value passes).
+Fixed (`b14b36c`, capture-into-a-variable; the park had the same bug fixed in `e924f5e`) —
+the 487/998 SIGPIPE lesson, met twice this rung. Re-run clean: card staged and written to
+`userdata`'s head (read-back matched `9bcef3ff…`), `fastboot boot` sent the gate's own bytes
+(`94bb179f…`, "Booting OKAY", never flashed). Runner exit 2 — the RESIDENT rung did NOT
+return, exactly as pre-registered; the USB ladder capture was empty (harmless — the handed-off
+kernel never idles). The device then returned **on its own**; the armed watcher recovered the
+log (`recover_last_kmsg.sh --read-only`).
+
+WHAT 1005 WAS BUILT TO ANSWER. 1004 (corrected) settled that the frontier is NOT the sleh
+return path but the **STALL**: after dyld first faults a shared-cache page the tick delivery
+collapses (`xnu_live_tick_sum_maxd` reached `0x1be8b709` ≈ 24.4 s) while the machine stays
+alive. Every existing tick instrument is SELF-REFERENTIAL — it publishes from *inside* the
+timer IRQ it measures, so when the tick stops the instrument stops with it and the log cannot
+tell "the tick slowed" from "the channel stopped". 1005 adds a **timer-independent** witness:
+a monotone counter bumped from the SYNCHRONOUS (USVC/syscall) path, published beside the
+per-tick counter and a NEW all-interrupts counter, under four keys
+`xnu_live_cadence_{t,sync,tick,irq}`. The ratio `ds/max(dt,1)` partitions the collapse into
+(b1) a timer-line-specific wedge (the sync path keeps running while the tick stops) vs (b2) a
+whole IRQ path frozen/masked (every counter freezes with the tick) vs a full stop (the sync
+path freezes too).
+
+## The witness is IN the image and the run CERTIFIED
+
+Identity census: `xnu_live_cadence_` tokens ×106 (4 unique literals pinned by the build;
+106 = the number of RECORDS, sampled + summary triples). Every cadence SAMPLE record carries
+the full `(t, sync, tick, irq)` tuple. `sync`/`tick`/`irq` are NON-DECREASING across all 30
+cadence rows (no measurement defect). `xnu_live_cadence_summary` ×0 — absent AS EXPECTED
+(there is **no** `_summary` KEY; `entry_cadence_summary` is a DEFINED symbol published as the
+`_sync`/`_tick`/`_irq` triple at two non-syscall moments). Death gate OPEN: exec-done trio
+present (`seq`/`who`/`current` = 1, @:21739-21741) + 5/5 probe keys + 7,505 records after.
+
+## The new reading: the tick and ALL interrupts move in LOCKSTEP
+
+The all-interrupts counter is the 1005 addition, and it is the decisive one. Across the WHOLE
+run **`tick` = `irq` − 3**, a constant:
+- samples: `@28062 tick=0x81(129) irq=0x84(132)`; `@28050 0x81/0x84`; `@27050 0x7d/0x80` …
+- summary triples: `@29124 0x87(135)/0x8a(138)`, `@29136 0x8b/0x8e`, `@29148 0x93/0x96`,
+  `@29160 0xb1/0xb4`, `@29179 0x10d/0x110`, `@29191 0x1dd/0x1e0`.
+
+A constant offset of exactly 3 (the three non-tick interrupts at the very start) means that in
+this run **essentially every interrupt delivered IS a timer tick.** There is therefore NO
+"the timer line is wedged while other IRQs still flow" window anywhere in the trace: whatever
+stops the tick stops the whole interrupt path with it — `dt` and `di` are equal, always. The
+(b1)/(b2) discriminator resolves to **(b2): a whole-interrupt-path freeze**, not a timer-line-
+specific wedge. (b1 — "syscalls keep running while ticks stop" — is NOT observed; see below.)
+
+## The collapse is one ~24.4 s FROZEN WINDOW, then a catch-up BURST
+
+`xnu_live_tick_sum_maxd` (the max inter-tick gap), in order:
+`0x3057de` ~0.101 s (@:8085) → `0x2f3e020` ~1.03 s (@:16491) → `0x4ba1ff0` ~2.5 s (@:28855)
+→ **`0x1be8bc01` = 468,237,313 ticks ÷ 19.2 MHz ≈ 24.39 s** (@:29121 onward, pegged).
+That pegged 24.39 s **reproduces 1004's ~24.4 s exactly** — the STALL is fully repeatable.
+
+Crucially the tick COUNT does not stop: it climbs `135 → 139 → 147 → 177 → 269 → 477` across
+the terminal summaries while `maxd` stays pegged. So the machine suffered ONE long frozen
+interval (no tick, no IRQ — the path was frozen) and then the interrupt path came back and the
+tick **burst** to drain the missed slots. The machine was ALIVE throughout: the watchdog pet
+kept feeding (`xnu_live_wdt_pet_calls` 592 → 43,178 across 8 published pets, `countdown` held
+at ~475,000 — RESIDENT, goal's 「保持在 xnu 里」), storage served, and the run ended with
+`No errors detected` (not a panic).
+
+## The synchronous path froze with it (near the end)
+
+The cadence `sync` counter (the pid-1 USVC path) climbs 1 → 16 across the sampled window
+(`ds=15, dt=7` — the early window is HEALTHY, which is why the coarse window verdict reads
+"NO COLLAPSE IN THE WINDOW"). But the terminal SUMMARY triples show `sync` **frozen at 20**
+(`@:29124 … @:29191`, six triples all `sync=0x14(20)`) while the tick bursts. So the pid-1
+syscall path also stopped advancing in the terminal window. This is consistent with (b2) — a
+whole-interrupt-path freeze takes the SVC delivery with it — and it refutes (b1): the
+synchronous path did NOT keep running past the tick; they froze together. The last USVC record
+`@:29209 n=22 _num=0xfffffffd _pc=0x2be5b328` is the pid-1 `mach_absolute_time` syscall.
+
+## The frontier frame (unchanged in kind from 1004)
+
+The 1003 stall sampler (kept as a regression) fires 15× — the last 9 samples all hold
+`pc=0x8001b32d` (`enable_interrupts`, `machine_routines_asm.o`) with `lr=0x8046b95c`
+(`sleh_abort`) and `cpsr=0x60000113` (IRQ masked). That is the same terminal frame 1004 saw:
+the machine is sitting in `sleh_abort`'s return path with interrupts masked. The 1004 abort
+trace (kept) is complete and a WALK (`far` pages ADVANCE ×21, REPEAT ×0), `_frame_ok`=1 on
+40/40; the last abort (`@:28083 seq=40 far=0x3f00c000 upc=0x804955c0`) is NOT fatal — 38
+cap-exempt records follow it.
+
+## VERDICT
+
+1005 is a pure MEASUREMENT rung (no kernel behaviour change) and it did exactly what it was
+built to do: it turned the STALL from "the tick instrument went quiet" into a by-value reading.
+
+**The STALL is (b2): a whole-INTERRUPT-PATH freeze.** The tick and the all-interrupts counter
+move in exact lockstep (`tick = irq − 3` for the entire run), so there is no window in which
+the timer line alone is wedged; and the pid-1 synchronous (SVC) path froze with them in the
+terminal window (it did not keep running past the tick). The freeze is a single, repeatable
+**~24.4 s** interval (`tick_sum_maxd = 0x1be8bc01`, matching 1004), after which the interrupt
+path returns and the tick bursts to catch up. The machine stays ALIVE (watchdog pet feeds,
+storage serves, no panic) but makes no forward progress — the goal's 「保持在 xnu 里」 holds;
+the goal's "boot into the OS" does not, because the interrupt path stalls for ~24 s.
+
+**The frontier for 1006** is therefore the CAUSE of the ~24.4 s whole-interrupt-path freeze:
+what masks every IRQ for 24 s while the kernel still runs its idle/pet path. The candidates a
+1006 rung must separate (all now measurable against this baseline): (i) a long IRQ-masked
+critical section held across a blocking path (the terminal frame is `enable_interrupts` with
+`cpsr=0x113`, IRQ masked); (ii) the GIC distributor re-masking (`IOS7SHREG`-era GICD_ICENABLER
+visible to the 968/983 GIC window); (iii) a device ISR that never EOI'd (the 984
+`waitForService`/`timerdrv_isr_calls` lineage). 1005 has ruled OUT the timer-line-specific
+hypothesis and the "syscall path survives" hypothesis; those are retired.
+
+## Regression guards (all held under the gate)
+
+`IOS7LAB cache mapping` ×4, shared region ×1, `check_np ret=12` ×1, `map_slide ret=0` ×1,
+`xnu_live_cadence_*` ×106, `cs_invalid_page` ×1 (TOLERATED, not the frontier), VMHINT991 ×0,
+`usermode data abort at 0x4` ×0 (the 1002 r3-save fix holds), watchdog constants frozen
+(`hw_watchdog_timeout_s=0x1d`, `bite_ticks_written=0xfffa0`), the 1003 stall instrument ×15,
+the 1004 abort trace ×40 with `_frame_ok`=1 ×40 (WALK).
