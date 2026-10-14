@@ -28,6 +28,17 @@
 # out-of-window L2 table via a temporary section VA->PA installed by `entry_mmio_section` (the 911c smem
 # mechanism). See docs/1010-pte-walk.md §7.
 #
+# 1010c (2026-10-14, THIS RUNG): the walk becomes WINDOW-BOUNDED and can REACH an out-of-window L2 table.
+# Both derefs (the L1 slot and the L2 leaf) are bounded to [gPhysBase, gPhysBase + mem_size) and FAIL
+# OPEN - the walk returns 0 rather than faulting (class [[mi4-a-device-address-can-be-right-and-
+# undereferenceable]]). An out-of-window L2 leaf is reached through a temporary 1 MB section VA->PA
+# installed by `entry_mmio_section` (the 911c `entry_smem.c` mechanism) and RESTORED into the exact table
+# the install wrote (`g_live_mmio_l1`, never re-derived - the 484 defect). The alias install is gated to
+# the published LADDER ordinals (`onladder = n <= 4 || n & (n-1) == 0`), so the ~2.1 M-abort storm does
+# NOT install/restore a section per abort. SIX new keys (`xnu_live_abt_pteoow`/`_ptealias`/`_ptemapok`/
+# `_pteslot`/`_ptewbase`/`_ptewlen`) publish the walk's own statement about where the table was. The
+# switch set is UNCHANGED (no new switch), so the entry bin moves only because the walk moved.
+#
 # 1009's press read (records/1009-press-read.txt, arm armed-d13-24997fc5) named the storm BY VALUE -
 # from ordinal 0x400 through 0x200000 (~2.09 M aborts) the faulting instruction is CONSTANT
 # (`pc=0x2be8a1a0`, in the dyld shared cache), the DFSR is CONSTANT (`fsr=0x0000080f` = WnR=1 | FS=0xf
@@ -431,12 +442,13 @@ XNU_TREE="$XNU_TREE" STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./scripts/buil
 echo "== result =="
 printf 'entry bin sha (first 8): '
 sha256sum out/stage90/xnu_arm_entry.bin | cut -c1-8
-echo "   1009 was 24997fc5, 1010 was 0f39207c - a DIFFERENT value here means the 1010b edits reached the image."
+echo "   1009 was 24997fc5, 1010 was 0f39207c, 1010b was 64391319 - a DIFFERENT value here means the 1010c edits reached the image."
 # The arm must MOVE off the PRESSED arms (the project rule: the arm IS the entry bin's sha8). A build
-# that lands back on 0f39207c did not change the entry image - the 1010b instrument fix (the TTBR0 base
-# mask + the (B) tail ladder) did not reach the linked image (or one of the two entry objects was not
-# rebuilt). This is the build-side counterpart of the arm-refusal guards the park/press scripts carry.
+# that lands back on 64391319 did not change the entry image - the 1010c window bound + alias fix did
+# not reach the linked image (or one of the two entry objects was not rebuilt). This is the build-side
+# counterpart of the arm-refusal guards the park/press scripts carry.
 _d6_arm=armed-d13-$(sha256sum out/stage90/xnu_arm_entry.bin | cut -c1-8)
+[[ $_d6_arm == armed-d13-64391319 ]] && { echo "FAIL: the build produced 1010b's PRESSED arm (64391319) again - the entry bin did NOT move, so the 1010c window bound + temporary-section alias did not reach the linked image (rebuild: build_entry.sh with STAGE90_XNU_ABT_PTE=1 AND STAGE90_XNU_ABT_PC=1 AND STAGE90_XNU_ABT_FAR=1 AND STAGE90_XNU_ABT_SPAN=1 exported for BOTH STUB_DEFINES and STUB_DEFINES_TRACE); do not park a 1010c arm identical to the pressed 1010b one"; exit 1; }
 [[ $_d6_arm == armed-d13-0f39207c ]] && { echo "FAIL: the build produced 1010's PRESSED arm (0f39207c) again - the entry bin did NOT move, so the 1010b instrument fix did not reach the linked image (rebuild: build_entry.sh with STAGE90_XNU_ABT_PTE=1 AND STAGE90_XNU_ABT_PC=1 AND STAGE90_XNU_ABT_FAR=1 AND STAGE90_XNU_ABT_SPAN=1 exported for BOTH STUB_DEFINES and STUB_DEFINES_TRACE); do not park a 1010b arm identical to the pressed 1010 one"; exit 1; }
 [[ $_d6_arm == armed-d13-24997fc5 ]] && { echo "FAIL: the build produced 1009's arm (24997fc5) - a stale layer"; exit 1; }
 [[ $_d6_arm == armed-d13-0343ef45 ]] && { echo "FAIL: the build produced 1008's arm (0343ef45) - a stale layer"; exit 1; }
@@ -445,7 +457,7 @@ _d6_arm=armed-d13-$(sha256sum out/stage90/xnu_arm_entry.bin | cut -c1-8)
 [[ $_d6_arm == armed-d13-ff937225 ]] && { echo "FAIL: the build produced 1005's arm (ff937225) - a stale layer"; exit 1; }
 [[ $_d6_arm == armed-d13-582a19c8 ]] && { echo "FAIL: the build produced 1004's arm (582a19c8) - a stale layer"; exit 1; }
 [[ $_d6_arm == armed-d13-7669309b ]] && { echo "FAIL: the build produced 1003's arm (7669309b) - a stale layer"; exit 1; }
-echo "   1010b arm: $_d6_arm (must differ from the pressed 1010 arm 0f39207c)"
+echo "   1010c arm: $_d6_arm (must differ from the pressed 1010b arm 64391319 and the pressed 1010 arm 0f39207c)"
 echo "-- 1000's own constants/keys BY VALUE (source side, what the image check cannot split) --"
 printf '   ENTRY_LIVE_CAP:  '; grep -m1 '^#define ENTRY_LIVE_CAP' src/entry/entry_stubs.c || true
 printf '   WDT timeout:     '; grep -m1 '^#define STAGE90_HW_WATCHDOG_TIMEOUT_S' src/stage90.h || true
@@ -1060,11 +1072,12 @@ echo "   (a) the source shape: 1+4 guards + 1 recorder def + 1 bracket call + th
 # (b) IMAGE KEYS - the `xnu_live_abt_` literals: the six 1007 span keys (n/seq/gap/call/maxcall/
 #     maxgap) PLUS 1008's five (far/type/farn/maxfar/maxtype), PLUS 1009's seven (pcn/pc/fsr/abtcpsr/
 #     pcfar/nfar/nfsr), PLUS 1010's twelve (pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx + vmfn/vmfret/
-#     vmfva/vmfprot/vmfnret) => the image carries 30. A count below 30 means a store did not reach the
-#     image; a count below the 1007/1008/1009 floors means a regression. docs/1010-design.md §4.
+#     vmfva/vmfprot/vmfnret), PLUS 1010c's six (pteoow/ptealias/ptemapok/pteslot/ptewbase/ptewlen) =>
+#     the image carries 36. A count below 36 means a store did not reach the image; a count below the
+#     1007/1008/1009 floors means a regression. docs/1010-design.md §4.
 ab_lit=$(strings "$elf" | grep -c 'xnu_live_abt_' || true)
-[[ "$ab_lit" == "30" ]] || { echo "FAIL: the image carries $ab_lit \`xnu_live_abt_\` literals (want 30: the 6 span + the 5 far + 1009's 7 pc + 1010's 12 (pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx/vmfn/vmfret/vmfva/vmfprot/vmfnret)) - a store did not reach the linked image"; exit 1; }
-echo "   (b) the linked image carries the 30 \`xnu_live_abt_\` key literals (6 span + 5 far + 7 pc + 12 pte/vmf)"
+[[ "$ab_lit" == "36" ]] || { echo "FAIL: the image carries $ab_lit \`xnu_live_abt_\` literals (want 36: the 6 span + the 5 far + 1009's 7 pc + 1010's 12 (pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx/vmfn/vmfret/vmfva/vmfprot/vmfnret) + 1010c's 6 (pteoow/ptealias/ptemapok/pteslot/ptewbase/ptewlen)) - a store did not reach the linked image"; exit 1; }
+echo "   (b) the linked image carries the 36 \`xnu_live_abt_\` key literals (6 span + 5 far + 7 pc + 12 pte/vmf + 6 pte-walk)"
 arm-none-eabi-nm "$elf" | grep -E '^[0-9a-f]+ [Tt] entry_note_abt_span$' || { echo "FAIL: entry_note_abt_span is not a DEFINED text symbol in $elf - an object did not rebuild or a generated stand-in was used"; exit 1; }
 echo "   (b) entry_note_abt_span is DEFINED T/t in the image"
 
@@ -1350,7 +1363,8 @@ echo "   (a) guards: entry_stubs.c x$abt_sp (want 1 - the walk + both recorders)
 #     NOTE the anchor: the walk's PROTOTYPE also appears in the doc comment above the definition,
 #     so a bare fixed-string count matches the comment AND the definition (2, not 1). Anchor to the
 #     line-start definition (column 0, no trailing `;`) — [[mi4-a-claim-in-a-comment-is-not-a-check]].
-[[ $(grep -cE '^stage90_read_l2_pte\(uint32_t va, uint32_t \*out_l1_desc, uint32_t \*out_ttbr0_used\)$' "$stub_src" || true) == 1 ]] || { echo "FAIL: the walk 'stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used)' is not DEFINED exactly once at line start in $stub_src"; exit 1; }
+[[ $(grep -cE '^stage90_read_l2_pte\(uint32_t va, uint32_t \*out_l1_desc, uint32_t \*out_ttbr0_used,$' "$stub_src" || true) == 1 ]] || { echo "FAIL: the walk's definition first line 'stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used,' is not present exactly once at line start in $stub_src (1010c added the allow_alias argument, which wrapped the signature to two lines)"; exit 1; }
+[[ $(grep -cE '^ +uint32_t allow_alias\)$' "$stub_src" || true) == 1 ]] || { echo "FAIL: the walk's definition second line '                    uint32_t allow_alias)' is not present exactly once in $stub_src (1010c's fourth argument)"; exit 1; }
 [[ $(grep -cF 'entry_note_abt_pte(uint32_t va)' "$stub_src" || true) == 1 ]] || { echo "FAIL: the recorder 'entry_note_abt_pte(uint32_t va)' is not DEFINED exactly once in $stub_src"; exit 1; }
 [[ $(grep -cF 'entry_note_abt_vmf(uint32_t ret, uint32_t va, uint32_t prot)' "$stub_src" || true) == 1 ]] || { echo "FAIL: the recorder 'entry_note_abt_vmf(uint32_t ret, uint32_t va, uint32_t prot)' is not DEFINED exactly once in $stub_src"; exit 1; }
 [[ $(grep -cF 'entry_note_abt_pte(far_);' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: the ONE 1010 call 'entry_note_abt_pte(far_);' is not present exactly once in entry_trace.c"; exit 1; }
@@ -1368,7 +1382,7 @@ echo "   (a) guards: entry_stubs.c x$abt_sp (want 1 - the walk + both recorders)
 # `base = ttbr0;` appears TWICE inside the walk's own two branches (N=0 and the low window). So scope
 # the count to the WALK BODY, extracted by its line-start definition, or the clause refuses a correct
 # image ([[mi4-a-claim-in-a-comment-is-not-a-check]], [[mi4-mutation-anchors-are-code-spans]]).
-ab_walk=$(awk '/^stage90_read_l2_pte\(uint32_t va, uint32_t \*out_l1_desc, uint32_t \*out_ttbr0_used\)$/{f=1} f{print} f&&/^}$/{exit}' "$stub_src")
+ab_walk=$(awk '/^stage90_read_l2_pte\(uint32_t va, uint32_t \*out_l1_desc, uint32_t \*out_ttbr0_used,$/{f=1} f{print} f&&/^}$/{exit}' "$stub_src")
 [[ $(grep -cF 'n = ttbcr & 7u;' <<<"$ab_walk" || true) == 1 ]] || { echo "FAIL: the walk does not read TTBCR.N into 'n' - it must key the table on TTBCR.N (get $(( $(grep -cF 'n = ttbcr & 7u;' <<<"$ab_walk" || true) )))"; exit 1; }
 [[ $(grep -cF 'base = ttbr0;' <<<"$ab_walk" || true) == 2 ]] || { echo "FAIL: the walk's TTBR0 selection is not 'base = ttbr0;' in BOTH branches (N=0 and the low window) - want 2 in the walk body"; exit 1; }
 # 1010b - THE TTBR0 BASE MASK, BY VALUE. The 1010 press (arm 0f39207c) read `ptel2=0/pteu=0` at the
@@ -1387,6 +1401,23 @@ ab_walk=$(awk '/^stage90_read_l2_pte\(uint32_t va, uint32_t \*out_l1_desc, uint3
 # "fix" cannot collapse the two masks the other way.
 [[ $(grep -cF 'l2base = l1e & ABTPTE_L1_PTE_MASK;' <<<"$ab_walk" || true) == 1 ]] || { echo "FAIL: the L2-table base is not 'l2base = l1e & ABTPTE_L1_PTE_MASK;' - the two masks must not be conflated (L1->L2 table base is bits[31:10])"; exit 1; }
 echo "   (a) the walk's two masks are DISTINCT and correct: TTBR0 base &= 0xffffc000, l2base = l1e & 0xfffffc00"
+# 1010c - THE WINDOW BOUND + THE TEMPORARY-SECTION ALIAS, BY VALUE. The 1010b press read the TRUE L1
+# whose L2 table sat at PA 0x46300000, BELOW the window, and the unbounded deref faulted FS=5. The walk
+# now (i) bounds both loads to [gPhysBase, gPhysBase + mem_size) and (ii) reaches the out-of-window
+# leaf through a temporary 1 MB section installed by entry_mmio_section and RESTORED. Assert the bound,
+# the alias helper, the restore, and the recorder's allow_alias gating - all scoped to the walk body.
+[[ $(grep -cF 'gPhysBase + (uintptr_t)mem_size' <<<"$ab_walk" || true) -ge 1 ]] || { echo "FAIL: the walk does not bound its L1/L2 loads to [gPhysBase, gPhysBase + mem_size) - the 1010b unbounded deref would fault again"; exit 1; }
+[[ $(grep -cF 'g_abtpte_walk_oow = 1u;' <<<"$ab_walk" || true) == 2 ]] || { echo "FAIL: the walk does not raise the out-of-window flag at BOTH derefs (want 2: the L1 slot and the L2 leaf)"; exit 1; }
+[[ $(grep -cF 'stage90_read_l2_word_aliased((uint32_t)l2p)' <<<"$ab_walk" || true) == 1 ]] || { echo "FAIL: the walk does not route the out-of-window L2 leaf through the temporary-section helper stage90_read_l2_word_aliased"; exit 1; }
+ab_alias=$(awk '/^stage90_read_l2_word_aliased\(uint32_t l2word_pa\)$/{f=1} f{print} f&&/^}$/{exit}' "$stub_src")
+[[ -n "$ab_alias" ]] || { echo "FAIL: the alias helper stage90_read_l2_word_aliased is not DEFINED at line start in $stub_src"; exit 1; }
+[[ $(grep -cF 'entry_mmio_section(cand, sect, &slot_before, &desc)' <<<"$ab_alias" || true) == 2 ]] || { echo "FAIL: the alias helper must try entry_mmio_section at BOTH alias slots (want 2 calls: ABTPTE_ALIAS_VA_A then, on refusal, ABTPTE_ALIAS_VA_B) - the 911c mechanism with a fallback slot"; exit 1; }
+[[ $(grep -cF '*slot = slot_before;' <<<"$ab_alias" || true) == 1 ]] || { echo "FAIL: the alias helper does not RESTORE the displaced slot ('*slot = slot_before;') - entry_section_install writes without restoring, so the restore must be spelled here"; exit 1; }
+[[ $(grep -cF 'g_live_mmio_l1 + 4u * (cand >> 20)' <<<"$ab_alias" || true) == 1 ]] || { echo "FAIL: the alias helper restores into a re-derived table - it must use g_live_mmio_l1, the table entry_mmio_section actually wrote (the 484 defect)"; exit 1; }
+ab_pte=$(awk '/^entry_note_abt_pte\(uint32_t va\)$/{f=1} f{print} f&&/^}$/{exit}' "$stub_src")
+[[ $(grep -cF 'stage90_read_l2_pte(va, &l1, &u, onladder)' <<<"$ab_pte" || true) == 1 ]] || { echo "FAIL: the (A) recorder does not pass the allow_alias gate ('onladder') to the walk - a storm would install/restore a section on every abort"; exit 1; }
+[[ $(grep -cF 'onladder = (n <= 4u || (n & (n - 1u)) == 0u) ? 1u : 0u;' <<<"$ab_pte" || true) == 1 ]] || { echo "FAIL: the (A) recorder's allow_alias gate is not the ladder rule - the alias must fire on the published ordinals alone"; exit 1; }
+echo "   (a) 1010c: the walk is WINDOW-BOUNDED (both derefs), the out-of-window L2 is reached via a temporary section (entry_mmio_section, restored into g_live_mmio_l1), and the alias is gated to the ladder ordinals"
 # 1010b - THE (B) LADDER SAMPLES THE TAIL. 1010 published only the FIRST FOUR `vm_fault` returns
 # (`ABTPTE_VMF_FIRST`), so a `_vmfret` row never described the storm's own tail - the whole-run-vs-tail
 # defect ([[mi4-measurement-defects]]). The rule is now the SAME powers-of-two ladder the (A) `_pte`
@@ -1400,10 +1431,10 @@ echo "   (a) the (B) vm_fault recorder samples the powers-of-two TAIL (paired to
 echo "   (a) the source shape: 1+3 ABT_PTE guards + walk/2 recorders def + 1 abort call + vm_fault wrapper + __real_ + the pmap.h constants + the TTBCR.N key + 1009 intact"
 
 # (b) IMAGE KEYS - 1010's eleven `xnu_live_abt_*` literals present, and the three symbols DEFINED T/t.
-for abt_key in xnu_live_abt_pten xnu_live_abt_pteva xnu_live_abt_ptel2 xnu_live_abt_ptel1 xnu_live_abt_ptettbr xnu_live_abt_pteu xnu_live_abt_ptenx xnu_live_abt_vmfn xnu_live_abt_vmfret xnu_live_abt_vmfva xnu_live_abt_vmfprot xnu_live_abt_vmfnret; do
+for abt_key in xnu_live_abt_pten xnu_live_abt_pteva xnu_live_abt_ptel2 xnu_live_abt_ptel1 xnu_live_abt_ptettbr xnu_live_abt_pteu xnu_live_abt_ptenx xnu_live_abt_vmfn xnu_live_abt_vmfret xnu_live_abt_vmfva xnu_live_abt_vmfprot xnu_live_abt_vmfnret xnu_live_abt_pteoow xnu_live_abt_ptealias xnu_live_abt_ptemapok xnu_live_abt_pteslot xnu_live_abt_ptewbase xnu_live_abt_ptewlen; do
   grep -qx "$abt_key" <<<"$(strings "$elf")" || { echo "FAIL: the image does not carry the \`$abt_key\` literal - the ABT_PTE store did not reach the linked image"; exit 1; }
 done
-echo "   (b) the linked image carries all twelve 1010 key literals (pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx/vmfn/vmfret/vmfva/vmfprot/vmfnret)"
+echo "   (b) the linked image carries all EIGHTEEN 1010 key literals (12 + 1010c's six walk-window keys)"
 for abt_sym in entry_note_abt_pte entry_note_abt_vmf __wrap_vm_fault; do
   arm-none-eabi-nm "$elf" | grep -E "^[0-9a-f]+ [Tt] $abt_sym\$" || { echo "FAIL: $abt_sym is not a DEFINED text symbol in $elf - an object did not rebuild or a generated stand-in was used"; exit 1; }
 done

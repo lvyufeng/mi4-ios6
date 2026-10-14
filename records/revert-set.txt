@@ -15082,3 +15082,62 @@ set=armed-d13-64391319 sha256=93b62c6e3b8a8b79dbf7f509e2399f2eecc37a78cfafb53608
 set=armed-d13-64391319 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1010-abtpte;stage90_fixture.macho
 set=armed-d13-64391319 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1010-abtpte;stage90-build-config.txt
 set=armed-d13-64391319 sha256=26a44fb833ddb66453bf22aff5ef960db18f0f2a4f1f39edb84d596e4228b192 bytes=560 file=SHA256SUMS.txt role=1010-abtpte;SHA256SUMS.txt
+# armed-d13-002b0683  -  1010: THE L2 DESCRIPTOR + THE vm_fault RETURN (walks TTBR0 to the L2 small-page
+# descriptor for the fault VA and publishes it, plus the vm_fault return code, so the reader can say
+# WHICH side of the vm_map-vs-PTE disagreement 1009 named is wrong; design docs/1010-design.md,
+# docs/1010-pte-walk.md)
+# Switch set is 1009-s VERBATIM plus STAGE90_XNU_ABT_PTE=1 (ABT_PC, ABT_FAR, ABT_SPAN,
+# FREEZE_WITNESS, CADENCE, STALL, ABORT_TRACE, DYLD_WITNESS, SHREG_PROBE, SHREG_WIRE, SHREG_GEOM,
+# RESIDENT, USVC and SUBMAP_PMAP_SKIP all stay 1); the ENTRY BIN moved (24997fc5 -> 002b0683); the
+# PAYLOAD moves (it embeds the entry blob; the 29 s watchdog constant is 999-s, unchanged); the
+# TREE does NOT move - 1010 has NO tree edit and NO stage driver (the change is TWO src/ files
+# plus ONE conditional --wrap: entry_stubs.c the walk stage90_read_l2_pte + the recorders
+# entry_note_abt_pte/entry_note_abt_vmf, entry_trace.c the declarations + the ONE call +
+# __wrap_vm_fault, build_entry.sh --wrap=vm_fault only when ABT_PTE=1).
+#
+# THE FRONTIER, BY VALUE (records/1009-press-read.txt): the storm is a USER-mode WRITE permission
+# fault - pc=0x2be8a1a0 (in the dyld shared cache), fsr=0x0000080f (WnR=1 (a write) | FS=0xf
+# "permission fault, level 2"), cpsr=0x60000030 (USER mode, IRQ on), far=0x9a000 (a LOW user VA,
+# below the TTBR0 split 0x40000000, in one of launchd-s own COW/data segments) - CONSTANT from
+# ordinal 0x400 through 0x200000 (~2.09 M aborts).  What 1009 could NOT say is WHY the fault is
+# never dismissed: the handler PRINTS on the failure branch and is SILENT on the retry branch,
+# and the capture shows the silent branch, so vm_fault returned KERN_SUCCESS || KERN_ABORTED.
+#
+# THE 1010 PRESS PRE-REGISTRATION (frozen once embedded; deviations reported, not interpreted) is
+# written by the TEAM-LEAD into scripts/press_1010.sh: THE HEADLINE (A) is the L2 descriptor at the
+# TAIL ordinals - xnu_live_abt_ptel2 / xnu_live_abt_pten paired with xnu_live_abt_pcfar.  Decide
+# CONSTANT-vs-CYCLING on the TAIL ROWS- OWN _ptel2 (ordinals >= 0x400), NEVER on the whole-run
+# xnu_live_abt_ptenx (the 1009 measurement defect, not repeated).  Decode _ptel2: bits[1:0] type
+# (0b10 = small page), bit 9 = APX (1 = user READ-ONLY), bit 5 = USER, bit 0 = NX,
+# bits[31:12] = PA.  The expected row is APX=1 + vm_fault KERN_SUCCESS => "the PTE is read-only
+# though vm_fault said success" - the cs-taint/prot-downgrade path.  (B) is xnu_live_abt_vmfret
+# (KERN_SUCCESS=0 / KERN_ABORTED=14) - it splits KERN_SUCCESS from KERN_ABORTED and is the only
+# source of that distinction.
+#
+# VERIFIED BY VALUE (build_1010.sh): the linked image carries the 36 xnu_live_abt_ key literals
+# (6 span + 5 far + 7 pc + 12 pte/vmf + 6 1010c walk-window: pteoow/ptealias/ptemapok/pteslot/
+# ptewbase/ptewlen), entry_note_abt_pte/entry_note_abt_vmf/__wrap_vm_fault
+# DEFINED T/t, exactly ONE b/bl to entry_note_abt_pte inside __wrap_sleh_abort image-wide, and
+# the __wrap_vm_fault body calling __real_vm_fault AND entry_note_abt_vmf, with the FROZEN 1009
+# elf (armed-d13-24997fc5) as the NEGATIVE CONTROL (xnu_live_abt_ x18, entry_note_abt_pc x>=1,
+# but the 1010 symbols x0 and the 1010 literals x0 - the 1010 change is NOT in the 1009 arm);
+# the 1009/1008/1007 witnesses, the 1006 freeze witness, the 1005 cadence witness, the 1004
+# abort trace (xnu_live_sleh_upc x1), the 1003 stall instrument and the 1002 six-word save set
+# asserted present (regressions).  The 996/997/998/999/1000/1001 checkers rerun ON the 1010
+# image - the probe checker-s ONE by-design frozen 20 B clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-002b0683 sha256=002b0683d2de2110035dd78bf0c0a5bfadeceedf8fcc1e19d5cf2b029c009d88 bytes=6347860 file=xnu_arm_entry.bin role=1010-abtpte;xnu_arm_entry.bin
+set=armed-d13-002b0683 sha256=b4e47cbc3cc2f6b5197332a1d0089310e16d06967fb57750a980538277ce55ca bytes=7391084 file=xnu_arm_entry.elf role=1010-abtpte;xnu_arm_entry.elf
+set=armed-d13-002b0683 sha256=f74738517e9e674145b69bc0ac7459496127b8531499196e4ccb3c15992ca079 bytes=1912 file=xnu_arm_entry.h role=1010-abtpte;xnu_arm_entry.h
+set=armed-d13-002b0683 sha256=bd47b6fa54aad6f7e5599c56aabc702a10e0bf9a160292e2dd9b3557f464c09a bytes=1877 file=xnu_arm_entry-config.txt role=1010-abtpte;xnu_arm_entry-config.txt
+set=armed-d13-002b0683 sha256=63e9f7319082b500f173d1848eb7468417e833dab98f46f5050d1774c4099bf1 bytes=3149 file=xnu_arm_entry-sources.txt role=1010-abtpte;xnu_arm_entry-sources.txt
+set=armed-d13-002b0683 sha256=e19a0070d7af3d326113dfaecc415af2b9883aa8392a002006a855da60f6a40a bytes=6843268 file=stage90.bin role=1010-abtpte;stage90.bin
+set=armed-d13-002b0683 sha256=7df3ff67cbecb4b0c204fb3926866da93f968338e7510f1581d322dd3e888840 bytes=6905340 file=stage90.elf role=1010-abtpte;stage90.elf
+set=armed-d13-002b0683 sha256=2e365a425438d5a371e31bf5cf827483295264c94fae000b935941e611d45964 bytes=6846464 file=stage90.img role=1010-abtpte;stage90.img
+set=armed-d13-002b0683 sha256=b21eea4817c4a8a55c47390dce3b3743ce5032370d51a018d6fd287530c801f1 bytes=9367552 file=stage90-qcdt.img role=1010-abtpte;stage90-qcdt.img
+set=armed-d13-002b0683 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1010-abtpte;stage90_fixture.macho
+set=armed-d13-002b0683 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1010-abtpte;stage90-build-config.txt
+set=armed-d13-002b0683 sha256=d2d3c5d2d3ed10dc94fb5bae2ae9040b932ec096a5fcb1b8b63d685008bcf844 bytes=560 file=SHA256SUMS.txt role=1010-abtpte;SHA256SUMS.txt

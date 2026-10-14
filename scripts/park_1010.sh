@@ -56,8 +56,9 @@
 # tools/stage_d13_submap_pmap_skip.sh (1001's - the vm_map.c is_submap guard).
 #
 # VERIFIED BY VALUE (build_1010.sh, run against the linked image): the L2-descriptor + vm_fault-return
-# witness in the linked image (the 29 `xnu_live_abt_` key literals - the 6 span + the 5 far + the 7 pc
-# + the 12 pte/vmf, `entry_note_abt_pte`/`entry_note_abt_vmf`/`__wrap_vm_fault` DEFINED T/t, the ONE
+# witness in the linked image (the 36 `xnu_live_abt_` key literals - the 6 span + the 5 far + the 7 pc
+# + the 12 pte/vmf + the 6 1010c walk-window, `entry_note_abt_pte`/`entry_note_abt_vmf`/`__wrap_vm_fault`
+# DEFINED T/t, the ONE
 # `b/bl` to `entry_note_abt_pte` inside `__wrap_sleh_abort` image-wide, and the `__wrap_vm_fault` body
 # calling BOTH `__real_vm_fault` (pass-through) and `entry_note_abt_vmf`), the 1009/1008/1007 witnesses
 # as REGRESSIONS, and the FROZEN 1009 elf (armed-d13-24997fc5, the PRESSED 1009 arm) as the NEGATIVE
@@ -130,9 +131,10 @@ grep -q '^STAGE90_XNU_SUBMAP_PMAP_SKIP=1$' "$LIVE/xnu_arm_entry-config.txt" || {
 
 # BY VALUE, at the freeze point: nine things.
 # (0) THE 1010 CHANGE (the L2 descriptor + the vm_fault return) must be in the linked image: the
-#     twenty-nine `xnu_live_abt_` key literals (the 6 span n/seq/gap/call/maxcall/maxgap + the 5 far
+#     thirty-six `xnu_live_abt_` key literals (the 6 span n/seq/gap/call/maxcall/maxgap + the 5 far
 #     far/type/farn/maxfar/maxtype + the 7 pc pcn/pc/fsr/abtcpsr/pcfar/nfar/nfsr + the 12 pte/vmf
-#     pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx/vmfn/vmfret/vmfva/vmfprot/vmfnret),
+#     pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx/vmfn/vmfret/vmfva/vmfprot/vmfnret + the 6 1010c
+#     walk-window pteoow/ptealias/ptemapok/pteslot/ptewbase/ptewlen),
 #     `entry_note_abt_pte`/`entry_note_abt_vmf`/`__wrap_vm_fault` DEFINED T/t, exactly ONE `b/bl` to
 #     `entry_note_abt_pte` inside `__wrap_sleh_abort` image-wide, and the `__wrap_vm_fault` body
 #     calling BOTH `__real_vm_fault` and `entry_note_abt_vmf`.
@@ -154,8 +156,8 @@ grep -q '^STAGE90_XNU_SUBMAP_PMAP_SKIP=1$' "$LIVE/xnu_arm_entry-config.txt" || {
 #     literal (a reader that cannot fail certifies nothing).
 # 1010's NEW instrument (the L2 descriptor + the vm_fault return), BY VALUE, FIRST.
 _ab_lit=$(strings "$LIVE/xnu_arm_entry.elf" | grep -c 'xnu_live_abt_' || true)
-[[ "$_ab_lit" == 30 ]] || {
-  echo "REFUSING: the parked image does not carry the 30 xnu_live_abt_ key literals (6 span + 5 far + 7 pc + 12 pte: pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx/vmfn/vmfret/vmfva/vmfprot/vmfnret) (x$_ab_lit, want 30) - the ABT_SPAN/FAR/PC store or the 1010 pte/vmf store is gone"; exit 1; }
+[[ "$_ab_lit" == 36 ]] || {
+  echo "REFUSING: the parked image does not carry the 36 xnu_live_abt_ key literals (6 span + 5 far + 7 pc + 12 pte: pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx/vmfn/vmfret/vmfva/vmfprot/vmfnret + 6 1010c walk-window: pteoow/ptealias/ptemapok/pteslot/ptewbase/ptewlen) (x$_ab_lit, want 36) - the ABT_SPAN/FAR/PC store, the 1010 pte/vmf store or the 1010c walk-window store is gone"; exit 1; }
 _ab_nm=$(arm-none-eabi-nm "$LIVE/xnu_arm_entry.elf")
 for _ab_1010sym in entry_note_abt_pte entry_note_abt_vmf __wrap_vm_fault; do
   grep -qE "^[0-9a-f]+ [Tt] $_ab_1010sym\$" <<<"$_ab_nm" || {
@@ -297,8 +299,9 @@ for m in "${MEMBERS[@]}"; do cp -p "$LIVE/$m" "$PARK/$m"; done
   printf '# though vm_fault said success" - the cs-taint/prot-downgrade path.  (B) is xnu_live_abt_vmfret\n'
   printf '# (KERN_SUCCESS=0 / KERN_ABORTED=14) - it splits KERN_SUCCESS from KERN_ABORTED and is the only\n'
   printf '# source of that distinction.\n#\n'
-  printf '# VERIFIED BY VALUE (build_1010.sh): the linked image carries the 29 xnu_live_abt_ key literals\n'
-  printf '# (6 span + 5 far + 7 pc + 12 pte/vmf), entry_note_abt_pte/entry_note_abt_vmf/__wrap_vm_fault\n'
+  printf '# VERIFIED BY VALUE (build_1010.sh): the linked image carries the 36 xnu_live_abt_ key literals\n'
+  printf '# (6 span + 5 far + 7 pc + 12 pte/vmf + 6 1010c walk-window: pteoow/ptealias/ptemapok/pteslot/\n'
+  printf '# ptewbase/ptewlen), entry_note_abt_pte/entry_note_abt_vmf/__wrap_vm_fault\n'
   printf '# DEFINED T/t, exactly ONE b/bl to entry_note_abt_pte inside __wrap_sleh_abort image-wide, and\n'
   printf '# the __wrap_vm_fault body calling __real_vm_fault AND entry_note_abt_vmf, with the FROZEN 1009\n'
   printf '# elf (armed-d13-24997fc5) as the NEGATIVE CONTROL (xnu_live_abt_ x18, entry_note_abt_pc x>=1,\n'

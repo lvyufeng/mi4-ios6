@@ -448,18 +448,28 @@ ABT4_KEYS = ("xnu_live_abt_pten", "xnu_live_abt_pteva", "xnu_live_abt_ptel2",
              "xnu_live_abt_ptenx",
              "xnu_live_abt_vmfn", "xnu_live_abt_vmfret", "xnu_live_abt_vmfva",
              "xnu_live_abt_vmfprot", "xnu_live_abt_vmfnret")
-ABT4_IMG_LIT_WANT = 29                        # the image's pinned TOTAL `xnu_live_abt_` count (6+5+7+11)
+ABT4_IMG_LIT_WANT = 36                        # the image's pinned TOTAL `xnu_live_abt_` count (6+5+7+18)
 ABT4_IMG_LIT_WANT_1009 = 18                   # the 1009 arm (ABT_PTE=0): 6 span + 5 far + 7 pc alone
-ABT4_ADDED_LIT_WANT = 11                       # 1010's own NEW literals: the 7 pte + the 4 vmf ladder keys
-# The SIX PER-ABORT keys of the pte LADDER (the change-count `_ptenx` is NOT part of a ladder row).
+ABT4_IMG_LIT_WANT_1010 = 29                   # the 1010/1010b arm: 6 pte + 4 vmf (the six walk keys are 1010c's)
+ABT4_ADDED_LIT_WANT = 18                       # 1010(c)'s own NEW literals: 12 pte/vmf + 6 walk-window keys
+# The TWELVE PER-ABORT keys of the pte LADDER (the change-count `_ptenx` is NOT part of a ladder row).
+# 1010c added the six walk-window keys (oow/alias/mapok/slot/wbase/wlen) beside the original six.
 ABT4_ROW_KEYS = ("xnu_live_abt_pten", "xnu_live_abt_pteva", "xnu_live_abt_ptel2",
-                 "xnu_live_abt_ptel1", "xnu_live_abt_ptettbr", "xnu_live_abt_pteu")
+                 "xnu_live_abt_ptel1", "xnu_live_abt_ptettbr", "xnu_live_abt_pteu",
+                 "xnu_live_abt_pteoow", "xnu_live_abt_ptealias", "xnu_live_abt_ptemapok",
+                 "xnu_live_abt_pteslot", "xnu_live_abt_ptewbase", "xnu_live_abt_ptewlen")
 ABT4_PTEN_KEY = "xnu_live_abt_pten"
 ABT4_PTEVA_KEY = "xnu_live_abt_pteva"
 ABT4_PTEL2_KEY = "xnu_live_abt_ptel2"
 ABT4_PTEL1_KEY = "xnu_live_abt_ptel1"
 ABT4_PTETTBR_KEY = "xnu_live_abt_ptettbr"
 ABT4_PTEU_KEY = "xnu_live_abt_pteu"
+ABT4_PTEOOW_KEY = "xnu_live_abt_pteoow"       # 1010c: 1 = a table pointer left the entry window
+ABT4_PTEALIAS_KEY = "xnu_live_abt_ptealias"   # 1010c: the section VA used (0 = none)
+ABT4_PTEMAPOK_KEY = "xnu_live_abt_ptemapok"   # 1010c: 1 = a temporary section was installed
+ABT4_PTESLOT_KEY = "xnu_live_abt_pteslot"     # 1010c: the displaced slot word (0 = free)
+ABT4_PTEWBASE_KEY = "xnu_live_abt_ptewbase"   # 1010c: gPhysBase the walk bounded with
+ABT4_PTEWLEN_KEY = "xnu_live_abt_ptewlen"     # 1010c: mem_size the walk bounded with
 ABT4_PTENX_KEY = "xnu_live_abt_ptenx"         # the number of CHANGES in `l2` (a running max)
 ABT4_VMFN_KEY = "xnu_live_abt_vmfn"
 ABT4_VMFRET_KEY = "xnu_live_abt_vmfret"
@@ -495,6 +505,13 @@ ABT4_KERN_NAMES = {0: "KERN_SUCCESS", 14: "KERN_ABORTED", 1: "KERN_INVALID_ADDRE
 # The TAIL definition for the classifier: the ladder ordinals from here up are the RETRY TAIL (the
 # storm proper), not the walked prefix.  Same ordinal as [ABT3] (0x400): the storm settles by ~0x200.
 ABT4_TAIL_MIN_PTEN = 0x400
+# 1010c: `_pteoow`==1 marks a walk record where a table pointer (the L1 slot or the L2 table) left the
+# entry image's identity window.  Under 1010c the walk no longer dereferences such a pointer raw: it
+# either returns a COVERED fail-open (allow_alias==0, off-ladder) or installs a temporary section
+# (`_ptemapok`==1) and reads the leaf THROUGH THE ALIAS.  So a `_pteoow`==1 row is NOT the 1010b
+# truncation defect; it is the walk's own window bound doing its job.  The sub-case that still leaves
+# the leaf UNREAD is `_ptemapok`==0 (both alias slots occupied): a COVERED refusal, not a fault.
+ABT4_OOW_COVERED = 1
 
 # ---- [C] the classifier's thresholds.  The counters are UNSIGNED 32-bit ordinals/counts with NO
 #      time base, so the thresholds are ORDINAL, not seconds: they are chosen to say only what the
@@ -984,7 +1001,8 @@ class Capture:
         it changes and read separately in `s_abt4()`."""
         rows, cur = [], None
         fkeys = {"xnu_live_abt_" + f: f
-                 for f in ("pten", "pteva", "ptel2", "ptel1", "ptettbr", "pteu")}
+                 for f in ("pten", "pteva", "ptel2", "ptel1", "ptettbr", "pteu",
+                           "pteoow", "ptealias", "ptemapok", "pteslot", "ptewbase", "ptewlen")}
 
         def close():
             if cur is not None:
@@ -994,7 +1012,9 @@ class Capture:
             if key == "xnu_live_abt_pten":
                 close()
                 cur = {"ln": ln, "pten": val, "pteva": None, "ptel2": None, "ptel1": None,
-                       "ptettbr": None, "pteu": None, "order": ["pten"]}
+                       "ptettbr": None, "pteu": None,
+                       "pteoow": None, "ptealias": None, "ptemapok": None, "pteslot": None,
+                       "ptewbase": None, "ptewlen": None, "order": ["pten"]}
             elif cur is not None and key in fkeys:
                 f = fkeys[key]
                 cur[f] = val
@@ -2939,10 +2959,11 @@ def s_abt4(cap):
     n_span = cap.family_count("xnu_live_abt_n")
     n_farn = cap.family_count(ABT2_FARN_KEY)
     n_pcn = cap.family_count(ABT3_PCN_KEY)
-    say("OBS", "`%s` tokens TOTAL x%d (the 1010 image pins %d unique literals = %d span + %d far + %d "
-               "pc + %d pte/vmf; the 1009 arm pins %d) - a count here is RECORDS, not literals" % (
+    say("OBS", "`%s` tokens TOTAL x%d (the 1010c image pins %d unique literals = %d span + %d far + %d "
+               "pc + %d pte/vmf; the 1010/1010b arm pinned %d, the 1009 arm %d) - a count here is "
+               "RECORDS, not literals" % (
         ABT4_PREFIX, n_abt_fam, ABT4_IMG_LIT_WANT, ABT_IMG_LIT_WANT, len(ABT2_KEYS),
-        len(ABT3_KEYS), ABT4_ADDED_LIT_WANT, ABT4_IMG_LIT_WANT_1009))
+        len(ABT3_KEYS), ABT4_ADDED_LIT_WANT, ABT4_IMG_LIT_WANT_1010, ABT4_IMG_LIT_WANT_1009))
 
     if n_pte_total == 0:
         # ZERO pte tokens: either the switch did not reach the image (the NEGATIVE CONTROL), OR this is
@@ -2980,9 +3001,15 @@ def s_abt4(cap):
     vmf_rows = cap.abt4_vmf_records()
     say("OBS", "pte-ladder records x%d, vm_fault-return records x%d" % (len(rows), len(vmf_rows)))
 
-    # ---- (abt4-2) every pte record must be a full tuple; a partial one is a dropped key.
+    # ---- (abt4-2) every pte record must be a full ladder tuple.  The six ORIGINAL keys (pten/pteva/
+    # ptel2/ptel1/ptettbr/pteu) are the walk's verdict inputs and MUST all be present.  The six 1010c
+    # WINDOW keys (pteoow/ptealias/ptemapok/pteslot/ptewbase/ptewlen) are additive diagnostics: a
+    # 1010/1010b arm image does NOT carry them, so their absence is a PRE-1010c log, not a broken
+    # recorder - report it, do not fail.
     partial = [r for r in rows
                if None in (r["pten"], r["pteva"], r["ptel2"], r["ptel1"], r["ptettbr"], r["pteu"])]
+    oow_partial = [r for r in rows
+                   if None in (r["pteoow"], r["ptewbase"], r["ptewlen"])]
     if partial:
         hard("x%d pte-ladder record(s) are INCOMPLETE (a `_pten` opened a record but `_pteva`/`_ptel2`/"
              "`_ptel1`/`_ptettbr`/`_pteu` did not all follow) - the recorder's write order or the "
@@ -2990,6 +3017,12 @@ def s_abt4(cap):
     else:
         say("PASS", "every pte-ladder record carries the full (pten, pteva, ptel2, ptel1, ptettbr, pteu) "
                     "tuple")
+    if rows and oow_partial:
+        say("OBS", "x%d pte-ladder record(s) carry NO `_pteoow` window key - this log PREDATES 1010c's "
+                   "window bound: the walk's out-of-window deref has no guard in the image that "
+                   "produced it (the 1010b defect)" % len(oow_partial))
+    elif rows:
+        say("PASS", "every pte-ladder record carries the 1010c window keys (pteoow/ptewbase/ptewlen)")
 
     # ---- (abt4-3) THE L2 TYPE: every published `_ptel2` must carry an L2 SMALL-PAGE type (bits[1:0] ==
     # 0b10).  A non-zero `_ptel2` whose type bits are NOT 0b10 means the walk read a section or a
@@ -3024,6 +3057,12 @@ def s_abt4(cap):
     perm_missing = []
     for r in zero_l2:
         if r["pten"] is None or r["pteva"] is None:
+            continue
+        # 1010c: a `_pteoow`==1 row with `_ptemapok`!=1 is a COVERED refusal - the table was outside
+        # the window and both alias slots were occupied, so the walk FAILED OPEN WITHOUT READING. That
+        # is not the 1010b instrument defect (the walk did not misread; it declined to read). It is
+        # reported as an OBS in (abt4-4c), not a HARD anomaly here.
+        if r["pteoow"] == ABT4_OOW_COVERED and r["ptemapok"] != 1:
             continue
         dv = [s for s in cap.abt3_records() if s["pcn"] == r["pten"] and s["fsr"] is not None]
         if not dv:
@@ -3088,12 +3127,41 @@ def s_abt4(cap):
              "in `__wrap_sleh_abort` and its walk call precedes every write, so an ABSENT `_pten` is the "
              "walk DYING mid-read - a fault INSIDE `stage90_read_l2_pte`, not a kernel reading (the 1010b "
              "TTBR0-mask fix read the TRUE L1, whose L2 table is at a PA OUTSIDE the entry window "
-             "[0x80000000, memSize) and the unbounded L2 deref faulted). Do NOT read the (A) ladder as a "
-             "PTE verdict; the walk needs a window bound (design 1010b)." % (
+             "[0x80000000, memSize) and the unbounded L2 deref faulted). Under 1010c the walk bounds both "
+             "loads to [gPhysBase, gPhysBase+mem_size) and reaches an out-of-window L2 table through a "
+             "temporary section, so a truncation HERE means the window bound itself did not hold - a "
+             "fault INSIDE the walk, not a kernel reading. Do NOT read the (A) ladder as a PTE verdict." % (
                  len(walk_truncated), fmt(walk_truncated[0])))
     else:
         say("PASS", "every sampled `_pcn` ordinal has a matching `_pten` row (x%d siblings; the (A) "
                     "recorder survived its walk at every sampled abort)" % len(pc_ns))
+
+    # ---- (abt4-4c) THE 1010c WINDOW GATE.  When the image carries the window keys, READ the walk's
+    # own statement about where the L2 table was.  `_pteoow`==1 means a table pointer left the entry
+    # window [gPhysBase, gPhysBase+mem_size): the walk then either reached the leaf THROUGH A TEMPORARY
+    # SECTION (`_ptemapok`==1, the alias VA in `_ptealias`, the displaced word in `_pteslot`) or, when
+    # both alias slots were occupied, FAILED OPEN with a COVERED refusal (neither faulted nor truncated).
+    # Both are readings; the covered refusal leaves the leaf UNREAD for that ordinal, which the tail
+    # classifier must be told about so a `_ptel2`==0 there is NOT mistaken for the 1010b instrument bug.
+    oow_rows = [r for r in rows if r["pteoow"] == ABT4_OOW_COVERED]
+    aliased = [r for r in oow_rows if r["ptemapok"] == 1]
+    refused = [r for r in oow_rows if r["ptemapok"] != 1]
+    abt4_oow_covered = bool(oow_rows and not aliased)
+    has_window_keys = any(r["pteoow"] is not None for r in rows)
+    if not has_window_keys:
+        pass   # a pre-1010c image: the (abt4-2) OBS above already named the absence
+    elif oow_rows:
+        say("OBS", "x%d pte-ladder record(s) had a table pointer OUTSIDE the entry window (`_pteoow`=1): "
+                   "x%d reached the leaf through a temporary section (`xnu_live_abt_ptealias` set, "
+                   "`_ptemapok`=1), x%d failed open with a COVERED refusal (both alias slots occupied - "
+                   "the leaf is UNREAD there, NOT a fault and NOT a truncation)" % (
+                       len(oow_rows), len(aliased), len(refused)))
+        for r in aliased[:4]:
+            say("OBS", "  oow @:%d pten=%s alias=%s slot_before=%s win=[%s,+%s) ptel2=%s" % (
+                r["ln"], fmt(r["pten"]), fmt(r["ptealias"]), fmt(r["pteslot"]),
+                fmt(r["ptewbase"]), fmt(r["ptewlen"]), fmt(r["ptel2"])))
+    else:
+        say("PASS", "no pte-ladder record left the entry window (`_pteoow`=0 over x%d rows)" % len(rows))
 
     # ---- (abt4-5) MONOTONICITY / ladder membership of `_pten`.
     def on_ladder(n):
@@ -3189,7 +3257,8 @@ def s_abt4(cap):
     # `_ptel2`, NEVER by the whole-run `_ptenx` (the 1008/1009 measurement defect, NOT repeated).  The
     # tail rows carry `_ptel2`/`_ptettbr`/`_pteu`; their L2 APX constancy IS the "read-only" statement.
     tail_rows = [r for r in rows
-                 if r["pten"] is not None and r["pten"] >= ABT4_TAIL_MIN_PTEN and r["ptel2"] is not None]
+                 if r["pten"] is not None and r["pten"] >= ABT4_TAIL_MIN_PTEN and r["ptel2"] is not None
+                 and not (r["pteoow"] == ABT4_OOW_COVERED and r["ptemapok"] != 1)]
     tail_apx = None
     if not rows:
         say("OBS", "the pte ladder carries NO rows: the tail cannot be classified - a branch over zero "
@@ -3284,11 +3353,16 @@ def s_abt4(cap):
     # exit).  A reader that cannot fail certifies nothing ([[mi4-measurement-defects]]).
     if rows and not partial and not abt4_walk_invalid and not abt4_walk_truncated:
         ABT4_CERTIFIED = True
+        if abt4_oow_covered:
+            say("OBS", "the 1010c window bound HELD (the walk survived every sampled abort), but x%d "
+                       "out-of-window record(s) could not be reached (both alias slots occupied): the "
+                       "leaf is UNREAD at those ordinals - the tail classifier below reads only the "
+                       "ordinals whose `_ptel2` the walk actually returned" % len(refused))
     elif abt4_walk_truncated:
         say("OBS", "the 1010 (A) L2-DESCRIPTOR gate is NOT certified: the walk was TRUNCATED mid-read (a "
-                   "`_pcn` ordinal with no `_pten` row) - the corrected TTBR0 mask reached a real L1 whose "
-                   "L2 table sits OUTSIDE the entry window, and the unbounded L2 deref faulted. The walk "
-                   "needs a window bound (1010c); the (B) vm_fault return is still read.")
+                   "`_pcn` ordinal with no `_pten` row) - a fault INSIDE the bounded walk, so even the "
+                   "1010c window bound did not hold. Do NOT read the (A) ladder as a PTE verdict; the (B) "
+                   "vm_fault return is still read.")
     elif abt4_walk_invalid:
         say("OBS", "the 1010 (A) L2-DESCRIPTOR gate is NOT certified: the walk read `_ptel2`=0 for a "
                    "LEVEL-2 PERMISSION fault (impossible for a correct walk - the TTBR0-base-mask defect). "

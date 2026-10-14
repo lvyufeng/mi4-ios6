@@ -2121,13 +2121,112 @@ void entry_write_kv(const char *key, uint32_t value);   /* identically to :1920/
 #define ABTPTE_L2_SMALL_PAGE   0x2u          /* L2_SMALL_PAGE   pmap.h:226 (bits[1:0]=0b10) */
 
 /*
- * `uint32_t stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used);`
+ * 1010c - THE WINDOW BOUND, and the temporary section that reaches an out-of-window L2 table.
+ *
+ * 1010b (`records/1010b-press-read.txt`) fixed the TTBR0-base mask and so read the TRUE L1 - whose
+ * coarse descriptor points at an L2 table at PA 0x46300000, in the device's LOW RAM bank
+ * [0, 0x60000000). The walk dereferences that table with NO bound, and XNU's boot tables map only
+ * `[gPhysBase, gPhysBase + mem_size)` (phys==virt; `arm_vm_init.c:331-338`), so the load faulted
+ * FS=5 and the run died at launchd-start. **A walk that cannot reach a table must SAY SO, never
+ * fault** (`docs/1010-pte-walk.md` §7). So both derefs are now bounded to the window, and the L2
+ * table the window refuses is reached the way this port already reaches a low-RAM page: a temporary
+ * 1 MB section VA->PA installed by `entry_mmio_section` (the 911c `entry_smem.c` mechanism, capture
+ * `cb4e17f1`), read through, and RESTORED - no helper restores, so the restore is spelled here.
+ *
+ * The two alias VAs sit in the hole between the RAM banks (`entry_smem.h:56-58` names it), far from
+ * the console (0xde500000) and the MMIO (0xf9000000+). `entry_mmio_section` refuses an OCCUPIED
+ * slot, so a collision fails open (no leaf, published as `_ptel2map=0`) rather than clobbering.
+ */
+#define ABTPTE_ALIAS_VA_A      0xd0000000u   /* the hole between the banks; index 0xd00 */
+#define ABTPTE_ALIAS_VA_B      0xa0000000u   /* a second, in case the first slot is taken; 0xa00 */
+#define ABTPTE_SECT_MASK       0xfff00000u   /* a 1 MB section base (LIVE_TTE_PA_MASK, entry_stubs.c) */
+
+/* XNU's own window globals (`arm_vm_init.c:76,81`), already referenced above; decl'd here so the walk
+ * binds to the window the kernel was handed rather than to a transcribed constant. `gPhysBase`'s
+ * existing live extern in this TU is `uint32_t` (`:10378`) - match it, not `arm_vm_init.c`'s
+ * `unsigned long` (both 4 bytes, but two types for one object is the defect class). */
+extern uint32_t gPhysBase;
+extern uint32_t mem_size;
+
+/* `entry_mmio_section` (`entry_stubs.c:2689`, defined later in this TU) and the table it wrote into.
+ * The walk calls it from here (earlier in the file), so the prototypes and the published table word
+ * are named before use - the same forward-declaration shape `entry_gic.c`/`entry_smem.c` use. */
+extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_before_out,
+                                   uint32_t *desc_out);
+extern uint32_t g_live_mmio_l1;
+
+/*
+ * 1010c - the walk's OUT-OF-WINDOW readings, statics rather than new out-params so the recorder can
+ * publish them without an ever-widening signature. Reset by the recorder before each walk.
+ */
+static uint32_t g_abtpte_walk_oow;      /* 1 = the L1 slot OR the L2 leaf lay outside the window */
+static uint32_t g_abtpte_walk_aliasva;  /* the section VA the walk reached the L2 table through */
+static uint32_t g_abtpte_walk_mapok;    /* 1 = a section was installed (0 = refused / not needed) */
+static uint32_t g_abtpte_walk_slot;     /* the slot_before of that install (0 = the slot was free) */
+static uint32_t g_abtpte_walk_winbase;  /* the window base the walk bounded with (gPhysBase) */
+static uint32_t g_abtpte_walk_winlen;   /* the window length the walk bounded with (mem_size) */
+
+/*
+ * 1010c - reach ONE 32-bit L2 word through a temporary 1 MB section. Returns the raw word, or 0 if
+ * neither alias slot could be installed (occupied, or no live channel) - a REFUSAL that the caller
+ * publishes, never a fault. `l2word_pa` is the exact PA of the leaf; the section covers the 1 MB
+ * around it and the offset is the PA's low 20 bits.
+ */
+static uint32_t
+stage90_read_l2_word_aliased(uint32_t l2word_pa)
+{
+    uint32_t cand, sect, off, slot_before, desc, mapped, l2e;
+    volatile uint32_t *slot;
+
+    sect = l2word_pa & ABTPTE_SECT_MASK;
+    off  = l2word_pa & 0x000fffffu;
+    cand = ABTPTE_ALIAS_VA_A;
+    mapped = entry_mmio_section(cand, sect, &slot_before, &desc);
+    if (mapped == 0u) {
+        cand = ABTPTE_ALIAS_VA_B;
+        mapped = entry_mmio_section(cand, sect, &slot_before, &desc);
+    }
+    if (mapped == 0u)
+        return 0u;                                   /* both slots occupied / no live channel */
+
+    g_abtpte_walk_aliasva = cand;
+    g_abtpte_walk_mapok   = 1u;
+    g_abtpte_walk_slot    = slot_before;
+
+    l2e = *(const volatile uint32_t *)(uintptr_t)(cand + off);
+
+    /*
+     * RESTORE the slot the install displaced. `entry_section_install` writes the descriptor and does
+     * NOT restore (verified, `entry_stubs.c:2569-2599`), and it recorded the old word in
+     * `slot_before`; the table to restore into is `g_live_mmio_l1` - the exact table the install
+     * wrote, never a re-derived one (the 484 defect). DCCMVAC + DSB/ISB + TLBIMVA, the same pair the
+     * install uses, so the descriptor and the TLB agree before the walk's own caller returns.
+     */
+    slot = (volatile uint32_t *)(uintptr_t)(g_live_mmio_l1 + 4u * (cand >> 20));
+    *slot = slot_before;
+    __asm__ volatile ("mcr p15, 0, %0, c7, c10, 1" :: "r"(slot) : "memory");
+    __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
+    __asm__ volatile ("mcr p15, 0, %0, c8, c7, 1" :: "r"(cand) : "memory");
+    __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
+
+    return l2e;
+}
+
+/*
+ * `uint32_t stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used,
+ *                               uint32_t allow_alias);`
  * Reads TTBR0/TTBCR, picks the table by TTBCR.N, indexes L1 by VA[31:20], requires a COARSE L1
  * descriptor, indexes L2 by VA[19:12], and returns the raw SMALL-PAGE L2 word (`& 3 == 2`) else 0.
  * `*out_l1_desc` gets the raw L1 word; `*out_ttbr0_used` is 1 iff TTBR0 answered.
+ *
+ * 1010c bounds BOTH loads to `[gPhysBase, gPhysBase + mem_size)` and fails open. An out-of-window
+ * L2 leaf is reached through a temporary section ONLY when `allow_alias` is set - the recorder passes
+ * it on the ladder ordinals alone, so a 2.1 M-abort storm does not install/restore a section on every
+ * abort. The statics above carry the readings out.
  */
 uint32_t
-stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used)
+stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used,
+                    uint32_t allow_alias)
 {
     uint32_t ttbr0, ttbcr, n, base, l1e, l2base, l2e;
     uintptr_t l1p, l2p;
@@ -2165,8 +2264,24 @@ stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used
     if (base == 0u)
         return 0u;
 
+    /*
+     * 1010c - THE WINDOW. XNU's boot tables map only `[gPhysBase, gPhysBase + mem_size)` and this
+     * image's premise is phys == virt (`arm_vm_init.c:331-338`; `xnu_entry_jump.c` sets both to
+     * 0x80000000), so a table pointer inside that window is readable and one outside it is a
+     * translation fault. Bound the window once here and test both loads against it.
+     */
+    g_abtpte_walk_winbase = (uint32_t)gPhysBase;
+    g_abtpte_walk_winlen  = mem_size;
+
     /* L1 index = VA[31:20] (tte_offset, pmap.h:198); L2 index = VA[19:12] (pte_offset, pmap.h:199). */
     l1p = (uintptr_t)base + (((va >> 20) & 0xfffu) << 2);
+
+    /* The L1 slot itself must be in-window. If it is not, the walk CANNOT read it - say so and fail
+     * open (never deref). `_pteoow` publishes the refusal so "the table is elsewhere" is a reading. */
+    if (l1p < (uintptr_t)gPhysBase || l1p >= (uintptr_t)gPhysBase + (uintptr_t)mem_size) {
+        g_abtpte_walk_oow = 1u;
+        return 0u;
+    }
     l1e = *(const volatile uint32_t *)l1p;
     if (out_l1_desc != 0)
         *out_l1_desc = l1e;
@@ -2181,7 +2296,22 @@ stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used
         return 0u;
 
     l2p = (uintptr_t)l2base + (((va >> 12) & 0xffu) << 2);
-    l2e = *(const volatile uint32_t *)l2p;
+
+    /*
+     * 1010c - THE L2 LEAF. In-window: read it directly. OUT-of-window (the 1010b defect: the true L1
+     * pointed at an L2 table at PA 0x46300000, below the window): reach it through a temporary
+     * section VA->PA - but ONLY when `allow_alias` is set, so a 2.1 M-abort storm does not
+     * install/restore a section on every abort (the recorder passes 1 on the ladder ordinals alone).
+     * When the alias is not allowed or its slots are taken, fail open and publish the refusal.
+     */
+    if (l2p >= (uintptr_t)gPhysBase && l2p < (uintptr_t)gPhysBase + (uintptr_t)mem_size) {
+        l2e = *(const volatile uint32_t *)l2p;
+    } else {
+        g_abtpte_walk_oow = 1u;                       /* the leaf PA is outside the window */
+        if (allow_alias == 0u)
+            return 0u;
+        l2e = stage90_read_l2_word_aliased((uint32_t)l2p);
+    }
 
     /* A small-page leaf (bits[1:0]=0b10) is the only L2 entry that carries this page's AP bits; any
      * other shape (64K-large 0b01, absent 0b00, invalid 0b11) means the walk found no small page. */
@@ -2209,9 +2339,24 @@ void
 entry_note_abt_pte(uint32_t va)
 {
     uint32_t n = ++g_abtpte_n;
-    uint32_t l1 = 0u, u = 0u, l2, ttbr;
+    uint32_t l1 = 0u, u = 0u, l2, ttbr, onladder;
 
-    l2 = stage90_read_l2_pte(va, &l1, &u);
+    /*
+     * 1010c: the ALIAS is allowed on the LADDER ordinals alone (the rows that are published), so a
+     * 2.1 M-abort storm does not install/restore a temporary section on every abort. The ladder is
+     * the same `n <= 4 || power-of-two` set the rows use.
+     */
+    onladder = (n <= 4u || (n & (n - 1u)) == 0u) ? 1u : 0u;
+
+    /* Reset the walk's out-of-window readings before each walk (they are statics, not out-params). */
+    g_abtpte_walk_oow = 0u;
+    g_abtpte_walk_aliasva = 0u;
+    g_abtpte_walk_mapok = 0u;
+    g_abtpte_walk_slot = 0u;
+    g_abtpte_walk_winbase = (uint32_t)gPhysBase;
+    g_abtpte_walk_winlen = mem_size;
+
+    l2 = stage90_read_l2_pte(va, &l1, &u, onladder);
 
     __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr));   /* the TTBR0 word actually used */
 
@@ -2219,15 +2364,23 @@ entry_note_abt_pte(uint32_t va)
 
     /*
      * The LADDER rows - 1008/1009's set VERBATIM (the tail is already sampled), so `_ptel2` at a
-     * given ordinal pairs with 1009's `_pc`/`_pcfar` at the SAME ordinal.
+     * given ordinal pairs with 1009's `_pc`/`_pcfar` at the SAME ordinal. 1010c adds the walk's
+     * window verdict (oow/aliasva/mapok/slot + the window it bounded with) so an absent `_ptel2` is
+     * legible as "outside the window" rather than "no small page" - the 1010b defect made a reading.
      */
-    if (n <= 4u || (n & (n - 1u)) == 0u) {
+    if (onladder) {
         entry_write_kv("xnu_live_abt_pten",    n);      /* the ordinal */
         entry_write_kv("xnu_live_abt_pteva",   va);     /* the fault VA (far_) */
         entry_write_kv("xnu_live_abt_ptel2",   l2);     /* the raw L2 small-page descriptor */
         entry_write_kv("xnu_live_abt_ptel1",   l1);     /* the raw L1 descriptor (a bad walk shows here) */
         entry_write_kv("xnu_live_abt_ptettbr", ttbr);   /* the TTBR0 word the walk used */
         entry_write_kv("xnu_live_abt_pteu",    u);      /* 1 = TTBR0 answered */
+        entry_write_kv("xnu_live_abt_pteoow",  g_abtpte_walk_oow);   /* 1 = a table pointer left the window */
+        entry_write_kv("xnu_live_abt_ptealias", g_abtpte_walk_aliasva); /* section VA used (0 = none) */
+        entry_write_kv("xnu_live_abt_ptemapok", g_abtpte_walk_mapok);   /* 1 = a section was installed */
+        entry_write_kv("xnu_live_abt_pteslot",  g_abtpte_walk_slot);    /* displaced slot word (0 = free) */
+        entry_write_kv("xnu_live_abt_ptewbase", g_abtpte_walk_winbase); /* gPhysBase the walk bounded with */
+        entry_write_kv("xnu_live_abt_ptewlen",  g_abtpte_walk_winlen);  /* mem_size the walk bounded with */
     }
 
     /*
