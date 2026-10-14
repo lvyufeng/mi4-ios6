@@ -48,6 +48,18 @@ through dyld's image". The 40 is where the **capped live channel** stopped, not 
 The first ~40 aborts *are* the dyld walk (their `sleh_far`s step through `0x2be…`, the dyld image);
 what follows is a **storm** the capped channel never showed.
 
+**1004's own checker has the same blind spot, and its *own* capture proves it.** `check_1004_capture.py`
+reads the cap *positionally* — if `xnu_live_capped` lands after the last `sleh` record it prints "the
+abort trace is COMPLETE" (`:716`). In 1004's own capture
+(`recovered-unknown-arm-20261013-160126-last_kmsg.txt`) the last `sleh` record is at :28020 and the cap
+at :29006 — *after* it — so the checker called the trace complete while the storm ran on invisibly.
+The positional test is right for what it measures (no `sleh` record was dropped *before* the cap) but
+wrong for the verdict it draws: **a cap after the last *published* `sleh` record does not mean the
+aborts stopped** — it means the channel did. The `_storm` counter that was meant to say otherwise
+(`xnu_live_sleh_storm`, `entry_stubs.c:1814`) rides the **same capped channel** and so can never fire
+once the channel is full. The only instrument that saw the true count is the direct-channel one 1007
+added (`xnu_live_abt_n`).
+
 ## The freeze magnitude, exactly
 
 `xnu_live_tick_sum_maxd` is a **running maximum** republished 14×. Its largest (and last) value is
