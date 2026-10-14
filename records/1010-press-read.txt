@@ -1,0 +1,131 @@
+# 1010 press read — `armed-d13-0f39207c`
+
+**Capture.** The press booted via `fastboot boot` (never flash) at 2026-10-14 ~16:01; the runner
+returned 2 (the expected resident non-return, USB capture empty); the device was dark and returned
+**on its own** (adb, `4a2fe00b`) — the watchdog reset it, as in 1009. Recovered log (read-only, the
+device was already up):
+
+`out/stage90/captures/recovered-unknown-arm-20261014-163943-last_kmsg.txt` (1,457,488 B, 31,270 lines).
+
+Adjudicated with `python3 tools/check_1010_capture.py <capture>` — **0 HARD ANOMALIES**, EXIT=0,
+DEATH GATE OPEN.
+
+## VERDICT — the storm REPRODUCED (class-identical, 24.39 s); the 1010 (A) WALK IS INVALID (an instrument defect), so 1010 does NOT name the mechanism
+
+### 1. The storm reproduces 1009 to the second
+
+| key | 1009 (`24997fc5`) | 1010 (`0f39207c`) |
+|---|---|---|
+| tail `pc` | `0x2be8a1a0` | `0x2be4d1a0` (slides; dyld `__TEXT`) |
+| tail `far` | `0x0009a000` | `0x0005d000` (slides; low user VA) |
+| tail `fsr` | `0x0000080f` | `0x0000080f` (WnR=1 \| FS=15 permission fault, level 2) |
+| tail `abtcpsr` | `0x60000030` | `0x60000030` (USER mode 0x10, IRQ enabled) |
+| `abt_n` (this run) | `0x200000` | `0x00100000` |
+| `tick_sum_maxd` | `0x1be8767b` (24.386 s) | `0x1be90c2b` (24.394 s) |
+| `abt_maxcall` | `0x1570e6a5` (18.7 s) | `0x157121d9` (18.73 s) |
+| resident | `wdt_pets=97` | `wdt_pets=0x61=97` |
+
+`No errors detected`; the watchdog was fed; the machine returned on its own. **The class is invariant
+(USER-mode write, level-2 permission fault, dyld pc, low user far) and the addresses slide run to
+run** — 1008's and 1009's `far` slid `0x7b000 → 0x9a000 → 0x5d000` and `pc` likewise. 1009 is
+reproduced by value.
+
+### 2. The (B) cell: `vm_fault` returned `KERN_SUCCESS` on the user faults
+
+The 4 published `_vmf` rows (the recorder publishes the **first 4** returns, by design):
+
+| `vmfn` | `vmfret` | `vmfva` | `vmfprot` | reading |
+|---|---|---|---|---|
+| 1 | `1` KERN_INVALID_ADDRESS | `0xcfdbd000` | `0x3` | kernel copyin (stack) |
+| 2 | `1` KERN_INVALID_ADDRESS | `0xcfdfe000` | `0x3` | kernel copyout (stack) |
+| 3 | `0` **KERN_SUCCESS** | `0x2bdc3000` | `0x3` | **a USER fault** |
+| 4 | `0` **KERN_SUCCESS** | `0x2be3d000` | `0x5` | **a USER fault (READ\|EXEC)** |
+
+So for user faults `vm_fault` returns **`KERN_SUCCESS`** — the retry branch's precondition, matching
+1009's silence argument. (Limitation: the first-4 bound captures only the *prefix*, not the tail —
+§4.)
+
+### 3. The (A) cell is INVALID — the walk read `ptel2=0, pteu=0` at the tail, which a LEVEL-2 PERMISSION FAULT CANNOT PRODUCE
+
+For the storm's tail (`pten` 0x400 … 0x100000, `pteva=0x0005d000`) every row reads:
+
+```
+ptel2=0x00000000  ptel1=0x81bb1001 (a COARSE L1 descriptor, type 1)  ptettbr=0x81a8605b  pteu=0
+```
+
+**`pteu=0` means the walk found no small-page L2 leaf.** But the fault is `fsr=0x80f` = FS=15 =
+**permission fault, level 2** — which *requires* a **present** level-2 descriptor with insufficient
+permission. An absent L2 entry produces FS=5/6/7 (a *translation* fault), never FS=15. **So the
+walk's `ptel2=0` is incompatible with the fault it claims to describe: the WALK is wrong, not the
+page.**
+
+### 4. The defect, found by value: the walk masks TTBR0 with the wrong mask
+
+`stage90_read_l2_pte` (`src/entry/entry_stubs.c:2146`) does:
+
+```c
+base &= ABTPTE_L1_PTE_MASK;   /* = 0xfffffc00, pmap.h L1_PTE_ADDR_MASK, "bits[31:10]" */
+```
+
+But `ABTPTE_L1_PTE_MASK` (`0xfffffc00`) is the **coarse-L1-descriptor → L2-table** mask (an L2 table
+is `L2_SIZE`=1 KB aligned, so bits[9:0] are flags — correct for `l2base = l1e & mask` at `:2161`).
+The **TTBR0 base** needs a different mask: an L1 table is `L1_SIZE` = **0x4000 = 16 KB** aligned
+(`pmap.h:195`), so its base is `bits[31:14]` → mask **`0xffffc000`**. The walk substituted one mask
+for the other — a **stand-in** (`[[mi4-stand-in-size-is-not-value]]`).
+
+Read off the live word: `TTBR0 = 0x81a8605b`.
+
+| mask | base | 16 KB aligned? |
+|---|---|---|
+| `0xffffc000` (design §2; `entry_live_ttb_base`, `entry_stubs.c:2624`) | `0x81a84000` | **yes** |
+| `0xfffffc00` (the walk code) | `0x81a86000` | **no** |
+
+The walk therefore read from `0x81a86000`, **0x2000 high** of the real L1 at `0x81a84000` — i.e. it
+read the real table's entry `[VA_L1_index + 0x800]` (0x2000/4). For `far=0x5d000` (L1 index 0) that
+is real entry `0x800` = the L1 word for VA `0x80000000` (the **kernel**), whose L2 lookup then missed
+→ `ptel2=0`. The 3 rows that *did* return a leaf (pten 0x20/0x100/0x200, all `APX=1` user-RO small
+pages) are from the **same shifted table** and are equally unreliable.
+
+**The correct mask is `0xffffc000`** — the design (`docs/1010-pte-walk.md §2`) says so, and the port's
+own `entry_live_ttb_base` uses it and *works* (the live console is proof). The walk's use of
+`0xfffffc00` is a defect of the **instrument**, not a reading of the machine.
+
+### 5. This is the design's OWN falsifier (docs/1010-design.md §6)
+
+> "If the L2 walk yields a **section** or **absent** descriptor for `far_`, the walk itself is suspect
+> (wrong TTBR0 at the fault, or the port uses sections) and the extraction in §3.2 was wrong — the
+> rung re-reads the port's descriptor format by value before re-pressing."
+
+The design predicted exactly this outcome and prescribed exactly the fix. The mask is the wrongness.
+
+## What this does and does NOT say
+
+- **DOES say:** the storm reproduces 1009 by value (class constant; 24.39 s). The machine is resident
+  (`wdt_pets=97`), unpanicked, and returned on its own (`No errors detected`). The (B) cell shows
+  `vm_fault` returns `KERN_SUCCESS` on the user faults.
+- **DOES say (the finding):** the 1010 (A) walk is **invalid** — `ptel2=0` is impossible under
+  `fsr=0x80f`. The instrument's TTBR0 mask (`0xfffffc00`) is the wrong mask; the correct one is
+  `0xffffc000` (design §2, `entry_live_ttb_base`).
+- **DOES NOT say:** whether the tail leaf is APX=1 or APX=0 — the decisive cell is **still unread**.
+  The mechanism (cs-taint vs prot-deny, F1a vs F1b in `docs/1011-design.md`) **remains open.**
+
+## The next rung (1010b) — fix the instrument, re-press
+
+1. **Fix the mask.** In `stage90_read_l2_pte`, split the two masks: keep `0xfffffc00`
+   (`L1_PTE_ADDR_MASK`) for the **L2-table base** (`l2base = l1e & mask`, `:2161`), and use a NEW
+   `ABTPTE_TTBR_BASE_MASK = 0xffffc000u` for the **TTBR0 base** (`:2146`), cited to `pmap.h:195`
+   (`L1_SIZE` = 0x4000 → 16 KB alignment) and to `entry_live_ttb_base` (`entry_stubs.c:2624`).
+2. **Pin it with a build clause** that reads the mask BY VALUE and cross-checks it against the
+   working `entry_live_ttb_base`'s `0xffffc000` — a check, not a comment (`mi4-a-claim-in-a-comment-is-not-a-check`).
+3. **Extend the (B) ladder to the tail** (currently the first-4 bound: `ABTPTE_VMF_FIRST`): sample
+   `_vmfret` on the same powers-of-two ordinals (A) uses, so the storm's own `vm_fault` return is read.
+4. **Harden the checker**: flag "L2 absent/section on an FS=15 (level-2 permission) fault" as a HARD
+   ANOMALY naming the walk — the falsifier is now a check, not a paragraph.
+5. Rebuild (`armed-d13-…`), re-press, re-adjudicate. Only then does 1010 (A) read the leaf and name
+   which side of the `vm_map`-vs-PTE disagreement is wrong — and the 1011 fix (F1a/F1b) becomes
+   decidable.
+
+The frontier after 1010: **the storm reproduces 1009 with the fault class invariant; the L2 walk that
+was to name the PTE side read `ptel2=0` — impossible for a level-2 permission fault — because it
+masked TTBR0 with `0xfffffc00` instead of `0xffffc000`; the leaf is still unread, the mechanism still
+open.**
