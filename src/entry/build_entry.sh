@@ -303,7 +303,11 @@ if [[ $D13_TRACE -eq 1 ]]; then
     echo "  937: ${#TRACE_LDFLAGS[@]} trace wrap(s) -> ${#_937_kept[@]} for D13 (dropped $(( ${#TRACE_LDFLAGS[@]} - ${#_937_kept[@]} )) 4570-only target(s))"
     TRACE_LDFLAGS=("${_937_kept[@]}")
     unset -v _937_kept _w _d _drop
-    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1)
+    # **1005: the cadence witness reaches `entry_trace.c` by THIS vector, not `STUB_DEFINES`** (the
+    # trace object compiles on its own command line, `:2332-2333`). Same env var and same 0 default as
+    # the `$CADENCE` validated below, so the two spellings are one value; the append is here because
+    # `entry_trace.c`'s compile reads this array, and the switch must be in it before the compile.
+    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}")
 else
     # **946: 4570's list drops the one name D13's keeps.** `timer_call_enter1` is in the literal above so
     # `tools/check_timer_sources.py` can read the tree's wrap set out of the source; here the *other* tree
@@ -1144,6 +1148,20 @@ esac
 # `STAGE90_ENTRY_TRACE` region), exactly as the seam flags above do - so it is added here and
 # `entry_trace.c` (whose `#if`s consume the seam flags, not this one) does not need it.
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_ABORT_TRACE="$ABORT_TRACE")
+# **1005: the cadence witness - a timer-independent (syscall) sample beside the tick, plus an
+# all-interrupt counter, and the sleh seq/back `++` made atomic ([[mi4-measurement-defects]]).** With
+# `STAGE90_XNU_CADENCE=1`, `entry_stubs.c` gains `entry_cadence_sample`/`entry_cadence_summary` and
+# `entry_trace.c`'s pet calls the summary; the two sleh increments become `__atomic_fetch_add`. This
+# is a pure MEASUREMENT switch: OFF, every `#else` is the prior token set, byte for byte. The flag
+# reaches BOTH files: `entry_stubs.c` through `STUB_DEFINES` (added here) and `entry_trace.c` through
+# `STUB_DEFINES_TRACE` (appended at its own assignment above) - the same split the seam flags use.
+CADENCE=${STAGE90_XNU_CADENCE:-0}
+case "$CADENCE" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_CADENCE='$CADENCE' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_CADENCE="$CADENCE")
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
 # commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
@@ -1660,6 +1678,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_SHREG_GEOM
                 STAGE90_XNU_STALL
                 STAGE90_XNU_ABORT_TRACE
+                STAGE90_XNU_CADENCE
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1889,6 +1908,12 @@ do
         # from `STUB_DEFINES`, so the record and the stub object cannot be built from two spellings of
         # this switch. Read from `$ABORT_TRACE`, validated 0/1 at its own assignment above this loop.
         STAGE90_XNU_ABORT_TRACE)     _v=$ABORT_TRACE ;;
+        # 1005: the cadence witness - a syscall-path sample beside the tick, an all-interrupt counter,
+        # and the sleh seq/back `++` made atomic. Its two consumers are `entry_stubs.c` (via
+        # `STUB_DEFINES`) and `entry_trace.c` (via `STUB_DEFINES_TRACE`), both compiled here, so the
+        # record and the objects cannot be built from two spellings. Read from `$CADENCE`, validated
+        # 0/1 at its own assignment above this loop.
+        STAGE90_XNU_CADENCE)         _v=$CADENCE ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -39580,6 +39605,14 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # abort-trace arm. Written as the RESOLVED `$ABORT_TRACE`, not `${STAGE90_XNU_ABORT_TRACE}`, for
     # 882's reason.
     echo "STAGE90_XNU_ABORT_TRACE=$ABORT_TRACE"
+    # **1005's switch, written here for the same reason the ABORT_TRACE line above states**: this writer
+    # is the one site a name-keyed diff does not visit and the only site the gate ever reads, and CADENCE
+    # is an ARM key - it adds the syscall-path cadence sample + summary and the all-interrupt counter, and
+    # makes the sleh seq/back increments atomic. OFF, the image is byte-for-byte a build without the
+    # witness (and with the old non-atomic `++`); a record that omitted this key would let a witness-free
+    # image pass as the 1005 cadence arm. Written as the RESOLVED `$CADENCE`, not `${STAGE90_XNU_CADENCE}`,
+    # for 882's reason.
+    echo "STAGE90_XNU_CADENCE=$CADENCE"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

@@ -191,6 +191,16 @@ static unsigned int g_msm8974_tick_ticks;
  * the reading 984 could not make, because the line it would have come from did not exist. */
 static unsigned int g_msm8974_tick_count;
 
+/* 1005: the cadence witness's board half. g_msm8974_irq_count counts EVERY interrupt
+ * delivery (all lines), beside g_msm8974_tick_count (the timer line only, :192). Read by
+ * entry_stubs.c's summary through the two accessors below (a plain load; single CPU per
+ * counter, so no atomics are needed and none are used). OFF: the guard compiles out. */
+#if defined(STAGE90_XNU_CADENCE) && STAGE90_XNU_CADENCE
+static uint32_t g_msm8974_irq_count;
+uint32_t entry_board_tick_count(void) { return (uint32_t)g_msm8974_tick_count; }
+uint32_t entry_board_irq_count(void)  { return g_msm8974_irq_count; }
+#endif
+
 /* **1000: the delivery's own lateness, in the counter the deadline is expressed in.** The arm site
  * stamps CNTVCT.lo immediately before it programs `CNTV_TVAL`; the handler reads CNTVCT.lo again at
  * the entry and the delta is "how long after the deadline this delivery arrived" - a reading about
@@ -467,6 +477,9 @@ msm8974_handle_interrupt(void *context)
 		 * honest guard for the one path that would otherwise repeat the abort. */
 		return;
 	}
+#if defined(STAGE90_XNU_CADENCE) && STAGE90_XNU_CADENCE
+	++g_msm8974_irq_count;
+#endif
 	gicc_iar  = g_msm8974_gicc + (MSM8974_GICC_IAR  / sizeof(unsigned int));
 	gicc_eoir = g_msm8974_gicc + (MSM8974_GICC_EOIR / sizeof(unsigned int));
 

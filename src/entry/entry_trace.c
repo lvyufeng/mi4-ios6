@@ -2134,6 +2134,12 @@ extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_befo
  * wrapper above the seam's own declarations, and there is no header both sides share. */
 extern void entry_write_kv(const char *key, uint32_t value);
 extern void entry_tick_summary(void);
+/* **1005: the cadence witness's post-cap snapshot, riding the pet's same sparse gate.** Defined in
+ * `entry_stubs.c` beside `g_usvc_n`; declared here for the reason the two above are. Gated so
+ * CADENCE=0 compiles this file unchanged. */
+#if defined(STAGE90_XNU_CADENCE) && STAGE90_XNU_CADENCE
+extern void entry_cadence_summary(void);
+#endif
 
 static uint32_t g_wdt_installed;      /* the pet has a mapping it can vouch for */
 static uint32_t g_wdt_pets;
@@ -2243,6 +2249,12 @@ __attribute__((noinline)) void entry_wdt_pet(uint32_t calls)
          * at moments the cap cannot swallow - 999 could see the tick only through edge probes, and
          * the collapse's aggregate was unreadable after the exec. */
         entry_tick_summary();
+#if defined(STAGE90_XNU_CADENCE) && STAGE90_XNU_CADENCE
+        /* **1005: the cadence triple rides the same gate.** The pet fires across the whole run, so
+         * the last cadence numbers are visible at a moment that is not a syscall - a run whose
+         * syscalls stop still gets one final (sync, tick, irq) snapshot here. */
+        entry_cadence_summary();
+#endif
     }
 
     /* Pet only when the count has passed half the bark. `g_wdt_bark_ticks == 0` (a bark register that did

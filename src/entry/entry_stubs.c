@@ -1746,7 +1746,11 @@ void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread
 {
     uint32_t sp = 0u, lr = 0u, pc = 0u, cpsr = 0u, fsr_frame = 0u, far_frame = 0u;
 
+#if defined(STAGE90_XNU_CADENCE) && STAGE90_XNU_CADENCE
+    __atomic_fetch_add(&g_sleh_seq, 1u, __ATOMIC_RELAXED);
+#else
     g_sleh_seq++;
+#endif
     g_sleh_type = type;
     g_sleh_fsr = fsr;
     g_sleh_far = far_;
@@ -1858,7 +1862,11 @@ void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread
 
 void entry_note_sleh_back(uint32_t redirected)
 {
+#if defined(STAGE90_XNU_CADENCE) && STAGE90_XNU_CADENCE
+    __atomic_fetch_add(&g_sleh_back, 1u, __ATOMIC_RELAXED);
+#else
     g_sleh_back++;
+#endif
 
     /*
      * **490: the word was armed, or it was spent - and this is the second of the two.** The wrapper
@@ -5173,6 +5181,14 @@ uint32_t g_exec_calls;
  * name in this image. */
 extern void entry_tick_summary(void);
 
+/* **1005: the cadence witness's late snapshot, asked for at the same exec-done point.** Defined
+ * lower in THIS file (beside `g_usvc_n`), so unlike the board PE's summary above it is same-file -
+ * declared at use for the same reason every cross-region name here is, and gated so CADENCE=0 is
+ * the prior image byte for byte. */
+#if defined(STAGE90_XNU_CADENCE) && STAGE90_XNU_CADENCE
+void entry_cadence_summary(void);
+#endif
+
 uint32_t entry_note_exec(uint32_t caller, uint32_t who, uint32_t proc)
 {
     uint32_t seq = g_exec_calls + 1u;
@@ -5213,6 +5229,9 @@ void entry_note_exec_returned(uint32_t seq, uint32_t who, uint32_t after_who)
      * above (ANY later direct write does), so the stashed readback lands immediately before the
      * summary's three keys. */
     entry_tick_summary();
+#if defined(STAGE90_XNU_CADENCE) && STAGE90_XNU_CADENCE
+    entry_cadence_summary();
+#endif
 }
 
 /* ------------------------------ the user side's syscalls (1000) */
@@ -5263,6 +5282,44 @@ void entry_note_exec_returned(uint32_t seq, uint32_t who, uint32_t after_who)
  */
 uint32_t g_usvc_n;
 
+#if defined(STAGE90_XNU_CADENCE) && STAGE90_XNU_CADENCE
+extern uint32_t entry_board_tick_count(void);
+extern uint32_t entry_board_irq_count(void);
+static uint32_t g_cadence_sync;
+static uint32_t g_cadence_samples;
+
+/* First CADENCE_FULL_N samples in full (fine near the frontier), then the powers-of-two ladder -
+ * the USVC window's own rule (entry_stubs.c:5266), so a 23-minute run costs ~2 records/doubling. */
+#define CADENCE_FULL_N 16u
+
+__attribute__((noinline)) void
+entry_cadence_sample(void)
+{
+    uint32_t s;
+    if (entry_live_ready() == 0u)
+        return;
+    s = ++g_cadence_samples;
+    if (s <= CADENCE_FULL_N || (s & (s - 1u)) == 0u) {
+        entry_write_kv("xnu_live_cadence_t", s);
+        entry_write_kv("xnu_live_cadence_sync", g_cadence_sync);
+        entry_write_kv("xnu_live_cadence_tick", entry_board_tick_count());
+        entry_write_kv("xnu_live_cadence_irq", entry_board_irq_count());
+    }
+}
+
+/* The late snapshot: the last cadence numbers at a moment that is NOT a syscall - so a run whose
+ * syscalls stop still gets one final (sync, tick, irq) triple from the pet/exec-done gate. */
+void
+entry_cadence_summary(void)
+{
+    if (entry_live_ready() == 0u)
+        return;
+    entry_write_kv("xnu_live_cadence_sync", g_cadence_sync);
+    entry_write_kv("xnu_live_cadence_tick", entry_board_tick_count());
+    entry_write_kv("xnu_live_cadence_irq", entry_board_irq_count());
+}
+#endif
+
 #define USVC_FULL_N 64u      /* the full-field window; past it the ladder writes `_n`/`_num` only */
 
 /* `int proc_pid(proc_t)` and `proc_t current_proc(void)` in this file's `void *` spelling of a XNU
@@ -5282,6 +5339,10 @@ entry_note_user_svc(const uint32_t *state)
     if (entry_live_ready() == 0u)
         return;
     n = ++g_usvc_n;
+#if defined(STAGE90_XNU_CADENCE) && STAGE90_XNU_CADENCE
+    g_cadence_sync = n;
+    entry_cadence_sample();
+#endif
 
     if (state == 0) {
         entry_write_kv("xnu_live_usvc_n", n);
