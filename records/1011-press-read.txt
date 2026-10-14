@@ -1,0 +1,149 @@
+1011 press-read — the F1a/F1b DECISION is MEASURED: F1a.  The vm_map_entry GRANTS write
+(`vmeprot=0x3` READ+WRITE, `vmekr=KERN_SUCCESS` on a WRITE fault) yet the store keeps
+permission-faulting => the write is LOST between `prot` and the PTE.  AND the (A) walk's own
+TTBR0 base mask is WRONG (`0xffffc000` vs the port's TTBRCR.N=2 alignment `0xfffff000`),
+which is why the L2 leaf has been unreadable since 1010b.
+====================================================================================
+
+Arm:      armed-d13-fce83837   (sha256 fce8383727fc761689c7d26556d3ba7355626c1968cee61218b08386d5f73f14)
+Image:    out/stage90/xnu_arm_entry.elf, 6347860 bytes
+Capture:  out/stage90/captures/recovered-unknown-arm-20261014-220748-last_kmsg.txt
+          (recovered via scripts/recover_last_kmsg.sh --read-only after the operator's power press;
+           the carrier is the FLASHED ROM — this log is the PREVIOUS boot's RAM console)
+Runner:   exit 2 (resident rung did not return).  No panic: "No errors detected".  The machine
+          came back on the operator's power press (device dark, no host-side recovery).
+
+WHICH RUN THIS IS (proven, not assumed)
+---------------------------------------
+out/stage90/xnu_arm_entry-config.txt names the entry bin's sha256 = fce83837…, the 1011 arm.  The
+capture carries the 1011-only cells: the SIX (E') `xnu_live_abt_vme*` keys (these exist in NO
+earlier image — 1010c had 36 `xnu_live_abt_` literals, 1011 has 43) and the (A) `xnu_live_abt_ptethr`.
+So this IS the 1011 press, not a stale log.
+
+STORM IDENTITY (by value, whole tail)
+--------------------------------------
+    xnu_live_abt_pc      =0x2be511a0        (dyld __TEXT)
+    xnu_live_abt_far     =0x00061000
+    xnu_live_abt_fsr     =0x0000080f       (WnR=1 a WRITE; FS=0xf level-2 permission fault)
+    xnu_live_abt_pteva   =0x00061000
+    xnu_live_abt_abtcpsr =0x60000030       (USER, IRQ-off)
+    xnu_live_abt_pcn     max reached 0x00100000 (1,048,576) — a storm, but SHORTER than 1009's
+                          0x00200000 (the capture cap xnu_live_cap=0x6000=24576 was hit:
+                          `xnu_live_capped` is present), so the run was cut by the RECORD CHANNEL
+                          before the 24.4 s freeze landed; the freeze itself is 1009/1010c's reading,
+                          unchanged.
+Same shape as 1009/1010c: user WRITE permission fault at low VA 0x61000, dyld text, silent retry.
+
+RESULT 1 — (E') THE DECISION CELL IS READ AT THE STORM.  NEW, DECISIVE.
+----------------------------------------------------------------------
+The (E') ladder (`xnu_live_abt_vmen`) has x22 rows, and every TAIL row (ordinal >= 0x400) is the
+SAME tuple (read by value, e.g. ordinals 0x1000, 0x2000, 0x4000, 0x8000, 0x10000, 0x20000, 0x40000,
+0x80000, 0x100000):
+
+    xnu_live_abt_vmekr    = 0x00000000   = KERN_SUCCESS
+    xnu_live_abt_vmeprot  = 0x00000003   = VM_PROT_READ | VM_PROT_WRITE      <-- THE DISCRIMINATOR
+    xnu_live_abt_vmefault = 0x00000003   = VM_PROT_READ | VM_PROT_WRITE      (a WRITE fault)
+    xnu_live_abt_vmeva    = 0x00061000   = far, the faulting VA
+
+`out_prot` is `vm_map_lookup_locked`'s OUT-parameter (vm_map.c:9167 `*out_prot = prot`), set from
+`prot = entry->protection` (vm_map.c:9061) with the needs_copy read-demotion at vm_map.c:9139.  So
+`vmeprot = 0x3` IS the entry's EFFECTIVE protection for the faulting VA: it carries VM_PROT_WRITE.
+
+**F1b IS FALSIFIED BY VALUE, WITH NO NEED TO TRUST THE CHECKER.**  `vm_map_lookup_locked` refuses a
+write the entry does not grant, BEFORE `vm_fault_enter` is reached:
+
+    vm_map.c:9076   if ((fault_type & (prot)) != fault_type) {
+    vm_map.c:9087       return KERN_PROTECTION_FAILURE;
+
+For the storm `fault_type=0x3` and the lookup returned `KERN_SUCCESS` (not KERN_PROTECTION_FAILURE=2),
+so `prot & 0x2` (VM_PROT_WRITE) was SET — i.e. **the entry GRANTS WITE**.  And `vm_fault_enter`'s
+accept arm (`vm_fault.c:2478 kr = KERN_SUCCESS`) is then the EXPECTED result for an accepted tainted
+code page, not a wrong condition: the entry granted the write, and the page was validated (a dyld
+__TEXT page).  The F1b premise ("the entry DENIES write and some accept path wrongly returns
+KERN_SUCCESS") does NOT hold for this fault.
+
+RESULT 2 — HENCE F1a: THE WRITE IS LOST BETWEEN `prot` AND THE PTE.
+-------------------------------------------------------------------
+The entry grants write, `vm_fault` returns KERN_SUCCESS, the handler re-runs the store — and the
+hardware permission-faults it AGAIN (fsr=0x80f at the same pc/far, ~1 M times).  So the PTE the MMU
+walks is NOT writable even though `prot` carried VM_PROT_WRITE into `vm_fault_enter`.  By value, the
+PTE's write bit IS `prot`'s: `pmap_vm_prot_to_page_flags` (pmap.c:1110) clears APX (bit9, writable)
+iff `prot & VM_PROT_WRITE`, and `vm_fault_enter` does not strip write (only `prot &= ~VM_PROT_EXECUTE`
+at vm_fault.c:2545) — so a read-only PTE for a `prot` that has write is a loss BELOW the entry.
+**This is F1a, measured.**
+
+CANDIDATE STRIP SITES for the F1a fix (by value, all in the hd2 tree — NONE is instrumented yet):
+  * vm_map.c:8940   `prot = submap_entry->protection & ~VM_PROT_WRITE;`  (needs-copy SUBMAP migration —
+                    dyld shares its ROM region via submaps)
+  * vm_fault.c:1881 `*protection &= (~VM_PROT_WRITE);`  (need-copy, in vm_fault_page)
+  * vm_fault.c:3853 `prot &= retry_prot;`               (the RetryFault verify lookup — see RESULT 4)
+  * vm_fault.c:3855 `prot &= ~VM_PROT_WRITE;`           (when the copy object changed)
+These produce `fault_type` = write, `prot` = read-only at the PMAP_ENTER (vm_fault.c:2565) => a
+read-only PTE for a write fault that returns KERN_SUCCESS => the re-fault storm.  The NEXT rung must
+instrument WHICH of these fires for far=0x61000 (publish `prot`/`fault_type` at the PMAP_ENTER and at
+each strip site), then fix THERE.  A guard-fix at the accept arm is NOT warranted — F1b is falsified.
+
+RESULT 3 — THE (A) WALK'S TTBR0 BASE MASK IS WRONG.  1010b's "fix" WAS TO A SECOND WRONG MASK.
+---------------------------------------------------------------------------------------------
+1010c's frontier: the walk reads `ptel1=0xfeedface` at the storm.  `0xfeedface` is **MH_MAGIC**
+(the Mach-O magic, src/stage90.h:165) — the walk is reading a Mach-O image HEADER, not an L1 table.
+
+The mask is the defect.  `stage90_read_l2_pte` (entry_stubs.c:2263) does:
+
+    base &= STAGE90_TTBR_BASE_MASK;     /* 0xffffc000, entry_stubs.c:2112 */
+
+with the comment (entry_stubs.c:2107) claiming "an L1 table is L1_SIZE = 0x4000 = 16 KB aligned".
+That is true only for **TTBCR.N=0**.  THIS PORT PROGRAMS N=2 (`arm_vm_init.c:475 set_mmu_ttbcr(2)`,
+the walk itself reads `n = ttbcr & 7` at entry_stubs.c:2241).  With TTBCR.N=2, ARM's split is
+2^(32-N)=2^30 and TTBR0's table alignment is 2^(14-N) = 2^12 = **4 KB**, so the base is bits[31:12]
+=> mask **0xfffff000** (or 0xffffff00..0xffffffc0, all of which preserve bits[31:14]).
+
+PROOF BY VALUE, FROM THIS VERY CAPTURE:
+    live TTBR0                    = 0x81a8605b
+    0x81a8605b & 0xffffc000       = 0x81a84000   -> the walk read MH_MAGIC  (WRONG, 8 KB low)
+    0x81a8605b & 0xfffff000       = 0x81a86000   = xnu_live_abt_ptethr
+                                                 = pmap->pm_l1_phys  (the (A) cell's OWN measurement)
+0x81a86000 is 4 KB-aligned and NOT 16 KB-aligned — exactly what TTBCR.N=2 requires, and why
+`& 0xffffc000` lands 8 KB below it in a Mach-O image.  The (A) cell's `ptethr` (the faulting thread's
+own L1 base, read `current_thread()->map->pmap->pm_l1_phys`) is the INDEPENDENT witness that names
+the true base: the walk should have read 0x81a86000 and used 0xfffff000 to reach it.
+
+So the sequence of masks is:
+  1010   mask 0xfffffc00 -> base 0x81a86000 (CORRECT base by luck — bits[12:10]=0) -> read 0x81bb1001
+                                                       (a COARSE descriptor, correct for the odd VA)
+  1010b/c/1011  mask 0xffffc000 -> base 0x81a84000 (WRONG, 8 KB low) -> read MH_MAGIC 0xfeedface
+**1010b fixed one wrong mask into a second wrong mask; the base it reads has been wrong ever since,
+so the L2 LEAF (APX bit 9) has never been read and F1a/F1b (the APX cell) has been UNDECIDABLE by
+the walk from 1010b onward.**  The (E') cell, added in 1011, broke that deadlock from the vm_map side.
+
+The (A) cell's comparison text ("_ptethr AGREES with _ptettbr") is an ARTIFACT: the checker masks
+BOTH with 0xffffc000 (0x81a86000 -> 0x81a84000, 0x81a8605b -> 0x81a84000), so it "agrees" only
+because it applies the SAME wrong mask to both — [[mi4-one-value-two-definitions]]: the raw numbers
+differ (0x81a86000 vs 0x81a8605b) and the mask hides the difference that matters (bit13).
+
+RESULT 4 — (B) the vm_fault return IS at the storm (regression).
+---------------------------------------------------------------
+The tail vm_fault-return rows carry ret=KERN_SUCCESS, fault_type=0x3 for the storm ordinal — the
+same measurement 1010c made.  The silent-retry arm is taken (NO trap.c exception line, NO kern_sig
+panic: the 1009 shape, expected on a measurement arm).
+
+FALSIFIERS / WHAT IS STILL OPEN
+-------------------------------
+* The EXACT strip site (RESULT 2) is not identified — the next rung must instrument `prot`/`fault_type`
+  at the PMAP_ENTER (vm_fault.c:2565) and at each of the four strip sites, then fix there.
+* The (A) mask fix (0xfffff000) would let the L2 leaf be read and the APX bit9 cell CONFIRM F1a
+  downstream — but F1a is already decided from the (E') cell, so the mask fix is confirmatory.
+* The capture hit the record cap (xnu_live_cap=0x6000) before the freeze, so `pcn`'s 0x100000 is a
+  CHANNEL reading, not necessarily the storm's true length.  The storm's identity (pc/far/fsr) is
+  unaffected.
+
+NEXT
+----
+ 1. Fix `STAGE90_TTBR_BASE_MASK` to the TTBCR.N=2 alignment — bits[31:12] = **0xfffff000** (the
+    shared rule at entry_stubs.c:2112; the console's `g_live_l1` must be re-checked against it).  This
+    unblocks the (A)/APX cell for the first time since 1010.
+ 2. Instrument the four F1a strip sites (RESULT 2) + the PMAP_ENTER, so the next press NAMES the strip
+    site for far=0x61000; then build the fix at that site (guard-spelled, OFF byte-identical).
+ 3. Keep F4 (`tools/patch_d13_abt_retry_bound.py`, its escalation now SETS `exception_type` — commit
+    1174497 fixed the fall-out-with-0 bug) as a SAFETY NET only; it converts the freeze to a panic and
+    does not advance the boot.
