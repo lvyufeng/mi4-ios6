@@ -175,3 +175,26 @@ overflow the channel: the values published once are the ones that matter.
   **deliver** an aborted user fault (signal/return), never spin.
 
 Rung 1010 is **instrumentation only** (no new device behaviour, low blast radius); the fix is 1011+.
+
+## 8. Implementation notes (verified by value this session)
+
+- **`build_entry.sh` threading** — mirror `STAGE90_XNU_ABT_PC` at its five sites
+  (`:290-310` `STUB_DEFINES_TRACE` append; `:1220-1230` the validate/refuse block; `:1707-1751`
+  `ENTRY_ARM_KEYS`; `:1983-2002` the record-writer `case`; `:2031-2041` the record `echo`). The
+  refusal is `ABT_PTE=1` requires `ABT_FAR=1 && ABT_PC=1` (the conjunction guard).
+- **`scripts/preflight_boot_check.sh`** — add `STAGE90_XNU_ABT_PTE` to `ENTRY_CFG_KEYS`
+  (`:716-753`), or the CONVERSE check (`:1175`) refuses the record.
+- **`vm_fault` signature** — `vm_fault.h:90-97`, seven args ending `pmap_t pmap, vm_map_offset_t
+  pmap_addr`. The `--wrap=vm_fault` flag belongs wherever `--wrap=sleh_abort` is wired (the build
+  agent must find it; the OFF image must not carry it).
+- **The `sleh` keys' silence is BY CONSTRUCTION** (`entry_note_sleh`, `entry_stubs.c:1744-1818`):
+  rows write only while `g_sleh_seq <= SLEH_LIVE_MAX`, then one `_storm` marker, then only
+  `_seen <= SLEH_LIVE_SEEN`. So the capture's `sleh` rows describe the run's FIRST ~64 aborts, never
+  the tail — the wrapper's own keys are **not** an independent witness of handler behaviour over the
+  storm. The console (`cs_invalid_page` last at `:4130`) is. Do not read the `sleh` rows as the
+  storm's behaviour.
+- **The L2 walk must be read off this port's `pmap.c`/`arm_vm_init.c` by value** — the constants
+  (`L2_ADDR_MASK`, `L2_SMALL_PAGE` = 0x2, `L2_ACCESS_USER` = bit 5, `L2_ACCESS_APX` = bit 9,
+  `L2_ACCESS_PRW` = 0x10, `L2_NX_BIT`, the 0x80000000 split) are cited in §3.2; the extraction agent
+  produces the exact walk and it is committed as `docs/1010-pte-walk.md` **before** the build, so the
+  walk's correctness is a reviewed artifact, not an inline guess.
