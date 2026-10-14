@@ -307,7 +307,7 @@ if [[ $D13_TRACE -eq 1 ]]; then
     # trace object compiles on its own command line, `:2332-2333`). Same env var and same 0 default as
     # the `$CADENCE` validated below, so the two spellings are one value; the append is here because
     # `entry_trace.c`'s compile reads this array, and the switch must be in it before the compile.
-    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}")
+    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}")
 else
     # **946: 4570's list drops the one name D13's keeps.** `timer_call_enter1` is in the literal above so
     # `tools/check_timer_sources.py` can read the tree's wrap set out of the source; here the *other* tree
@@ -1176,6 +1176,19 @@ case "$FREEZE" in
        exit 1 ;;
 esac
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_FREEZE_WITNESS="$FREEZE")
+# **1007: the abort-span witness switch.** `entry_stubs.c` carries the recorder (`entry_note_abt_span`,
+# its clock passed BY VALUE so no `entry_counter` stand-in is grown) and `entry_trace.c` carries the two
+# clock reads around `__real_sleh_abort`. Read by BOTH entry-toolchain objects, so it is threaded through
+# both `STUB_DEFINES` (here) and `STUB_DEFINES_TRACE`; OFF, the guard deletes the recorder, the call, and
+# `t0`, and the wrapper body is the exact 1006 token set. A call to `entry_counter` from `entry_stubs.c`
+# would resolve to the TERMINAL stand-in (`docs/1007-design.md` §2.3); the build refuses it by value.
+ABTSPAN=${STAGE90_XNU_ABT_SPAN:-0}
+case "$ABTSPAN" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_ABT_SPAN='$ABTSPAN' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_ABT_SPAN="$ABTSPAN")
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
 # commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
@@ -1694,6 +1707,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_ABORT_TRACE
                 STAGE90_XNU_CADENCE
                 STAGE90_XNU_FREEZE_WITNESS
+                STAGE90_XNU_ABT_SPAN
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -1934,6 +1948,7 @@ do
         # record and the objects cannot be built from two spellings. Read from `$FREEZE`, validated
         # 0/1 at its own assignment above this loop.
         STAGE90_XNU_FREEZE_WITNESS)  _v=$FREEZE ;;
+        STAGE90_XNU_ABT_SPAN)        _v=$ABTSPAN ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -39639,6 +39654,8 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # OFF, the image is byte-for-byte a build without the witness. Written as the RESOLVED `$FREEZE`,
     # not `${STAGE90_XNU_FREEZE_WITNESS}`, for 882's reason.
     echo "STAGE90_XNU_FREEZE_WITNESS=$FREEZE"
+    # **1007: the abort-span witness.** Written as the RESOLVED `$ABTSPAN`, for 882's reason.
+    echo "STAGE90_XNU_ABT_SPAN=$ABTSPAN"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

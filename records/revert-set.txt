@@ -14806,3 +14806,60 @@ set=armed-d13-31bdebf3 sha256=da24c9f1665ac05086612c7d464a133dd4467e6802e8044f43
 set=armed-d13-31bdebf3 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1006-freeze;stage90_fixture.macho
 set=armed-d13-31bdebf3 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1006-freeze;stage90-build-config.txt
 set=armed-d13-31bdebf3 sha256=3a8bc6b14df980efb0b2f2397dbd6a3c363e90e6aac5e809802276394711c424 bytes=560 file=SHA256SUMS.txt role=1006-freeze;SHA256SUMS.txt
+# armed-d13-88074ab3  -  1007: THE ABORT-SPAN WITNESS (brackets each `__wrap_sleh_abort` call with the free-running
+# generic timer and publishes, per abort, the GAP to the previous abort and the handler`s own
+# DURATION, keys xnu_live_abt_{n,seq,gap,call,maxcall,maxgap}; first four in full then a
+# powers-of-two ladder; the two maxima latched WHERE THEY CHANGE), so the capture says whether the
+# ~24.4 s freeze sits BETWEEN two aborts, INSIDE one abort, or AFTER the last abort (design §5
+# classifier A/B/C/D).
+# Switch set is 1006-s VERBATIM plus STAGE90_XNU_ABT_SPAN=1 (FREEZE_WITNESS, CADENCE, STALL,
+# ABORT_TRACE, DYLD_WITNESS, SHREG_PROBE, SHREG_WIRE, SHREG_GEOM, RESIDENT, USVC and
+# SUBMAP_PMAP_SKIP all stay 1); the ENTRY BIN moved (31bdebf3 -> 88074ab3); the PAYLOAD moves (it embeds
+# the entry blob; the 29 s watchdog constant is 999-s, unchanged); the TREE does NOT move - 1007
+# has NO tree edit and NO stage driver (the change is TWO src/ files: entry_stubs.c the recorder
+# entry_note_abt_span, entry_trace.c the declaration + the ONE bracket inside __wrap_sleh_abort),
+# PLUS the MANDATORY §4.3 fix (entry_freeze_sample takes the clock as an argument).
+#
+# THE FRONTIER, BY VALUE (records/1006-press-read.txt): the ~24.4 s xnu_live_tick_sum_maxd freeze
+# (0x1be87a47 = 468,220,487 counts = 24.386 s at 19.2 MHz) does NOT overlap the idle path -
+# __wrap_machine_idle is NEVER entered on the recent D13 tail (its sampler fired 0x).  The terminal
+# frame is sleh_abort+0x468, an unconditional forward branch, NOT a fault-return self-loop - so the
+# freeze rides the NON-IDLE abort path (1004 saw ~40 aborts walking forward).  1007 brackets that
+# path.  NOTE (1007-s own correction): 1007 CLOSES a by-value defect in the INHERITED image - the
+# 1006 sampler called entry_counter() from entry_stubs.c, which resolved to a TERMINAL generated
+# stand-in (8049cce4 T entry_counter -> entry_stub_hit -> entry_epilogue) that would END THE RUN on
+# the abort path; dormant only because the idle path it rode is never entered.  §4.3 routes the
+# clock in as an argument and the build refuses the stand-in (§6e).
+#
+# THE 1007 PRESS PRE-REGISTRATION (frozen once embedded; deviations reported, not interpreted) is
+# written by the TEAM-LEAD into scripts/press_1007.sh: THE READING is xnu_live_abt_maxcall and
+# xnu_live_abt_maxgap against xnu_live_tick_sum_maxd (M): (A) both << M = the 24.4 s is NOT on the
+# abort path; (B) maxgap ~ M, maxcall small = the freeze is BETWEEN two aborts; (C) maxcall ~ M =
+# ONE abort took 24.4 s; (D) n/seq plateau with no key near M = the freeze is AFTER the last abort.
+# xnu_live_stub_hit_seq == 0 is the §2.3 guard (the terminal stand-in must NOT fire).
+#
+# VERIFIED BY VALUE (build_1007.sh): the linked image carries the 6 xnu_live_abt_ key literals,
+# entry_note_abt_span DEFINED T/t, exactly ONE bl inside __wrap_sleh_abort image-wide, and the §4.3
+# fix (entry_stubs.o has NO U entry_counter; realstubs.c generates NO entry_counter stand-in), with
+# the FROZEN 1006 elf (armed-d13-31bdebf3) as the NEGATIVE CONTROL (xnu_live_abt_ x0,
+# entry_note_abt_span x0 - and by value it DOES carry the entry_counter stand-in at 8049cce4, the
+# §2.3 defect 1007 closes); the 1006 freeze witness, the 1005 cadence witness, the 1004 abort trace
+# (xnu_live_sleh_upc x1), the 1003 stall instrument and the 1002 six-word save set asserted present
+# (regressions).  The 996/997/998/999/1000/1001 checkers rerun ON the 1007 image - the probe
+# checker-s ONE by-design frozen 20 B clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-88074ab3 sha256=88074ab31c222a76f13ef43f0baf168e6e5342b139a902b2f23cd1db849c1b4f bytes=6347860 file=xnu_arm_entry.bin role=1007-abtspan;xnu_arm_entry.bin
+set=armed-d13-88074ab3 sha256=54e1046f00caba54acbb1d8a1810368e506d14323f8bd9f6880d0e3a477065b5 bytes=7390168 file=xnu_arm_entry.elf role=1007-abtspan;xnu_arm_entry.elf
+set=armed-d13-88074ab3 sha256=f74738517e9e674145b69bc0ac7459496127b8531499196e4ccb3c15992ca079 bytes=1912 file=xnu_arm_entry.h role=1007-abtspan;xnu_arm_entry.h
+set=armed-d13-88074ab3 sha256=a46138ee36324714fed1a3dedfe1c43785d0f29e525ebf78ad45b49d79eac71b bytes=1812 file=xnu_arm_entry-config.txt role=1007-abtspan;xnu_arm_entry-config.txt
+set=armed-d13-88074ab3 sha256=2c3e3aec6fc7588581850aa536a19f63340a817c2ba8ae12a67f37a587350138 bytes=3149 file=xnu_arm_entry-sources.txt role=1007-abtspan;xnu_arm_entry-sources.txt
+set=armed-d13-88074ab3 sha256=90f06a82ee56753ab99924115e1bff2fa52391e82cbd3cbd3bb7443b43865458 bytes=6843268 file=stage90.bin role=1007-abtspan;stage90.bin
+set=armed-d13-88074ab3 sha256=be0325648168a66f188ac412304aab6f005261201be8254229334c7e3db9564c bytes=6905340 file=stage90.elf role=1007-abtspan;stage90.elf
+set=armed-d13-88074ab3 sha256=2373199a17dfedea5e5f29b0df16b88d87e314e99b1679238e7cb5843257df46 bytes=6846464 file=stage90.img role=1007-abtspan;stage90.img
+set=armed-d13-88074ab3 sha256=d6f70b5bc4698480f07ead5527a5a11f711b1cef8eb014564644f2844babc754 bytes=9367552 file=stage90-qcdt.img role=1007-abtspan;stage90-qcdt.img
+set=armed-d13-88074ab3 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1007-abtspan;stage90_fixture.macho
+set=armed-d13-88074ab3 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1007-abtspan;stage90-build-config.txt
+set=armed-d13-88074ab3 sha256=0b0f98049fea5a8d9f5b2180e9b56124b810ae487af8b04dbf98fe703a28cdae bytes=560 file=SHA256SUMS.txt role=1007-abtspan;SHA256SUMS.txt

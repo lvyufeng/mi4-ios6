@@ -1891,6 +1891,68 @@ void entry_note_sleh_back(uint32_t redirected)
 #endif
 
 /*
+ * ------------------------------------------------------- 1007: the abort-span witness
+ *
+ * 1006 proved the ~24.4 s freeze (`xnu_live_tick_sum_maxd`) is spent in NON-idle kernel work
+ * (`__wrap_machine_idle` is never entered). The one non-idle path that runs during the tail is the
+ * abort handler: `__wrap_sleh_abort` (`entry_trace.c`), entered ~40x (1004's WALK). This recorder
+ * brackets each `sleh_abort` with the free-running generic timer so the capture can say whether the
+ * 24.4 s sits BETWEEN two aborts (`gap`), INSIDE one (`call`), or AFTER the last (a plateau) - the
+ * design's classifier (A)/(B)/(C)/(D), `docs/1007-design.md` §5.
+ *
+ * **The clock is received BY VALUE.** `entry_counter()` is a `static inline` in `entry_trace.c`; a
+ * call from here would be undefined at pass 1 and resolve to the TERMINAL `entry_counter` stand-in
+ * (`entry_stub_hit` -> `noreturn entry_epilogue`), ending the run the instant the abort path is taken.
+ * So `__wrap_sleh_abort` reads the clock (in the file that owns it) and passes the two values in
+ * (`entry_note_repair`'s argument-passing shape, `entry_stubs.c:5858`).
+ *
+ * All records go through `entry_write_kv` (DIRECT, cap-exempt by construction - the channel
+ * `entry_tick_summary` uses), so the maxima at the frontier survive the live-record cap. Plain
+ * statics, no allocation: this rides a handler that can re-enter itself, so the body is bounded
+ * stores - the rule `entry_note_sleh` already obeys (`entry_stubs.c:1596-1602`).
+ */
+#if defined(STAGE90_XNU_ABT_SPAN) && STAGE90_XNU_ABT_SPAN
+/*
+ * `entry_write_kv`'s own prototype is at `:2180` (inside `STAGE90_ENTRY_TRACE`), i.e. BELOW this
+ * recorder, and `-Werror` refuses an implicit declaration - so it is declared here, identically to
+ * the definition at `:2682` (two identical prototypes are not a conflict).
+ */
+void entry_write_kv(const char *key, uint32_t value);
+
+static uint32_t g_abt_n;
+static uint32_t g_abt_last_t;
+static uint32_t g_abt_have;
+static uint32_t g_abt_maxcall;
+static uint32_t g_abt_maxgap;
+
+void
+entry_note_abt_span(uint32_t t0, uint32_t call)
+{
+    uint32_t gap, n;
+
+    gap = (g_abt_have != 0u) ? (t0 - g_abt_last_t) : 0u;
+    g_abt_last_t = t0;
+    g_abt_have = 1u;
+    n = ++g_abt_n;
+
+    /*
+     * The latched maxima, written WHERE THEY CHANGE (the `g_sleh_armed` rule, `entry_stubs.c:1774`):
+     * the ladder below can miss the one huge sample; the max cannot.
+     */
+    if (call > g_abt_maxcall) { g_abt_maxcall = call; entry_write_kv("xnu_live_abt_maxcall", call); }
+    if (gap > g_abt_maxgap)   { g_abt_maxgap = gap;   entry_write_kv("xnu_live_abt_maxgap", gap); }
+
+    /* First four in full (fine near the head), then the powers-of-two ladder - the pet/cadence rule. */
+    if (n <= 4u || (n & (n - 1u)) == 0u) {
+        entry_write_kv("xnu_live_abt_n", n);
+        entry_write_kv("xnu_live_abt_seq", g_sleh_seq);   /* pairs with the sleh entry record's _seq/_far */
+        entry_write_kv("xnu_live_abt_gap", gap);
+        entry_write_kv("xnu_live_abt_call", call);
+    }
+}
+#endif
+
+/*
  * Set by the IRQ vector so the epilogue knows to name the interrupt it stopped on.
  *
  * Experiment 308's run ended on `exception: irq` and the report could not say *which* interrupt:
@@ -5341,7 +5403,16 @@ entry_cadence_summary(void)
  * _now/_en`), and a `strings | grep -c 'xnu_live_idle_'` would then count 7+2 literals under a name two
  * ordinals (`_n` here, `_seq` there) answer to. A distinct, non-containing prefix keeps the count exact.
  */
-extern uint32_t entry_counter(void);
+/*
+ * **1007: the clock is passed BY VALUE, never called from this file.** `entry_counter` is a `static
+ * inline` in `entry_trace.c` (the file that owns the `mrrc`); a `extern uint32_t entry_counter(void)`
+ * here would be undefined at pass 1, so the stub generator would emit the TERMINAL stand-in
+ * (`out/stage90/xnu_arm_entry_realstubs.c` -> `entry_stub_hit` -> `noreturn entry_epilogue`) - which
+ * tears the MMU down and ends the run. 1006's sampler carried exactly that extern and was dormant only
+ * because `__wrap_machine_idle` is never entered; on the abort path (entered ~40x) it would end the
+ * run. So the sampler now takes `now` as an argument (`src/entry/entry_trace.c` reads it), and the
+ * build refuses the stand-in (`mi4-a-claim-in-a-comment-is-not-a-check`, `docs/1007-design.md` §2.3/§6e).
+ */
 extern void entry_gic_freeze_state(uint32_t *out);
 
 /* ~1 ms (19.2 MHz) - well above an idle pass, ~4 orders below the ~24.4 s freeze; published in the
@@ -5353,9 +5424,8 @@ static uint32_t g_freeze_last;
 static uint32_t g_freeze_n;
 
 void
-entry_freeze_sample(void)
+entry_freeze_sample(uint32_t now)
 {
-    uint32_t now = entry_counter();
     uint32_t d = now - g_freeze_last;
     uint32_t c;
 

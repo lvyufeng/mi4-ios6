@@ -2144,7 +2144,7 @@ extern void entry_cadence_summary(void);
  * declared here for the reason the three above are. Gated so FREEZE_WITNESS=0 compiles this file
  * unchanged. */
 #if defined(STAGE90_XNU_FREEZE_WITNESS) && STAGE90_XNU_FREEZE_WITNESS
-extern void entry_freeze_sample(void);
+extern void entry_freeze_sample(uint32_t now);
 #endif
 
 static uint32_t g_wdt_installed;      /* the pet has a mapping it can vouch for */
@@ -2304,8 +2304,10 @@ void __wrap_machine_idle(void)
     /* **1006: the idle-path freeze witness, at the very head of the pass.** Entered BEFORE
      * `__real_machine_idle` (below), so the `entry_counter()` delta this reads between two passes is
      * the dwell of the previous pass including its `wfi` - and the freeze cannot stop `entry_counter`.
-     * Before `entry_note_idle` so the reading is independent of that record's own gating. */
-    entry_freeze_sample();
+     * Before `entry_note_idle` so the reading is independent of that record's own gating.
+     * **1007: the clock is read HERE and passed by value** - `entry_stubs.c` cannot call
+     * `entry_counter` without the terminal stand-in (`docs/1007-design.md` §2.3/§4.3). */
+    entry_freeze_sample(entry_counter());
 #endif
 
     now = current_proc();
@@ -5656,11 +5658,23 @@ extern void entry_note_sleh(uint32_t type, uint32_t dfsr, uint32_t dfar, uint32_
                             const uint32_t *frame, uint32_t recover);
 extern void entry_note_sleh_back(uint32_t redirected);
 
+/*
+ * 1007: the abort-span recorder, whose two clocks this file reads (its `entry_counter` is the real
+ * `mrrc` inline at `:952`). The clock is passed BY VALUE because `entry_stubs.c` cannot call
+ * `entry_counter` without the terminal stand-in (`docs/1007-design.md` §2.3).
+ */
+#if defined(STAGE90_XNU_ABT_SPAN) && STAGE90_XNU_ABT_SPAN
+extern void entry_note_abt_span(uint32_t t0, uint32_t call);
+#endif
+
 void __real_sleh_abort(void *regs, int type);
 
 void __wrap_sleh_abort(void *regs, int type)
 {
     uint32_t fsr, far_, thread, recover, redirected;
+#if defined(STAGE90_XNU_ABT_SPAN) && STAGE90_XNU_ABT_SPAN
+    uint32_t t0;
+#endif
 
     /*
      * **476: the class selects the coprocessor pair, because the class is what says which pair is the
@@ -5678,6 +5692,17 @@ void __wrap_sleh_abort(void *regs, int type)
         __asm__ volatile ("mrc p15, 0, %0, c6, c0, 0" : "=r"(far_));
     }
     __asm__ volatile ("mrc p15, 0, %0, c13, c0, 4" : "=r"(thread));
+
+#if defined(STAGE90_XNU_ABT_SPAN) && STAGE90_XNU_ABT_SPAN
+    /*
+     * 1007: read the clock BEFORE the recover read, not between it and the call. The contiguous
+     * `recover = ...; entry_note_sleh(...); __real_sleh_abort(...);` span is an ANCHOR
+     * `tools/check_fault_recovery.py` mutates by literal text-replace (`the_wrapper_reads_after_the_handler`,
+     * `:1127`); inserting between them moves it and the mutation no-ops. Placing the read first keeps
+     * the anchor intact and is still before `__real_sleh_abort`.
+     */
+    t0 = entry_counter();
+#endif
 
     /* Before the real handler, which zeroes it (`trap.c:290-291`). See the comment above. */
     recover = ((const uint32_t *)(uintptr_t)thread)[STAGE90_TH_RECOVER / 4];
@@ -5701,6 +5726,9 @@ void __wrap_sleh_abort(void *regs, int type)
     }
 
     entry_note_sleh_back(redirected);
+#if defined(STAGE90_XNU_ABT_SPAN) && STAGE90_XNU_ABT_SPAN
+    entry_note_abt_span(t0, entry_counter() - t0);
+#endif
 }
 
 /* ------------------------------------------------- what the exec said when it gave up (471) */
