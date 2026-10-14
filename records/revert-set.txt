@@ -14863,3 +14863,53 @@ set=armed-d13-88074ab3 sha256=d6f70b5bc4698480f07ead5527a5a11f711b1cef8eb0145646
 set=armed-d13-88074ab3 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1007-abtspan;stage90_fixture.macho
 set=armed-d13-88074ab3 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1007-abtspan;stage90-build-config.txt
 set=armed-d13-88074ab3 sha256=0b0f98049fea5a8d9f5b2180e9b56124b810ae487af8b04dbf98fe703a28cdae bytes=560 file=SHA256SUMS.txt role=1007-abtspan;SHA256SUMS.txt
+# armed-d13-0343ef45  -  1008: THE ABORT-FAULT IDENTITY (forwards the `far`/`type` `__wrap_sleh_abort` already
+# reads to `entry_note_abt_far(call, far, type)`, publishing the fault ADDRESS and TYPE of the storm
+# on the DIRECT channel under the five keys xnu_live_abt_{far,type,farn,maxfar,maxtype} - the maxcall
+# latch plus the powers-of-two ladder), so the capture NAMES the ~18.7 s abort-s fault address and its
+# (S) SPREAD vs (R) REPEAT shape (design docs/1008-design.md).
+# Switch set is 1007-s VERBATIM plus STAGE90_XNU_ABT_FAR=1 (ABT_SPAN, FREEZE_WITNESS, CADENCE,
+# STALL, ABORT_TRACE, DYLD_WITNESS, SHREG_PROBE, SHREG_WIRE, SHREG_GEOM, RESIDENT, USVC and
+# SUBMAP_PMAP_SKIP all stay 1); the ENTRY BIN moved (88074ab3 -> 0343ef45); the PAYLOAD moves (it embeds
+# the entry blob; the 29 s watchdog constant is 999-s, unchanged); the TREE does NOT move - 1008
+# has NO tree edit and NO stage driver (the change is TWO src/ files: entry_stubs.c the recorder
+# entry_note_abt_far, entry_trace.c the declaration + the ONE call inside __wrap_sleh_abort).
+#
+# THE FRONTIER, BY VALUE (records/1007-press-read.txt): the ~24.4 s xnu_live_tick_sum_maxd freeze
+# (0x1be892af = 468,226,735 counts = 24.387 s at 19.2 MHz) sits INSIDE ONE sleh_abort -
+# xnu_live_abt_maxcall = 0x1570e6a5 = 359,720,613 counts = 18.735 s = 0.768 x M - corroborated by
+# the abt_call ladder (0x100 -> 5.322 s, 0x200 -> 3.776 s), riding a FAULT STORM of ~2.1 M aborts
+# (abt_n == abt_seq at all 23 rows, both reaching 0x200000) that the CAPPED live channel hid at
+# #40 (24,023/24,576 = 97.8 % full, then SDHCI page-ins filled the last 553 to the cap).  The
+# storm-s fault ADDRESS is in NO capture - 1008 publishes it (the missing reading).
+#
+# THE 1008 PRESS PRE-REGISTRATION (frozen once embedded; deviations reported, not interpreted) is
+# written by the TEAM-LEAD into scripts/press_1008.sh: THE READING is xnu_live_abt_far/
+# xnu_live_abt_type (and the latched maxfar/maxtype) vs the span ladder: (S) SPREAD = the ladder-s
+# `far` is DISTINCT and PROGRESSIVE = the ~2.1 M aborts are ~2.1 M distinct faults; (R) REPEAT =
+# the `far` repeats (a small set of addresses) = ONE fault retried = a self-re-entering fault loop.
+#
+# VERIFIED BY VALUE (build_1008.sh): the linked image carries the 11 xnu_live_abt_ key literals
+# (6 span + 5 far), entry_note_abt_far DEFINED T/t, exactly ONE b/bl inside __wrap_sleh_abort
+# image-wide, with the FROZEN 1007 elf (armed-d13-88074ab3) as the NEGATIVE CONTROL (xnu_live_abt_
+# x6, entry_note_abt_span x>=1, but entry_note_abt_far x0 and the far literals x0 - the 1008 change
+# is NOT in the 1007 arm); the 1007 span witness, the 1006 freeze witness, the 1005 cadence
+# witness, the 1004 abort trace (xnu_live_sleh_upc x1), the 1003 stall instrument and the 1002
+# six-word save set asserted present (regressions).  The 996/997/998/999/1000/1001 checkers rerun
+# ON the 1008 image - the probe checker-s ONE by-design frozen 20 B clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-0343ef45 sha256=0343ef45d92e03d81097cb1449428efc640dfcd392c68fa7dc663f200b19931c bytes=6347860 file=xnu_arm_entry.bin role=1008-abtfar;xnu_arm_entry.bin
+set=armed-d13-0343ef45 sha256=4ac8ce31a234f98d852b71ddf72f8cc7fc27f1b781176d8e7b623f0e43fa8057 bytes=7390292 file=xnu_arm_entry.elf role=1008-abtfar;xnu_arm_entry.elf
+set=armed-d13-0343ef45 sha256=f74738517e9e674145b69bc0ac7459496127b8531499196e4ccb3c15992ca079 bytes=1912 file=xnu_arm_entry.h role=1008-abtfar;xnu_arm_entry.h
+set=armed-d13-0343ef45 sha256=a80d69aaf7cf2bc8cc4393d1f88a08ca35970cb3538820ab412e337b4ebdd9ff bytes=1834 file=xnu_arm_entry-config.txt role=1008-abtfar;xnu_arm_entry-config.txt
+set=armed-d13-0343ef45 sha256=c8442517df4ded0d3937056cf1a7211b1d019b49feaf955b0e05b16a8d52f9b7 bytes=3149 file=xnu_arm_entry-sources.txt role=1008-abtfar;xnu_arm_entry-sources.txt
+set=armed-d13-0343ef45 sha256=839669bcf5d3a4648524c9392d77b29f722530df81240742885c1da771e6f192 bytes=6843268 file=stage90.bin role=1008-abtfar;stage90.bin
+set=armed-d13-0343ef45 sha256=51cdf3601f38bda1555750d4205c9ff9cb08f455e0ab40ddc18cdab702507b67 bytes=6905340 file=stage90.elf role=1008-abtfar;stage90.elf
+set=armed-d13-0343ef45 sha256=3423ec6a99ec735851df160d678f04074d67d34c3cf49aa5cba9095fa4459f6d bytes=6846464 file=stage90.img role=1008-abtfar;stage90.img
+set=armed-d13-0343ef45 sha256=c35e41563921a891514bab8ef32afcee434465ee076b710ddc9075c233279552 bytes=9367552 file=stage90-qcdt.img role=1008-abtfar;stage90-qcdt.img
+set=armed-d13-0343ef45 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1008-abtfar;stage90_fixture.macho
+set=armed-d13-0343ef45 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1008-abtfar;stage90-build-config.txt
+set=armed-d13-0343ef45 sha256=569ec6708b267be918e33c6bacf81bf306f47167df419bb77cf3f9fcb7727c56 bytes=560 file=SHA256SUMS.txt role=1008-abtfar;SHA256SUMS.txt
