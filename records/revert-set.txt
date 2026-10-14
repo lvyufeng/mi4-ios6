@@ -15141,3 +15141,70 @@ set=armed-d13-002b0683 sha256=b21eea4817c4a8a55c47390dce3b3743ce5032370d51a018d6
 set=armed-d13-002b0683 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1010-abtpte;stage90_fixture.macho
 set=armed-d13-002b0683 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1010-abtpte;stage90-build-config.txt
 set=armed-d13-002b0683 sha256=d2d3c5d2d3ed10dc94fb5bae2ae9040b932ec096a5fcb1b8b63d685008bcf844 bytes=560 file=SHA256SUMS.txt role=1010-abtpte;SHA256SUMS.txt
+# armed-d13-fce83837  -  1011: THE vm_map_entry EFFECTIVE PROTECTION + THE FAULTING THREAD-S OWN L1 BASE
+# (publishes vm_map_lookup_locked-s out_prot for the storm-s fault, and the L1 base the faulting
+# thread-s own map/pmap names, so the reader can decide F1a vs F1b WITHOUT a tree patch and WITHOUT a
+# struct offset; design docs/1011-design-v2.md)
+# Switch set is 1010c-s VERBATIM plus STAGE90_XNU_VME_PROT=1 (ABT_PTE, ABT_PC, ABT_FAR, ABT_SPAN,
+# FREEZE_WITNESS, CADENCE, STALL, ABORT_TRACE, DYLD_WITNESS, SHREG_PROBE, SHREG_WIRE, SHREG_GEOM,
+# RESIDENT, USVC and SUBMAP_PMAP_SKIP all stay 1); the ENTRY BIN moved (002b0683 -> fce83837); the
+# PAYLOAD moves (it embeds the entry blob; the 29 s watchdog constant is 999-s, unchanged); the
+# TREE does NOT move - 1011 has NO tree edit and NO stage driver (the change is THREE src/ files
+# plus ONE conditional --wrap: entry_stubs.c the (A) reader + g_abtpte_vmelatch + the _ptethr store
+# + the (E-prime) recorder, entry_trace.c the declaration + __wrap_vm_map_lookup_locked,
+# entry_saved_state.h STAGE90_PMAP_L1_PHYS=0, build_entry.sh --wrap=vm_map_lookup_locked only when
+# VME_PROT=1).
+#
+# THE FRONTIER 1011 PROBES (records/1010c-press-read.txt): the storm is a USER-mode WRITE permission
+# fault - pc=0x2be4d1a0 (in the dyld shared cache), fsr=0x0000080f (WnR=1 | FS=0xf "level-2 perm
+# fault"), far=0x5d000 (a LOW user VA). The 1010c walk is WINDOW-BOUNDED but reads the WRONG TABLE
+# at the storm: with the mask fixed to 0xffffc000 it reads the TRUE L1 base 0x81a84000, whose slot
+# for the fault VA holds a SECTION descriptor (ptel1=0xfeedface, bits[1:0]=0b10), so the walk
+# returns early (entry_stubs.c:2291, (l1e&3)!=1) and the L2 LEAF (APX) is NEVER read. F1a/F1b are
+# UNDECIDABLE from 1010c.
+#
+# THE 1011 PRESS PRE-REGISTRATION (frozen once embedded; deviations reported, not interpreted):
+# THE HEADLINE MUST be decided from the TAIL ROWS-OWN xnu_live_abt_vmeprot (ordinals >= 0x400 on the
+# powers-of-two ladder), NEVER on the whole-run change count (the 1009 measurement defect, not
+# repeated). (E-prime) DECISION TREE (docs/1011-design-v2.md §3):
+#   * xnu_live_abt_vmeprot & VM_PROT_WRITE (0x2) != 0 at the tail => F1a: the vm_map_entry GRANTS
+#     write, so the write is LOST between the entry and the PTE (the prot->PTE path, or the entry-s
+#     protection is not what the fault is serviced with).
+#   * (xnu_live_abt_vmeprot & 0x2) == 0 at the tail => F1b: the entry does NOT grant write, so the
+#     accept path-s UNCONDITIONAL `kr = KERN_SUCCESS` (vm_fault.c:2478) is the wrong condition -
+#     the fault is accepted although the entry is read-only, and the retry is forever.
+#   * xnu_live_abt_vmekr names vm_map_lookup_locked-s return (KERN_SUCCESS=0 / KERN_INVALID_ADDRESS=1
+#     / KERN_PROTECTION_FAILURE=2 / KERN_NO_SPACE=3).  _vmefault is the fault_type (VM_PROT_*).
+# (A) THE L1-BASE CELL: compare xnu_live_abt_ptethr (the faulting thread-s own L1 base) with
+# xnu_live_abt_ptettbr (the live TTBR0 the walk sampled).  AGREE => the walk read the right table
+# and the non-coarse _ptel1 IS a real L1 slot (the storm VA is served by a SECTION mapping, or the
+# TTBR0 the handler runs with is not the one that faulted).  DIFFER => the walk and the handler look
+# at DIFFERENT tables - the 1010c frontier, now MEASURED.
+#
+# VERIFIED BY VALUE (build_1011.sh): the linked image carries the 43 xnu_live_abt_ key literals
+# (1010c-s 36 + the 6 vme vmen/vmekr/vmeprot/vmefault/vmeva/vmenx + the 1 ptethr),
+# entry_note_abt_vme/__wrap_vm_map_lookup_locked DEFINED T/t, exactly ONE bl to entry_note_abt_vme,
+# the __wrap_vm_map_lookup_locked body calling <vm_map_lookup_locked> (pass-through) AND
+# entry_note_abt_vme, and the (A) STAGE90_ACT_MAP immediate (956) present, with the FROZEN 1010c
+# elf (armed-d13-002b0683) as the NEGATIVE CONTROL (xnu_live_abt_ x36, the 1010 symbols present,
+# but the 1011 symbols x0 and the 1011 literals x0 - the 1011 change is NOT in the 1010c arm);
+# the 1010/1009/1008/1007 witnesses, the 1006 freeze witness, the 1005 cadence witness, the 1004
+# abort trace (xnu_live_sleh_upc x1), the 1003 stall instrument and the 1002 six-word save set
+# asserted present (regressions).  The 996/997/998/999/1000/1001 checkers rerun ON the 1011
+# image - the probe checker-s ONE by-design frozen 20 B clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-fce83837 sha256=fce8383727fc761689c7d26556d3ba7355626c1968cee61218b08386d5f73f14 bytes=6347860 file=xnu_arm_entry.bin role=1011-vmeprot;xnu_arm_entry.bin
+set=armed-d13-fce83837 sha256=38b152bdf1340417285d889fd83e5c213016c55e6bb3246afd5644587f33a995 bytes=7391276 file=xnu_arm_entry.elf role=1011-vmeprot;xnu_arm_entry.elf
+set=armed-d13-fce83837 sha256=f74738517e9e674145b69bc0ac7459496127b8531499196e4ccb3c15992ca079 bytes=1912 file=xnu_arm_entry.h role=1011-vmeprot;xnu_arm_entry.h
+set=armed-d13-fce83837 sha256=f6f29bb9af87c1e0c5f9f7ffc3c73f885cfa7f0ec6cb15a2445a421e1195fd1f bytes=1900 file=xnu_arm_entry-config.txt role=1011-vmeprot;xnu_arm_entry-config.txt
+set=armed-d13-fce83837 sha256=69dba3f314f04cf4fe57a33a68be5906346c504f43673c96bd7285242d86c9f2 bytes=3149 file=xnu_arm_entry-sources.txt role=1011-vmeprot;xnu_arm_entry-sources.txt
+set=armed-d13-fce83837 sha256=23a222c92964371c657f352aed34e7e51a6f78369852d4fa9ec191f6976ab024 bytes=6843268 file=stage90.bin role=1011-vmeprot;stage90.bin
+set=armed-d13-fce83837 sha256=31cb209761eb0c17ef5809c7c1352f8a56fb8c17637203b98fd3d7f7d1087b7e bytes=6905340 file=stage90.elf role=1011-vmeprot;stage90.elf
+set=armed-d13-fce83837 sha256=b84d5aff41a2b2e19a0ddc3c47af760818c08469bc54f8bba0e7ef787f85f649 bytes=6846464 file=stage90.img role=1011-vmeprot;stage90.img
+set=armed-d13-fce83837 sha256=5170a985ff9e1300b11150221de379de20f0e047fef327bfd9923918b360a6df bytes=9367552 file=stage90-qcdt.img role=1011-vmeprot;stage90-qcdt.img
+set=armed-d13-fce83837 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1011-vmeprot;stage90_fixture.macho
+set=armed-d13-fce83837 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1011-vmeprot;stage90-build-config.txt
+set=armed-d13-fce83837 sha256=7bfc31312245d7a4bc5b2c0440600d546d4b4bcbef6f31cb8af652980ea827e1 bytes=560 file=SHA256SUMS.txt role=1011-vmeprot;SHA256SUMS.txt

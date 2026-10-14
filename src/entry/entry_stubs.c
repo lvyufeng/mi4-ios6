@@ -2335,6 +2335,57 @@ static uint32_t g_abtpte_ptenx;    /* DISTINCT raw L2 descriptors seen so far (m
  */
 static uint32_t g_abtpte_latch;
 
+/*
+ * 1011 (E')'s own latch, SEPARATE from (B)'s above. `entry_note_abt_vme` fires from `__wrap_vm_map_lookup_locked`,
+ * which runs INSIDE the `vm_fault` that (B)'s `__wrap_vm_fault` calls: (B)'s wrapper clears
+ * `g_abtpte_latch` only AFTER `__real_vm_fault` returns - i.e. after (E') has already run - so (E')
+ * cannot share (B)'s latch without either being cleared before it fires or clearing it before (B)
+ * reads it. Both are set by `entry_note_abt_pte` and each clears only its own; `entry_note_abt_pte`
+ * is called ONLY from `__wrap_sleh_abort`, so the NEXT lookup/return belongs to THIS abort.
+ */
+static uint32_t g_abtpte_vmelatch;
+
+/*
+ * 1011 (A) - WHICH page-table base the walk SHOULD read, read from the faulting thread's own state
+ * instead of from the live TTBR0 the walk samples. The 1010c record read `ptel1=0xfeedface` at the
+ * storm - a non-COARSE word - while the L1 base the walk derived from TTBR0 (`0x81a84000`) is the one
+ * the mask says to use, so the question is which physical L1 the abort-time TTBR0 ACTUALLY points at.
+ * The 4570 way of answering it (the thread's saved `uptw_ttb`) does NOT exist in D13
+ * (`records/1010c-press-read.txt` RESULT 3: D13's `struct machine_thread` has no `uptw_ttb`), so this
+ * reads the current thread's map→pmap→L1-base chain directly:
+ *
+ *   `current_thread()` (TPIDRPRW, `entry_stubs_thread_pointer`) → `thread->map` (STAGE90_ACT_MAP)
+ *   → `map->pmap` (STAGE90_MAP_PMAP) → `pmap->pm_l1_phys` (STAGE90_PMAP_L1_PHYS).
+ *
+ * The D13 gate is REQUIRED, not stylistic: 4570's `struct pmap` has no `pm_l1_phys` member (it leads
+ * with `tte`/`ttep`), so on a 4570 build this reads a different field - published as the D13-only
+ * `0xFFFFFFFF` "not read" sentinel, the same shape `g_mmap_pmap` uses. Every deref is guarded against
+ * a non-kernel pointer (the `pmap_kernel_va` window `[0x80000000, 0xFFFEFFFF]` the mmap recorder
+ * already names), so a NULL or user map reports 0 rather than taking the fault this cell exists to
+ * explain. It is a READING, never a fix - the walk still reads TTBR0; only the comparison is new.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_VME_PROT) && STAGE90_XNU_VME_PROT
+static uint32_t
+stage90_abt_thread_l1_base(void)
+{
+    uint32_t thread, map, pmap;
+
+    thread = entry_stubs_thread_pointer();
+    if (thread < 0x80000000u || thread > 0xFFFEFFFFu)
+        return 0u;
+
+    map = *(volatile uint32_t *)(uintptr_t)(thread + STAGE90_ACT_MAP);
+    if (map < 0x80000000u || map > 0xFFFEFFFFu)
+        return 0u;
+
+    pmap = *(volatile uint32_t *)(uintptr_t)(map + STAGE90_MAP_PMAP);
+    if (pmap < 0x80000000u || pmap > 0xFFFEFFFFu)
+        return 0u;
+
+    return *(volatile uint32_t *)(uintptr_t)(pmap + STAGE90_PMAP_L1_PHYS);
+}
+#endif
+
 void
 entry_note_abt_pte(uint32_t va)
 {
@@ -2361,6 +2412,7 @@ entry_note_abt_pte(uint32_t va)
     __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr));   /* the TTBR0 word actually used */
 
     g_abtpte_latch = 1u;    /* arm the (B) recorder for the vm_fault this abort's handler will make */
+    g_abtpte_vmelatch = 1u; /* arm 1011 (E') too - it fires INSIDE that vm_fault, before (B) returns */
 
     /*
      * The LADDER rows - 1008/1009's set VERBATIM (the tail is already sampled), so `_ptel2` at a
@@ -2381,6 +2433,23 @@ entry_note_abt_pte(uint32_t va)
         entry_write_kv("xnu_live_abt_pteslot",  g_abtpte_walk_slot);    /* displaced slot word (0 = free) */
         entry_write_kv("xnu_live_abt_ptewbase", g_abtpte_walk_winbase); /* gPhysBase the walk bounded with */
         entry_write_kv("xnu_live_abt_ptewlen",  g_abtpte_walk_winlen);  /* mem_size the walk bounded with */
+
+        /*
+         * 1011 (A): the L1 base the FAULTING THREAD's own map/pmap names, beside `_ptettbr` (the live
+         * TTBR0 the walk sampled). The READING is the comparison: if the two bases agree, the walk read
+         * the right table and the non-coarse `_ptel1` is a real L1 slot; if they differ, the walk (and
+         * the handler) are looking at different tables - the 1010c frontier, now measured rather than
+         * assumed. VME_PROT-gated so the switch owns the cell (an OFF build has neither the store nor
+         * the reader). D13-only inside: 4570's struct pmap has no pm_l1_phys, so the 4570 arm publishes
+         * the 0xFFFFFFFF "not read" sentinel rather than reading a different field.
+         */
+#if defined(STAGE90_XNU_VME_PROT) && STAGE90_XNU_VME_PROT
+#if defined(STAGE90_ENTRY_D13) && STAGE90_ENTRY_D13
+        entry_write_kv("xnu_live_abt_ptethr", stage90_abt_thread_l1_base());
+#else
+        entry_write_kv("xnu_live_abt_ptethr", 0xFFFFFFFFu);   /* not available on 4570 - see the reader */
+#endif
+#endif
     }
 
     /*
@@ -2430,6 +2499,58 @@ entry_note_abt_vmf(uint32_t ret, uint32_t va, uint32_t prot)
 
     if (n == 1u) { g_abtpte_vmflastret = ret; }
     if (ret != g_abtpte_vmflastret) { g_abtpte_vmflastret = ret; g_abtpte_vmfnret++; entry_write_kv("xnu_live_abt_vmfnret", g_abtpte_vmfnret); }
+}
+#endif
+
+/*
+ * ================================================================================================
+ * 1011 (E'): the vm_map_entry EFFECTIVE PROTECTION for the abort's VA - the F1a/F1b discriminator
+ * ================================================================================================
+ *
+ * Called from `__wrap_vm_map_lookup_locked` (entry_trace.c), a PURE PASS-THROUGH but for this call.
+ * The value `prot` is the lookup's OUT-param: the entry's EFFECTIVE protection for the fault, after the
+ * `needs_copy` read-fault demotion (`vm_map.c:9061/9139/9167`). `docs/1011-discriminator-gap.md` found
+ * this cell published by NOTHING - the (B) `vm_fault` return reads KERN_SUCCESS whether the entry grants
+ * or (in the CS case) the fault is taken anyway, so it cannot separate the two hypotheses. This does:
+ *
+ *   `prot & VM_PROT_WRITE`      ⇒ the entry GRANTS write, yet the hardware keeps permission-faulting the
+ *                                 store ⇒ F1a: the write is lost on the way from `prot` to the PTE.
+ *   `!(prot & VM_PROT_WRITE)`   ⇒ the entry DENIES write (the read-only/CS-taint demotion) ⇒ F1b: the
+ *                                 accept path's unconditional `kr = KERN_SUCCESS` (`vm_fault.c:2478`) is
+ *                                 the wrong condition, and F4's retry bound is the safety net.
+ *
+ * LATCHED like (B) but on its OWN latch (`g_abtpte_vmelatch`): this fires INSIDE the `vm_fault` that
+ * (B)'s wrapper calls, before (B)'s wrapper clears its latch. Same ladder rule (`n <= 4 || power of two`)
+ * so a `_vmeprot` row at ordinal k pairs with the `_vmfprot`/`_ptel2` rows at the same k. `fault_type`
+ * is the SAME `>= 1` bit test `vm_fault`'s callers use (`VM_PROT_READ` always set, `VM_PROT_WRITE` for
+ * a store), so the row says whether the fault was a write by the caller's own convention.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_VME_PROT) && STAGE90_XNU_VME_PROT
+static uint32_t g_abtpte_vmen;
+static uint32_t g_abtpte_vmelastprot;
+static uint32_t g_abtpte_vmenx;   /* DISTINCT `prot` values seen (monotone, bounded) - an OBSERVATION */
+
+void
+entry_note_abt_vme(uint32_t kr, uint32_t prot, uint32_t fault_type, uint32_t vaddr)
+{
+    uint32_t n;
+
+    if (g_abtpte_vmelatch == 0u)
+        return;                 /* not the abort the storm is about - do not fill the channel */
+    g_abtpte_vmelatch = 0u;     /* one lookup per latched abort */
+
+    n = ++g_abtpte_vmen;
+
+    if (n <= 4u || (n & (n - 1u)) == 0u) {
+        entry_write_kv("xnu_live_abt_vmen",    n);           /* the ordinal */
+        entry_write_kv("xnu_live_abt_vmekr",   kr);          /* the KERN_* code the lookup returned */
+        entry_write_kv("xnu_live_abt_vmeprot", prot);        /* the EFFECTIVE entry protection (OUT-param) */
+        entry_write_kv("xnu_live_abt_vmefault", fault_type); /* the fault_type it was called with */
+        entry_write_kv("xnu_live_abt_vmeva",   vaddr);       /* the va it was called with */
+    }
+
+    if (n == 1u) { g_abtpte_vmelastprot = prot; }
+    if (prot != g_abtpte_vmelastprot) { g_abtpte_vmelastprot = prot; g_abtpte_vmenx++; entry_write_kv("xnu_live_abt_vmenx", g_abtpte_vmenx); }
 }
 #endif
 

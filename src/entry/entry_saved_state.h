@@ -104,6 +104,16 @@
 #define STAGE90_TH_RECOVER     552
 #define STAGE90_ACT_PCBDATA    580
 
+/* **1011 (A): `offsetof(struct pmap, pm_l1_phys)`.** D13's `struct pmap` (`osfmk/arm/pmap.h:98-99`)
+ * leads with `paddr_t pm_l1_phys` - the physical base of the L1 table - so the offset is 0. It is
+ * defined HERE (and only in the D13 branch) because 4570's `struct pmap` is a different struct
+ * entirely: it leads with `tt_entry_t *tte` then `pmap_paddr_t ttep`, so there is no `pm_l1_phys` to
+ * name (the L1 physical base there is `pmap->ttep`, a different field at a different offset). The
+ * 1011 (A) reader that dereferences it is `#if STAGE90_ENTRY_D13`-gated for exactly this reason - a
+ * transcribed offset reused across two trees is the [[mi4-one-value-two-definitions]] defect the 949
+ * note above already paid for. */
+#define STAGE90_PMAP_L1_PHYS   0
+
 #else   /* 4570 (Darwin 17) - the frozen backup's layout, unchanged since 474. */
 
 /* `struct arm_saved_state`, `osfmk/mach/arm/thread_status.h` - via genassym's `SS_*` (see above). */

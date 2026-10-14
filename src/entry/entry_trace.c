@@ -5692,6 +5692,15 @@ extern void entry_note_abt_pte(uint32_t va);
 extern void entry_note_abt_vmf(uint32_t ret, uint32_t va, uint32_t prot);
 #endif
 
+/*
+ * 1011 (E'): the vm_map_entry EFFECTIVE PROTECTION for the faulting VA - the F1a/F1b discriminator.
+ * Its own guard (ABT_FAR && ABT_PC && ABT_PTE && VME_PROT), so the declaration is only live where the
+ * call is; the ABT_PTE guard count (2: extern + call) is undisturbed.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_VME_PROT) && STAGE90_XNU_VME_PROT
+extern void entry_note_abt_vme(uint32_t kr, uint32_t prot, uint32_t fault_type, uint32_t vaddr);
+#endif
+
 void __real_sleh_abort(void *regs, int type);
 
 void __wrap_sleh_abort(void *regs, int type)
@@ -5815,6 +5824,60 @@ uint32_t __wrap_vm_fault(void *map, uint32_t vaddr, uint32_t fault_type, uint32_
     /* The pass-through above is unconditional; only the recording is gated by the latch. */
     entry_note_abt_vmf(r, vaddr, fault_type);
     return r;
+}
+#endif
+
+/*
+ * ================================================================================================
+ * 1011 (E'): what `vm_map_lookup_locked` computed for the storm's abort - the F1a/F1b discriminator
+ * ================================================================================================
+ *
+ * `kern_return_t vm_map_lookup_locked(vm_map_t *var_map, vm_map_address_t vaddr, vm_prot_t fault_type,
+ * int object_lock_type, vm_map_version_t *out_version, vm_object_t *object, vm_object_offset_t *offset,
+ * vm_prot_t *out_prot, boolean_t *wired, vm_object_fault_info_t fault_info, vm_map_t *real_map)`
+ * (`osfmk/vm/vm_map.h:503-515`). On this 32-bit target every argument is a word (`vm_map_address_t`/
+ * `vm_object_offset_t` are pointers here, `vm_prot_t`/`int`/`boolean_t` are 32-bit), so there is no
+ * register-pair question.
+ *
+ * **WHY THIS AND NOT A STRUCT DEREF (docs/1011-design-v2.md §2 (E')).** `out_prot` IS the entry's
+ * EFFECTIVE protection for the fault: `vm_map_lookup_locked` sets `prot = entry->protection`
+ * (`vm_map.c:9061`), demotes it for a read fault on a `needs_copy` entry (`:9139`), and writes
+ * `*out_prot = prot` (`:9167`). It is already a materialized local at the call site, so the instrument
+ * reads the value that GOVERNS the fault without transcribing a single `struct vm_map_entry` offset -
+ * the offsets are a defect class this project keeps paying for (the audit's numbers were wrong twice).
+ * The cell it fills is the one `docs/1011-discriminator-gap.md` found published by NOTHING:
+ * `protection & VM_PROT_WRITE` ⇒ the entry GRANTS write (F1a: the write is lost `prot`→PTE);
+ * `!(protection & VM_PROT_WRITE)` ⇒ the entry DENIES write (F1b: the accept path's unconditional
+ * `KERN_SUCCESS` is the wrong condition, `vm_fault.c:2478`).
+ *
+ * **THE RULE (the same as the `--wrap=vm_fault` above).** `vm_map_lookup_locked` is called from
+ * `vm_fault.o` (`vm_fault.c:2830` first lookup, `:3769` the RetryFault verify branch) and, on the CS
+ * path, from a handful of other sites; the wrapper is a PURE PASS-THROUGH on the non-storm case. It
+ * returns `__real_vm_map_lookup_locked(...)` unconditionally and calls `entry_note_abt_vme` behind the
+ * LATCH ONLY (set by `entry_note_abt_pte`, cleared by whichever recorder reads it first), so only the
+ * abort the storm is about publishes a row and 2.1 M retries do not fill the channel. The `--wrap` is
+ * added to `TRACE_LDFLAGS` ONLY when `STAGE90_XNU_VME_PROT=1` (build_entry.sh), so the OFF image
+ * carries no `--wrap=vm_map_lookup_locked` at all.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_VME_PROT) && STAGE90_XNU_VME_PROT
+uint32_t __real_vm_map_lookup_locked(void *var_map, uint32_t vaddr, uint32_t fault_type,
+                                     int object_lock_type, void *out_version, void **object,
+                                     void *offset, uint32_t *out_prot, uint32_t *wired,
+                                     void *fault_info, void **real_map);
+
+uint32_t __wrap_vm_map_lookup_locked(void *var_map, uint32_t vaddr, uint32_t fault_type,
+                                     int object_lock_type, void *out_version, void **object,
+                                     void *offset, uint32_t *out_prot, uint32_t *wired,
+                                     void *fault_info, void **real_map)
+{
+    uint32_t kr = __real_vm_map_lookup_locked(var_map, vaddr, fault_type, object_lock_type,
+                                              out_version, object, offset, out_prot, wired,
+                                              fault_info, real_map);
+
+    /* The pass-through above is unconditional; only the recording is gated by the latch. */
+    if (out_prot != 0)
+        entry_note_abt_vme(kr, *out_prot, fault_type, vaddr);
+    return kr;
 }
 #endif
 
