@@ -1,0 +1,124 @@
+# 1009 press read — `armed-d13-24997fc5`
+
+**Captures.** The press booted via `fastboot boot` (never flash) at 2026-10-14 ~13:30; the runner
+returned 2 (the expected resident non-return); the device was dark; it returned **on its own** at
+14:01:38 (adb, `4a2fe00b`, no operator power-press needed — the watchdog reset). Recovered log:
+
+`out/stage90/captures/recovered-unknown-arm-20261014-140220-last_kmsg.txt` (1,431,945 B).
+
+Adjudicated with `python3 tools/check_1009_capture.py <capture>` — **0 HARD ANOMALIES**, EXIT=0,
+`FAULTING-PC-AND-FSR CERTIFIED`.
+
+## VERDICT — the storm is a USER-MODE WRITE PERMISSION FAULT, retried ~2 M times
+
+**1009 names the faulting instruction and the fault status. The loop is one userspace instruction
+writing to one user page that faults *permission*, over and over.** 1008's REPEAT reading holds; the
+fault is not a kernel fault and not a demand walk — it is a **write to a page the user process is not
+allowed to write**.
+
+The ladder — `pcn` (ordinal), `pc` (faulting instruction), `fsr` (DFSR), `abtcpsr` (mode), `pcfar`
+(fault address):
+
+| `pcn` | `pc` | `fsr` | mode | `pcfar` | note |
+|---|---|---|---|---|---|
+| 1 | `0x80496a20` | `0x805` | SVC 0x13 | `0x1000` | kernel copyin walk |
+| 2 | `0x80496e4c` | `0x807` | SVC | `0xcfdbd000` | kernel copyout (stack) |
+| 3 | `0x80016a70` | `0x807` | SVC | `0xcfdfe000` | kernel |
+| 4 | `0x80496a44` | `0x805` | SVC | `0x2bd86f7c` | kernel copyin (dyld) |
+| 8 | `0x2be7a194` | `0x007` | **USER 0x30** | `0x2bec3004` | first user fault (dyld) |
+| 16 | `0x2be7d400` | `0x807` | USER | `0x2be9c018` | dyld walk |
+| 32 | `0x2be8cfe8` | `0x007` | USER | `0x2be8cfe8` | dyld walk |
+| 64 | `0x804965c0` | `0x007` | SVC | `0x3e36d000` | kernel copyin |
+| 128 | `0x804965c0` | `0x007` | SVC | `0x3e3ad000` | kernel copyin |
+| 256 | `0x2be92fe4` | `0x005` | USER | `0x2fe2984c` | user walk |
+| 512 | `0x2be92fe4` | `0x007` | USER | `0x34c8b3c8` | user walk |
+| **1024** | **`0x2be8a1a0`** | **`0x80f`** | **USER** | **`0x0009a000`** | **the collapse** |
+| 2048 … **2097152** | **`0x2be8a1a0`** | **`0x80f`** | **USER** | **`0x0009a000`** | **constant for every row** |
+
+From `pcn=1024` through `pcn=0x200000` — ~2.09 M aborts — **`pc`, `fsr`, mode and `pcfar` are
+CONSTANT**: `pc=0x2be8a1a0`, `fsr=0x0000080f`, `abtcpsr=0x60000030`, `far=0x0009a000`. This is the
+`(R) REPEAT` class **by value**, and it is decisive.
+
+### The fault, decoded
+
+- **`fsr = 0x0000080f`** — bit 11 (0x800), **WnR = 1: this is a WRITE**. The fault-status code is the
+  low nibble `0x f`? No: D13 decodes the **FSR** as `(0x800 = external)|(0x00f)`; the status is
+  `0b001111`→ the **fault-status code 0b0111 (7) = permission fault** (the low bits `0xf` = WnR(0x8) |
+  status(0x7)). The same `0x…7` appears in the dyld walk rows — a permission fault, and here on a write.
+- **`abtcpsr = 0x60000030`** — mode bits `0x30 & 0x1f` = **`0x10` = USER mode**, **IRQ enabled**,
+  T bit set (Thumb), Z=0 C=0 N=0. The fault is taken **in userspace**, not in the kernel.
+- **`far = 0x0009a000`** — a low user VA (~630 KB), **below** the `0x80000000` split (`arm_vm_init.c:86`).
+  (1008's run read the same class at `far=0x0007b000` — the *class* is constant, the *low address*
+  slides run to run; both are the process's low user mappings.)
+- **`pc = 0x2be8a1a0`** — the faulting instruction, in the **dyld shared cache** (`0x2be…`, the
+  region 999/996 identified). A userspace store into shared-cache territory.
+
+**So the storm is: a userspace store to user VA `0x9a000` takes a permission fault (`fsr=0x80f`,
+WnR=1), and the kernel's data-abort handler RETURNS WITHOUT DISMISSING IT** — the same store
+re-executes at the same address, faults again, ~2 M times, and the run freezes for 24.4 s.
+
+## The stall frame — the CPU is INSIDE the abort wrapper
+
+| key | value | symbol |
+|---|---|---|
+| `xnu_live_stall_pc` | `0x8049ffc1` | **`__wrap_sleh_abort+0x61`** (the project's own wrapper) |
+| `xnu_live_stall_lr` | `0x8046c95c` | `sleh_abort+0x468` |
+| `xnu_live_stall_cpsr` | `0x60000113` | SVC, IRQ enabled |
+
+The stall sample lands inside the abort path (the wrapper), which is the expected shape for a
+synchronous-fault storm. `xnu_live_abt_maxcall = 0x1570bb71` = 359.7 M counts ≈ **18.73 s** — the long
+handler call, reproducing 1007 (`0x1570e6a5`) and 1008 (`0x1570c1a7`) to within a few 10 k counts.
+`xnu_live_tick_sum_maxd = 0x1be8767b` = **24.386 s** (1008: 24.387 s — reproduced).
+
+**Resident.** `xnu_live_wdt_pets = 97` (> 0) — the watchdog was fed, the goal's 「保持在 xnu 里」 holds
+until the freeze. `No errors detected`; the machine was alive and returned on its own.
+
+## What this does and does NOT say
+
+- **DOES say:** the storm is a **single userspace instruction** (`pc=0x2be8a1a0`, dyld shared cache)
+  taking a **permission fault on a WRITE** (`fsr=0x80f`, WnR=1) to a **low user VA** (`far=0x9a000`),
+  in **USER mode** (`cpsr=0x60000030`), retried ~2 M times. 1008's REPEAT holds; the fault is a
+  **user write to a page it cannot write**.
+- **DOES say (correction):** 1008's `far=0x7b000` and 1009's `far=0x9a000` are the SAME class — a
+  low user address — **not a stable identity**; the address slides run to run. What is invariant is
+  the *mode* (user), the *WnR* (write), the *fault status* (permission), and the *retry* (~2 M).
+- **DOES NOT say:** *why* the page is unwritable, or *why the handler returns without dismissing*. The
+  two candidate mechanisms are (i) a **`pmap`/MMU attribute bug** — a user page mapped read-only (AP
+  bits) that the process must write, so every store permission-faults; or (ii) a **missing user-fault
+  delivery path** — the port's `sleh_abort` user branch does not turn an unresolvable user fault into
+  a signal (SIGSEGV/SIGBUS), so it returns and the store re-executes. Named next rung below.
+- **No brick:** the machine is alive (`No errors detected`, watchdog fed, returned on its own).
+
+## The reader defect fixed in this rung (`23b71d1`)
+
+The `[ABT3]` classifier was specified (`docs/1009-design.md §5`) to decide REPEAT/SPREAD from the
+**change-counts** `nfar`/`nfsr`. But those are encoded as **whole-run running maxima** (written from
+abort 1, monotone) — they count changes through the walked prefix and **can never describe the
+tail**. 1009's run reads `nfar=832`, `nfsr=49`, and `nfar>1` is true from the dyld walk onward, so the
+first run of the reader reported **SPREAD** over a tail that is, in fact, perfectly constant. The tail
+is visible in the **ladder rows' own `pcfar`/`fsr`/`abtcpsr`**; the classifier now reads those rows
+at/after ordinal `0x400`, and reports `nfar`/`nfsr` as what they are. Real capture → **REPEAT**; a
+synthetic tail mutation → **SPREAD** (mutation-checked). This is `[[mi4-measurement-defects]]`: **a
+whole-run statistic is not a tail statistic** — the same class as 1007's `first()`-vs-`max()` defect,
+from the other side.
+
+## The next rung (1010)
+
+Two mechanisms, one measurement each:
+
+1. **Is the page read-only?** Publish, on the REPEAT `far`, the **L2 page-table entry** the fault
+   resolved to (or the `pmap`'s view of it) — the AP/APX bits and the W/X state. If a user page the
+   process must write is mapped read-only, that is the bug, and the fix is in `pmap_enter`'s attribute
+   computation (`external/xnu-hd2-darwin13/xnu/osfmk/arm/pmap.c`). The **shared-cache geometry**
+   (iOS7SHREG/IOS7LAB, the port's `vm_shared_region.c`) is the prime suspect: if the dyld shared cache
+   is mapped read-only but a process writes a fixup into it, this is exactly `fsr=0x80f` at a `0x2be…`
+   `pc` — the same region 999/996 already flagged as mis-mapped.
+2. **Does the handler deliver a signal?** Read the port's `sleh_abort` **user-mode branch**
+   (`external/xnu-hd2-darwin13/xnu/osfmk/arm/trap.c:510`): does an unresolvable user fault call into
+   the BSD layer (`send_signal`/`psignal`) or reach a `thread_exception_return` that ends the process?
+   If it returns without either, the store re-executes — the retry loop — and the fix is to add the
+   delivery, not to chase the page permission.
+
+The frontier after 1009: **a userspace store to a low user page permission-faults (WnR=1) and the
+handler re-runs it ~2 M times — decide whether the page is wrongly read-only (pmap/shared-cache
+mapping) or the user-fault signal path is missing (trap.c).**
