@@ -197,8 +197,20 @@ def cond_true(expression, macros):
     """
     if not COND_OK.match(expression):
         raise SystemExit("unparsable #if expression: %r" % expression)
+    # `defined X` / `defined(X)` must be resolved BEFORE the identifier substitution below, or that
+    # substitution would rewrite the `defined` token itself to `0` and leave the invalid `0(0)`. C makes
+    # `defined(X)` 1 iff X is a macro AT ALL, regardless of its value - this tree's `defined()`-first
+    # guards (`#if defined(SWITCH) && SWITCH`, the [[mi4-off-option-two-spellings]] form) rely on that:
+    # a switch the translator sets but does not `#define` in the file is still "defined" to the guard.
+    expression = re.sub(r"\bdefined\b[ \t]*\(?[ \t]*([A-Za-z_]\w*)[ \t]*\)?",
+                        lambda m: "1" if m.group(1) in macros else "0", expression)
     substituted = re.sub(r"\b[A-Za-z_]\w*\b", lambda m: str(macros.get(m.group(0), 0)), expression)
     substituted = substituted.replace("u", "").replace("U", "")
+    # C's logical operators are not Python's: `&&`/`||` are a syntax error to `eval`, and a lone `!`
+    # is `not` (`!=` must survive).  This evaluator was written for a single-identifier `#if` and only
+    # meets a compound one now that a switch is guarded `defined(S) && S`; translate rather than refuse.
+    substituted = substituted.replace("&&", " and ").replace("||", " or ")
+    substituted = re.sub(r"!(?!=)", " not ", substituted)
     try:
         return bool(eval(substituted, {"__builtins__": {}}, {}))  # noqa: S307 - digits and operators only
     except Exception as error:                                    # noqa: BLE001 - reported, not raised
