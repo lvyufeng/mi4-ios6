@@ -2104,12 +2104,39 @@ entry_note_abt_pc(uint32_t pc, uint32_t fsr, uint32_t cpsr, uint32_t far)
 /*
  * THE TTBR BASE RULE - ONE SPELLING (`check_gic_routing.py` refuses a second: "the answer to which
  * table answers for this address is one value"). Defined OUTSIDE the ABT_PTE gate so the walk and the
- * pre-existing `entry_live_ttb_base` below share it. `TTBR & 0xffffc000` = bits[31:14]: an L1 table is
- * `L1_SIZE` = 0x4000 = 16 KB aligned (pmap.h:195), and a TTBR's low 14 bits are walk attributes
- * (arm_context_switch ORs 0x5b/0x1b, armv/cpufunc-v7.s:52-54). 1010's walk used the *L1->L2 table*
- * mask (0xfffffc00) here instead and read the L1 +0x2000 high - the defect 1010b fixes (see the walk).
+ * pre-existing `entry_live_ttb_base` below share it.
+ *
+ * **THE MASK IS A FUNCTION OF `TTBCR.N`, NOT A CONSTANT** (1011's outcome, `records/1011-press-read.txt`).
+ * The old fixed mask (bits[31:14]) is the alignment of a **16 KB** table = the entry
+ * table of a **TTBCR.N = 0** configuration (512-byte granularity => 4096 descriptors). THIS PORT RUNS
+ * **N = 2** (`arm_vm_init.c:475 set_mmu_ttbcr(2)`), and ARM's rule is: for N >= 1, TTBR0's base is
+ * `2^(14 - N)` bytes aligned, so a 4 KB table of 1024 first-level descriptors indexed by VA[31:22].
+ * Bits[31:12] answer (`0xfffff000` .. `0xffffffc0`, all equal in bits[31:14]); bits[11:0] are the walk
+ * attribute (`arm_context_switch` ORs 0x5b/0x1b, `armv/cpufunc-v7.s:52-54`). The 16 KB mask is only
+ * correct under N = 0.
+ *
+ * **WHY IT WAS WRONG AND HOW IT WAS FOUND.** The user pmap's TTBR0 table is 4 KB-aligned: the faulting
+ * thread's own L1 base measured `xnu_live_abt_ptethr = 0x81a86000` with a 16 KB mask landing on
+ * `0x81a84000` (8 KB low, into a Mach-O image => the walk read **MH_MAGIC 0xfeedface**). The console's
+ * `entry_live_init` latches the table EARLY, when `ttbcr = 0` (N = 0, a 16 KB table `0x80a00000`), so
+ * its old 16 KB spell was right THEN and is wrong at the storm. The alignment is a function of `n`;
+ * spelling it as a constant is the defect, and 1010/1010b swapped one constant for another.
  */
-#define STAGE90_TTBR_BASE_MASK 0xffffc000u
+static inline uint32_t
+entry_ttbr_align_bits(uint32_t n)
+{
+    return 14u - n;   /* `n` is `ttbcr & 7` (0..7), so this is 7..14 - never negative, never a UB shift */
+}
+
+static inline uint32_t
+entry_ttbr_base(uint32_t ttbr, uint32_t n)
+{
+    /* ARMv7 ARM: a translation table is 2^(14 - N) bytes, aligned to 2^(14 - N) - for BOTH TTBR0 and
+     * TTBR1 (each covers a 2^(32 - N)-byte range at 1 MB section granularity, so 2^(12 - N) entries).
+     * N = 0 => 16 KB (the entry table, this image's boot table); N = 2 => 4 KB (this port's user pmap). */
+    uint32_t align_bits = entry_ttbr_align_bits(n);
+    return ttbr & ~((1u << align_bits) - 1u);
+}
 
 #if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE
 void entry_write_kv(const char *key, uint32_t value);   /* identically to :1920/:1973 */
@@ -2253,14 +2280,16 @@ stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used
         return 0u;                                /* the high window (TTBR1) - out of scope */
 
     /*
-     * 1010b: the TTBR0 base is bits[31:14] (`STAGE90_TTBR_BASE_MASK`), NOT bits[31:10]. The 1010 walk
-     * used `ABTPTE_L1_PTE_MASK` (the L1->L2 table mask, correct only at `l2base` below) here, which
-     * left bits[13:10] of the live walk attributes in the base and read the L1 table 0x2000 high -
-     * so every tail row returned `ptel2=0` for an address the hardware faults at LEVEL 2. The mask a
-     * base needs is the alignment of the thing it points at; the same shared rule
-     * `entry_live_ttb_base` uses and this port has always run on.
+     * THE BASE MASK IS `2^(14 - N)`, NOT A CONSTANT - 1011's outcome. A TTBR's table is 2^(14 - n)
+     * bytes aligned; its low `14 - n` bits are the walk attribute (arm_context_switch ORs 0x5b/0x1b,
+     * cpufunc-v7.s:52-54). 1010 used `ABTPTE_L1_PTE_MASK` (bits[31:10], the *L1->L2* table mask) - a
+     * second wrong alignment; 1010b swapped in the fixed 16 KB mask `0xffffc000` (bits[31:14]), which
+     * is right only for N = 0. THIS PORT RUNS `N = 2` at the storm (the user pmap's 4 KB table,
+     * TTBCR.N=2), so bits[31:12] answer and the 16 KB mask landed 8 KB low - into a Mach-O image
+     * (the walk read MH_MAGIC `0xfeedface`, the 1010c/1011 frontier). `entry_ttbr_base` is the ONE
+     * spelling of this rule, shared with `entry_live_ttb_base` and the console latch.
      */
-    base &= STAGE90_TTBR_BASE_MASK;               /* TTBR0 base: low 14 bits are walk attributes */
+    base = entry_ttbr_base(base, n);
     if (base == 0u)
         return 0u;
 
@@ -2916,7 +2945,7 @@ static uint32_t entry_live_ttb_base(uint32_t *ttbr0_out, uint32_t *ttbr1_out)
         *ttbr1_out = ttbr1;
 
     n = ttbcr & 7u;
-    return ((n == 0u) ? ttbr0 : ttbr1) & STAGE90_TTBR_BASE_MASK;
+    return entry_ttbr_base((n == 0u) ? ttbr0 : ttbr1, n);
 }
 
 /*

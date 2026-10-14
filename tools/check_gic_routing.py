@@ -840,11 +840,21 @@ def claim_live_table(facts, failures, notes, d13=False):
                             "window and alignment test the console's init makes is what keeps a write "
                             "out of a table this image cannot vouch for")
 
-    if stubs.count("0xffffc000u") != 1:
-        failures.append("entry_stubs.c spells the `TTBR` base rule %d time(s): the answer to \"which "
-                        "table answers for this address\" is one value, and a second spelling is the "
-                        "defect family this project has recorded twenty-four times"
-                        % stubs.count("0xffffc000u"))
+    # 1011: the TTBR base rule is now spelled ONCE as an n-derived alignment (`entry_ttbr_base` /
+    # `entry_ttbr_align_bits`), NOT as the fixed 16 KB mask `0xffffc000u` - which is right only under
+    # TTBCR.N = 0, and this port runs N = 2 at the storm (records/1011-press-read.txt: the fixed mask
+    # read MH_MAGIC 0xfeedface). The "one spelling" is `entry_ttbr_align_bits`; a SECOND spelling is
+    # still the defect this step exists to catch.
+    if stubs.count("entry_ttbr_align_bits(") < 2:
+        failures.append("entry_stubs.c no longer routes BOTH the walk and entry_live_ttb_base through "
+                        "the single n-derived alignment `entry_ttbr_align_bits` (%d call(s)): the "
+                        "answer to \"which base\" is one value, and a second spelling is the defect "
+                        "family this project has recorded twenty-four times"
+                        % stubs.count("entry_ttbr_align_bits("))
+    if stubs.count("0xffffc000u") != 0:
+        failures.append("entry_stubs.c still spells the fixed 16 KB TTBR mask `0xffffc000u` %d time(s): "
+                        "that mask is TTBCR.N = 0 only, and this port runs N = 2 (the 1011 defect, "
+                        "records/1011-press-read.txt)" % stubs.count("0xffffc000u"))
     init = function_body(stubs, "entry_live_init")
     if init is None or "entry_live_ttb_base(" not in init:
         failures.append("entry_stubs.c's entry_live_init no longer uses entry_live_ttb_base, so the "
@@ -1041,7 +1051,7 @@ def mutate_facts(facts, mutate):
         facts["stubs_text"] = _bump(
             facts["stubs_text"], "    l1 = entry_live_ttb_base(0, 0);",
             "    { uint32_t n2 = ttbcr & 7u;\n"
-            "      l1 = ((n2 == 0u) ? ttbr0 : ttbr1) & 0xffffc000u; }")
+            "      l1 = entry_ttbr_base((n2 == 0u) ? ttbr0 : ttbr1, n2); }")
     elif mutate == "the_probe_keeps_the_table_to_itself":
         facts["probe_text"] = _bump(
             facts["probe_text"], '    GIC_LIVE("xnu_live_gic_l1", g_live_mmio_l1);\n',
