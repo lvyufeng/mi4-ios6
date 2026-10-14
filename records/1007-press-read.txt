@@ -76,7 +76,16 @@ xnu_live_abt_maxgap  = 0x1570e6e9 = 359,720,681 counts = 18.735 s   (0.768 × M)
 The latched `maxcall` and `maxgap` are written **where they change**, so the last published value is
 the max. They escalate in lockstep (both → 18.735 s), meaning **one single `sleh_abort` invocation
 took 18.7 s** and **the gap just before it was also 18.7 s** — the same event seen from both sides of
-one abort. The classifier reads this as:
+one abort.
+
+The 68-count (`3.54 µs`) difference is the arithmetic that **rules out** the alternative reading (B)
+"the freeze is *between* two aborts". The recorder defines `gap(k) = t0(k) − t0(k−1) = call(k−1) +
+outside(k−1)`, where `outside` is the time the CPU spends *outside* the wrapper between abort *k−1*'s
+return and abort *k*'s entry. So a large `gap` is just a large previous `call` plus a small outside
+term — which is exactly what is measured: `maxgap − maxcall = 68 counts = 3.54 µs`. The two maxima are
+not two separate long stretches; they are **one invocation seen from both sides**, with 3.5 µs of
+outside-time between them. (B) would require `maxgap >> maxcall` with a *small* `maxcall`; here the
+opposite holds. The classifier reads this as:
 
 > **(C) ABORT-PATH LOCALISED — INSIDE ONE ABORT:** a single `sleh_abort` (its `arm_fast_fault` +
 > `vm_fault` body) took ~18.7 s. The frontier is **inside one fault**.
