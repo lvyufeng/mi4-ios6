@@ -38,7 +38,7 @@ The last `xnu_live_sleh_seen` this log carries is **40** (@:28159) — 968 lines
 `xnu_live_abt_n == xnu_live_abt_seq` at **every** one of the 23 published rows (cross-checked), and the
 disassembly confirms `entry_note_abt_span` reads `g_sleh_seq` directly (`801...= [r4,#120]`,
 `r4=0x8060f000`; `g_sleh_seq` at `0x8060f078`). So `abt_seq` **is** `g_sleh_seq` and both reach
-**2,097,152**: the run took **~2.1 million aborts**, not 40. The live channel hid every one past ~#64
+**2,097,152**: the run took **~2.1 million aborts**, not 40. The live channel hid every one past #40
 behind its cap; the direct channel did not. (0x200000 is the *last published* ladder row, so the count
 is `>= 2^21 = 2,097,152` and `< 2^22 = 4,194,304` — the run would have published a `0x400000` row
 had it reached one. The magnitude is not in doubt; only the exact ordinal is bracketed.)
@@ -47,6 +47,21 @@ had it reached one. The magnitude is not in doubt; only the exact ordinal is bra
 through dyld's image". The 40 is where the **capped live channel** stopped, not where the aborts did.
 The first ~40 aborts *are* the dyld walk (their `sleh_far`s step through `0x2be…`, the dyld image);
 what follows is a **storm** the capped channel never showed.
+
+**Why the *sleh* records stop at 40 — the channel was nearly full, and the fault handler's page-ins
+filled the rest.** The run image's band is 512 (`ABORT_TRACE=1`); the disassembly of `entry_note_sleh`
+shows it writing the per-entry frame band for **every** `seq ≤ 512` (`cmp r1, #512` / `bls`), so every
+abort up to #512 must have written a `sleh_seen` record *if the channel accepted it*. It did not. The
+channel's record counter is measurable: the last `sleh_seen` (#40) lands when the live channel holds
+**24,023 of its 24,576 records — 97.8 % full** — and the 968 live records that follow it are the SDHCI
+storage transport (`xnu_live_storage_dr_*`, `xnu_live_storage_rd_*`, ~10 per driver read, LBA
+`0x400000→0x4f4987`, a page-in) that the fault handler performs: aborts **41…512 would have written,
+but by the time they ran the channel was full** and `entry_live_write` refused them
+(`g_live_records >= ENTRY_LIVE_CAP`). So this is a **channel-FULL** artifact, not a channel-*down* one
+(`g_live_state` can only become 2 inside `entry_live_init`'s install checks, `entry_stubs.c:2248-2554`;
+it does not flip mid-run), and the marker `xnu_live_capped=0x00006000` is the channel reaching its cap,
+not a refusal. That the aborts continued past #40 is independently visible in the **direct** channel:
+`abt_n=0x40` (abort #64) appears *after* the cap marker, and the ladder runs to `0x200000`.
 
 **1004's own checker has the same blind spot, and its *own* capture proves it.** `check_1004_capture.py`
 reads the cap *positionally* — if `xnu_live_capped` lands after the last `sleh` record it prints "the
@@ -64,31 +79,38 @@ added (`xnu_live_abt_n`).
 
 `xnu_live_tick_sum_maxd` is a **running maximum** republished 14×. Its largest (and last) value is
 `0x1be892af` = **468,226,735 counts = 24.387 s** at 19.2 MHz — the 1004/1005/1006 reading reproduced
-(a 371-count drift from 1005's `0x1be8bc01`, i.e. the same freeze, not a new one).
+(a **10,578-count** / 551 µs drift from 1005's `0x1be8bc01`, i.e. the same freeze, not a new one).
 
-The two latched abort maxima sit **just under** it:
+The abort pointer sits **just under** it:
 
 ```
 xnu_live_abt_maxcall = 0x1570e6a5 = 359,720,613 counts = 18.735 s   (0.768 × M)
 xnu_live_abt_maxgap  = 0x1570e6e9 = 359,720,681 counts = 18.735 s   (0.768 × M)
 ```
 
-The latched `maxcall` and `maxgap` are written **where they change**, so the last published value is
-the max. They escalate in lockstep (both → 18.735 s), meaning **one single `sleh_abort` invocation
-took 18.7 s** and **the gap just before it was also 18.7 s** — the same event seen from both sides of
-one abort.
+**The load-bearing number is `maxcall` alone.** The recorder brackets every `sleh_abort` with the
+free-running timer (`entry_note_abt_span(t0, entry_counter()-t0)`), so `maxcall` = the longest *single*
+`sleh_abort` invocation the run took = **18.735 s**. Its ladder (the `xnu_live_abt_call` records, not
+just the latch) corroborates it independently: the 0x100 row shows a 5.322 s handler, 0x200 shows
+3.776 s, and the latch climbs monotonically (`0x631 → … → 0x1570e6a5`). So **the ~18.7 s is inside one
+abort**, measured directly.
 
-The 68-count (`3.54 µs`) difference is the arithmetic that **rules out** the alternative reading (B)
-"the freeze is *between* two aborts". The recorder defines `gap(k) = t0(k) − t0(k−1) = call(k−1) +
-outside(k−1)`, where `outside` is the time the CPU spends *outside* the wrapper between abort *k−1*'s
-return and abort *k*'s entry. So a large `gap` is just a large previous `call` plus a small outside
-term — which is exactly what is measured: `maxgap − maxcall = 68 counts = 3.54 µs`. The two maxima are
-not two separate long stretches; they are **one invocation seen from both sides**, with 3.5 µs of
-outside-time between them. (B) would require `maxgap >> maxcall` with a *small* `maxcall`; here the
-opposite holds. The classifier reads this as:
+**`maxgap` adds nothing and must not be presented as a second witness.** The recorder defines
+`gap(k) = t0(k) − t0(k−1) = call(k−1) + outside(k−1)`, where `outside` is the CPU time *between* abort
+*k−1*'s return and abort *k*'s entry. This is an **identity**: `maxgap ≥ maxcall` always, and the two
+maxima are the *same* invocation seen once as `call` and once as the next `gap` — the 68-count
+(3.54 µs) difference is exactly `outside(maxcall-invocation)`. So the pairing is a **tautology, not
+evidence** for (C); it cannot *by construction* distinguish (C) from (B). The (B) reading — "the freeze
+is *between* two aborts" — is ruled out instead by what `maxcall` measures: 18.7 s was spent with the
+wrapper's second `entry_counter()` not yet reached, i.e. *inside* the call, not after it.
+
+The classifier's (C) verdict is therefore carried by `maxcall` (18.7 s < M = 24.39 s: **77 % of the
+freeze is inside one abort invocation**), with the remaining **5.65 s** (`M − maxcall`) not further
+localised by this instrument:
 
 > **(C) ABORT-PATH LOCALISED — INSIDE ONE ABORT:** a single `sleh_abort` (its `arm_fast_fault` +
-> `vm_fault` body) took ~18.7 s. The frontier is **inside one fault**.
+> `vm_fault` body) took ~18.7 s. The frontier is **inside one fault**; a further ~5.65 s of the 24.39 s
+> freeze is not attributed by 1007's two clocks.
 
 ## The stall frame (resolved by value)
 
