@@ -8,7 +8,9 @@ device was already up):
 `out/stage90/captures/recovered-unknown-arm-20261014-163943-last_kmsg.txt` (1,457,488 B, 31,270 lines).
 
 Adjudicated with `python3 tools/check_1010_capture.py <capture>` — **0 HARD ANOMALIES**, EXIT=0,
-DEATH GATE OPEN.
+DEATH GATE OPEN. *(The 1010b rung hardens the checker: it now classifies the `_ptel2=0`-vs-FS=15
+contradiction of §3 as a HARD ANOMALY (1 anomaly, EXIT=1) and refuses to certify the (A) gate — the
+same reading §3–§5 below reach by hand, now a check rather than a paragraph.)*
 
 ## VERDICT — the storm REPRODUCED (class-identical, 24.39 s); the 1010 (A) WALK IS INVALID (an instrument defect), so 1010 does NOT name the mechanism
 

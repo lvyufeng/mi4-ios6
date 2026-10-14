@@ -88,3 +88,75 @@ answered. Full body is in the extraction transcript; the constants above are its
 0xfff = 0`, L2 index `= (0x9a000 >> 12) & 0xff = 0x9a`; `*out_ttbr0_used` reads 1. The owning pmap is
 `current_cpu_datap()->user_pmap` — for pid 1 (launchd) its user `pm_l1_phys`. The kernel pmap is only
 reachable via TTBR1 (≥ `0x40000000`), so this low address cannot be a kernel_pmap mapping.
+## 6. UPDATE 2026-10-14 (1010b) — the walk as BUILT had §1's mask in §2's slot
+
+The 1010 press read (`records/1010-press-read.txt`, arm `armed-d13-0f39207c`) exposed a defect in the
+walk **as built** (`src/entry/entry_stubs.c:2146`), not in this document. The code masked the TTBR0
+base with `ABTPTE_L1_PTE_MASK` (`0xfffffc00`, §1 — the **coarse-L1-descriptor → L2-table** mask) where
+§2 says — and the working `entry_live_ttb_base` does — to use `TTBR & 0xffffc000`.
+
+The consequence, read off the machine: for the storm's tail (`far=0x5d000`, `fsr=0x0000080f` = FS=15
+"permission fault, level 2") every walk row returned `ptel2=0` / `pteu=0` — **no L2 leaf** — which an
+FS=15 fault *cannot* produce (an absent L2 descriptor yields FS=5/6/7, a *translation* fault). The walk
+read the L1 table **+0x2000** high (`0x81a8605b & 0xfffffc00 = 0x81a86000` vs the real, 16 KB-aligned
+`0x81a84000`), so `far=0x5d000` (L1 index 0) landed on the real L1 word for VA `0x80000000` (the
+kernel), whose L2 lookup missed.
+
+**1010b fix.** Two named masks, one per role:
+
+| role | mask | name | why |
+|---|---|---|---|
+| TTBR0 **base** | `0xffffc000` (bits[31:14]) | `STAGE90_TTBR_BASE_MASK` | an L1 table is `L1_SIZE` = 0x4000 = **16 KB** aligned (§1) |
+| L1 descriptor → **L2 table** | `0xfffffc00` (bits[31:10]) | `ABTPTE_L1_PTE_MASK` | an L2 table is `L2_SIZE` = 0x400 = 1 KB aligned (§1) |
+
+This is the class `[[mi4-stand-in-size-is-not-value]]` / `[[mi4-one-value-two-definitions]]` — one mask
+literal, two roles, the wrong one substituted. `tools/check_1010_capture.py` now makes the falsifier a
+check: a `_ptel2 == 0` row paired to an FS=15 fault is a **HARD anomaly** naming the walk (§3 above),
+and the (A) gate is refused rather than certified. The 1010b build clauses pin the mask **by value** at
+both the definition and the use, and assert the old (wrong) use is gone.
+
+**Still owed after 1010b:** the leaf (APX=1 vs APX=0 at the tail) — the decisive cell for
+`docs/1011-design.md` (F1a prot-strip vs F1b entry-denies-write) — remains unread until a correct walk
+is pressed.
+
+## 7. UPDATE 2026-10-14 (1010c) — the corrected walk reached OUT OF ITS OWN WINDOW and faulted
+
+The 1010b press (`records/1010b-press-read.txt`, arm `armed-d13-64391319`) fixed §6's mask defect — and
+the fix **exposed a second, deeper defect in the same walk**: it dereferences an L2 table that lies
+*outside* the entry image's identity window, with **no bounds check**, and the deref faults. The run
+died at launchd-start, before the storm; the leaf is still unread.
+
+**By value.** Abort #4 (`_pcn=4`, `far=0x2bd89f7c`) has its `_pcn` row but **no `_pten` row** — and
+`entry_note_abt_pte` is the LAST statement of `__wrap_sleh_abort` (`entry_trace.c:5779`), whose walk
+call precedes every write, so a fault *inside the walk* truncates the (A) block. The very next abort
+(#5) is **the walk itself**: `pc=0x80002644` = `ldr r0,[r0]`, the L2 leaf load (`entry_stubs.c:2184`),
+with `far=0x46300224`, `fsr=0x00000005` (FS=5 section translation fault), `cpsr=0x20000193`
+(supervisor). And the arithmetic is exact: `0x46300224 = 0x46300000 + (((0x2bd89f7c>>12)&0xff)<<2)` =
+`l2base + L2_index×4` — bit-identical to `entry_stubs.c:2183`.
+
+**Why the mask fix is *correct* and still faults.** With the live word `TTBR0=0x81a6e05b`: 1010's mask
+`0xfffffc00` gave base `0x81a6e000` (**not** 16 KB aligned) so the L1 read landed on the wrong slot and
+returned a stale coarse pointer whose L2 was *in-window* — hence 1010 returned `ptel2=0` **without
+faulting**. 1010b's mask `0xffffc000` gives `0x81a6c000` (**16 KB aligned**, `L1_SIZE`), so the L1 read
+now lands in-window (`0x81a6caf4`) and **succeeds** — but the *true* L1 descriptor points at an L2 table
+at PA **`0x46300000`**, in the device's **low RAM bank** `[0, 0x60000000)`, which this port's
+single-span physmap does not map (`phys_to_virt(p)=p - gPhysBase + gVirtBase` is the identity and only
+reflects `p ≥ 0x80000000`, `pmap.h:193`; the multi-bank region list is the owed 911-B/911e port). The
+entry window is `[0x80000000, 0x80000000+memSize=0x9e400000)`, so `0x46300224` is unmapped → FS=5.
+
+**The lesson.** The walk is a *reader* with two dereferences (`entry_stubs.c:2170` the L1 slot,
+`:2184` the L2 leaf) and **neither is bounded**. §4's own note assumed "every address it is about is
+below the TTBCR split" — true of `far_`, **false** of the L2 pointer the walk chases *from* `far_`. A
+walk that cannot reach a table must say so (return 0, as it already does for every other bad shape),
+never fault. `tools/check_1010_capture.py` now makes this the falsifier-as-check: a `_pcn` ordinal with
+**no** `_pten` row is a HARD anomaly naming the walk, and the (A) gate refuses to certify. (Its
+`s_cadence` empty-sample crash, which hid this, is also fixed.)
+
+**1010c plan.** (1) Bound both derefs to `[0x80000000, 0x80000000 + memSize)`, using the window the
+image was handed (`xnu_entry_args_memSize`) — fail open when a table is out of range. (2) For the L2
+leaf the window refuses, do **not** give up — reach it the way the port already reaches a low-RAM page:
+`entry_smem.c` (rung 911c) installs a **section** VA→PA for the low bank (`0xe0000000` → `0x0fa00000`)
+via `entry_mmio_section`/`entry_section_install` and **reads it live** (capture `cb4e17f1`). The walk
+can install a temporary section for the L2 table's 1 MB, read the leaf through the alias, and restore
+the slot — that is the read that finally names the leaf, using only machinery this port has already
+pressed.

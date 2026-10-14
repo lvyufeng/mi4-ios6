@@ -7,6 +7,27 @@
 # docs/1010-design.md (§3 the change, §4 the build refusals, §5 the classifier);
 # docs/1010-pte-walk.md (the L2 walk, by value).
 #
+# 1010b (2026-10-14): the 1010 press (`records/1010-press-read.txt`, arm armed-d13-0f39207c) reproduced
+# the storm by value BUT the (A) walk read `ptel2=0/pteu=0` at the tail - IMPOSSIBLE under `fsr=0x80f`
+# (FS=15, a LEVEL-2 permission fault REQUIRES a present L2 descriptor). Root cause, by value: the walk
+# masked the TTBR0 base with `ABTPTE_L1_PTE_MASK` (0xfffffc00, the coarse-L1-descriptor -> L2-TABLE
+# mask, correct only at `l2base`) instead of `STAGE90_TTBR_BASE_MASK` (0xffffc000, bits[31:14] - an L1
+# table is L1_SIZE=0x4000=16 KB aligned, pmap.h:195), reading the L1 +0x2000 high. 1010b splits the two
+# masks AND extends the (B) `vm_fault` ladder past the first-four prefix to the powers-of-two tail (paired
+# to the (A) `_ptel2` rows). Both are instrument fixes; the switch set is UNCHANGED (no new switch), so
+# the entry bin moves only because the instrument moved. This is the design's OWN falsifier
+# (docs/1010-design.md §6).
+#
+# 1010b PRESS RESULT (2026-10-14): the mask fix is CORRECT but it EXPOSED a second defect in the same
+# walk (`records/1010b-press-read.txt`, arm armed-d13-64391319). The corrected TTBR0 base reads the TRUE
+# L1, whose L2 table lives at PA 0x46300000 - BELOW the entry image's identity window [0x80000000,
+# 0x9e400000) - and the walk dereferences it with NO window bound, so the L2 leaf load (`entry_stubs.c:
+# 2184`) faults FS=5 and the run dies at launchd-start (before the storm; the leaf is STILL unread). The
+# truncation shows as a `_pcn` ordinal with NO `_pten` row (`entry_note_abt_pte` runs LAST in
+# `__wrap_sleh_abort`). The next rung is 1010c: bound both walk derefs to the entry window, and reach an
+# out-of-window L2 table via a temporary section VA->PA installed by `entry_mmio_section` (the 911c smem
+# mechanism). See docs/1010-pte-walk.md §7.
+#
 # 1009's press read (records/1009-press-read.txt, arm armed-d13-24997fc5) named the storm BY VALUE -
 # from ordinal 0x400 through 0x200000 (~2.09 M aborts) the faulting instruction is CONSTANT
 # (`pc=0x2be8a1a0`, in the dyld shared cache), the DFSR is CONSTANT (`fsr=0x0000080f` = WnR=1 | FS=0xf
@@ -410,20 +431,21 @@ XNU_TREE="$XNU_TREE" STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./scripts/buil
 echo "== result =="
 printf 'entry bin sha (first 8): '
 sha256sum out/stage90/xnu_arm_entry.bin | cut -c1-8
-echo "   1009 was 24997fc5 - a DIFFERENT value here means the 1010 edits reached the image."
-# The arm must MOVE off the PRESSED 1009 arm (the project rule: the arm IS the entry bin's sha8). A
-# build that lands back on 24997fc5 did not change the entry image - the 1010 edit did not reach the
-# linked image (or one of the two entry objects was not rebuilt). This is the build-side counterpart of
-# the arm-refusal guards the park/press scripts carry against the pressed arms.
+echo "   1009 was 24997fc5, 1010 was 0f39207c - a DIFFERENT value here means the 1010b edits reached the image."
+# The arm must MOVE off the PRESSED arms (the project rule: the arm IS the entry bin's sha8). A build
+# that lands back on 0f39207c did not change the entry image - the 1010b instrument fix (the TTBR0 base
+# mask + the (B) tail ladder) did not reach the linked image (or one of the two entry objects was not
+# rebuilt). This is the build-side counterpart of the arm-refusal guards the park/press scripts carry.
 _d6_arm=armed-d13-$(sha256sum out/stage90/xnu_arm_entry.bin | cut -c1-8)
-[[ $_d6_arm == armed-d13-24997fc5 ]] && { echo "FAIL: the build produced 1009's PRESSED arm (24997fc5) again - the entry bin did NOT move, so the 1010 edits did not reach the linked image (rebuild: build_entry.sh with STAGE90_XNU_ABT_PTE=1 AND STAGE90_XNU_ABT_PC=1 AND STAGE90_XNU_ABT_FAR=1 AND STAGE90_XNU_ABT_SPAN=1 exported for BOTH STUB_DEFINES and STUB_DEFINES_TRACE); do not park a 1010 arm identical to the pressed 1009 one"; exit 1; }
+[[ $_d6_arm == armed-d13-0f39207c ]] && { echo "FAIL: the build produced 1010's PRESSED arm (0f39207c) again - the entry bin did NOT move, so the 1010b instrument fix did not reach the linked image (rebuild: build_entry.sh with STAGE90_XNU_ABT_PTE=1 AND STAGE90_XNU_ABT_PC=1 AND STAGE90_XNU_ABT_FAR=1 AND STAGE90_XNU_ABT_SPAN=1 exported for BOTH STUB_DEFINES and STUB_DEFINES_TRACE); do not park a 1010b arm identical to the pressed 1010 one"; exit 1; }
+[[ $_d6_arm == armed-d13-24997fc5 ]] && { echo "FAIL: the build produced 1009's arm (24997fc5) - a stale layer"; exit 1; }
 [[ $_d6_arm == armed-d13-0343ef45 ]] && { echo "FAIL: the build produced 1008's arm (0343ef45) - a stale layer"; exit 1; }
 [[ $_d6_arm == armed-d13-88074ab3 ]] && { echo "FAIL: the build produced 1007's arm (88074ab3) - a stale layer"; exit 1; }
 [[ $_d6_arm == armed-d13-31bdebf3 ]] && { echo "FAIL: the build produced 1006's arm (31bdebf3) - a stale layer"; exit 1; }
 [[ $_d6_arm == armed-d13-ff937225 ]] && { echo "FAIL: the build produced 1005's arm (ff937225) - a stale layer"; exit 1; }
 [[ $_d6_arm == armed-d13-582a19c8 ]] && { echo "FAIL: the build produced 1004's arm (582a19c8) - a stale layer"; exit 1; }
 [[ $_d6_arm == armed-d13-7669309b ]] && { echo "FAIL: the build produced 1003's arm (7669309b) - a stale layer"; exit 1; }
-echo "   1010 arm: $_d6_arm (must differ from the pressed 1009 arm 24997fc5)"
+echo "   1010b arm: $_d6_arm (must differ from the pressed 1010 arm 0f39207c)"
 echo "-- 1000's own constants/keys BY VALUE (source side, what the image check cannot split) --"
 printf '   ENTRY_LIVE_CAP:  '; grep -m1 '^#define ENTRY_LIVE_CAP' src/entry/entry_stubs.c || true
 printf '   WDT timeout:     '; grep -m1 '^#define STAGE90_HW_WATCHDOG_TIMEOUT_S' src/stage90.h || true
@@ -1349,6 +1371,30 @@ echo "   (a) guards: entry_stubs.c x$abt_sp (want 1 - the walk + both recorders)
 ab_walk=$(awk '/^stage90_read_l2_pte\(uint32_t va, uint32_t \*out_l1_desc, uint32_t \*out_ttbr0_used\)$/{f=1} f{print} f&&/^}$/{exit}' "$stub_src")
 [[ $(grep -cF 'n = ttbcr & 7u;' <<<"$ab_walk" || true) == 1 ]] || { echo "FAIL: the walk does not read TTBCR.N into 'n' - it must key the table on TTBCR.N (get $(( $(grep -cF 'n = ttbcr & 7u;' <<<"$ab_walk" || true) )))"; exit 1; }
 [[ $(grep -cF 'base = ttbr0;' <<<"$ab_walk" || true) == 2 ]] || { echo "FAIL: the walk's TTBR0 selection is not 'base = ttbr0;' in BOTH branches (N=0 and the low window) - want 2 in the walk body"; exit 1; }
+# 1010b - THE TTBR0 BASE MASK, BY VALUE. The 1010 press (arm 0f39207c) read `ptel2=0/pteu=0` at the
+# storm's tail - IMPOSSIBLE under `fsr=0x80f` (FS=15, "permission fault, level 2"), which REQUIRES a
+# present L2 descriptor. Root cause: the walk masked the TTBR0 base with ABTPTE_L1_PTE_MASK
+# (0xfffffc00, the coarse-L1-descriptor -> L2-TABLE mask, correct ONLY at `l2base`), which left
+# bits[13:10] of the live walk attributes in the base and read the L1 table +0x2000 high. The base is
+# bits[31:14] = STAGE90_TTBR_BASE_MASK (0xffffc000; an L1 table is L1_SIZE=0x4000=16 KB aligned,
+# pmap.h:195) - the SAME rule `entry_live_ttb_base` uses (`:2621`, `& 0xffffc000u`). Class:
+# [[mi4-stand-in-size-is-not-value]] / [[mi4-one-value-two-definitions]]. Assert the definition, the
+# USE, and that the OLD (wrong) use is GONE, all scoped to the walk body.
+[[ $(grep -cF '#define STAGE90_TTBR_BASE_MASK 0xffffc000u' "$stub_src" || true) == 1 ]] || { echo "FAIL: STAGE90_TTBR_BASE_MASK is not 0xffffc000u (TTBR0 base bits[31:14], L1_SIZE=0x4000, pmap.h:195) in $stub_src"; exit 1; }
+[[ $(grep -cF 'base &= STAGE90_TTBR_BASE_MASK;' <<<"$ab_walk" || true) == 1 ]] || { echo "FAIL: the walk does not mask the TTBR0 base with STAGE90_TTBR_BASE_MASK (0xffffc000) - the 1010 defect (reading the L1 +0x2000) would return ptel2=0 for a level-2 fault"; exit 1; }
+[[ $(grep -cF 'base &= ABTPTE_L1_PTE_MASK;' <<<"$ab_walk" || true) == 0 ]] || { echo "FAIL: the walk STILL masks the TTBR0 base with the L1->L2 mask ABTPTE_L1_PTE_MASK (the 1010 defect) - the base mask and the L2-table mask are DIFFERENT (one value, two roles)"; exit 1; }
+# The L2-TABLE base is the OTHER role: it MUST keep the L1_PTE mask (bits[31:10]). Pin it so a future
+# "fix" cannot collapse the two masks the other way.
+[[ $(grep -cF 'l2base = l1e & ABTPTE_L1_PTE_MASK;' <<<"$ab_walk" || true) == 1 ]] || { echo "FAIL: the L2-table base is not 'l2base = l1e & ABTPTE_L1_PTE_MASK;' - the two masks must not be conflated (L1->L2 table base is bits[31:10])"; exit 1; }
+echo "   (a) the walk's two masks are DISTINCT and correct: TTBR0 base &= 0xffffc000, l2base = l1e & 0xfffffc00"
+# 1010b - THE (B) LADDER SAMPLES THE TAIL. 1010 published only the FIRST FOUR `vm_fault` returns
+# (`ABTPTE_VMF_FIRST`), so a `_vmfret` row never described the storm's own tail - the whole-run-vs-tail
+# defect ([[mi4-measurement-defects]]). The rule is now the SAME powers-of-two ladder the (A) `_pte`
+# rows use, so a `_vmfret` at ordinal k pairs with the `_ptel2` at the same k.
+ab_vmf=$(awk '/^entry_note_abt_vmf\(uint32_t ret, uint32_t va, uint32_t prot\)$/{f=1} f{print} f&&/^}$/{exit}' "$stub_src")
+[[ $(grep -cF 'n <= 4u || (n & (n - 1u)) == 0u' <<<"$ab_vmf" || true) == 1 ]] || { echo "FAIL: the (B) recorder does not use the tail ladder 'n <= 4u || (n & (n - 1u)) == 0u' - the vm_fault return must be sampled at the storm's tail, not only the prefix (the 1010 measurement defect)"; exit 1; }
+[[ $(grep -cF 'ABTPTE_VMF_FIRST' <<<"$ab_vmf" || true) == 0 ]] || { echo "FAIL: the (B) recorder still bounds its rows by ABTPTE_VMF_FIRST (the first-N prefix) - the (B) ladder is the tail fix"; exit 1; }
+echo "   (a) the (B) vm_fault recorder samples the powers-of-two TAIL (paired to the (A) _ptel2 ladder)"
 # The 1009 call must NOT be touched by 1010 (the ABT_PC guard is a prefix of the conjunction).
 [[ $(grep -cF 'entry_note_abt_pc(((const uint32_t *)(uintptr_t)regs)[STAGE90_SS_PC / 4],' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: 1009 is NOT reproducible - the pc call is not present exactly once in entry_trace.c"; exit 1; }
 echo "   (a) the source shape: 1+3 ABT_PTE guards + walk/2 recorders def + 1 abort call + vm_fault wrapper + __real_ + the pmap.h constants + the TTBCR.N key + 1009 intact"

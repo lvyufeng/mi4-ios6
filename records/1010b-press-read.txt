@@ -1,0 +1,161 @@
+# 1010b press read — `armed-d13-64391319`
+
+**Capture.** The press booted via `fastboot boot` (never flash) at 2026-10-14 ~17:32; the runner
+returned 0 (the device came back **51 s** after `fastboot boot`, on its own — adb, `4a2fe00b`). The
+recovered log (read-only, the device was already up):
+
+`out/stage90/captures/recovered-armed-d13-64391319-20261014-173654-last_kmsg.txt` (945,511 B,
+17,550 lines; the runner's own step 4 named it `recovered-unknown-arm-20261014-173654` and it was
+renamed to carry the arm).
+
+**The rung.** 1010b was **instrumentation only**: (i) split the two masks the 1010 (A) walk
+conflated — the TTBR0 **base** mask `0xffffc000` (`STAGE90_TTBR_BASE_MASK`; an L1 table is
+`L1_SIZE` = 0x4000 = 16 KB aligned, `pmap.h:195`) vs the L1-descriptor → L2-**table** mask
+`ABTPTE_L1_PTE_MASK` = `0xfffffc00` (unchanged); (ii) extend the (B) `vm_fault` ladder from
+first-4 to powers-of-two, paired to the (A) ordinals. Switch set UNCHANGED (`STAGE90_XNU_ABT_PTE=1`
+on 1009's set verbatim).
+
+## VERDICT — the mask fix is CORRECT and it exposed a SECOND defect in the same walk: the walk dereferences an L2 table OUTSIDE the entry window and the deref FAULTS (the run died at launchd-start)
+
+### 1. This run did NOT reach the storm — it died at launchd-start
+
+The capture reaches `BSD root: md0` (@:4079), `can't perform kext scan …attempting to start init of
+/sbin/launchd` (@:4095), `SUBMAPSKIP` ×2 (@:4096-97), `IOS7LAB shared region …` (@:4098) — and then,
+instead of 1010's `mini4: the OS starts the process …`, the console prints the **KDP panic**:
+
+```
+Using serial KDP.  x2
+Waiting for remote debugger connection.  x2
+Please go to http://github.com/winocm/xnu to report this panic.  x2
+```
+
+Only **4** abort records exist (1010: 0x100000; 1009: 0x200000), `xnu_live_wdt_pets=0` (1010: 97),
+`xnu_live_tick_sum_maxd=0x02f43d98` (~0.5 s, 1010: `0x1be90c2b` = 24.39 s). The storm never started.
+The machine returned on its own (`No errors detected`), so it is not bricked.
+
+*(The precedent `recovered-unknown-arm-20261013-072537-last_kmsg.txt` also shows this KDP text — but
+it died BEFORE the ladder in a `hw_lock_lock` panic, with NO `SUBMAPSKIP`, NO abort channel. That
+is a different death; it does NOT pre-empt this one. Across all 14 distinct captures only these two
+show the KDP wait, and only this one reached the abort ladder.)*
+
+### 2. The death is INSIDE the walk — `stage90_read_l2_pte` faulted on its L2 leaf load
+
+**2a. Abort #4's (A) row is missing.** `xnu_live_abt_pcn=0x00000004` (far=0x2bd89f7c) is present, but
+`xnu_live_abt_pten=0x00000004` is **absent** — the last `pten` row is `=0x00000003`. `entry_note_abt_pte`
+(the (A) recorder) is the **LAST** statement of `__wrap_sleh_abort` (`entry_trace.c:5779`), and inside
+it the walk call (`entry_stubs.c:2214`) precedes every `entry_write_kv` — so a fault in the walk
+truncates the whole (A) block including its `pten` header. **1010 had this row** (its `pten=4` is
+`ptel2=0/…/pteu=0`, a clean walk).
+
+**2b. The next abort is the walk itself.** Abort #5 (`xnu_live_sleh_seq=0x00000005`):
+
+| key | value | meaning |
+|---|---|---|
+| `pc` | `0x80002644` | **inside `stage90_read_l2_pte`** (symbol base `0x800025b8`) — `ldr r0,[r0]`, the L2 leaf load (`entry_stubs.c:2184`) |
+| `far` | `0x46300224` | the L2-leaf **address the walk computed** |
+| `fsr` | `0x00000005` | FS=5, **section translation fault**, supervisor read |
+| `cpsr` | `0x20000193` | SVC/supervisor |
+| `recover` | `0x804969a0` | the abort was *recovered* (the port's fault label) — this one did not kill it |
+
+**2c. The arithmetic is exact.** `0x46300224 = 0x46300000 + (((0x2bd89f7c >> 12) & 0xff) << 2)`. L2
+index of abort #4's VA `0x2bd89f7c` = `0x89`; `0x89 << 2 = 0x224`; `0x46300000 + 0x224 = 0x46300224`.
+That is bit-identical to `entry_stubs.c:2183` (`l2p = l2base + (((va >> 12) & 0xffu) << 2)`) and to the
+linked disassembly (`0x80002638–40`: `lsr r0,r0,#10; and r0,r0,#1020; orr r0,r0,r3`). So **abort #4's
+VA is the one under the walk, and #5 IS that walk's fault.** `far(#5)` pins the L2 table base to
+`0x46300000`.
+
+### 3. THE DEFECT BY VALUE — the L1 read is in-window, the L2 table is not, and there is NO window bound
+
+Read off the live word the run published (`xnu_live_abt_ptettbr=0x81a6e05b`, 1010b run):
+
+| mask | base | 16 KB aligned? | L1 read (abort#4, idx 0x2bd) | result |
+|---|---|---|---|---|
+| 1010's `0xfffffc00` | `0x81a6e000` | **no** | `0x81a6eaf4` (wrong slot, +0x2000 high) | got a stale coarse ptr → read an in-window L2 → `ptel2=0`, **no fault** |
+| 1010b's `0xffffc000` | `0x81a6c000` | **yes** | `0x81a6caf4` (the **real** L1 slot) | got the **real** L1 descriptor, `l2base=0x46300000` |
+
+So the mask fix is **correct** (an L1 table is 16 KB aligned — `pmap.h:195`; the base is bits[31:14]).
+The L1 read now lands in-window (`0x81a6caf4` ∈ `[0x80000000, 0x9e400000)`) and **succeeds**. But the
+real L1 descriptor points to an L2 table at physical **`0x46300000`**, and:
+
+```
+entry window = [0x80000000, 0x80000000 + memSize=0x1e400000) = [0x80000000, 0x9e400000)
+L2 leaf load address  = 0x46300224   ->  BELOW 0x80000000  ->  OUTSIDE the window
+```
+
+The entry image can only dereference a physical address *as a VA* when that address is inside its
+own window (its premise `physBase == virtBase == 0x80000000`; XNU's kernel tables at that moment map
+only `[0x80000000, 0x9e400000)`). `0x46300224` is in the device's **low RAM bank** `[0, 0x60000000)`,
+which this port does **not** map (the physmap is single-span: `phys_to_virt(p) = p - gPhysBase +
+gVirtBase` is the identity and only reflects `p ≥ 0x80000000` — `pmap.h:193`; the multi-bank region
+list is the **owed 911-B/911e port**). So the load is a translation fault (FS=5). **The walk has no
+window check on either dereference** (`entry_stubs.c:2170/2184`), and its own design comment assumed
+"every address it is about is below the TTBCR split" — true of `far_`, **false** of the L2 pointer the
+walk chases *from* `far_`.
+
+This is the class `[[mi4-a-device-address-can-be-right-and-undereferenceable]]` (the address is
+correct and the walk cannot reach it) meeting `[[mi4-stand-in-size-is-not-value]]` (the 1010 mask was
+wrong; the correction is right; the *reader* around it was never bounded).
+
+### 4. Which 1010b change did it — change (i), and it is INHERENT to the corrected walk
+
+- **(ii) is not involved.** The (B) ladder lives in `entry_note_abt_vmf` (`entry_stubs.c:2246+`), called
+  only from `__wrap_vm_fault`. The fault is inside `stage90_read_l2_pte`, reached only from (A).
+- **(i) is the enabler, and the fault is not a *mistake* in (i).** 1010b changed only the TTBR0 base
+  mask (`:2164`); it did **not** touch `l2base = l1e & ABTPTE_L1_PTE_MASK` (`:2179`) or `l2p` (`:2183`).
+  For a *given* L1 descriptor the deref address is identical on both arms. What changed is **which L1
+  slot is read**: 1010's mis-masked base read a stale slot whose L2 pointer happened to be in-window
+  (so it returned `ptel2=0` without faulting — the INVALID reading the 1010b rung set out to fix); the
+  corrected base reads the real L1 slot, whose L2 pointer is out-of-window. **The corrected walk is
+  the one that finally reads the machine truthfully — and the machine's truth is an L2 table the
+  entry image cannot reach.** The 1010 walk was not merely "wrong"; it was *unable to fault*, which is
+  why 1010 survived and this did not.
+
+### 5. Consequence — 1010b did NOT read the leaf; the F1a/F1b cell is STILL open
+
+The (A) cell's whole purpose — read the L2 small-page descriptor's **APX bit** (bit 9) at the storm
+tail — was **not** obtained: the run died before the storm, and the three `pten` rows it did publish
+(ordinals 1-3, all `ptel1=0`/`ptel2=0`) are for the pre-storm kernel aborts. The decisive cell for
+`docs/1011-design.md` (F1a prot-strip vs F1b entry-denies-write) **remains unread.**
+
+**A partial positive:** abort #1 (`far=0x1000`, `fsr=0x00000805` = FS=5, level-1 translation fault) now
+reads `ptel1=0x00000000` — a **correct** reading (an FS=5 level-1 fault has no L1 descriptor). The 1010
+walk read `ptel1=0x81a81001` there, which was itself the mask defect showing. So the fix moved the
+walk from *wrong readings* to *correct readings that fault when out-of-range*.
+
+## What this does and does NOT say
+
+- **DOES say:** the 1010 (A) walk's mask defect is **real and now fixed** — the walk reads the true L1
+  (`0x81a6c000`, 16 KB aligned) and its L1 loads land in-window.
+- **DOES say (the finding):** the walk **dereferences an L2 table at physical `0x46300000` with no
+  window bound** and faults (FS=5, `pc=0x80002644` = its own leaf load). The entry image cannot reach
+  the low RAM bank; the walk must not chase an L2 pointer there. **The run died at launchd-start, not
+  at a wall of the port — it died because the instrument reached out of its own window.**
+- **DOES NOT say:** whether the tail leaf is APX=1 or APX=0 — the decisive cell is **still unread**.
+  The mechanism (cs-taint vs prot-deny, F1a vs F1b) **remains open.**
+
+## The next rung (1010c) — bound the walk, then read the leaf
+
+1. **Bound every dereference in `stage90_read_l2_pte` to the entry window** `[0x80000000,
+   0x80000000 + memSize)`, using the window the image was handed (`xnu_entry_args_memSize`) — read the
+   base/length from the same place `entry_live_init` reads them; **return 0** (fail open, as the walk
+   already does for every other bad shape) when either the L1 slot address or the L2 leaf address is
+   out of window. A walk that cannot reach a table must say so, not fault.
+2. **For the L2 leaf the window refuses, do NOT give up — reach it the way the port already reaches a
+   low-RAM page.** `entry_smem.c` (rung 911c) installs a **section** VA→PA for the low bank
+   (`STAGE90_SMEM_ALIAS_BASE = 0xe0000000` → PA `0x0fa00000`) via `entry_mmio_section` /
+   `entry_section_install`, and **reads it live** (capture `cb4e17f1`). The walk can do the same for the
+   L2 table's 1 MB: install a temporary section, read the leaf word through the alias VA, restore the
+   L1 slot. **That is the read that finally names the leaf** — and it uses only machinery this port has
+   already pressed. (If the section install is judged too near the abort handler, the alternative is to
+   latch `prot` at `pmap_enter_options` entry — an in-window proxy for the F1a/F1b discriminator, per
+   `docs/1011-design.md` §1.5 — but it is not the raw leaf.)
+3. **Harden the checker**: a `pten` row MISSING while its `pcn` row is present, or an abort whose `pc`
+   is inside `stage90_read_l2_pte`, is a **HARD ANOMALY** naming the walk — the falsifier is now a
+   check, not a paragraph.
+4. Rebuild (`armed-d13-…`), re-press, re-adjudicate. Only then does (A) read the leaf and name which
+   side of the `vm_map`-vs-PTE disagreement is wrong — and 1011 (F1a/F1b) becomes decidable.
+
+The frontier after 1010b: **the (A) walk's mask is fixed and reads the true L1, but the true L1 points
+at an L2 table at `0x46300000`, outside the entry image's identity window — the unbounded deref faults
+and the run dies at launchd-start before the storm; the leaf is still unread, the F1a/F1b mechanism
+still open.**

@@ -194,6 +194,21 @@ fi
 
 # The arm name IS the entry bin's sha8 (the project's rule). Derive it, and refuse the known arms.
 EXPECT_ARM=armed-d13-$(sha256sum out/stage90/xnu_arm_entry.bin | cut -c1-8)
+[[ $EXPECT_ARM == armed-d13-64391319 ]] && {
+  echo "REFUSING: out/stage90 holds 1010b's arm (64391319) - the PRESSED predecessor (VERDICT: the TTBR0"
+  echo "mask fix is CORRECT but it exposed a SECOND defect in the SAME walk - the corrected base reads the"
+  echo "TRUE L1, whose L2 table is at PA 0x46300000, BELOW the entry image's identity window"
+  echo "[0x80000000,0x9e400000); the walk dereferences it with NO window bound, so the L2 leaf load faults"
+  echo "FS=5 (pc=0x80002644 = its own ldr) and the run DIES at launchd-start BEFORE the storm; the leaf is"
+  echo "STILL unread; adjudicated in records/1010b-press-read.txt)."
+  echo "Build 1010c (bound the walk to the entry window; reach the L2 table via a temporary section"
+  echo "VA->PA - the 911c smem mechanism) first."; exit 1; }
+[[ $EXPECT_ARM == armed-d13-0f39207c ]] && {
+  echo "REFUSING: out/stage90 holds 1010's arm (0f39207c) - the PRESSED predecessor (VERDICT: the storm"
+  echo "reproduced, but the (A) L2 walk is INVALID - it read ptel2=0/pteu=0 at the tail (impossible under"
+  echo "fsr=0x80f, FS=15 level-2 permission fault) because the TTBR0 base was masked with the L1->L2 mask"
+  echo "0xfffffc00 instead of the base mask 0xffffc000; adjudicated in records/1010-press-read.txt)."
+  echo "Build 1010b (scripts/build_1010.sh) first."; exit 1; }
 [[ $EXPECT_ARM == armed-d13-24997fc5 ]] && {
   echo "REFUSING: out/stage90 holds 1009's arm (24997fc5) - the PRESSED predecessor (frontier: the storm"
   echo "is a USER-mode WRITE permission fault - pc=0x2be8a1a0 in the dyld shared cache, fsr=0x0000080f ="

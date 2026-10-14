@@ -1699,6 +1699,10 @@ def s_cadence(cap):
         say("OBS", "ONLY %d cadence sample(s) (< %d): the deltas are too short to classify the stall "
                    "- this is an OBS, NOT a verdict ([[mi4-measurement-defects]]: a short window is "
                    "not evidence of a stall)" % (len(samples), CAD_SHORT_WINDOW))
+    if not samples:
+        say("OBS", "NO cadence sample rows at all: the deltas and the ratio witness cannot be read "
+                   "(a branch over zero samples is not a verdict) - the [C] section is skipped")
+        return
     first, last = samples[0], samples[-1]
     ds = (last["sync"] - first["sync"]) if (last["sync"] is not None and first["sync"] is not None) else None
     dt = (last["tick"] - first["tick"]) if (last["tick"] is not None and first["tick"] is not None) else None
@@ -3009,6 +3013,39 @@ def s_abt4(cap):
                    "address was not a small-page L2 entry under TTBR0 - a section, or TTBR1 was "
                    "selected); read `_pteu` (1 = TTBR0 used) and `_ptettbr` before judging" % len(zero_l2))
 
+    # ---- (abt4-3b) THE INSTRUMENT'S OWN FALSIFIER, MADE A CHECK (design §6 falsifier (b)).  A `_ptel2`
+    # == 0 means the walk found NO L2 leaf.  For a DEMAND-PAGING, USER-mode fault (DFSR FS=7 "translation
+    # fault, level 2"; FS=5/6 are level 1) that is EXPECTED - the page was never mapped, so there is no L2
+    # entry to read; the whole point of the fault.  But for a LEVEL-2 PERMISSION fault (FS=0xf, e.g.
+    # `fsr=0x80f` = WnR | FS=15) a PRESENT L2 descriptor is REQUIRED - an absent one produces FS=5/6/7,
+    # never FS=15.  So `_ptel2`==0 at an FS=15 fault is IMPOSSIBLE for a correct walk: it is the
+    # INSTRUMENT (the 1010 TTBR0-base-mask defect: 0xfffffc00 read the L1 +0x2000 high), NOT the machine.
+    ABT4_PERM_FS = frozenset((0xf, 0xd, 0xe))   # level-2 permission fault (FAR section / page / other)
+    perm_missing = []
+    for r in zero_l2:
+        if r["pten"] is None or r["pteva"] is None:
+            continue
+        dv = [s for s in cap.abt3_records() if s["pcn"] == r["pten"] and s["fsr"] is not None]
+        if not dv:
+            continue
+        fs = dv[-1]["fsr"] & 0xf
+        if fs in ABT4_PERM_FS:
+            perm_missing.append((r, dv[-1]["fsr"], fs))
+    abt4_walk_invalid = bool(perm_missing)   # a `_ptel2`==0 on an FS=15 fault: the walk, not the page
+    if perm_missing:
+        r0, fs0, fsv = perm_missing[0]
+        hard("x%d pte-ladder record(s) carry `_ptel2`=0 (NO L2 LEAF) for a LEVEL-2 PERMISSION fault "
+             "(first @:%d pten=%s pteva=%s fsr=0x%x FS=%d) - IMPOSSIBLE for a correct walk: FS=%d REQUIRES "
+             "a present L2 descriptor (an absent one gives FS=5/6/7). THE WALK IS THE DEFECT, not the page "
+             "- this is the 1010 TTBR0-base-mask defect (the base must be masked with the BASE mask "
+             "0xffffc000 = ABTPTE_TTBR_BASE_MASK, NOT the L1->L2 mask 0xfffffc00; design §6 falsifier (b), "
+             "[[mi4-stand-in-size-is-not-value]]). Do NOT read the (A) tail as a PTE verdict." % (
+                 len(perm_missing), r0["ln"], fmt(r0["pten"]), fmt(r0["pteva"]), fs0, fsv, fsv))
+    elif zero_l2:
+        say("OBS", "the `_ptel2`=0 rows all pair to TRANSLATION faults (FS=5/6/7) or have no FS row: an "
+                   "absent L2 leaf is the EXPECTED shape for a demand-paging fault, so no instrument "
+                   "defect is inferred")
+
     # ---- (abt4-4) PAIR BY KEY EQUALITY (design §5).  The pte ladder publishes `pten`; the span ladder
     # `n`; the far ladder `farn`; the pc ladder `pcn`.  ALL advance once per abort, so the four row sets
     # must carry the SAME ordinals.  A `pten` with NO sibling row of the same ordinal is a GAP - the pte
@@ -3029,6 +3066,34 @@ def s_abt4(cap):
     else:
         say("PASS", "every pte-ladder `pten` pairs to a span/far/pc row of the same ordinal (x%d rows; "
                     "the recorders ran once per abort) - the self-consistency holds" % len(ptens))
+
+    # ---- (abt4-4b) THE WALK-TRUNCATION FALSIFIER (the 1010b rung's own defect), the MIRROR of abt4-4.
+    # `entry_note_abt_pte` (the (A) recorder) runs LAST inside `__wrap_sleh_abort` (entry_trace.c:5779),
+    # and inside it the walk call (`entry_stubs.c:2214`) precedes every `entry_write_kv` - so a fault
+    # INSIDE the walk truncates the whole (A) block: the abort's `_pcn`/`_farn`/`_n` row EXISTS but no
+    # `_pten` row does. So a sibling ladder ordinal (`_pcn` sampled at 1008's trigger set, once per
+    # abort) with NO matching `_pten`, while the pte ladder ran at all, is not a gap in the pairing (that
+    # is abt4-4) - it is the (A) recorder DYING mid-walk. 1010b exposed this: the corrected TTBR0 mask
+    # read the TRUE L1, whose L2 table lived at PA 0x46300000 - below the entry image's identity window
+    # [0x80000000, 0x9e400000) - and the unbounded L2 deref faulted (FS=5) at the walk's own leaf load.
+    # An absent `_pten` is a TRUNCATION; a present `_pten` with `_ptel2`=0 is the walk's FAIL-OPEN
+    # return, a different thing (abt4-3/3b). A reader that cannot fail certifies nothing.
+    walk_truncated = []
+    if rows:
+        pten_set = set(ptens)
+        walk_truncated = [k for k in sorted(pc_ns) if k not in pten_set]
+    abt4_walk_truncated = bool(walk_truncated)
+    if walk_truncated:
+        hard("x%d pcn ordinal(s) have NO matching `_pten` row (first pcn=%s): the (A) recorder runs LAST "
+             "in `__wrap_sleh_abort` and its walk call precedes every write, so an ABSENT `_pten` is the "
+             "walk DYING mid-read - a fault INSIDE `stage90_read_l2_pte`, not a kernel reading (the 1010b "
+             "TTBR0-mask fix read the TRUE L1, whose L2 table is at a PA OUTSIDE the entry window "
+             "[0x80000000, memSize) and the unbounded L2 deref faulted). Do NOT read the (A) ladder as a "
+             "PTE verdict; the walk needs a window bound (design 1010b)." % (
+                 len(walk_truncated), fmt(walk_truncated[0])))
+    else:
+        say("PASS", "every sampled `_pcn` ordinal has a matching `_pten` row (x%d siblings; the (A) "
+                    "recorder survived its walk at every sampled abort)" % len(pc_ns))
 
     # ---- (abt4-5) MONOTONICITY / ladder membership of `_pten`.
     def on_ladder(n):
@@ -3164,7 +3229,14 @@ def s_abt4(cap):
     ret_const = len(ret_set) == 1
     ret_last = rets[-1] if rets else None
     ret_names = ",".join(ABT4_KERN_NAMES.get(v, "0x%x" % v) for v in ret_set) if ret_set else "-"
-    if tail_apx is not None and ret_last is not None:
+    if abt4_walk_invalid:
+        say("VERDICT", "(A) WALK INVALID - the pte ladder's tail rows carry `_ptel2`=0 (NO L2 LEAF) while "
+                       "the paired faults are LEVEL-2 PERMISSION faults (FS=0xf), which REQUIRE a present "
+                       "L2 descriptor. The (A) side of the decisive cell CANNOT be read from this log: the "
+                       "walk is the defect (the TTBR0 base masked with 0xfffffc00 instead of 0xffffc000). "
+                       "The mechanism (cs-taint vs prot-deny, F1a/F1b) remains OPEN; the (B) vm_fault "
+                       "return below is still a reading.")
+    elif tail_apx is not None and ret_last is not None:
         if tail_apx == 1 and ret_last == ABT4_KERN_SUCCESS:
             say("VERDICT", "*** THE DECISIVE CELL (design §2.2): the L2 PTE at the tail is APX=1 (USER "
                            "READ-ONLY) AND vm_fault returned KERN_SUCCESS (0). The write permission "
@@ -3206,9 +3278,21 @@ def s_abt4(cap):
                "it CANNOT describe the tail; the tail verdict above reads the ladder ROWS' OWN `_ptel2` "
                "(the 1008/1009 measurement defect, NOT repeated)" % (ABT4_PTENX_KEY, fmt(nptenx)))
 
-    # ---- certified: a real pte ladder was read (>= 1 full record) - the 1010 pass gate.
-    if rows and not partial:
+    # ---- certified: a real pte ladder was read (>= 1 full record) AND the walk is not shown invalid by
+    # its own falsifier (abt4-3b).  A `_ptel2`==0 on an FS=15 fault means the walk misread the L1, so the
+    # (A) ladder is NOT a PTE verdict - the rung is NOT certified (the HARD anomaly above also fails the
+    # exit).  A reader that cannot fail certifies nothing ([[mi4-measurement-defects]]).
+    if rows and not partial and not abt4_walk_invalid and not abt4_walk_truncated:
         ABT4_CERTIFIED = True
+    elif abt4_walk_truncated:
+        say("OBS", "the 1010 (A) L2-DESCRIPTOR gate is NOT certified: the walk was TRUNCATED mid-read (a "
+                   "`_pcn` ordinal with no `_pten` row) - the corrected TTBR0 mask reached a real L1 whose "
+                   "L2 table sits OUTSIDE the entry window, and the unbounded L2 deref faulted. The walk "
+                   "needs a window bound (1010c); the (B) vm_fault return is still read.")
+    elif abt4_walk_invalid:
+        say("OBS", "the 1010 (A) L2-DESCRIPTOR gate is NOT certified: the walk read `_ptel2`=0 for a "
+                   "LEVEL-2 PERMISSION fault (impossible for a correct walk - the TTBR0-base-mask defect). "
+                   "Fix the instrument (build 1010b) and re-press; the (B) vm_fault return is still read.")
 
 
 def main():
