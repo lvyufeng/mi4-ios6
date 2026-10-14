@@ -1,47 +1,55 @@
 #!/usr/bin/env python3
-"""Mechanical adjudicator for the 1011 press capture - THE FIX for the user write permission-fault
-storm, adjudicated BY VALUE against the 1009 STORM BASELINE, and DEATH-AWARE.
+"""Mechanical adjudicator for the 1011-v2 press capture - the MEASUREMENT rung that reads the two cells
+(design `docs/1011-design-v2.md`) and DECIDES F1a vs F1b, adjudicated BY VALUE and DEATH-AWARE.
+
+1011-v2 IS A PURE MEASUREMENT RUNG - IT CHANGES NO KERNEL BEHAVIOUR (design §5: "No fix is built or
+pressed").  The earlier `docs/1011-design.md` made 1011 the FIX (F1a/F1b/F1c/F2); that design was
+SUPERSEDED.  This tool therefore CERTIFIES a MEASUREMENT, it does not adjudicate a behavioural fix - a
+distinction that runs through every clause below.
 
 MODELLED BYTE-STRUCTURALLY ON tools/check_1010_capture.py (its `Capture` reader and EVERY 1010/1009/
 1008/1007/1006/1005/1004 clause are kept VERBATIM as regressions; the measurement clauses stay because
-1011 CHANGES NO INSTRUMENT - it changes kernel BEHAVIOUR).  1011 adds ONE section, `[CFFIX]`: the rung's
-headline verdict - did the 1009 storm STOP?  The rung is the FIX (design `docs/1011-design.md` §2:
-F1a strip / F1b deny / F1c COW / F2 shared-region), and it is only DECIDABLE once 1010's (A)/(B) cells
-were read - which is why this reader runs the 1010 clauses first and then reads the fix.
+1011-v2 adds instrument, not behaviour).  1011-v2 adds ONE section, `[CFFIX]`: it reads the TWO CELLS
+1010c could not (design §2) and prints the ONE F1a/F1b/re-open classification the measurement supports.
 
-[CFFIX] THE WRITE-PERMISSION-FAULT FIX - THE 1011 RUNG ITSELF (the NEW section, the ONE [CFFIX] line).
+[CFFIX] THE 1011-v2 MEASUREMENT - (E') the vm_map_entry's EFFECTIVE PROTECTION + (A) which L1 base
+answered (the NEW section, the ONE `[CFFIX] VERDICT:` line).
 The 1009 storm (records/1009-press-read.txt, arm armed-d13-24997fc5): from ordinal 0x400 to 0x200000
 (~2.09 M aborts) the faulting instruction is CONSTANT (`pc=0x2be8a1a0`, dyld __TEXT), the DFSR is
 CONSTANT (`fsr=0x0000080f` = WnR=1 | FS=15 "permission fault, level 2"), the abort ran in USER mode
 (`cpsr=0x60000030`), the fault VA is a LOW user page (`far=0x9a000`), and the whole ride froze the boot
-~24.4 s (`xnu_live_tick_sum_maxd=0x1be8767b`).  The handler PRINTS on the failure branch and is SILENT on
-the retry branch, so over 2.1 M faults the capture shows ZERO `usermode data abort, EXC_BAD_ACCESS` lines:
-`vm_fault` returned KERN_SUCCESS (or ABORTED) and the handler retried forever.
+~24.4 s (`xnu_live_tick_sum_maxd=0x1be8767b`).  1010c then MEASURED (B): `vm_fault` returns
+KERN_SUCCESS (`xnu_live_abt_vmfret=0`) for that USER WRITE fault, so the handler's `== KERN_SUCCESS` arm
+retries forever.  What 1010c could NOT read is the DISCRIMINATOR: F1a (the entry GRANTS write, so the
+write is lost between `prot` and the PTE) vs F1b (the entry DENIES write, so the accept path's
+UNCONDITIONAL `kr = KERN_SUCCESS`, vm_fault.c:2478, is the wrong condition).  1011-v2 publishes it.
 
-[CFFIX] READS the storm-scale evidence by value over the WHOLE log (`max()`, NEVER `first()` - a
-running-max key read with `first()` is the defect the 1007 reader hit; records/1007-press-read.txt;
-[[mi4-measurement-defects]]):
-    `xnu_live_abt_pcn`          MAX  - the highest storm ordinal reached        (1009: 0x200000)
-    `xnu_live_tick_sum_maxd`    MAX  - the worst freeze duration                (1009: 0x1be8767b)
-plus the TAIL pc-ladder rows (ordinal >= 0x400: the `pc`/`fsr`/`pcfar` the storm retried), the F1b
-console line (`arm/trap.c:871-875`, `usermode data abort, EXC_BAD_ACCESS at 0x…`), and the kern_sig
-panic (`unexpected SIGKILL of …`).  It prints ONE headline verdict (`[CFFIX] VERDICT: …`, design §3):
-  * POSITIVE (the fix TOOK) - `xnu_live_abt_pcn` does NOT reach 0x200000 AND `xnu_live_tick_sum_maxd`
-    ≪ 0x1be8…  The "new console line" is the whole proof: for F1b it is the trap.c exception line
-    (+/- the kern_sig panic, which is "the fix worked AS DESIGNED, outcome fatal" - REPORTED, never a
-    failure of the fix); for F1a/F1c/F2 it is the boot advancing past the last 1009 line.
-  * FALSIFIER (REPORTED as a finding, and a SUCCESSFUL READ - exit stays 0) - the storm is STILL THERE
-    (pcn still ~2M, or maxd still ~24.4 s).  Sub-classed by the tail signature: `SAME` (pc/fsr equal
-    1009's - after F1a the strip site was wrong; after F1b impossible in principle, the reading is
-    re-opened) vs `NEW WALL` (a different pc/fsr - the fix exposed the next wall: NAME it, do not widen
-    1011); and `pcn` still reaching 0x200000 means the fix did not reach the object.
-  * ONE HARD (a real expectation defect) - a 1011 run CLAIMING F1b (`--fix-shape=F1b`) whose storm
-    stopped but whose trap.c exception line is ABSENT: "its absence, on a 1011 that claims F1b, is a
-    FAIL of the fix (not a quiet success)" (design §3).  The shape is a property of the SOURCE edit, so
-    it is named by the caller, not read from the capture ([[mi4-self-written-record-is-not-a-constraint]]).
-A branch that fires over ZERO samples is NOT a verdict: every classifier is guarded on a truthy
-evidence set (the storm-scale signals `pcn`/`maxd`; the signature read on a non-empty tail).  A reader
-that cannot fail certifies nothing.
+THE TWO CELLS (design §2), published on the abort LADDER only (`n <= 4 || power-of-two`) plus a bounded
+change-count, so the 2.1 M storm cannot flood the channel:
+  * (E') `__wrap_vm_map_lookup_locked` (a PURE PASS-THROUGH) publishes the lookup's OUT-param `out_prot`
+    - the entry's EFFECTIVE protection for the fault (vm_map.c:9061/9139/9167) - beside the KERN_*
+    return, the fault_type and the VA: `xnu_live_abt_{vmen,vmekr,vmeprot,vmefault,vmeva}` + `_vmenx`.
+  * (A) `entry_note_abt_pte` publishes the faulting thread's OWN L1 physical base
+    (`current_thread()->map->pmap->pm_l1_phys`) under `xnu_live_abt_ptethr`, BESIDE the live TTBR0 the
+    walk sampled (`xnu_live_abt_ptettbr`) - the comparison is the reading.
+
+[CFFIX] READS the decision by value from the TAIL (E') rows' OWN `_vmeprot` (ordinal >= 0x400) - NEVER a
+whole-run `max()`/`first()` (the exact measurement defect this project banned: [[mi4-measurement-defects]]) -
+plus the advance signals `xnu_live_abt_pcn` MAX / `xnu_live_tick_sum_maxd` MAX (read with `max()`, never
+`first()`; records/1007-press-read.txt).  It prints ONE headline (`[CFFIX] VERDICT: …`, design §3):
+  * `F1a`  - `(vmeprot & VM_PROT_WRITE) != 0` at the tail: the entry GRANTS write, yet the store keeps
+    permission-faulting => the write is LOST between the entry's `prot` and the PTE (a pmap/enter bug).
+  * `F1b`  - `(vmeprot & VM_PROT_WRITE) == 0` at the tail: the entry DENIES write => the accept path's
+    UNCONDITIONAL `kr = KERN_SUCCESS` (vm_fault.c:2478) is the WRONG CONDITION (F4's retry bound next).
+  * `RE-OPEN` - a NAMED re-opened reading (design §4 falsifiers), each a finding: `vmekr != KERN_SUCCESS`
+    (the lookup refused - a different storm class); `!(vmefault & VM_PROT_WRITE)` (the "write" is the
+    unreliable `DFSR.WnR` on Krait); an illegal `vmeprot`; `vmeva` not matching the paired pte/vmf VA.
+  * `UNCLASSIFIED` - only when the (E') TAIL cannot be read at all (no vme row at/after 0x400): a branch
+    over zero samples is not a verdict.  It is NEVER the old "FIXED" - 1011-v2 changes nothing.
+The F1b console line / kern_sig panic are RETAINED as corroboration (design §4); on a 1011-v2 arm nothing
+was fixed, so their presence would be an advance past the storm - REPORTED, never a fix proof.
+A branch that fires over ZERO samples is NOT a verdict: the classifier is guarded on a non-empty (E')
+tail.  A reader that cannot fail certifies nothing.
 
 THE MEASUREMENT CLAUSES BELOW ARE KEPT VERBATIM (1011 installs no new instrument).  The 1009 faulting
 pc + FSR (`[ABT3]`), the 1010 L2 descriptor + vm_fault return (`[ABT4]`), the 1008 abort-fault identity
@@ -241,12 +249,12 @@ kv records after the exec-returned point.  Verbatim from the 1003 tool.  Gate CL
 readings print `[death-gated]` and are NOT counted.  Presence-based readings stay hard.
 
 WHAT 1011 CHECKS (the 1010 set VERBATIM, plus section [CFFIX]):
-  [CFFIX] THE WRITE-PERMISSION-FAULT FIX - THE 1011 RUNG ITSELF (see above).  [NEW]  It adjudicates
-      whether the 1009 storm STOPPED (by value over the whole log), names each falsifier (SAME / NEW
-      WALL / did-not-reach-the-object), reads the F1b exception line and its kern_sig panic, and prints
-      ONE headline verdict.  It is a FIX rung, so a "STORM STILL PRESENT" verdict is a SUCCESSFUL READ
-      (exit 0), not a checker failure; the ONE hard anomaly is a claimed-F1b run whose exception line
-      is absent.
+  [CFFIX] THE 1011-v2 MEASUREMENT - (E') the entry's effective protection + (A) which L1 base answered
+      (see above).  [NEW]  It reads the (E') tail rows' OWN `_vmeprot` (never a whole-run max/first) and
+      the (A) `_ptethr` vs `_ptettbr` comparison, then prints ONE headline classifying the storm as
+      F1a / F1b / a NAMED RE-OPEN (design §3/§4).  It is a MEASUREMENT rung (no behaviour change), so
+      every verdict is a SUCCESSFUL READ (exit 0); the only HARD anomalies are the no-abort-instrument
+      refusal and a broken recorder (an incomplete (E')/pte row, or a absent `_ptenx`/`_vmenx`).
   [R] THE 1002 r3-SAVE FIX AS A REGRESSION (verbatim from 1004): after `IOS7SHREG check_np ret=12`,
       the count of `usermode data abort ... at 0x00000004` must STILL be 0.  A recurrence is a
       REGRESSION - REBUILD, not a reading.
@@ -271,16 +279,17 @@ WHAT 1011 CHECKS (the 1010 set VERBATIM, plus section [CFFIX]):
 METHOD.  Every reader (the `newline=""` file read, the de-doubling panic reader, the KV regex, the
 `@:line` numbering, `groups_of`, the death gate) is the 1001/1002/1003/1004/1005/1006/1007/1008/1009/
 1010 tool's, key for key.  This tool is `tools/check_1010_capture.py` with the ONE new section [CFFIX]
-(the fix's adjudication), the 1011 authority path, and the exit-code discipline that treats a
-"STORM STILL PRESENT" verdict as a SUCCESSFUL READ (design §3).
+(the 1011-v2 measurement), the 1011 authority path, and the exit-code discipline that treats every
+measurement verdict as a SUCCESSFUL READ (design §3/§5).
 
 Usage:  tools/check_1011_capture.py [--arm=<sha8>] [--fix-shape=F1a|F1b|F1c|F2] [--allow-missing-cffix] [--allow-missing-abt4] [--allow-missing-abt3] [--allow-missing-abt2] [--allow-missing-abt] [--allow-missing-freeze] [--allow-missing-cadence] <capture.txt>
+        (`--fix-shape=` is KEPT on the CLI but INERT: 1011-v2 builds no fix, so there is no shape to FAIL.)
 
-Exit: 0 = a clean READ (including a "STORM STILL PRESENT" verdict - the fix did not take is a finding,
-NOT a checker failure); 1 = at least one hard anomaly (a `[FAIL]` line: a wrong-capture/no-evidence
-refusal, or a claimed-F1b run whose exception line is absent); 2 = usage.  A hard anomaly means
-STOP-and-report, never "rerun until green" - and a `[death-gated]` line is a death reading that must be
-adjudicated against the timeline before it is called anything.
+Exit: 0 = a clean READ (including an F1a/F1b/RE-OPEN/UNCLASSIFIED verdict - a measurement that could not
+be made is a finding, NOT a checker failure); 1 = at least one hard anomaly (a `[FAIL]` line: a
+wrong-capture/no-abort-instrument refusal, or a broken (E')/pte recorder); 2 = usage.  A hard anomaly
+means STOP-and-report, never "rerun until green" - and a `[death-gated]` line is a death reading that
+must be adjudicated against the timeline before it is called anything.
 """
 
 import os
@@ -501,18 +510,23 @@ ABT4_IMG_LIT_WANT = 36                        # the image's pinned TOTAL `xnu_li
 ABT4_IMG_LIT_WANT_1009 = 18                   # the 1009 arm (ABT_PTE=0): 6 span + 5 far + 7 pc alone
 ABT4_IMG_LIT_WANT_1010 = 29                   # the 1010/1010b arm: 6 pte + 4 vmf (the six walk keys are 1010c's)
 ABT4_ADDED_LIT_WANT = 18                       # 1010(c)'s own NEW literals: 12 pte/vmf + 6 walk-window keys
-# The TWELVE PER-ABORT keys of the pte LADDER (the change-count `_ptenx` is NOT part of a ladder row).
-# 1010c added the six walk-window keys (oow/alias/mapok/slot/wbase/wlen) beside the original six.
+ABT4_IMG_LIT_WANT_V2 = 43                     # 1011-v2: 1010c's 36 + the 6 (E') vme + the 1 (A) ptethr
+# The THIRTEEN PER-ABORT keys of the pte LADDER (the change-count `_ptenx` is NOT part of a ladder row).
+# 1010c added the six walk-window keys (oow/alias/mapok/slot/wbase/wlen) beside the original six; the
+# 1011-v2 (A) cell adds `_ptethr` (the faulting thread's own L1 base) BESIDE `_ptettbr` - a 1010c log
+# carries no `_ptethr`, so its absence is a PRE-1011 log, reported not failed.
 ABT4_ROW_KEYS = ("xnu_live_abt_pten", "xnu_live_abt_pteva", "xnu_live_abt_ptel2",
                  "xnu_live_abt_ptel1", "xnu_live_abt_ptettbr", "xnu_live_abt_pteu",
                  "xnu_live_abt_pteoow", "xnu_live_abt_ptealias", "xnu_live_abt_ptemapok",
-                 "xnu_live_abt_pteslot", "xnu_live_abt_ptewbase", "xnu_live_abt_ptewlen")
+                 "xnu_live_abt_pteslot", "xnu_live_abt_ptewbase", "xnu_live_abt_ptewlen",
+                 "xnu_live_abt_ptethr")
 ABT4_PTEN_KEY = "xnu_live_abt_pten"
 ABT4_PTEVA_KEY = "xnu_live_abt_pteva"
 ABT4_PTEL2_KEY = "xnu_live_abt_ptel2"
 ABT4_PTEL1_KEY = "xnu_live_abt_ptel1"
 ABT4_PTETTBR_KEY = "xnu_live_abt_ptettbr"
 ABT4_PTEU_KEY = "xnu_live_abt_pteu"
+ABT4_PTETHR_KEY = "xnu_live_abt_ptethr"       # 1011-v2 (A): the faulting thread's own L1 physical base
 ABT4_PTEOOW_KEY = "xnu_live_abt_pteoow"       # 1010c: 1 = a table pointer left the entry window
 ABT4_PTEALIAS_KEY = "xnu_live_abt_ptealias"   # 1010c: the section VA used (0 = none)
 ABT4_PTEMAPOK_KEY = "xnu_live_abt_ptemapok"   # 1010c: 1 = a temporary section was installed
@@ -562,57 +576,114 @@ ABT4_TAIL_MIN_PTEN = 0x400
 # the leaf UNREAD is `_ptemapok`==0 (both alias slots occupied): a COVERED refusal, not a fault.
 ABT4_OOW_COVERED = 1
 
-# ---- [CFFIX] THE 1011 WRITE-PERMISSION-FAULT FIX - THE NEW RUNG (design `docs/1011-design.md` §3).
-#      1011 is the FIX, not a measurement: it changes kernel behaviour (the three ranked fix shapes
-#      F1a/F1b/F1c/F2, §2), so the checker's job is NOT to certify an instrument - it is to ADJUDICATE
-#      whether the fix TOOK, and to NAME each falsifier rather than retry it.  The rung's own evidence
-#      is the SAME 1009/1010 instrument set this checker inherits (so [ABT3]/[ABT4]/[ABT] still run
-#      VERBATIM as regressions), read against the 1009 STORM BASELINE it must STOP:
+# ---- [CFFIX] THE 1011 v2 MEASUREMENT RUNG - THE NEW SECTION (design `docs/1011-design-v2.md`).
+#      **1011-v2 IS A PURE MEASUREMENT RUNG - IT CHANGES NO KERNEL BEHAVIOUR.**  The earlier
+#      `docs/1011-design.md` made 1011 the FIX (the ranked shapes F1a/F1b/F1c/F2); that design was
+#      SUPERSEDED by `docs/1011-design-v2.md`, which makes 1011 the TWO MEASUREMENTS that DECIDE the
+#      F1a/F1b hypothesis WITHOUT any fix being built or pressed (design §5: "No fix is built or
+#      pressed").  So this section does NOT adjudicate a fix - it CERTIFIES a measurement, and prints
+#      the ONE F1a/F1b/re-open classification that the measurement supports.
+#
+#      THE TWO CELLS (design §2), both published on the abort LADDER only (`n <= 4 || power-of-two`)
+#      plus a bounded change-count, so the 2.1 M storm cannot flood the channel:
+#        (E') `__wrap_vm_map_lookup_locked` (a PURE PASS-THROUGH) publishes the lookup's OUT-param
+#             `out_prot` - the vm_map_entry's EFFECTIVE protection for the fault (vm_map.c:9061/9139/
+#             9167) - beside the KERN_* return, the fault_type, and the VA, under
+#             `xnu_live_abt_{vmen,vmekr,vmeprot,vmefault,vmeva}` + the change-count `_vmenx`.
+#        (A)  `entry_note_abt_pte` publishes the faulting thread's OWN L1 physical base (via
+#             `current_thread()->map->pmap->pm_l1_phys`) under `xnu_live_abt_ptethr`, BESIDE the live
+#             TTBR0 the walk sampled (`_ptettbr`) - the comparison is the reading.
+#
+#      THE STORM BASELINE the measurement is read against (1009, records/1009-press-read.txt):
 #        pcn     the storm ordinal   (`xnu_live_abt_pcn` max)          1009: 0x200000 (2,097,152)
 #        maxd    the freeze duration (`xnu_live_tick_sum_maxd` max)    1009: 0x1be8767b (~24.4 s)
 #        pc      the faulting instr  (`xnu_live_abt_pc` at the tail)   1009: 0x2be8a1a0 (dyld __TEXT)
 #        fsr     the WnR|FS          (`xnu_live_abt_fsr` at the tail)  1009: 0x0000080f (WnR=1, FS=15)
 #        far     the fault VA        (`xnu_live_abt_pcfar` at the tail)1009: 0x0009a000 (low USER)
-#      A POSITIVE (the fix took) is BOTH: pcn does NOT reach `CFFIX_PCN_STORM` AND maxd is far below
-#      `CFFIX_MAXD_STORM`.  When those hold the boot has advanced past the storm, and the "new console
-#      line" (design §3) is the proof it went somewhere; who printed it is a SEPARATE reading.
-#      THE PANIC IS NOT A FAILURE (design §3): F1b routes the unresolvable write to the exception path
-#      on purpose, and `kern_sig.c`'s `panic_plain("unexpected SIGKILL of ...")` is the design's OWN
-#      fatal outcome - "the fix worked as designed, outcome fatal", REPORTED, never counted HARD.
+#        (B)     the vm_fault return (`xnu_live_abt_vmfret`)           1010c: 0 == KERN_SUCCESS
+#      A 1011-v2 arm ALWAYS records the pte ladder (it is 1010c + the new switch), so a log with NO
+#      abort instrument at all is NOT "the fix removed the fault" - it is a wrong capture, or an
+#      advance SO FAR PAST the storm that no abort was recorded.  Either way it is REPORTED as "no
+#      abort instrument - not a 1011-v2 reading", NEVER as the old design's "FIXED".
 CFFIX_PREFIX = "xnu_live_abt_"
-# The storm ordinal that must NO LONGER be reached.  1009's ladder tops out at exactly 0x200000
-# (2,097,152).  A pcn that STILL reaches it means the fix did not reach the object (design §3).
+# The storm ordinal the storm ran to.  1009's ladder tops out at exactly 0x200000 (2,097,152).
 CFFIX_PCN_STORM = 0x200000
-CFFIX_PCN_STORM_NEAR = 0x100000        # >= half the storm => "still ~2M", the fix missed the object
-# The freeze the storm rode.  1009: 0x1be8767b ~ 24.386 s at 19.2 MHz.  "far below" is a factor, not a
-# slack (the counters carry no time base): a maxd < CFFIX_MAXD_CLEAR * the 1009 value => the freeze is
-# GONE; a maxd still >= CFFIX_MAXD_STORM_NEAR => the storm-scale freeze is STILL present.
+CFFIX_PCN_STORM_NEAR = 0x100000        # >= half the storm => the storm-scale pcn is STILL reached
+# The freeze the storm rode.  1009: 0x1be8767b ~ 24.386 s at 19.2 MHz.  These are read as ADVANCE
+# signals only: 1011-v2 does not change behaviour, so a storm-SCALE pcn/maxd is the pre-storm shape a
+# measurement MUST have reached, and an ABSENT/low one means the run did not reach the tail to measure.
 CFFIX_MAXD_1009 = 0x1be8767b
-CFFIX_MAXD_CLEAR = 4                   # maxd < (1009 / 4) => the storm-scale freeze is GONE
-CFFIX_MAXD_STORM_NEAR = 0.5            # maxd >= 0.5 * 1009 => the storm-scale freeze is STILL present
-# The 1009 storm signature (design §3 falsifiers): the SAME (pc, fsr) retried at a low USER far.  The
-# SAME-class falsifier is the fix's strip site being wrong (after F1a) or a re-opened reading (after F1b).
+CFFIX_MAXD_CLEAR = 4                   # maxd < (1009 / 4) => the storm-scale freeze did NOT run
+CFFIX_MAXD_STORM_NEAR = 0.5            # maxd >= 0.5 * 1009 => the storm-scale freeze RAN
+# The 1009 storm signature: the SAME (pc, fsr) retried at a low USER far.
 CFFIX_PC_1009 = 0x2be8a1a0             # dyld __TEXT store (design §1.5)
 CFFIX_FSR_1009 = 0x0000080f            # WnR=1 | FS=15 "permission fault, level 2"
 CFFIX_FAR_1009_PAGE = 0x9a000          # the constant low-USER fault VA (page-granular)
 CFFIX_KERNEL_BASE = 0x80000000         # USER vs KERNEL split for a data abort's `far`
-# F1b's NEW console line (design §3): `arm/trap.c:871-875`'s failure-branch print.  1009's capture has
-# ZERO of these over 2.1 M faults; ONE of them == the fix routed the unresolvable write to the exception
-# path.  Read as a SUBSTRING of the real format string, whitespace-tolerant (a leading timestamp/ANSI
-# escape may precede it), so a match is on the message, not on a column.
-CFFIX_F1B_LINE_RE = re.compile(r'usermode\s+data\s+abort,\s+EXC_BAD_ACCESS\s+at\s+0x', re.IGNORECASE)
-CFFIX_F1B_LINE_LIT = "usermode data abort, EXC_BAD_ACCESS at 0x"
-# The kern_sig.c landmine (design §2/§3): F1b's fatal outcome, printed when SIGBUS/SIGKILL reaches
-# initproc.  REPORTED as "the fix worked as designed, outcome fatal" - NOT a failure of the fix.
-CFFIX_SIGKILL_LIT = "unexpected SIGKILL of"
-# The 1002 r3-save regression literal (at 0x4) is a DIFFERENT abort - it must NOT be confused with the
-# F1b line above (which is an arbitrary user VA).  KEPT verbatim from the 1003 reader.
-CFFIX_ABORT4_LIT = "usermode data abort, EXC_BAD_ACCESS at 0x00000004"
-# The expected ~per-abort storm: `pcn` is a powers-of-two ladder ordinal, so a value that is NOT on the
+# ---- (E') THE vm_map_entry EFFECTIVE PROTECTION - the F1a/F1b discriminator.  `entry_note_abt_vme`
+#      (entry_stubs.c) publishes SIX DIRECT `entry_write_kv` keys, all unsigned 32-bit, in ONE write
+#      order (the ordinal OPENS the record):
+#        `xnu_live_abt_vmen`    - the ordinal (the ladder key)
+#        `xnu_live_abt_vmekr`   - the KERN_* code `vm_map_lookup_locked` returned
+#        `xnu_live_abt_vmeprot` - the EFFECTIVE entry protection (the lookup's OUT-param `out_prot`)
+#        `xnu_live_abt_vmefault`- the fault_type the lookup was called with (the VM_PROT_* the fault asked)
+#        `xnu_live_abt_vmeva`   - the VA the lookup was called with
+#      plus the change-count `xnu_live_abt_vmenx` (distinct `prot` values, a running monotone max).
+#      The recorder fires from a PURE PASS-THROUGH wrapper behind a latch set by `entry_note_abt_pte`,
+#      so a `_vmeprot` row at ordinal k is PAIRED to the SAME abort as the `_ptel2`/`_vmfprot` rows at k.
+CFFIX_VMEN_KEY = "xnu_live_abt_vmen"
+CFFIX_VMEKR_KEY = "xnu_live_abt_vmekr"
+CFFIX_VMEPROT_KEY = "xnu_live_abt_vmeprot"
+CFFIX_VMEFAULT_KEY = "xnu_live_abt_vmefault"
+CFFIX_VMEVA_KEY = "xnu_live_abt_vmeva"
+CFFIX_VMENX_KEY = "xnu_live_abt_vmenx"
+# The FIVE per-abort keys of the (E') LADDER (the change-count `_vmenx` is NOT part of a ladder row) -
+# the reader binds to the recorder's ONE write order.
+CFFIX_VME_ROW_KEYS = (CFFIX_VMEN_KEY, CFFIX_VMEKR_KEY, CFFIX_VMEPROT_KEY,
+                      CFFIX_VMEFAULT_KEY, CFFIX_VMEVA_KEY)
+CFFIX_VME_KEYS = CFFIX_VME_ROW_KEYS + (CFFIX_VMENX_KEY,)
+# ---- (A) THE FAULTING THREAD'S OWN L1 BASE - the "which base answered" cell (design §2 (A-i)).
+CFFIX_PTETHR_KEY = "xnu_live_abt_ptethr"      # the faulting thread's pmap L1 physical base
+CFFIX_PTETHR_NOT_AVAIL = 0xFFFFFFFF           # the 4570 sentinel (struct pmap leads with `tte`, D13-only)
+# The 1011-v2 image carries 1010c's 36 `xnu_live_abt_` literals PLUS these 7 new ones (6 vme + 1 ptethr).
+CFFIX_IMG_LIT_WANT = 43                        # 1010c's 36 + the 6 vme + the 1 ptethr (press_1011.sh (0))
+# ---- THE vm_prot_t BITS (`osfmk/mach/vm_prot.h`): the (E') `_vmeprot`/`_vmefault` values are vm_prot_t.
+CFFIX_VM_PROT_READ = 0x1
+CFFIX_VM_PROT_WRITE = 0x2
+CFFIX_VM_PROT_EXECUTE = 0x4
+CFFIX_VM_PROT_NAMES = {0x1: "READ", 0x2: "WRITE", 0x4: "EXECUTE"}
+CFFIX_VM_PROT_LEGAL_MAX = 0x7
+# ---- THE KERN_* RETURN CODES of `vm_map_lookup_locked` (`osfmk/mach/kern_return.h`; design §2 (E')).
+CFFIX_KERN_SUCCESS = 0
+CFFIX_KERN_INVALID_ADDRESS = 1
+CFFIX_KERN_PROTECTION_FAILURE = 2
+CFFIX_KERN_NO_SPACE = 3
+CFFIX_KERN_NAMES = {0: "KERN_SUCCESS", 1: "KERN_INVALID_ADDRESS",
+                    2: "KERN_PROTECTION_FAILURE", 3: "KERN_NO_SPACE"}
+# ---- THE ARM SHORT-DESCRIPTOR L1 TYPE (design §4 falsifier): bits[1:0] 0b01 = COARSE (a level-2 walk
+#      can proceed), 0b10 = SECTION (no L2; FS=15 is impossible under a section, so the walk returning a
+#      section for an FS=15 fault means it read the WRONG table - the 1010c `0xfeedface` frontier).
+CFFIX_L1_TYPE_MASK = 0x3
+CFFIX_L1_COARSE = 0x1
+CFFIX_L1_SECTION = 0x2
+CFFIX_L1E_FEEDFACE = 0xfeedface               # the 1010c storm's non-coarse L1 word (the frontier)
+# The expected ~per-abort storm: `vmen` is a powers-of-two ladder ordinal, so a value that is NOT on the
 # ladder is a recorder inconsistency, not a storm reading (KEPT from [ABT3]/[ABT4]).
 CFFIX_LADDER_HEAD = 4
-# The tail ordinal for the (pc, fsr, far) signature read: the SAME ordinal [ABT3]/[ABT4] use (0x400).
+# The tail ordinal for the (E')/signature reads: the SAME ordinal [ABT3]/[ABT4] use (0x400).  The storm
+# settles by ~0x200, so the rows at/after 0x400 are the storm's OWN steady state - THE tail.  The F1a/F1b
+# decision reads the TAIL rows' OWN `_vmeprot`, NEVER a whole-run `max()`/`first()` (the exact
+# measurement defect this project banned: [[mi4-measurement-defects]], cf. line ~3404).
 CFFIX_TAIL_MIN_PCN = 0x400
+# The F1b console line (`arm/trap.c:871-875`) and its kern_sig landmine - KEPT as corroboration (design
+# §4: "the existing F1b console-line branch retained as corroboration").  1009 printed ZERO over 2.1 M
+# faults; on a 1011-v2 MEASUREMENT arm they are EXPECTED absent (nothing was fixed), so their presence
+# would be an advance past the storm (REPORTED), never a fix.
+CFFIX_F1B_LINE_RE = re.compile(r'usermode\s+data\s+abort,\s+EXC_BAD_ACCESS\s+at\s+0x', re.IGNORECASE)
+CFFIX_F1B_LINE_LIT = "usermode data abort, EXC_BAD_ACCESS at 0x"
+CFFIX_SIGKILL_LIT = "unexpected SIGKILL of"
+# The 1002 r3-save regression literal (at 0x4) is a DIFFERENT abort - KEPT verbatim from the 1003 reader.
+CFFIX_ABORT4_LIT = "usermode data abort, EXC_BAD_ACCESS at 0x00000004"
 
 # ---- [C] the classifier's thresholds.  The counters are UNSIGNED 32-bit ordinals/counts with NO
 #      time base, so the thresholds are ORDINAL, not seconds: they are chosen to say only what the
@@ -709,19 +780,21 @@ ALLOW_MISSING_ABT4 = False      # set by --allow-missing-abt4 (a pre-1010 log, e
 ABT4_CERTIFIED = False          # True once [ABT4] read a real pte ladder OR an allowed absence (the 1010 gate)
 
 # ---- 1011-only state (KEPT - [CFFIX] is a regression in 1012).
-# `ALLOW_MISSING_CFFIX` waives ONLY the HARD "no abort instrument at all" refusal: a 1011 FIX can make
-# the boot advance so far that it dies BEFORE any abort is recorded (e.g. F1a's strip removes the fault
-# entirely), and in that case ZERO `xnu_live_abt_` keys are a READING of the fix, not a build failure -
-# so a caller who knows the run is a 1011 arm may pass the flag to read the storm-absence.  It does NOT
-# soften any storm-STILL-PRESENT verdict (those are lenient, never HARD).
+# `ALLOW_MISSING_CFFIX` waives ONLY the HARD "no abort instrument at all" refusal.  A 1011-v2 arm
+# ALWAYS records the pte ladder (it is 1010c's switch set + `STAGE90_XNU_VME_PROT=1`), so ZERO
+# `xnu_live_abt_` keys mean a wrong capture OR a total advance PAST the storm (no abort recorded) -
+# the two are indistinguishable, so the DEFAULT refuses to certify and the flag lets the caller read
+# the absence as "advanced past the storm, not a 1011-v2 reading" (NEVER as the old design's "FIXED").
+# It does NOT soften the F1a/F1b classification (that is a reading, never hard).
 ALLOW_MISSING_CFFIX = False
 CFFIX_EVIDENCE = 0              # the count of independent storm-scale signals (pcn / maxd) actually read
 CFFIX_VERDICT = None            # the one headline verdict string (design §3)
-CFFIX_CLASS = None              # the machine-readable verdict class ("FIXED" / "STORM" / ...)
-# The fix shape the run CLAIMS (design §2), named by the caller with `--fix-shape=`.  It is the ONLY
-# thing that makes "storm stopped but no F1b exception line" a FAIL: for F1a/F1c/F2 the line is EXPECTED
-# absent (they do not print it).  NOT derivable from the capture (the shape is a property of the source
-# edit), so it defaults to None ("unstated") - [[mi4-self-written-record-is-not-a-constraint]].
+CFFIX_CLASS = None              # the machine-readable verdict class ("F1a" / "F1b" / "REOPEN" / ...)
+CFFIX_VME_CERTIFIED = False     # True once [CFFIX] read a real (E') vme tail row (a measurement was made)
+# The (E') latch pairing note: the vme row is published from INSIDE the vm_fault the (B) wrapper calls,
+# behind a latch set by `entry_note_abt_pte`, so `_vmen == _pten == _pcn` at a paired row.
+# `--fix-shape=` is KEPT on the CLI (the surface is unchanged) but is now INERT: 1011-v2 builds no fix,
+# so there is no fix shape to FAIL against.  A run that still names one is REPORTED as inapplicable.
 FIX_SHAPE = None
 
 
@@ -1133,7 +1206,9 @@ class Capture:
         One `{"ln", "pten", "pteva", "ptel2", "ptel1", "ptettbr", "pteu", "order"}` per PUBLISHED
         pte-ladder record, in log order.  Modelled on `abt3_records()`: `entry_note_abt_pte` writes
         its ladder keys in ONE fixed order - `xnu_live_abt_pten` OPENS a record, then `_pteva`/`_ptel2`/
-        `_ptel1`/`_ptettbr`/`_pteu` - so the reader binds to the recorder's ONE write order rather than
+        `_ptel1`/`_ptettbr`/`_pteu` (1010c's six window keys follow; 1011-v2's `_ptethr` follows those,
+        the faulting thread's own L1 base beside the live `_ptettbr`) - so the reader binds to the
+        recorder's ONE write order rather than
         to a channel layout it cannot see ([[mi4-one-value-two-definitions]]).  The field set is KNOWN
         (ABT4_ROW_KEYS), so a key outside it (the change-count `_ptenx`, written WHERE IT CHANGES, or
         the vm_fault-return ladder's `_vmfn`/`_vmfret`/`_vmfva`/`_vmfprot`, or the span/pc/far
@@ -1145,7 +1220,8 @@ class Capture:
         rows, cur = [], None
         fkeys = {"xnu_live_abt_" + f: f
                  for f in ("pten", "pteva", "ptel2", "ptel1", "ptettbr", "pteu",
-                           "pteoow", "ptealias", "ptemapok", "pteslot", "ptewbase", "ptewlen")}
+                           "pteoow", "ptealias", "ptemapok", "pteslot", "ptewbase", "ptewlen",
+                           "ptethr")}
 
         def close():
             if cur is not None:
@@ -1157,7 +1233,42 @@ class Capture:
                 cur = {"ln": ln, "pten": val, "pteva": None, "ptel2": None, "ptel1": None,
                        "ptettbr": None, "pteu": None,
                        "pteoow": None, "ptealias": None, "ptemapok": None, "pteslot": None,
-                       "ptewbase": None, "ptewlen": None, "order": ["pten"]}
+                       "ptewbase": None, "ptewlen": None, "ptethr": None, "order": ["pten"]}
+            elif cur is not None and key in fkeys:
+                f = fkeys[key]
+                cur[f] = val
+                cur["order"].append(f)
+        close()
+        return rows
+
+    def cffix_vme_records(self):
+        """[CFFIX] THE 1011-v2 (E') vm_map_entry EFFECTIVE PROTECTION.
+
+        One `{"ln", "vmen", "vmekr", "vmeprot", "vmefault", "vmeva", "order"}` per PUBLISHED vme-ladder
+        record, in log order.  Modelled on `abt4_records()`/`abt4_vmf_records()`: `entry_note_abt_vme`
+        (entry_stubs.c) writes its ladder keys in ONE fixed order - `xnu_live_abt_vmen` OPENS a record,
+        then `_vmekr`/`_vmeprot`/`_vmefault`/`_vmeva` - so the reader binds to the recorder's ONE write
+        order rather than to a channel layout it cannot see ([[mi4-one-value-two-definitions]]; a wrong
+        write-order binding is the defect class this project keeps paying for).  The field set is KNOWN
+        (CFFIX_VME_ROW_KEYS), so a key outside it (the change-count `_vmenx`, written WHERE IT CHANGES,
+        or any pte/vmf/pc/far/span key, which pair to these rows BY KEY EQUALITY, never by position) is
+        skipped rather than trusted.
+
+        NOTE: `xnu_live_abt_vmenx` is NOT part of a ladder record - it is a change-count latched where
+        it changes and read separately in `s_cffix()`."""
+        rows, cur = [], None
+        fkeys = {"xnu_live_abt_" + f: f
+                 for f in ("vmen", "vmekr", "vmeprot", "vmefault", "vmeva")}
+
+        def close():
+            if cur is not None:
+                rows.append(cur)
+
+        for ln, key, _raw, val in self.toks:
+            if key == "xnu_live_abt_vmen":
+                close()
+                cur = {"ln": ln, "vmen": val, "vmekr": None, "vmeprot": None, "vmefault": None,
+                       "vmeva": None, "order": ["vmen"]}
             elif cur is not None and key in fkeys:
                 f = fkeys[key]
                 cur[f] = val
@@ -1222,9 +1333,10 @@ def prior_arm_guard(arm_sha8):
     """THE PRESSED-ARM GUARD - refuse the arm a PRIOR rung has already pressed.
 
     1011's reader must REFUSE the PRESSED predecessors whose logs this reader's [CFFIX] would mis-read
-    as a 1011 run: 1009's `24997fc5` (the STORM baseline - this reader is for the FIX that must STOP
-    it), 1010's `0f39207c` and 1010b's `64391319` (the measurement rungs - their logs carry the
-    instrument but NO fix).  It must ACCEPT the built 1011 arm (whatever sha8 the 1011 build produces).
+    as a 1011-v2 run: 1009's `24997fc5` (the STORM baseline - this reader is for the measurement ON it),
+    1010's `0f39207c`/1010b's `64391319`/1010c's `002b0683` (earlier MEASUREMENT rungs - their logs carry
+    the instrument but NOT the (E')/`_ptethr` cells).  It must ACCEPT the built 1011-v2 arm (whatever
+    sha8 the 1011 build produces).
     The arm is the entry bin's sha8 (the project's rule); the caller names it explicitly with
     `--arm=<sha8>` (the reader does NOT read the LIVE `out/stage90/xnu_arm_entry.bin` by default - that
     is shared live state and the capture under adjudication was booted from a possibly different image,
@@ -1237,12 +1349,15 @@ def prior_arm_guard(arm_sha8):
     PRESSED = {
         "24997fc5": "1009's PRESSED arm - the STORM BASELINE this fix must STOP; its log carries NO "
                     "fix (records/1009-press-read.txt). Build 1011 first",
-        "0f39207c": "1010's PRESSED arm - a MEASUREMENT rung (the (A)/(B) cells), NOT a fix "
-                    "(records/1010-press-read.txt). Build 1011 first",
-        "64391319": "1010b's PRESSED arm - a MEASUREMENT rung (the walk-window bound), NOT a fix "
-                    "(records/1010b-press-read.txt). Build 1011 first",
-        "0343ef45": "1008's PRESSED arm - superseded; carries neither the fix nor the later instrument "
-                    "(records/1008-press-read.txt). Build 1011 first",
+        "0f39207c": "1010's PRESSED arm - a MEASUREMENT rung (the (A)/(B) cells), NOT the (E')/(A) "
+                    "cells (records/1010-press-read.txt). Build 1011-v2 first",
+        "64391319": "1010b's PRESSED arm - a MEASUREMENT rung (the walk-window bound), NOT the "
+                    "(E')/(A) cells (records/1010b-press-read.txt). Build 1011-v2 first",
+        "002b0683": "1010c's PRESSED arm - the measure that NAMED the (E')/(A) cells but did NOT "
+                    "read them (the wrong-table frontier, records/1010c-press-read.txt). Build "
+                    "1011-v2 first",
+        "0343ef45": "1008's PRESSED arm - superseded; carries none of the later instrument "
+                    "(records/1008-press-read.txt). Build 1011-v2 first",
     }
     if arm_sha8 is None:
         say("OBS", "no arm was named (`--arm=<sha8>` not passed) - the pressed-arm guard is INERT; "
@@ -1254,8 +1369,8 @@ def prior_arm_guard(arm_sha8):
         hard("REFUSING the arm armed-d13-%s: %s" % (arm_sha8, PRESSED[arm_sha8]))
     else:
         say("PASS", "the arm armed-d13-%s is not a KNOWN pressed predecessor - it is (or claims to "
-                    "be) the built 1011 arm; the log is adjudicated against the 1011 FIX below"
-            % arm_sha8)
+                    "be) the built 1011-v2 arm; the log is adjudicated against the 1011-v2 MEASUREMENT "
+                    "below" % arm_sha8)
 
 
 def s0_gate(cap):
@@ -3169,6 +3284,16 @@ def s_abt4(cap):
                    "produced it (the 1010b defect)" % len(oow_partial))
     elif rows:
         say("PASS", "every pte-ladder record carries the 1010c window keys (pteoow/ptewbase/ptewlen)")
+    # 1011-v2's (A) key `_ptethr` is ADDITIVE: a 1010c/1010/1010b log carries no `_ptethr`, so its
+    # absence is a PRE-1011 log, not a broken recorder ([CFFIX] reads whatever is present).
+    thr_rows = [r for r in rows if r["ptethr"] is not None]
+    if rows and not thr_rows:
+        say("OBS", "no pte-ladder record carries `%s` - this log PREDATES 1011-v2's (A) cell (the "
+                   "faulting thread's own L1 base); [CFFIX]'s (A) comparison is not readable here" % (
+                       ABT4_PTETHR_KEY))
+    elif thr_rows:
+        say("PASS", "x%d pte-ladder record(s) carry `%s` (the 1011-v2 (A) cell is in the image)" % (
+            len(thr_rows), ABT4_PTETHR_KEY))
 
     # ---- (abt4-3) THE L2 TYPE: every published `_ptel2` must carry an L2 SMALL-PAGE type (bits[1:0] ==
     # 0b10).  A non-zero `_ptel2` whose type bits are NOT 0b10 means the walk read a section or a
@@ -3517,10 +3642,11 @@ def s_abt4(cap):
 
 def _console_tail(cap, n=6):
     """The last NON-KV console text lines (lines carrying NO `xnu_live_`/`hw_watchdog_` token), in log
-    order - the "new console line" the 1011 fix must produce (design §3).  A kv-only line is the direct
-    channel's own output, not a console print, so it is skipped: the fix's proof is a REAL console line
-    (`trap.c` / `kern_sig.c`), and mixing the two would let the instrument's own chatter impersonate the
-    proof ([[mi4-one-value-two-definitions]])."""
+    order - the advance's own trace (design §4).  On a 1011-v2 MEASUREMENT arm nothing is fixed, so this
+    is corroboration: the F1b `trap.c` line / `kern_sig.c` panic say whether the storm took the EXCEPTION
+    path or the silent retry, not whether a fix worked.  A kv-only line is the direct channel's own
+    output, not a console print, so it is skipped: the proof is a REAL console line, and mixing the two
+    would let the instrument's own chatter impersonate it ([[mi4-one-value-two-definitions]])."""
     out = []
     for ln, line in enumerate(cap.lines, 1):
         if KV_RE.search(line):
@@ -3531,42 +3657,49 @@ def _console_tail(cap, n=6):
 
 
 def s_cffix(cap):
-    """[CFFIX] THE WRITE-PERMISSION-FAULT FIX - THE 1011 RUNG ITSELF (the NEW section, and the rung's
-    ONE headline verdict).
+    """[CFFIX] THE 1011-v2 MEASUREMENT RUNG - the (E')/(A) cells and the F1a/F1b DECISION.
 
-    Unlike every section above, 1011 is NOT a measurement: it changes kernel behaviour (the ranked fix
-    shapes F1a/F1b/F1c/F2, design §2), so this section does not certify an instrument - it ADJUDICATES
-    whether the 1009 storm STOPPED, and NAMES each falsifier (design §3) rather than retrying it.
+    **1011-v2 CHANGES NO KERNEL BEHAVIOUR** (design `docs/1011-design-v2.md`, §5: "No fix is built or
+    pressed").  It is a PURE MEASUREMENT: it publishes the ONE cell 1010c could not read - the
+    vm_map_entry's EFFECTIVE PROTECTION for the storm's fault (cell (E'),
+    `--wrap=vm_map_lookup_locked`'s OUT-param `out_prot`) - beside the faulting thread's OWN L1 physical
+    base (cell (A), `current_thread()->map->pmap->pm_l1_phys`).  So this section CERTIFIES a
+    measurement and prints the ONE F1a/F1b/re-open classification the measurement supports; it does NOT
+    adjudicate a fix.
 
-    EVIDENCE, read by value over the WHOLE log (`max()`, never `first()` - a running-max key read with
+    EVIDENCE, by value over the WHOLE log (`max()`, never `first()` - a running-max key read with
     `first()` is the defect this repo hit at 1007, records/1007-press-read.txt;
     [[mi4-measurement-defects]]):
-      * `xnu_live_abt_pcn`           - MAX = the highest storm ordinal reached   (1009: 0x200000)
-      * `xnu_live_tick_sum_maxd`     - MAX = the worst freeze duration            (1009: 0x1be8767b)
-      * the TAIL pc-ladder rows (pcn >= 0x400) - the faulting `pc`/`fsr`/`pcfar` (1009: the constant
-        `pc=0x2be8a1a0`, `fsr=0x0000080f`, `far=0x9a000`)
-      * `usermode data abort, EXC_BAD_ACCESS at 0x…` (trap.c:871-875) - F1b's NEW console line
-      * `unexpected SIGKILL of …` (kern_sig.c)   - F1b's fatal outcome (the design's OWN panic)
+      * the TAIL (E') vme rows (`xnu_live_abt_vmen` >= 0x400) - the tuple (vmekr, vmeprot, vmefault,
+        vmeva) for the storm's fault (design §2/§3).  THE DECISION READS THE TAIL ROWS' OWN `_vmeprot`,
+        NEVER a whole-run `max()`/`first()` (the exact measurement defect this project banned).
+      * the TAIL (A) pte rows (`xnu_live_abt_pten` >= 0x400) - `_ptethr` (the faulting thread's own L1
+        base) vs `_ptettbr` (the live TTBR0 the walk sampled), plus `_ptel1`'s descriptor type.
+      * `xnu_live_abt_pcn` MAX and `xnu_live_tick_sum_maxd` MAX - the advance signals (1009: 0x200000 /
+        0x1be8767b).  1011-v2 changes no behaviour, so a storm-SCALE advance is EXPECTED.
+      * the F1b console line (`arm/trap.c:871-875`) / kern_sig panic - RETAINED as corroboration
+        (design §4: "the existing F1b console-line branch retained as corroboration").
 
     THE VERDICT (ONE headline line, `[CFFIX] VERDICT: …`; design §3):
-      * `STORM STILL PRESENT` (pcn still ~2M OR maxd still ~24.4 s) - a FALSIFIER, REPORTED, and it is
-        a SUCCESSFUL READ (exit stays 0): the fix did not take.  Sub-classified by the tail signature:
-        `SAME` (pc/fsr equal 1009's) vs `NEW WALL` (a different pc/fsr - name it, do not widen 1011).
-      * `FIXED` (storm stopped) - with the "new console line" proof:
-          - the F1b exception line present (+/- the kern_sig panic) => F1b routed the unresolvable write
-            to the exception path; the panic, if present, is "the fix worked as designed, outcome fatal",
-            REPORTED, never a failure;
-          - no F1b line and no fix shape claimed => F1a/F1c/F2 (or an unstated shape): the advance past
-            the storm is the proof, and the missing F1b line is REPORTED (it is a FAIL only if the fix
-            CLAIMS F1b, `--fix-shape=F1b`).
+      * `F1a`  - `(vmeprot & VM_PROT_WRITE) != 0` at the tail: the entry GRANTS write, yet the hardware
+        keeps permission-faulting the store => the write is lost on the way from `prot` to the PTE.
+      * `F1b`  - `(vmeprot & VM_PROT_WRITE) == 0` at the tail: the entry does NOT grant write, so the
+        accept path's UNCONDITIONAL `kr = KERN_SUCCESS` (`vm_fault.c:2478`) is the wrong condition.
+      * `RE-OPEN` - a NAMED re-opened reading (design §4 falsifiers): `vmekr != KERN_SUCCESS` (the lookup
+        refused), `!(vmefault & VM_PROT_WRITE)` (the "write" is the unreliable `DFSR.WnR`), an illegal
+        `vmeprot`, or `vmeva` not matching the pte/vmf VA.
+      A branch that fires over ZERO samples is NOT a verdict: the classifier is guarded on a non-empty
+      (E') TAIL.  A reader that cannot fail certifies nothing."""
+    global CFFIX_EVIDENCE, CFFIX_VERDICT, CFFIX_CLASS, CFFIX_VME_CERTIFIED
+    print("\n== [CFFIX] THE 1011-v2 MEASUREMENT - (E') the entry's effective protection + (A) which "
+          "L1 base answered; the F1a/F1b DECISION ==")
+    if FIX_SHAPE is not None:
+        say("OBS", "`--fix-shape=%s` was passed, but 1011-v2 builds NO fix (design §5) - the flag is "
+                   "INERT here: this reader CERTIFIES a measurement, it does not adjudicate a fix" % FIX_SHAPE)
 
-    A branch that fires over ZERO samples is NOT a verdict: every classifier below is guarded on a
-    truthy evidence set (the evidence is `pcn_max` and/or `maxd`; the signature read is guarded on a
-    non-empty tail).  A reader that cannot fail certifies nothing."""
-    global CFFIX_EVIDENCE, CFFIX_VERDICT, CFFIX_CLASS
-    print("\n== [CFFIX] THE WRITE-PERMISSION-FAULT FIX - did the 1009 storm STOP? (the 1011 rung) ==")
-
-    # ---- (cffix-1) THE STORM-SCALE EVIDENCE - read as RUNNING MONOTONE MAXIMA (`max()`, NOT first()).
+    # ---- (cffix-1) THE ADVANCE EVIDENCE - the storm-scale signals, read as RUNNING MONOTONE MAXIMA
+    # (`max()`, NOT first()).  A 1011-v2 run changes no behaviour, so a storm-SCALE advance is EXPECTED;
+    # a low/absent one means the run did not reach the tail to MEASURE (reported, not a fix).
     pcn_vals = [r[3] for r in cap.all("xnu_live_abt_pcn") if r[3] is not None]
     pcn_max = max(pcn_vals) if pcn_vals else None
     maxd_vals = [r[3] for r in cap.all("xnu_live_tick_sum_maxd") if r[3] is not None]
@@ -3578,8 +3711,10 @@ def s_cffix(cap):
     say("OBS", "`xnu_live_tick_sum_maxd` x%d, MAX=%s (the worst freeze; 1009 read %s ~ 24.386 s at "
                "19.2 MHz) - read as the running max" % (
                    len(maxd_vals), fmt(maxd), fmt(CFFIX_MAXD_1009)))
-    say("OBS", "`%s` tokens TOTAL x%d (a 1011 run keeps the 1010 instrument set; the FIX adds no key - "
-               "the fix is a kernel-behaviour change, not a recorder)" % (CFFIX_PREFIX, n_abt_fam))
+    say("OBS", "`%s` tokens TOTAL x%d (a 1011-v2 image pins %d unique `xnu_live_abt_` literals = 1010c's "
+               "36 + the 6 (E') vme + the 1 (A) ptethr; a count here is RECORDS, not literals)" % (
+                   CFFIX_PREFIX, n_abt_fam, CFFIX_IMG_LIT_WANT))
+    n_vme = sum(cap.family_count(k) for k in CFFIX_VME_ROW_KEYS)
 
     ev = []
     if pcn_max is not None:
@@ -3588,153 +3723,306 @@ def s_cffix(cap):
         ev.append("maxd")
     CFFIX_EVIDENCE = len(ev)
 
-    # ---- (cffix-2) THE INSTRUMENT GATE.  A log with NO storm-scale evidence AND no abort instrument
-    # is either a wrong capture or a fix so total that NOTHING faulted - indistinguishable from a
-    # wrong capture, so it is HARD unless the caller waives it (`--allow-missing-cffix`).
+    # ---- (cffix-2) THE INSTRUMENT GATE.  A 1011-v2 arm ALWAYS records the pte ladder (it is 1010c +
+    # `STAGE90_XNU_VME_PROT=1`), so a log with NO abort instrument at all is either a wrong capture or an
+    # advance SO FAR PAST the storm that no abort was recorded - indistinguishable, so it is HARD unless
+    # the caller waives it (`--allow-missing-cffix`).  REPORTED as "advanced past the storm", NEVER as
+    # the old design's "FIXED".
     if not ev and n_abt_fam == 0:
         if ALLOW_MISSING_CFFIX:
             say("OBS", "NO storm-scale evidence (`xnu_live_abt_pcn`/`xnu_live_tick_sum_maxd`) AND no "
-                       "`xnu_live_abt_` instrument, and `--allow-missing-cffix` was passed: the 1011 "
-                       "verdict is NOT certified (a fix so total that nothing faulted is "
-                       "indistinguishable from a wrong capture)")
-            CFFIX_CLASS, CFFIX_VERDICT = "NONE", "NO EVIDENCE (waived) - not certified"
+                       "`xnu_live_abt_` instrument, and `--allow-missing-cffix` was passed: 1011-v2 is a "
+                       "MEASUREMENT and this run recorded NO abort - either the boot advanced past the "
+                       "storm (nothing to measure) or this is a wrong capture; NOT a 1011-v2 reading")
+            CFFIX_CLASS, CFFIX_VERDICT = "NONE", "NO ABORT INSTRUMENT (waived) - not a 1011-v2 reading"
             say("VERDICT", "[CFFIX] VERDICT: " + CFFIX_VERDICT)
             return
         hard("NO storm-scale evidence (`xnu_live_abt_pcn` ABSENT, `xnu_live_tick_sum_maxd` ABSENT) "
              "AND no `xnu_live_abt_` instrument: this log carries NO abort witness - either the wrong "
-             "capture was handed to this tool, or the 1011 fix removed every fault (indistinguishable "
-             "from a wrong capture). The DEFAULT refuses to certify a 1011 pass without evidence; pass "
-             "`--allow-missing-cffix` to read the absence as a fix", absence_based=True)
-        CFFIX_CLASS, CFFIX_VERDICT = "NONE", "NO EVIDENCE - wrong capture or total fix (uncertified)"
+             "capture was handed to this tool, or the boot advanced SO FAR PAST the storm that no abort "
+             "was recorded. 1011-v2 is a MEASUREMENT (it records the pte ladder at every abort), so the "
+             "absence is not a reading; the DEFAULT refuses to certify it - pass `--allow-missing-cffix` "
+             "to state the absence is a total advance past the storm", absence_based=True)
+        CFFIX_CLASS, CFFIX_VERDICT = "NONE", "NO ABORT INSTRUMENT - wrong capture or total advance (uncertified)"
         say("VERDICT", "[CFFIX] VERDICT: " + CFFIX_VERDICT)
         return
 
-    # ---- (cffix-3) THE TAIL SIGNATURE - the faulting `pc`/`fsr`/`far` at the storm ordinals (the SAME
-    # rows [ABT3]/[ABT4] read).  GUARDED: only a NON-EMPTY tail yields a class (a branch over zero
-    # samples is not a verdict).  If the pcn ladder is absent, fall back to the abt3 rows' last ordinal.
-    tail_rows = [r for r in cap.abt3_records()
-                 if r["pcn"] is not None and r["pcn"] >= CFFIX_TAIL_MIN_PCN]
-    if not tail_rows:
-        abt3 = [r for r in cap.abt3_records() if r["pcn"] is not None]
-        tail_rows = abt3[-4:] if abt3 else []
-    tail_pcs = [r["pc"] for r in tail_rows if r["pc"] is not None]
-    tail_fsrs = [r["fsr"] for r in tail_rows if r["fsr"] is not None]
-    tail_fars = [r["pcfar"] for r in tail_rows if r["pcfar"] is not None]
-    same_pc = any(p == CFFIX_PC_1009 for p in tail_pcs)
-    same_fsr = any(f == CFFIX_FSR_1009 for f in tail_fsrs)
-    for r in tail_rows[-4:]:
-        say("OBS", "  tail pc-ladder @:%d pcn=%s pc=%s fsr=%s abtcpsr=%s pcfar=%s" % (
-            r["ln"], fmt(r["pcn"]), fmt(r["pc"]), fmt(r["fsr"]), fmt(r["abtcpsr"]), fmt(r["pcfar"])))
+    # ---- (cffix-3) THE TAIL (E') ROWS - the F1a/F1b DECISION.  The vme rows carry the tuple
+    # (vmekr, vmeprot, vmefault, vmeva); the decision reads THEIR OWN `_vmeprot` (never a whole-run max).
+    vme_rows = cap.cffix_vme_records()
+    vme_partial = [r for r in vme_rows
+                   if None in (r["vmen"], r["vmekr"], r["vmeprot"], r["vmefault"], r["vmeva"])]
+    if vme_partial:
+        hard("x%d (E') vme record(s) are INCOMPLETE (a `_vmen` opened a record but `_vmekr`/`_vmeprot`/"
+             "`_vmefault`/`_vmeva` did not all follow) - the recorder's write order or the channel is "
+             "broken; first partial @:%d" % (len(vme_partial), vme_partial[0]["ln"]))
+    elif vme_rows:
+        say("PASS", "every (E') vme record carries the full (vmen, vmekr, vmeprot, vmefault, vmeva) tuple")
+    say("OBS", "`xnu_live_abt_vmen` rows x%d (the (E') ladder); `xnu_live_abt_vmenx` x%d" % (
+        len(vme_rows), cap.family_count(CFFIX_VMENX_KEY)))
+    tail_vme = [r for r in vme_rows
+                if r["vmen"] is not None and r["vmen"] >= CFFIX_TAIL_MIN_PCN and r["vmeprot"] is not None]
+    for r in tail_vme[-4:]:
+        say("OBS", "  tail (E') @:%d vmen=%s vmekr=%s vmeprot=%s vmefault=%s vmeva=%s" % (
+            r["ln"], fmt(r["vmen"]), fmt(r["vmekr"]), fmt(r["vmeprot"]),
+            fmt(r["vmefault"]), fmt(r["vmeva"])))
 
-    # ---- (cffix-4) THE STORM-STILL-PRESENT DETECTOR.  EITHER signal is enough; the guard is the
-    # evidence set (each is `None`-checked).
-    pcn_storm = pcn_max is not None and pcn_max >= CFFIX_PCN_STORM_NEAR
-    pcn_reached = pcn_max is not None and pcn_max >= CFFIX_PCN_STORM
-    maxd_storm = maxd is not None and maxd >= (CFFIX_MAXD_STORM_NEAR * CFFIX_MAXD_1009)
-    maxd_clear = maxd is not None and maxd < (CFFIX_MAXD_1009 / CFFIX_MAXD_CLEAR)
-    storm_present = pcn_storm or maxd_storm
+    # The expected (A)/pairing anchors: the pte ladder's OWN tail rows (the same ordinals).
+    pte_rows = cap.abt4_records()
+    vmf_rows = cap.abt4_vmf_records()
+    tail_pte = [r for r in pte_rows
+                if r["pten"] is not None and r["pten"] >= CFFIX_TAIL_MIN_PCN]
+    tail_vmf = [r for r in vmf_rows
+                if r["vmfn"] is not None and r["vmfn"] >= CFFIX_TAIL_MIN_PCN]
 
-    # ---- (cffix-5) F1b'S EVIDENCE - the trap.c exception line and the kern_sig panic, by value.
+    # The change-count gate (design §4: "`_ptenx`/`_vmenx` absent while the ladder is present => the
+    # change-count site did not fire").  `_ptenx` is gated in [ABT4] (the 1010c regression) - KEPT there
+    # verbatim; THIS section gates the 1011-v2 `_vmenx`.
+    n_vmenx = cap.family_count(CFFIX_VMENX_KEY)
+    if vme_rows and n_vmenx == 0:
+        hard("`%s` is ABSENT while the (E') vme ladder is PRESENT (x%d rows) - the change-count site "
+             "never fired: an INSTRUMENT defect (design §4 falsifier)" % (CFFIX_VMENX_KEY, len(vme_rows)))
+
+    # ---- (cffix-4) THE (A) CELL - which L1 base answered (design §2 (A-i)).  Compare `_ptethr` (the
+    # faulting thread's own L1 physical base) with `_ptettbr` (the live TTBR0 the walk sampled) on the
+    # SAME tail rows.  AGREE => the walk read the right table; DIFFER => the walk and the handler look at
+    # different tables (a NAMED finding).  NON-HARD by design (it is a measurement, not a fix).
+    a_rows = [r for r in tail_pte if r["ptethr"] is not None]
+    a_agree = a_differ = None
+    if not a_rows:
+        say("OBS", "(A) cannot be read: no pte-ladder tail row carries `%s` (this log predates the "
+                   "1011-v2 (A) cell)" % CFFIX_PTETHR_KEY)
+    else:
+        thr = a_rows[-1]["ptethr"]
+        ttbr = a_rows[-1]["ptettbr"]
+        if thr == CFFIX_PTETHR_NOT_AVAIL:
+            say("OBS", "(A) `%s`=%s is the 4570 NOT-AVAILABLE sentinel (struct pmap leads with `tte`; the "
+                       "pm_l1_phys read is D13-only) - the (A) comparison is not available on this arm" % (
+                           CFFIX_PTETHR_KEY, fmt(thr)))
+        else:
+            thr_base = thr & 0xffffc000 if thr is not None else None
+            ttbr_base = ttbr & 0xffffc000 if ttbr is not None else None
+            a_agree = (thr_base is not None and thr_base == ttbr_base)
+            a_differ = not a_agree
+            if a_agree:
+                say("READING", "(A) THE WALK READ THE RIGHT TABLE: the faulting thread's own L1 base "
+                               "(`%s`=%s -> %s) AGREES with the live TTBR0 base (`%s`=%s -> %s) - the "
+                               "walk and the handler consult the SAME table" % (
+                                   CFFIX_PTETHR_KEY, fmt(thr), fmt(thr_base),
+                                   ABT4_PTETTBR_KEY, fmt(ttbr), fmt(ttbr_base)))
+            else:
+                soft("(A) THE WALK AND THE HANDLER LOOK AT DIFFERENT TABLES: `%s`=%s (thread base %s) "
+                     "DIFFERS from `%s`=%s (live TTBR0 base %s) - a NAMED finding (the 1010c "
+                     "wrong-table frontier, now measured); do NOT build a fix on an assumed cause" % (
+                         CFFIX_PTETHR_KEY, fmt(thr), fmt(thr_base), ABT4_PTETTBR_KEY, fmt(ttbr), fmt(ttbr_base)))
+        # The tail L1 descriptor type (design §4 falsifier: still 0xfeedface-class => the table base was
+        # not the issue) and whether the L2 leaf is now readable.
+        tail_l1 = [r["ptel1"] for r in tail_pte if r["ptel1"] is not None]
+        tail_l2 = [r["ptel2"] for r in tail_pte if r["ptel2"] is not None]
+        if tail_l1:
+            l1_last = tail_l1[-1]
+            if (l1_last & CFFIX_L1_TYPE_MASK) == CFFIX_L1_SECTION:
+                soft("(A) the tail `_ptel1`=%s is STILL a SECTION descriptor (bits[1:0]=0b10) for an "
+                     "FS=15 (level-2 permission) fault - IMPOSSIBLE under a section, so the walk STILL "
+                     "reads a table with no COARSE entry for this VA (the 1010c `0xfeedface` frontier "
+                     "holds; design §4 falsifier - the table base was not the issue)" % fmt(l1_last))
+            elif (l1_last & CFFIX_L1_TYPE_MASK) == CFFIX_L1_COARSE:
+                say("READING", "(A) the tail `_ptel1`=%s is a COARSE L1 descriptor (bits[1:0]=0b01) - the "
+                               "walk reached an L2 table (the 1010c wrong-table read is GONE)" % fmt(l1_last))
+            else:
+                say("OBS", "(A) the tail `_ptel1`=%s carries type bits[1:0]=0x%x (neither COARSE 0b01 nor "
+                           "SECTION 0b10) - read the raw rows" % (fmt(l1_last), l1_last & CFFIX_L1_TYPE_MASK))
+        n_l2 = len([v for v in tail_l2 if v != 0])
+        say("OBS" if n_l2 else "---", "(A) the tail L2 leaf: %d/%d nonzero `_ptel2` row(s) at ordinal>=%s "
+            "(%s)" % (n_l2, len(tail_l2), fmt(CFFIX_TAIL_MIN_PCN),
+                      "READABLE" if n_l2 else "NOT readable (the walk returned 0 at every tail row)"))
+
+    # ---- (cffix-5) F1b'S EVIDENCE - RETAINED as corroboration (design §4).  On a 1011-v2 MEASUREMENT
+    # arm nothing was fixed, so these are EXPECTED absent; their presence is an advance past the storm.
     exc_hits = cap.exc_bad_access_hits()
     sk_hits = cap.sigkill_hits()
     ct = _console_tail(cap)
-    say("OBS" if exc_hits else "---", "F1b console line `%s…`: x%d%s (1009's capture has ZERO over "
-        "2.1 M faults)" % (CFFIX_F1B_LINE_LIT, len(exc_hits),
-                           "  first @:%d" % exc_hits[0][0] if exc_hits else ""))
-    say("OBS" if sk_hits else "---", "kern_sig panic `%s…`: x%d%s" % (
-        CFFIX_SIGKILL_LIT, len(sk_hits), "  first @:%d" % sk_hits[0][0] if sk_hits else "  (absent)"))
-    say("OBS", "the console's last NON-kv lines (the \"new line\" proof): %s" % (
+    say("OBS", "the console's last NON-kv lines (the advance's own trace): %s" % (
         " | ".join(l for _ln, l in ct) if ct else "(none)"))
+    say("OBS" if exc_hits else "---", "F1b console line `%s…` (corroboration, NOT a fix proof here): x%d"
+        "%s (1009's capture has ZERO over 2.1 M faults)" % (CFFIX_F1B_LINE_LIT, len(exc_hits),
+                                                           "  first @:%d" % exc_hits[0][0] if exc_hits else ""))
+    say("OBS" if sk_hits else "---", "kern_sig panic `%s…`: x%d%s (corroboration)" % (
+        CFFIX_SIGKILL_LIT, len(sk_hits), "  first @:%d" % sk_hits[0][0] if sk_hits else "  (absent)"))
     n_abort4 = len(cap.abort_hits())
     say("OBS" if n_abort4 else "---", "the 1002 regression `… at 0x00000004`: x%d (must stay 0; read "
         "verbatim in [R])" % n_abort4)
+    # The F1b line and the kern_sig panic are a READING here (design §4 corroboration): on a 1011-v2
+    # MEASUREMENT arm the fix was NOT applied, so a present line is NOT "the fix worked" - it is the
+    # storm having routed the unresolvable write to the exception path (an advance past the retry loop).
+    if exc_hits and sk_hits:
+        say("READING", "the F1b `usermode data abort, EXC_BAD_ACCESS` line PRINTED (x%d) and the "
+                       "kern_sig.c SIGKILL panic followed (x%d) - on a MEASUREMENT arm this is NOT a "
+                       "fix proof: it is the storm having taken the EXCEPTION path (fatal, REPORTED), "
+                       "not the silent ~2.1 M retry" % (len(exc_hits), len(sk_hits)))
+    elif exc_hits:
+        say("READING", "the F1b `usermode data abort, EXC_BAD_ACCESS` line PRINTED (x%d) - the storm's "
+                       "fault reached the trap.c failure branch (NOT the silent retry); corroboration "
+                       "only, not a fix proof" % len(exc_hits))
+    elif sk_hits:
+        say("READING", "a kern_sig SIGKILL panic is present (x%d) without the trap.c line - read the "
+                       "console by value" % len(sk_hits))
+    else:
+        say("OBS", "NO trap.c exception line and NO kern_sig panic: the storm took the SILENT RETRY arm "
+                   "(the 1009 shape, as expected on a MEASUREMENT arm)")
 
-    # ---- (cffix-6) THE VERDICT - ONE headline line (design §3).
-    if storm_present:
-        # A FALSIFIER, reported, and a SUCCESSFUL READ (exit stays 0 - do NOT hard-fail a read).
-        if same_pc and same_fsr:
-            CFFIX_CLASS = "STORM-SAME"
-            CFFIX_VERDICT = ("STORM STILL PRESENT (SAME 1009 class): pcn_max=%s, maxd=%s - the tail "
-                             "retries the SAME (pc=%s, fsr=%s, far≈low) fault; the fix did NOT take "
-                             "(after F1a the strip site was wrong; after F1b this is impossible in "
-                             "principle - the reading is re-opened)" % (
-                                 fmt(pcn_max), fmt(maxd), fmt(CFFIX_PC_1009), fmt(CFFIX_FSR_1009)))
-            soft("SAME-CLASS STORM: the tail pc/fsr equal 1009's exactly - the fix did not reach the "
-                 "object (if pcn still ~2M) or the strip site is wrong (if F1a) - do NOT retry")
-        elif tail_pcs:
-            CFFIX_CLASS = "STORM-NEW-WALL"
-            _pcs = sorted(set(tail_pcs))
-            _fsrs = sorted(set(tail_fsrs))
-            CFFIX_VERDICT = ("STORM STILL PRESENT (DIFFERENT class): pcn_max=%s, maxd=%s - the tail "
-                             "fault is pc=%s fsr=%s (NOT 1009's pc=0x2be8a1a0/fsr=0x80f): the fix "
-                             "exposed the NEXT WALL - NAME it, do not widen 1011" % (
-                                 fmt(pcn_max), fmt(maxd),
-                                 "[" + ",".join(fmt(p) for p in _pcs) + "]",
-                                 "[" + ",".join(fmt(f) for f in _fsrs) + "]"))
-            soft("NEW-WALL STORM: the storm persists but with a DIFFERENT (pc=%s, fsr=%s) class - the "
-                 "fix exposed the next wall; name it, do not widen 1011" % (
-                     "[" + ",".join(fmt(p) for p in _pcs) + "]",
-                     "[" + ",".join(fmt(f) for f in _fsrs) + "]"))
+    # ---- (cffix-6) THE DECISION - the §3 tree over the TAIL (E') rows' OWN `_vmeprot`.  ONE headline.
+    if not tail_vme:
+        # NO (E') tail row: the decision cannot be made from THIS log.  A branch over zero samples is not
+        # a verdict ([[mi4-silence-is-a-reading-only-if-success-is-silent]]).  The design forbids the
+        # old "TOO SHORT TO CLASSIFY" ONLY for a storm that actually RAN to 0x200000 - a run that did not
+        # reach the tail (or predates the (E') instrument) is a DIFFERENT, named non-reading.
+        ran_storm = (pcn_max is not None and pcn_max >= CFFIX_PCN_STORM_NEAR) or \
+                    (maxd is not None and maxd >= CFFIX_MAXD_STORM_NEAR * CFFIX_MAXD_1009)
+        CFFIX_CLASS = "UNCLASSIFIED"
+        if vme_rows:
+            CFFIX_VERDICT = ("UNCLASSIFIED - the (E') vme ladder is PRESENT (x%d rows) but carries NO "
+                             "row at the tail ordinal >= %s: the decision needs the TAIL row's own "
+                             "`_vmeprot`, which this log does not contain" % (
+                                 len(vme_rows), fmt(CFFIX_TAIL_MIN_PCN)))
+        elif ran_storm:
+            CFFIX_VERDICT = ("UNCLASSIFIED - the storm RAN to pcn_max=%s / maxd=%s yet the log carries "
+                             "NO `%s` (E') row: the (E') instrument is absent from the image that "
+                             "produced this log - REBUILD with STAGE90_XNU_VME_PROT=1 and re-press" % (
+                                 fmt(pcn_max), fmt(maxd), CFFIX_VMEN_KEY))
         else:
-            CFFIX_CLASS = "STORM"
-            CFFIX_VERDICT = ("STORM STILL PRESENT: pcn_max=%s, maxd=%s (no tail rows to class the "
-                             "fault)" % (fmt(pcn_max), fmt(maxd)))
-            soft("STORM STILL PRESENT with no tail signature - read the pcn ladder by value")
-        if pcn_reached:
-            soft("the fix did NOT reach the object: `xnu_live_abt_pcn` STILL reaches %s (the full 1009 "
-                 "storm ordinal) - the by-value checker should have refused the build; do NOT press" % (
-                     fmt(CFFIX_PCN_STORM)))
+            CFFIX_VERDICT = ("UNCLASSIFIED - NO (E') vme rows AND no storm-scale advance (pcn_max=%s, "
+                             "maxd=%s): this run did not reach the tail to measure" % (
+                                 fmt(pcn_max), fmt(maxd)))
         say("VERDICT", "[CFFIX] VERDICT: " + CFFIX_VERDICT)
-        say("OBS", "a STORM-still-present verdict is a SUCCESSFUL READ (exit 0), NOT a checker failure "
-                   "- the fix did not take; report and re-read 1010 (design §3)")
+        say("OBS", "the F1a/F1b decision is a READING of the tail (E') rows' OWN `_vmeprot` - it cannot "
+                   "be made without them (design §3); this is NOT the old design's \"FIXED\"")
         return
 
-    # ---- the storm STOPPED: the fix took, and the "new line" is the proof.
-    CFFIX_CLASS = "FIXED"
-    if pcn_max is None and maxd is None:
-        CFFIX_VERDICT = "NO SIGNAL - the storm-scale evidence is absent (a fix so total nothing faulted)"
-    elif exc_hits and sk_hits:
-        CFFIX_VERDICT = ("FIXED (F1b): the storm stopped (pcn_max=%s, maxd=%s) AND the trap.c exception "
-                         "line printed AND the kern_sig.c SIGKILL panic followed - the fix worked AS "
-                         "DESIGNED; the outcome is FATAL (SIGBUS on initproc), by design §2/§3" % (
-                             fmt(pcn_max), fmt(maxd)))
-        say("READING", "F1b OUTCOME: the fix converted the 24.4 s freeze into an immediate panic - this "
-                       "is the design's OWN landmine (kern_sig.c `unexpected SIGKILL of …`), REPORTED, "
-                       "NOT a failure of the fix")
-    elif exc_hits:
-        CFFIX_VERDICT = ("FIXED (F1b): the storm stopped (pcn_max=%s, maxd=%s) AND the trap.c "
-                         "`usermode data abort, EXC_BAD_ACCESS` line printed x%d - the fix routed the "
-                         "unresolvable write to the exception path (1009 printed ZERO of these over "
-                         "2.1 M faults)" % (fmt(pcn_max), fmt(maxd), len(exc_hits)))
-    else:
-        # storm stopped, no F1b line: expected for F1a/F1c/F2 (a different fix shape), a FAIL only if
-        # the fix CLAIMS F1b (`--fix-shape=F1b`).
-        if FIX_SHAPE == "F1b":
-            hard("the fix claims F1b but the trap.c exception line `usermode data abort, "
-                 "EXC_BAD_ACCESS at 0x…` is ABSENT while the storm stopped - its absence over a "
-                 "1011 claiming F1b is a FAIL of the fix, not a quiet success (design §3)")
-            CFFIX_CLASS = "FIXED-NO-F1B-LINE"
-            CFFIX_VERDICT = ("FAIL OF THE FIX (F1b claimed): the storm stopped (pcn_max=%s, maxd=%s) "
-                             "but the F1b exception line is ABSENT - the fix did NOT route the "
-                             "unresolvable write to the exception path" % (fmt(pcn_max), fmt(maxd)))
+    # THE TAIL tuple - DECIDED BY VALUE on the tail rows' own `_vmeprot` (NEVER a whole-run max/first).
+    prot_vals = sorted(set(r["vmeprot"] for r in tail_vme))
+    prot_last = tail_vme[-1]["vmeprot"]
+    kr_vals = sorted(set(r["vmekr"] for r in tail_vme if r["vmekr"] is not None))
+    flt_vals = sorted(set(r["vmefault"] for r in tail_vme if r["vmefault"] is not None))
+    va_vals = sorted(set(r["vmeva"] for r in tail_vme if r["vmeva"] is not None))
+
+    def _prot_str(p):
+        names = [n for b, n in sorted(CFFIX_VM_PROT_NAMES.items()) if p & b]
+        return "0x%x(%s)" % (p, "+".join(names) if names else "none")
+
+    say("READING", "(E') THE DECISION CELL - the TAIL (x%d row(s), ordinal>=%s) `_vmeprot` set is {%s}; "
+                   "the LAST tail row carries `_vmeprot`=%s - read from the TAIL ROWS' OWN value, NEVER "
+                   "a whole-run max/first (the 1008/1009 measurement defect, not repeated)" % (
+                       len(tail_vme), fmt(CFFIX_TAIL_MIN_PCN),
+                       ",".join(_prot_str(p) for p in prot_vals), _prot_str(prot_last)))
+
+    # The §4 falsifiers, each a NAMED finding (checked in the order the design's tree lists them).
+    bad_kr = [v for v in kr_vals if v != CFFIX_KERN_SUCCESS]
+    read_only_write = (prot_last & CFFIX_VM_PROT_WRITE) == 0
+    no_write_fault = (flt_vals and all((f & CFFIX_VM_PROT_WRITE) == 0 for f in flt_vals))
+    illegal_prot = [p for p in prot_vals if p < 1 or p > CFFIX_VM_PROT_LEGAL_MAX]
+    # `shared_va`: did any tail vme row's `vmeva` MATCH a pte/vmf VA at a PAIRED ordinal?  A vme row is
+    # published at the SAME ordinal as its paired pte/vmf row (the latch sets them from one abort), and
+    # the fault VA printed by the pte recorder is `_pteva`; the design also names `vmfva=0x9a000`.
+    pte_va_by_n = {}
+    for r in pte_rows:
+        if r["pten"] is not None and r["pteva"] is not None:
+            pte_va_by_n[r["pten"]] = r["pteva"]
+    vmf_va_by_n = {}
+    for r in vmf_rows:
+        if r["vmfn"] is not None and r["vmfva"] is not None:
+            vmf_va_by_n[r["vmfn"]] = r["vmfva"]
+    va_paired_ok = va_checked = 0
+    va_conflicts = []
+    for r in tail_vme:
+        if r["vmeva"] is None:
+            continue
+        ref = None
+        if r["vmen"] in pte_va_by_n:
+            ref = pte_va_by_n[r["vmen"]]
+        elif r["vmen"] in vmf_va_by_n:
+            ref = vmf_va_by_n[r["vmen"]]
+        if ref is None:
+            continue
+        va_checked += 1
+        if ref == r["vmeva"]:
+            va_paired_ok += 1
         else:
-            soft("the storm stopped and NO trap.c exception line printed - if the fix shape is F1b "
-                 "this is a FAIL of the fix (design §3); if F1a/F1c/F2 it is EXPECTED (those shapes do "
-                 "not print the line) - pass `--fix-shape=F1b` to make this decisive")
-            CFFIX_VERDICT = ("FIXED: the storm stopped (pcn_max=%s, maxd=%s) and the boot advanced past "
-                             "the 1009 storm (%s) - no F1b exception line (expected for F1a/F1c/F2; a "
-                             "FAIL only if the fix claims F1b)" % (
-                                 fmt(pcn_max), fmt(maxd),
-                                 "new console line(s) present" if ct else "read the console tail"))
-    if pcn_max is not None and not pcn_storm:
-        say("READING", "the storm ordinal is CLEARED: pcn_max=%s < the 1009 storm %s (the fix stopped "
-                       "the retry storm)" % (fmt(pcn_max), fmt(CFFIX_PCN_STORM)))
-    if maxd_clear:
-        say("READING", "the freeze is CLEARED: maxd=%s < 1009/4 (%s) - the 24.4 s tick-collapse "
-                       "freeze is gone" % (fmt(maxd), fmt(CFFIX_MAXD_1009 // CFFIX_MAXD_CLEAR)))
+            va_conflicts.append((r["vmen"], r["vmeva"], ref))
+    va_mismatch = bool(va_conflicts)
+
+    # Report the (B) vm_fault tail return beside the (E') row (the design §3 anchor: F1a is a WRITE
+    # fault; design §3.1).  A corroboration, not the discriminator.
+    vmf_ret_tail = sorted(set(r["vmfret"] for r in tail_vmf if r["vmfret"] is not None))
+    vmf_flt_tail = sorted(set(r["vmfprot"] for r in tail_vmf if r["vmfprot"] is not None))
+    say("OBS", "(B) corroboration: the tail vm_fault-return rows (x%d) carry ret {%s}, fault_type {%s} "
+               "(the retry distinguishes KERN_SUCCESS=0 from KERN_ABORTED=14)" % (
+                   len(tail_vmf),
+                   ",".join(ABT4_KERN_NAMES.get(v, "0x%x" % v) for v in vmf_ret_tail) or "-",
+                   ",".join("0x%x" % v for v in vmf_flt_tail) or "-"))
+
+    CFFIX_VME_CERTIFIED = True
+    # ---- THE DECISION TREE (design §3 / §4).  RE-OPEN first (each falsifier is a NAMED finding), then
+    # F1a vs F1b from the tail's own `vmeprot`.
+    if bad_kr:
+        CFFIX_CLASS = "REOPEN"
+        CFFIX_VERDICT = ("RE-OPEN (vmekr != KERN_SUCCESS): the tail `_vmekr` set is {%s} - the lookup "
+                         "REFUSED the faulting VA, so this is NOT the F1a/F1b write case.  1009 showed "
+                         "ZERO `usermode data abort, EXC_BAD_ACCESS` lines over 2.1 M faults, so a "
+                         "refusal re-opens the storm's class (design §3.3/§4 falsifier)" % (
+                             ",".join(CFFIX_KERN_NAMES.get(v, "0x%x" % v) for v in kr_vals)))
+        soft("(E') RE-OPEN: vmekr != KERN_SUCCESS at the tail - the lookup refused; the storm is a "
+             "different class (design §3.3/§4)")
+    elif no_write_fault:
+        CFFIX_CLASS = "REOPEN"
+        CFFIX_VERDICT = ("RE-OPEN (the fault is NOT a write): the tail `_vmefault` set is {%s} - "
+                         "VM_PROT_WRITE is NOT set, so the \"write\" is the unreliable `DFSR.WnR` on "
+                         "Krait (a READ on a read-only page); re-rank as a CPU/DFSR reading, not a prot "
+                         "bug (design §3.4/§4 falsifier)" % (
+                             ",".join("0x%x" % v for v in flt_vals)))
+        soft("(E') RE-OPEN: the fault_type is not a write - the DFSR.WnR bit is unreliable (design §3.4/§4)")
+    elif illegal_prot:
+        CFFIX_CLASS = "REOPEN"
+        CFFIX_VERDICT = ("RE-OPEN (illegal vmeprot): the tail `_vmeprot` set {%s} contains a value "
+                         "outside the legal vm_prot_t range 1..7 - the out-param read is mismatched, a "
+                         "MEASUREMENT defect" % ",".join(fmt(p) for p in illegal_prot))
+        soft("(E') RE-OPEN: a tail `_vmeprot` is outside the legal vm_prot_t range 1..7 (design §4)")
+    elif va_mismatch:
+        CFFIX_CLASS = "REOPEN"
+        CFFIX_VERDICT = ("RE-OPEN (vmeva != the paired pte/vmf VA): x%d tail (E') row(s) carry a "
+                         "`_vmeva` that does NOT match the pte/vmf VA at the SAME ordinal (first "
+                         "vmen=%s vmeva=%s vs %s) - the (E') row is not paired to the storm's fault" % (
+                             len(va_conflicts), fmt(va_conflicts[0][0]), fmt(va_conflicts[0][1]),
+                             fmt(va_conflicts[0][2])))
+        soft("(E') RE-OPEN: a tail `_vmeva` does not match the paired pte/vmf VA (design §4)")
+    elif read_only_write:
+        CFFIX_CLASS = "F1b"
+        CFFIX_VERDICT = ("F1b - the entry does NOT grant write: the tail `_vmeprot`=%s has "
+                         "VM_PROT_WRITE CLEAR (read-only) yet the hardware keeps permission-faulting "
+                         "the store, so the accept path's UNCONDITIONAL `kr = KERN_SUCCESS` "
+                         "(vm_fault.c:2478) is the WRONG CONDITION.  Corroborated by (B) vmfret=0 "
+                         "(KERN_SUCCESS).  Next: F4's retry bound (tools/patch_d13_abt_retry_bound.py); "
+                         "the boot's silent ~2.1 M retry is the faithful consequence" % _prot_str(prot_last))
+        say("READING", "F1b CONFIRMED (measurement): the storm's fault is on a vm_map_entry that DENIES "
+                       "write; the write is lost by the accept path's unconditional success, not by a "
+                       "strip between entry and PTE")
+    else:
+        CFFIX_CLASS = "F1a"
+        CFFIX_VERDICT = ("F1a - the entry GRANTS write: the tail `_vmeprot`=%s has VM_PROT_WRITE SET "
+                         "(and the fault is a write), yet the hardware keeps permission-faulting the "
+                         "store - the write is LOST on the way from `prot` to the PTE (a pmap/enter "
+                         "bug).  (A) should then show a COARSE L1 and an L2 leaf with APX=1 once the "
+                         "table is right" % _prot_str(prot_last))
+        soft("F1a (measurement): the entry grants write but the fault recurs - the loss is between the "
+             "entry's `prot` and the PTE (design §3.1); (A)'s L2 APX is the confirming cell")
+
+    # The (A) note, attached to the headline (DESIGN §4 positive: "(A): `_ptethr` reads a COARSE L1").
+    if a_agree is False:
+        say("OBS", "the F1a/F1b decision above stands, but the (A) cell flags a DIFFERENT table - the "
+                   "walk's L2 leaf is not trustworthy until (A) is resolved")
     say("VERDICT", "[CFFIX] VERDICT: " + CFFIX_VERDICT)
-    say("OBS", "a FIXED verdict is the 1011 rung's positive: the storm stopped AND a new console line "
-               "(or the F1b exception line + its kern_sig panic) is the proof (design §3)")
+    say("OBS", "1011-v2 is a MEASUREMENT (design §5): this verdict classifies the storm's cause and "
+               "NAMES any re-opened reading; it is a READING (exit 0), never a fix adjudication")
 
 
 def main():
@@ -3784,10 +4072,11 @@ def main():
     print("spec read here: the 1010 switch set VERBATIM (the L2-descriptor [ABT4], the 1009 faulting pc "
           "[ABT3], the 1008 abort-fault identity [ABT2], the 1007 abort-span witness [ABT], the 1006 "
           "freeze witness [W], the 1005 cadence witness [C], the 1004 abort trace [A] and its PROGRESS "
-          "correction are KEPT as regressions) PLUS the ONE new 1011 reading [CFFIX]: does the 1009 "
-          "USER write permission-fault storm STOP? 1011 is the FIX (F1a/F1b/F1c/F2), so [CFFIX] "
-          "ADJUDICATES the fix by value, not a measurement; the tolerated wall `%s` is NOT the frontier"
-          % CS_INVALID_LIT)
+          "correction are KEPT as regressions) PLUS the ONE new 1011-v2 reading [CFFIX]: the (E') "
+          "vm_map_entry EFFECTIVE PROTECTION for the storm's fault (the F1a/F1b discriminator) and the "
+          "(A) L1 base the walk answered from. 1011-v2 is a MEASUREMENT (design §5: no fix is built or "
+          "pressed), so [CFFIX] CERTIFIES a measurement, not a behavioural fix; the tolerated wall `%s` "
+          "is NOT the frontier" % CS_INVALID_LIT)
     # ---- THE PRESSED-ARM GUARD: refuse the PRESSED predecessors; accept the built 1011 arm.  The caller
     # names the arm explicitly (`--arm=<sha8>`); the reader does NOT read the LIVE
     # `out/stage90/xnu_arm_entry.bin` by default (shared live state, [[mi4-out-stage90-is-shared-live-state]]).
@@ -3847,31 +4136,40 @@ def main():
     print("CADENCE (the 1005 regression gate): %s" % (
         "CERTIFIED (a real cadence window was read)" if CADENCE_CERTIFIED else
         "NOT CERTIFIED (no cadence window in this log)"))
-    # ---- [CFFIX] THE 1011 HEADLINE.  The fix's verdict is a READING, not an instrument certificate:
-    # a "STORM STILL PRESENT" verdict is a SUCCESSFUL READ (exit stays 0).  A HARD anomaly (the
-    # no-evidence refusal above, or the `--fix-shape=F1b` FAIL) is a real instrument/expectation
-    # defect and is counted in FAILURES.
-    print("WRITE-PERMISSION-FAULT-FIX (the 1011 verdict): %s" % (
-        "[CFFIX] " + CFFIX_VERDICT if CFFIX_VERDICT else "NOT READ (no storm-scale evidence)"))
+    # ---- [CFFIX] THE 1011-v2 HEADLINE.  The measurement's verdict is a READING, not a fix
+    # adjudication: an F1a/F1b/RE-OPEN verdict is a SUCCESSFUL READ (exit stays 0).  The ONLY HARD path
+    # here is the no-abort-instrument refusal / a broken recorder, which is already in FAILURES.
+    print("ENTRY-EFFECTIVE-PROTECTION (the 1011-v2 verdict): %s" % (
+        "[CFFIX] " + CFFIX_VERDICT if CFFIX_VERDICT else "NOT READ (no abort instrument)"))
+    print("  (E') MEASUREMENT CERTIFIED: %s" % (
+        "YES (a real (E') vme tail row was read)" if CFFIX_VME_CERTIFIED else
+        "NO (this log carries no (E') vme tail row - the F1a/F1b decision was not made)"))
     if FAILURES:
         print("  => STOP and report per the pre-reg's FAILURE SIGNATURES")
         return 1
     if CFFIX_CLASS is None:
-        print("  => no hard anomaly in the regression clauses, but the 1011 fix verdict was NOT read: "
-              "this log carries no storm-scale evidence (a wrong capture, or a fix so total nothing "
-              "faulted - indistinguishable). Re-run on a 1011 capture, or pass `--allow-missing-cffix` "
-              "to state the absence is the fix")
+        print("  => no hard anomaly in the regression clauses, but the 1011-v2 verdict was NOT read: "
+              "this log carries no abort instrument (a wrong capture, or a total advance past the "
+              "storm - indistinguishable). Re-run on a 1011-v2 capture, or pass `--allow-missing-cffix` "
+              "to state the absence is a total advance past the storm")
         return 0 if ALLOW_MISSING_CFFIX else 1
-    if CFFIX_CLASS == "STORM-SAME" or CFFIX_CLASS == "STORM" or CFFIX_CLASS == "STORM-NEW-WALL":
-        print("  => the 1011 fix did NOT take (the storm is still present): this is a SUCCESSFUL READ "
-              "(exit 0), REPORT it and re-read 1010 - do NOT retry until green")
+    if CFFIX_CLASS == "NONE":
+        print("  => no abort instrument in this log: a wrong capture, or an advance past the storm "
+              "(the two are indistinguishable) - %s" % (
+                  "read as a total advance past the storm (exit 0)" if ALLOW_MISSING_CFFIX else
+                  "pass `--allow-missing-cffix` to state the absence is a total advance past the storm"))
+        return 0 if ALLOW_MISSING_CFFIX else 1
+    if CFFIX_CLASS == "UNCLASSIFIED":
+        print("  => the 1011-v2 (E') cell was NOT read from this log (see the headline) - REPORT it; a "
+              "reading that could not be made is not a fix, and a branch over zero samples is not a "
+              "verdict (exit 0: no hard anomaly)")
         return 0
-    if CFFIX_CLASS == "FIXED-NO-F1B-LINE":
-        print("  => the fix CLAIMS F1b but the exception line is absent - the HARD anomaly above fails "
-              "the exit")
-        return 1
-    print("  no hard anomaly; the 1011 fix TOOK: the storm stopped and the new console line / F1b "
-          "exception path is the proof (readings above are the evidence)")
+    if CFFIX_CLASS in ("F1a", "F1b", "REOPEN"):
+        print("  => the 1011-v2 MEASUREMENT is a SUCCESSFUL READ (exit 0): the tail (E') `_vmeprot` "
+              "classifies the storm's cause as %s; the (A) cell above says which L1 base answered - "
+              "REPORT both, do NOT build or press a fix from an assumed cause (design §5)" % CFFIX_CLASS)
+        return 0
+    print("  no hard anomaly; the 1011-v2 reading above is the evidence (design §5: no fix was built)")
     return 0
 
 
