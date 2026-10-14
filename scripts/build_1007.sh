@@ -943,12 +943,12 @@ ab_tr=$(grep -cE '^#if defined\(STAGE90_XNU_ABT_SPAN\) && STAGE90_XNU_ABT_SPAN$'
 # local to `-Wall -Wextra -Werror` in the OFF arm, `build_entry.sh:2089`). The measured count is 4.
 echo "   (a) guards: entry_stubs.c x$ab_sp (want 1 - the recorder), entry_trace.c x$ab_tr (want 4 - decl, t0 decl, clock read, note call)"
 [[ "$ab_sp" == "1" && "$ab_tr" == "4" ]] || { echo "FAIL: the ABT_SPAN guards are not one-per-region (stubs x$ab_sp want 1, trace x$ab_tr want 4: decl + t0 decl + clock read + note call) - a hand edit moved or dropped one"; exit 1; }
-[[ $(grep -cF 'entry_note_abt_span(uint32_t t0, uint32_t call)' "$stub_src" || true) == 1 ]] || { echo "FAIL: the recorder `entry_note_abt_span(uint32_t t0, uint32_t call)` is not DEFINED exactly once in $stub_src"; exit 1; }
-[[ $(grep -cF 'entry_note_abt_span(t0, entry_counter() - t0);' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: the ONE bracket call `entry_note_abt_span(t0, entry_counter() - t0);` is not present exactly once in entry_trace.c"; exit 1; }
+[[ $(grep -cF 'entry_note_abt_span(uint32_t t0, uint32_t call)' "$stub_src" || true) == 1 ]] || { echo "FAIL: the recorder 'entry_note_abt_span(uint32_t t0, uint32_t call)' is not DEFINED exactly once in $stub_src"; exit 1; }
+[[ $(grep -cF 'entry_note_abt_span(t0, entry_counter() - t0);' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: the ONE bracket call 'entry_note_abt_span(t0, entry_counter() - t0);' is not present exactly once in entry_trace.c"; exit 1; }
 # §4.3 (the companion fix that closes the §2.3 defect): the 1006 sampler must take the clock as an
 # argument, NOT call the stubbed symbol.
-[[ $(grep -cF 'entry_freeze_sample(uint32_t now)' "$stub_src" || true) == 1 ]] || { echo "FAIL: entry_freeze_sample is not the §4.3 argument-passing shape `entry_freeze_sample(uint32_t now)` in $stub_src - the sampler still calls entry_counter and the terminal stand-in would end the run"; exit 1; }
-[[ $(grep -cF 'entry_freeze_sample(entry_counter());' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: `entry_freeze_sample(entry_counter());` is not present exactly once in entry_trace.c - the §4.3 caller does not pass the clock"; exit 1; }
+[[ $(grep -cF 'entry_freeze_sample(uint32_t now)' "$stub_src" || true) == 1 ]] || { echo "FAIL: entry_freeze_sample is not the §4.3 argument-passing shape 'entry_freeze_sample(uint32_t now)' in $stub_src - the sampler still calls entry_counter and the terminal stand-in would end the run"; exit 1; }
+[[ $(grep -cF 'entry_freeze_sample(entry_counter());' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: 'entry_freeze_sample(entry_counter());' is not present exactly once in entry_trace.c - the §4.3 caller does not pass the clock"; exit 1; }
 echo "   (a) the source shape: 1+4 guards + 1 recorder def + 1 bracket call + the §4.3 argument-passing fix"
 
 # (b) IMAGE KEYS - the six `xnu_live_abt_` literals (n/seq/gap/call/maxcall/maxgap), and the recorder a

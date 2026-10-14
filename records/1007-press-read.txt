@@ -1,0 +1,118 @@
+# 1007 press read — `armed-d13-88074ab3`
+
+**Captures.** The press booted via `fastboot boot` (never flash) at 2026-10-14 ~07:05; the runner
+returned 2 (the expected resident non-return); the device was dark; the operator power-pressed it
+back at 07:56; the watcher read the previous boot. Recovered log:
+
+`out/stage90/captures/recovered-unknown-arm-20261014-075614-last_kmsg.txt` (1,399,348 B, 29,380 lines).
+
+Adjudicated with `python3 tools/check_1007_capture.py <capture>` (default gate, no waiver).
+
+## VERDICT — the frontier is a FAULT STORM, and 1007 makes it visible
+
+**The abort path is where the ~24.4 s freeze lives, and the "~40 aborts" the run has been read as
+since 1004 is a RECORD-CAP ARTIFACT, not the abort count.**
+
+The 1007 witness brackets every `sleh_abort` with the free-running generic timer and publishes its
+records through `entry_write_kv` — the **direct, cap-exempt** channel (the one `entry_tick_summary`
+uses, `entry_stubs.c:1909-1912`). The 1004-era `xnu_live_sleh_*` keys go through the **capped** live
+channel (`ENTRY_LIVE_CAP 24576`, `:2403`). This run's live channel filled and published its cap marker:
+
+```
+xnu_live_cap=0x00006000 (24576)  @:3933        (the header)
+xnu_live_capped=0x00006000 (24576) @:29127     (the channel stopped appending here)
+```
+
+The last `xnu_live_sleh_seen` this log carries is **40** (@:28159) — 968 lines *before* the cap. The
+1007 ladder, read from the direct channel, tells the real story:
+
+| abort ordinal | gap (s) | handler call (s) | note |
+|---|---|---|---|
+| 1 … 4 | 0.00 – 0.69 | ~0 | dyld walking its image (1004's set) |
+| 8 | 0.000 | **0.860** | first long handler |
+| 0x100 (256) | 2.746 | **5.322** | |
+| 0x200 (512) | 0.000 | **3.776** | |
+| 0x400 … 0x200000 | ~0.000 | 0.000 | **flat storm: ~0.000…0.000 s apart** |
+| **0x200000 (2,097,152)** | 0.000 | 0.000 | **the last row — the stall** |
+
+`xnu_live_abt_n == xnu_live_abt_seq` at **every** one of the 23 published rows (cross-checked), and the
+disassembly confirms `entry_note_abt_span` reads `g_sleh_seq` directly (`801...= [r4,#120]`,
+`r4=0x8060f000`; `g_sleh_seq` at `0x8060f078`). So `abt_seq` **is** `g_sleh_seq` and both reach
+**2,097,152**: the run took **~2.1 million aborts**, not 40. The live channel hid every one past ~#64
+behind its cap; the direct channel did not.
+
+**This corrects 1004's central claim.** 1004 read `sleh_seq×40` and concluded "40 aborts, a WALK
+through dyld's image". The 40 is where the **capped live channel** stopped, not where the aborts did.
+The first ~40 aborts *are* the dyld walk (their `sleh_far`s step through `0x2be…`, the dyld image);
+what follows is a **storm** the capped channel never showed.
+
+## The freeze magnitude, exactly
+
+`xnu_live_tick_sum_maxd` is a **running maximum** republished 14×. Its largest (and last) value is
+`0x1be892af` = **468,226,735 counts = 24.387 s** at 19.2 MHz — the 1004/1005/1006 reading reproduced
+(a 371-count drift from 1005's `0x1be8bc01`, i.e. the same freeze, not a new one).
+
+The two latched abort maxima sit **just under** it:
+
+```
+xnu_live_abt_maxcall = 0x1570e6a5 = 359,720,613 counts = 18.735 s   (0.768 × M)
+xnu_live_abt_maxgap  = 0x1570e6e9 = 359,720,681 counts = 18.735 s   (0.768 × M)
+```
+
+The latched `maxcall` and `maxgap` are written **where they change**, so the last published value is
+the max. They escalate in lockstep (both → 18.735 s), meaning **one single `sleh_abort` invocation
+took 18.7 s** and **the gap just before it was also 18.7 s** — the same event seen from both sides of
+one abort. The classifier reads this as:
+
+> **(C) ABORT-PATH LOCALISED — INSIDE ONE ABORT:** a single `sleh_abort` (its `arm_fast_fault` +
+> `vm_fault` body) took ~18.7 s. The frontier is **inside one fault**.
+
+## The stall frame (resolved by value)
+
+`xnu_live_stall_pc=0x8001b5cd` = **`enable_interrupts+0x5`**; `xnu_live_stall_lr=0x8046c95c` =
+**`sleh_abort+0x468`**; `xnu_live_stall_cpsr=0x60000113` (IRQ **masked**, `i=1`). The 1004 read pinned
+this frame on "the sleh return path / `ml_cause_interrupt`". The 1007 data relocates it: the frame is
+the CPU **slowly making its way through fault handling with interrupts masked**, inside the
+storm — `sleh_abort` at `+0x468` returning toward `enable_interrupts`, the `cpsie i`'s own `push`.
+The `cpsr=0x60000113` `i=1` (IRQ masked) is *consistent* with a storm that keeps re-entering the
+exception by a **synchronous** fault (a data abort masks what the current CPSR masks; it does not
+re-enable anything), exactly what the flat `gap≈0, call≈0` rows show between the two 18.7 s ones.
+
+## What this does and does NOT say
+
+- **DOES say:** the frontier is the abort path — specifically **a single `sleh_abort` invocation of
+  ~18.7 s**, riding a **fault storm of ~2.1 million aborts** that the capped channel hid. 1006's
+  "non-idle" reading now has a location: the storm is the non-idle work.
+- **DOES say (correction):** 1004's "40 aborts, a WALK" is a **cap artifact** — the count is
+  ~2,097,152. The dyld-walk reading held only for the first ~40; the run then enters a storm.
+- **DOES NOT say:** the fault *address* of the storm. The storm rows are past the live channel's cap,
+  so `sleh_far` stops at #40 (`0x3ef2f000`, a kernel copyin — `recover=0x8049652c`, `user=0`). The
+  `sleh_far` for the 18.7 s abort is **not in this log** — that reading needs the `far` published on
+  the direct channel (1008's task).
+- **No brick:** the machine is alive (`No errors detected`); the run ended in a resident non-return as
+  expected for this arm.
+
+## The checker's two defects (fixed here, `tools/check_1007_capture.py`)
+
+1. **`abt_reference_M` read `cap.first("xnu_live_tick_sum_maxd")`.** That key is a running max
+   republished 14×; `first()` returned the pre-freeze interim `0x002f02c4` = **152× too small**, so
+   every `near_m()` comparison landed in branch (A). Fixed to read the **largest** published value
+   (`max()` over the records). This is `[[mi4-measurement-defects]]` — the *measurement* was wrong.
+   With the fix the verdict flips (A) → (C).
+2. **`[W]` hard-refused a log with no `xnu_live_freeze_` keys.** But this log carries the **1007**
+   instrument (`xnu_live_abt_` x111); the 1007 arm pins `FREEZE_WITNESS=1` (arm config verified), so
+   the missing freeze keys are the **inherited 1006 silence** (D13 never enters `machine_idle`,
+   `records/1006-press-read.txt`), not a wrong capture. Fixed: when the 1007 instrument is present the
+   absence is downgraded to an OBS/READING (uncertified), grounded on the sibling switch's own
+   evidence. A log with **neither** instrument still hard-refuses.
+
+Both fixes are in `tools/check_1007_capture.py`; the re-run gives **0 HARD ANOMALIES, EXIT=0**,
+ABORT-SPAN CERTIFIED, CADENCE CERTIFIED.
+
+## The next rung (1008)
+
+The storm's fault address is the missing reading. Publish `xnu_live_abt_far` (the fault address) and
+`xnu_live_abt_type` on the **direct** channel for the storm rows — read the coprocessor pair the same
+way `__wrap_sleh_abort` already does for `sleh` — so the 18.7 s abort's `far` is named. Pair it with a
+rate limiter (`far` published only where `call` sets a new max, or on the powers-of-two ladder) to
+keep the direct channel bounded.

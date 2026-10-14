@@ -1414,6 +1414,26 @@ def s_freeze(cap):
                        "- the freeze verdict is NOT certified; the 1005 cadence and 1004 regression "
                        "clauses below still run independently")
             say("OBS", "the 1006 VERDICT is UNCERTIFIED (a reader that cannot fail certifies nothing)")
+        elif cap.family_count(ABT_PREFIX) > 0:
+            # THIS LOG CARRIES THE 1007 INSTRUMENT.  A log with `xnu_live_abt_` keys is provably a
+            # post-1006 arm with STAGE90_XNU_ABT_SPAN=1; the 1007 arm set also carries FREEZE_WITNESS=1
+            # (measured in out/stage90/xnu_arm_entry-config.txt), so the sampler IS in the image and the
+            # absence of freeze keys is NOT "the wrong capture".  It is the SAME silence 1006 read: the
+            # D13 kernel never enters `machine_idle`, so the unmoved sampler records nothing
+            # (records/1006-press-read.txt).  That is a READING of the rung, not a build failure, so it
+            # is an OBS (uncertified) - NOT a HARD anomaly.  Grounding the downgrade on the 1007
+            # instrument's own presence keeps the gate honest: a log with NEITHER instrument still
+            # hard-refuses below.
+            say("OBS", "NO `xnu_live_freeze_` keys, BUT this log carries the 1007 instrument "
+                       "(`xnu_live_abt_` x%d): the arm is post-1006 (ABT_SPAN=1 pins the sibling "
+                       "switch set, FREEZE_WITNESS=1). The silence is the INHERITED 1006 reading - the "
+                       "D13 kernel never enters `machine_idle`, so the unmoved sampler publishes "
+                       "nothing. NOT a wrong capture and NOT a build failure."
+                % cap.family_count(ABT_PREFIX))
+            say("READING", "the 1006 freeze witness is SILENT (machine_idle never entered) - the freeze "
+                           "did not overlap the idle path; the 1007 abort-span section below is where "
+                           "this log's freeze reading lives. The 1006 VERDICT is UNCERTIFIED here (the "
+                           "instrument did not fire), which is the expected 1007 outcome.")
         else:
             hard("NO `xnu_live_freeze_` keys: this log carries NO 1006 freeze witness - either the run "
                  "is a PRE-1006 arm (the switch did not reach the image: REBUILD with "
@@ -1558,10 +1578,19 @@ def s_freeze(cap):
 def abt_reference_M(cap):
     """The freeze magnitude the abort spans are compared against - the SAME capture's
     `xnu_live_tick_sum_maxd` (`M`), or the frozen 1005/1006-press reading if that key is absent.
-    Returns `(value, source_text)`."""
-    t = cap.first("xnu_live_tick_sum_maxd")
-    if t is not None and t[3] is not None:
-        return t[3], "this capture: xnu_live_tick_sum_maxd @:%d" % t[0]
+    Returns `(value, source_text)`.
+
+    `xnu_live_tick_sum_maxd` is a RUNNING MAXIMUM republished at every summary (measured: 14 records in
+    the 1007 capture, 0x002f02c4 -> 0x1be892af). `cap.first()` therefore reads a PRE-FREEZE interim
+    value - 152x too small - and every `near_m()` comparison then lands in branch (A) regardless of the
+    truth ([[mi4-measurement-defects]]: the measurement was the thing that was wrong). Read the LARGEST
+    published value: a max only grows, so the maximum over the records is the last one by value."""
+    vals = [r[3] for r in cap.all("xnu_live_tick_sum_maxd") if r[3] is not None]
+    if vals:
+        v = max(vals)
+        ln = next(r[0] for r in cap.all("xnu_live_tick_sum_maxd") if r[3] == v)
+        return v, "this capture: xnu_live_tick_sum_maxd=%s (the max of %d running-max records) @:%d" % (
+            fmt(v), len(vals), ln)
     return ABT_M_FALLBACK, "the frozen 1005/1006-press reading xnu_live_tick_sum_maxd=%s" % fmt(ABT_M_FALLBACK)
 
 
