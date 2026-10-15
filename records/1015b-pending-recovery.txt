@@ -8,13 +8,16 @@ STATE
     /proc/last_kmsg. It survives a warm reset but is DESTROYED by (a) a cold power
     transition or (b) a NEW `fastboot boot` (any later kernel clears the buffer on entry).
 
-ORDERING CONSTRAINT (why host-side build work is HELD)
-  * out/stage90/xnu_arm_entry.{bin,elf} is the 1015b arm (sha8 16fe8885). Any build that
-    targets out/stage90 would REPLACE it BEFORE the recovery, and the recovery (if the
-    device returns on the watchdog / a warm path) needs nothing rebuilt - but a rebuild
-    also risks a `fastboot boot` in a later step that would clear the DRAM log.
-  * Therefore: do NOT run build_1015*.sh / build_entry.sh (they write out/stage90) until the
-    1015b run's log is recovered or declared unrecoverable.
+ORDERING CONSTRAINT (narrowed by measurement)
+  * MEASURED: the 1015b arm IS frozen - out/stage90/frozen/armed-d13-16fe8885/ holds
+    xnu_arm_entry.bin + the full set. So a rebuild targeting out/stage90 does NOT lose the
+    arm; it is restorable from the frozen copy. The gate is NOT image loss.
+  * The gate is SEQUENCING: the 1015b run's verdict is the current frontier, and the next
+    `fastboot boot` (which any new rung's press needs) CLEARS the DRAM log. So a NEW PRESS
+    must wait until the 1015b log is recovered or declared lost.
+  * Host-side BUILDS of a later rung are therefore technically safe (the arm is frozen) but
+    are HELD here so the tree stays in one unambiguous state ("1015b pressed, unread") until
+    the read lands - after which 1016's Branch A/B decides the next arm.
 
 RECOVERY SEQUENCE (once the device is back)
   1. If adb lists 4a2fe00b: `scripts/recover_last_kmsg.sh --read-only`, then
