@@ -756,7 +756,21 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_PMP_ENTER
                 STAGE90_XNU_WRSTRIP
                 STAGE90_XNU_PTE_WITNESS
-                STAGE90_XNU_FLUSH_WITNESS)
+                STAGE90_XNU_FLUSH_WITNESS
+                STAGE90_XNU_PERM_WITNESS)
+# **1015: `STAGE90_XNU_PERM_WITNESS`, the permission-inputs witness (the passive half of rung 1015).**
+# It went in at the tail beside `STAGE90_XNU_FLUSH_WITNESS`, and the "variant subset / pair of counts"
+# arithmetic the 882/683/686 notes above describe was **already retired by 1005** - the counts they name
+# were a *pair* of numbers in the converse check, and 1005 dropped them in favour of comparing the whole
+# sorted key set both ways. So this addition moves **no count**: the converse check below is a set
+# difference, and both sides grew by exactly this one name. It is a REQUIRED key and an unconditional
+# one, exactly like `STAGE90_XNU_FLUSH_WITNESS` beside it: `build_entry.sh` validates the switch at its
+# own assignment (0/1 only) and echoes the line *unconditionally*, so every record this gate can see that
+# was produced by a build at or after 1015 carries it. (An arm parked BEFORE 1015 - `armed-d13-29ec9e48`
+# is the last - does NOT, and this gate would refuse it; that is the intended behaviour here, because
+# those arms are retired and a build at this HEAD always writes the line. The 882/594/1003/1004 `-z`
+# grace branches above exist only for records the ladder still owes a press.) The value is printed by the
+# loop below like every other name in this list, and an off value (0) is a valid arm.
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this

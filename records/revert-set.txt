@@ -15726,3 +15726,157 @@ set=armed-d13-29ec9e48 sha256=39561289910655a29708c241b3a5e10da4e957d296d6ae911d
 set=armed-d13-29ec9e48 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1014a-flushwitness;stage90_fixture.macho
 set=armed-d13-29ec9e48 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1014a-flushwitness;stage90-build-config.txt
 set=armed-d13-29ec9e48 sha256=a034602d689662aec5893a21505430e60593939ea5249d1bc222ebab983e597b bytes=560 file=SHA256SUMS.txt role=1014a-flushwitness;SHA256SUMS.txt
+# armed-d13-e51d14fa  -  1015: THE PERMISSION-INPUTS WITNESS + THE AT/PAR HARDWARE CELL - what does the MMU
+# ITSELF say about the storm VA, and are the permission inputs the ones the walk read? (design
+# docs/1015-design.md)
+# Switch set is 1014-s VERBATIM plus STAGE90_XNU_PERM_WITNESS=1 (PTE_WITNESS, PMP_ENTER, VME_PROT,
+# ABT_PTE, ABT_PC, ABT_FAR, ABT_SPAN, FREEZE_WITNESS, CADENCE, STALL, ABORT_TRACE, DYLD_WITNESS,
+# SHREG_PROBE, SHREG_WIRE, SHREG_GEOM, RESIDENT, USVC, SUBMAP_PMAP_SKIP and FLUSH_WITNESS all stay
+# 1); the ENTRY BIN moves (29ec9e48 -> e51d14fa); the PAYLOAD moves (it embeds the entry blob; the 29 s
+# watchdog constant is 999-s, unchanged); the TREE DOES NOT MOVE - 1015 is ENTRY-ONLY, it adds NO
+# tree edit and NO new --wrap (the kernel pool out/xnu_kernel_obj_d13/osfmk_arm_pmap.o is 1014-s,
+# byte for byte: 1014-s pmap.c flush probe stays staged, STAGE90_XNU_FLUSH_WITNESS stays 1, and
+# 1015 adds no second pmap.c probe).
+#
+# WHY 1015 FOLLOWS 1014.  The 1014 press (arm armed-d13-29ec9e48, records/1014-press-read.txt)
+# MEASURED two cells.  F2 (docs/1014-design.md §2.5): on every tail row wfkind=0x02
+# (arm_tlb_flushID_ASID), wfself=1 (the pmap.c:1298 gate was TRUE), wfttb == wflive ==
+# 0x81a86000 (the pmap-s own L1 table IS the live TTBR0 table at flush time), wfasid=2 == wctx=2
+# (the flush ran under the faulting ASID), wfncpus=1 - so 1013c-s H-FF hypothesis ("the flush
+# never ran because pm_l1_phys != TTBR0") is REFUTED BY VALUE.  V1: three probes read the SAME
+# cell (VA 0x000e6000, L1 0x81bb2001, L2 table 0x81bb2000) and all three read the SAME word
+# 0x841e91bb = PRESENT small page, ap=0b11, apx=0 (USER-WRITABLE), PA 0x841e9000 - YET the CPU
+# still takes FS=15 permission faults on it ~2.6e5 times at a constant far=0xe6000/pc=0x2bed61a0.
+# A WRITABLE LEAF PLUS A FLUSH THAT RAN AND STILL FAULTS means the CPU-s translation is not the
+# leaf the walk reads.  BUT: the earlier reading "F1 (stale TLB) is dead" was CORRECTED - F2
+# proves a flush RAN, NOT that a GLOBAL entry was INVALIDATED.  This port installs EVERY leaf
+# global (bit11=0; L2_NG_BIT is never ORed), so a TLBIASID cannot evict them and H-G
+# STALE_GLOBAL_TLB is NARROWED, NOT eliminated.  That narrowed question - does the CPU-s own
+# translation of 0xe6000 differ from the walked leaf - is this rung.
+#
+# WHAT 1015 MEASURES.  Two passes, both read in the abort context (__wrap_sleh_abort,
+# src/entry/entry_trace.c, BEFORE the handler) so the values describe the fault AS TAKEN.
+#   (1) THE AT/PAR HARDWARE CELL - the deciding pass.  The recorder issues the tree-s OWN idiom
+#       (pmap_extract, pmap.c:2930): `mcr p15,0,cura,c7,c8,3` (armreg_va2pa_uw_ns_write = AT,
+#       stage-1, USER WRITE) on the storm VA, ISBs (`"xisb sy"`, the sequence the AT/PAR pair
+#       requires), then `mrc p15,0,Rt,c7,c4,0` (armreg_par_read).  `par & 1 == 1` is a FAULT;
+#       `par & 0xfffff000` is the PA the MMU itself uses.  Published RAW as _wdatpar.  The
+#       PRIVILEGED cross-check repeats it with `c7,c8,0` (va2pa_pr_ns) on the STORM VA and
+#       publishes it as _wdatparpr: it is the only thing that separates "the entry is user-denied" from "the
+#       entry is not there".  The AT is the STRONGEST instrument here: every other witness asks
+#       the PAGE TABLES what should happen; AT asks the MMU what DOES happen - the same
+#       translation path the faulting store used, in the same thread context, so a stale entry
+#       that shadows the leaf shadows AT too.
+#   (2) THE PERMISSION-INPUTS LADDER - the residual/null pass.  Read at the SAME abort, from NO
+#       NEW WALKER (the L1 and the leaf come from the ONE routine stage90_read_l2_pte): _wddom
+#       (the L1 descriptor-s domain field, bits[8:5]), _wddacr (DACR raw, `mrc p15,0,Rt,c3,c0,0`),
+#       _wdttbcr (TTBCR raw, `c2,c0,2`) + _wdsplit (1 << (32-(ttbcr&7))), _wdttbr0/_wdttbr1
+#       (live raw), _wdl1 and _wdleaf (ONE read; every decode below comes from that local),
+#       _wdap (leaf>>4 & 3), _wdapx (leaf>>9 & 1), _wdtex (leaf>>6 & 7), _wdcb (leaf>>2 & 3),
+#       _wdsmall (leaf>>1 & 1), _wdempty (the walk-s present-test), _wdpcpu (TPIDRPRW),
+#       _wdthrmap (the aborting thread-s own pmap L1 base, the 1011 chain) + _wdmapok (1 iff
+#       every deref landed in [0x80000000,0xFFFEFFFF] - the lineage-s own null control), and
+#       _wdsctlr (SCTLR raw AT THE ABORT - perm-static-s ranked cause #2).
+#   (3) THE NULL CONTROLS.  On each row the recorder issues the SAME AT pair against the W-SYNC
+#       control VA (entry_stubs.c:3153; 1014 already read its leaf as present at PA 0x80080000,
+#       _wcleaf=0x8008021a) and publishes its PRIVILEGED par ON ITS OWN KEY, _wdctlat - NOT on
+#       _wdatparpr, which reads the STORM VA (a DIFFERENT address must never share a key:
+#       [[mi4-one-value-two-definitions]]; the first design draft made exactly that collision and
+#       the lead-s 2026-10-15 ruling split it).  _wdctlok = 1 iff that control read was taken;
+#       _wdseen = 1 iff the cells were actually produced; _wdatok = 1 iff the three AT/PAR pairs
+#       executed AND the control passed.  A missing or mis-executed read can NEVER impersonate a
+#       confirmation.
+#
+# THE 1015 VERDICT CELLS (docs/1015-design.md §3a - this table was §3c before the ENTRY-ONLY
+# renumber; tools/check_1015_capture.py and docs/1015-harness.md still cite it as §3c - SAME
+# table, old number).  Read on the TAIL ROWS-OWN values (_wdn >= 0x400, _wdva == 0xe6000,
+# _wdseen=1, _wdatok=1), NEVER on a whole-run aggregate (the 1008/1009 measurement defect, not
+# repeated).  The 1014 tail is NOT uniform - the last two rows are DIFFERENT faults inside a
+# different dyld (far~0x3a0xxxxx), so the filter is BOTH the ordinal AND far == 0xe6000:
+#   V-AT0  the control read (_wdctlat) did not come back `par & 1 == 0` with
+#          `(par & 0xfffff000) == 0x80080000`, or _wdctlat is unpublished, or _wdatok=0
+#          => AT_INSTRUMENT_BROKEN: WITHHOLD V-AT1..4.  (SILENCE_IS_A_READING: the AT-s
+#          absence is a reading only because the control proves success is silent-but-readable.)
+#   V-AT1  _wdatpar FAULTS (`par & 1 == 1`) while _wdatparpr SUCCEEDS (`par & 1 == 0`)
+#          => H-G CONFIRMED AT THE HARDWARE - the translation is NOT the user leaf.  The MMU
+#          will not translate 0xe6000 for a user write even though the walked leaf is
+#          ap=0b11/apx=0/nG=0/domain=0; the privileged view succeeds, so this is a user-AP
+#          decision made from a translation that is not the leaf the walk reads => a stale/other
+#          entry.  With _leafng == 0 the culprit is a GLOBAL entry surviving TLBIASID.
+#   V-AT2  _wdatpar SUCCEEDS to the leaf-s OWN PA (`par & 1 == 0` and
+#          `(par & 0xfffff000) == 0x841e9000`) => TRANSLATION_IS_CORRECT_YET_THE_STORE_FAULTED:
+#          H-G REFUTED - the store-s FS=15 is NOT produced by this translation, so the probe-s
+#          key/ordering (g_abtpte_curva) or the DFSR/DFAR pair describes a DIFFERENT access.
+#          NOT a page-table defect - hand back to the observer (§3b-s P-X1 -> H-X, SCTLR/PRRR).
+#   V-AT3  _wdatpar SUCCEEDS to a DIFFERENT PA (`par & 1 == 0` and
+#          `(par & 0xfffff000) != 0x841e9000`) => WRONG_TRANSLATION_IN_THE_TLB: a TLB entry is
+#          serving a translation the tables no longer hold.  Same conclusion as V-AT1, reached
+#          from the PA side, and it NAMES the stale PA by value.
+#   V-AT4  BOTH views fault (`par & 1 == 1` on both) => the entry is not merely user-denied; a
+#          domain/invalid mechanism is in play.  Re-rank toward perm-static cause #2 (SCTLR/PRRR)
+#          before §7.
+# THE PASSIVE LADDER (§3b) rides the SAME rows and is WITHHELD unless _wdctlok=1, _wdseen=1 and
+# (for the lineage cells) _wdmapok=1: P-CTL (_wdctlok=0 or _wdseen=0) => NO_PERM_WITNESS, no
+# verdict; P-AT (_wdatok=0) => NO_AT (the deciding table is unavailable, regardless of
+# everything below); P-D1 _wddom != 0 => L1_DOMAIN_NONZERO; P-D2 _wddom==0 and (_wddacr & 3) != 1
+# => DACR_NOT_CLIENT (H-P CONFIRMED, the only DACR writer is src/mmu.c:4921); P-D3 _wddom==0 and
+# (_wddacr & 3) == 1 => DACR_CLIENT (H-P-s domain form KILLED); P-T1 (_wdttbcr & 7) != 2 =>
+# TTBCR_NOT_N2 (every entry_ttbr_base derivation must be re-read); P-T2 (_wdttbcr&7)==2 and
+# _wdva >= _wdsplit => ROUTED_TO_TTBR1; P-T3 the masked _wdttbr0 != 0x81a86000 => TTBR0_MOVED_
+# AT_ABORT; P-M1 _wdmapok=1 and _wdthrmap != _wdttbr0 => THREAD_PMAP_NE_TTBR0; P-L1 _wdsmall=1
+# and (_wdapx!=0 or _wdap!=0b11) => LEAF_NOT_USER_WRITABLE (contradicts 1014-s stable
+# double-read); P-L3 _wdsmall=0 => NOT_A_SMALL_PAGE; P-S1 (_wdsctlr bits TRE(28)/AFE(1)/M(0))
+# differs from the console-install reading => SCTLR_MOVED (H-X is live); P-X1 all of
+# P-D3/P-T1..P-T3/P-M1/P-L1/P-L3/P-S1 killed AND V-AT2 => INPUTS_ALL_CORRECT_STILL_FAULTS (the
+# next rung is the observer, not the pmap).
+# A NOTE ON _leafng: `_leafng == 0` (GLOBAL) is NOT by itself a verdict - it is the PRECONDITION
+# of H-G, published RAW so the reader sees it without decoding the packed leaf.  `_leafng == 1`
+# (non-global) would KILL H-G by value before any press: if the leaf were ASID-tagged, TLBIASID
+# WOULD evict its stale entry.  The checker asserts _leafng == 0 at the storm as H-G-s
+# precondition (the 1014 leaf-s bit11 is 0).
+# The filter is the rung-s provenance statement: the recorder keys on 1013-s g_abtpte_curva
+# (_wdva) AND 1014-s storm identity, because the 24576-entry channel would otherwise be spent
+# before the storm (the 998 cap, the 1007 ladder lesson, [[mi4-measurement-defects]]).
+#
+# KEYS (the fixed keyspace, docs/1015-design.md §2a): the 27 permission-INPUTS/AT-PAR cells
+# wdn/wdva/wddacr/wddom/wdttbcr/wdsplit/wdttbr0/wdttbr1/wdl1/wdleaf/wdap/wdapx/wdtex/wdcb/
+# wdsmall/wdpcpu/wdthrmap/wdmapok/wdseen/wdctl/wdctlok/wdempty/wdatok/wdatpar/wdatparpr/
+# wdctlat/wdsctlr; the H-G precondition cell xnu_live_abt_leafng; and the THREE OWED-1014-FIX
+# keys xnu_live_abt_wwpre/wwpost/wwmoved (published from entry_note_abt_wleaf so that 1013-s
+# _wwnoproof becomes a READING - the pre- and post-call TTBR0 bases plus a moved flag - rather
+# than the bare, polarity-inverted 1 that 1014-s HARD #1 adjudicated).  No two probes share a
+# key: every one of the 31 greps to 0 tree-wide before it was added.
+# THE THREE OWED-1014-FIX KEYS are 1015-s only ENTRY-SIDE correction and they are the reason the
+# 1013 W-APEX cell is re-read this rung: 1014 could not form a (VA, L1, L2) pair because W-APEX-s
+# own provenance cell contradicted the SAME row-s pmp cells.
+#
+# VERIFIED BY VALUE (scripts/build_1015.sh + this park): the image carries 131 xnu_live_abt_ key
+# literals (1014-s measured 100 + 1015-s 31) and all 31 1015 keys; entry_note_abt_wd is DEFINED
+# T/t with exactly ONE `(b|bl)` call site (the (b|bl) rule - the compiler TAILS a void call that
+# ends its function; this was 1013-s own build bug), living inside __wrap_sleh_abort, which still
+# calls <sleh_abort> (pass-through) AND <entry_note_abt_cur> (the fault-VA latch the recorder
+# keys on); the pool-s osfmk_arm_pmap.o is UNMOVED (still `U entry_note_abt_wf`, exactly ONE
+# R_ARM_CALL relocation, ZERO wf literals, and NO entry_note_abt_wd reference - 1015 adds no tree
+# edit); with the FROZEN 1014 elf (armed-d13-29ec9e48) as a REQUIRED NEGATIVE CONTROL
+# (xnu_live_abt_ x100, the 1014 symbols present, but the 1015 symbol x0 and the 1015 wd/leafng
+# literals x0 - the 1015 change is NOT in the 1014 arm, so the reader CAN fail); the 1014 flush
+# witness (14 keys), the 1013 witness, the 1012 apex, the 1011 (E-prime)/(A) witness, the
+# 1010/1009/1008/1007 witnesses, the 1006 freeze witness, the 1005 cadence witness, the 1004
+# abort trace (xnu_live_sleh_upc x1), the 1003 stall instrument and the 1002 six-word save set
+# asserted present (regressions).
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-e51d14fa sha256=e51d14fa5ecd7936a566ca463a63a686c73903348319c7892cdbf39070840638 bytes=6356052 file=xnu_arm_entry.bin role=1015-permwitness;xnu_arm_entry.bin
+set=armed-d13-e51d14fa sha256=24a3b8dc5cca64f8837a3010a9bc759d4d0bc8fd50f8a3055e3fc44a61b856b1 bytes=7400472 file=xnu_arm_entry.elf role=1015-permwitness;xnu_arm_entry.elf
+set=armed-d13-e51d14fa sha256=04c45b9e7c146f9a6e20051abd8d36980a46025cf3f867e261f8f20ed17d7b0e bytes=1912 file=xnu_arm_entry.h role=1015-permwitness;xnu_arm_entry.h
+set=armed-d13-e51d14fa sha256=4092dcce998fefc8e0202e8993069d40db4caad83893a34c896e5923d63bb237 bytes=2027 file=xnu_arm_entry-config.txt role=1015-permwitness;xnu_arm_entry-config.txt
+set=armed-d13-e51d14fa sha256=06380a6d006c02b2d906426e91d78c604ff8d0d832f2ae25735795f1404d6747 bytes=3149 file=xnu_arm_entry-sources.txt role=1015-permwitness;xnu_arm_entry-sources.txt
+set=armed-d13-e51d14fa sha256=1284baf420ee1431357e63a5e11d6b9bcdac051f76809cf5fd834ec9179d1767 bytes=6851460 file=stage90.bin role=1015-permwitness;stage90.bin
+set=armed-d13-e51d14fa sha256=93d64d8b3ccecccecb742efef09a827f36ded4821cf749cab049811543297097 bytes=6913532 file=stage90.elf role=1015-permwitness;stage90.elf
+set=armed-d13-e51d14fa sha256=a5af9c5d19943f8a78c714c8753aa95aeba186c0ce6ecda43361752bed7da213 bytes=6854656 file=stage90.img role=1015-permwitness;stage90.img
+set=armed-d13-e51d14fa sha256=32846fbf7127dd2b62b6a6898dd3c4d6526ed59c51ff36d406e3b9487ecb7ec3 bytes=9375744 file=stage90-qcdt.img role=1015-permwitness;stage90-qcdt.img
+set=armed-d13-e51d14fa sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1015-permwitness;stage90_fixture.macho
+set=armed-d13-e51d14fa sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1015-permwitness;stage90-build-config.txt
+set=armed-d13-e51d14fa sha256=88a89bc0d26e3e06884d4e043600cbb86da0c7524b820f3a9184ec6639e53c08 bytes=560 file=SHA256SUMS.txt role=1015-permwitness;SHA256SUMS.txt

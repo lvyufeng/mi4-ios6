@@ -41,7 +41,8 @@ the design:
 
 Everything below is cited to a line **read by value this session** (`HEAD` = `0ef1949`). New names
 grep to 0 tree-wide: `STAGE90_XNU_PERM_WITNESS`, `xnu_live_abt_leafng`, `xnu_live_abt_wd*`,
-`xnu_live_abt_wdatpar`, `xnu_live_abt_wdatparpr`, `xnu_live_abt_wdatok`, `xnu_live_abt_wdsctlr`.
+`xnu_live_abt_wdatpar`, `xnu_live_abt_wdatparpr`, `xnu_live_abt_wdctlat`, `xnu_live_abt_wdatok`,
+`xnu_live_abt_wdsctlr`.
 (The deferred rung's `STAGE90_XNU_USER_FULL_FLUSH` likewise greps to 0 outside this design's own
 hits — see §2b/§8d.)
 
@@ -182,8 +183,9 @@ entry-side read. All keys grep to **0** tree-wide.
 | `xnu_live_abt_wdctlok` | 32 | **1 iff the control read was taken**; **0 ⇒ withhold every passive verdict** | — | recorder |
 | `xnu_live_abt_wdsctlr` | 32 | **SCTLR raw AT THE ABORT** — `mrc p15,0,Rt,c1,c0,0` (spelling `entry_stubs.c:4164` reads a latched one; the storm's own is what is owed — perm-static cause #2) | new read | recorder |
 | `xnu_live_abt_**wdatpar**` | 32 | **THE HARDWARE'S OWN ANSWER (K6/T-AT)**: `mcr p15,0,cura,c7,c8,3` (`va2pa_uw_ns`, `proc_reg.h:547` = AT, stage-1, **user write**) then `mrc p15,0,Rt,c7,c4,0` (`par`, `proc_reg.h:522`). Published **RAW** | derived: `par` | recorder |
-| `xnu_live_abt_**wdatparpr**` | 32 | **the privileged cross-check (K7)**: same with `c7,c8,0` (`va2pa_pr_ns`, `proc_reg.h:544`) | derived: `par` | recorder |
-| `xnu_live_abt_**wdatok**` | 32 | **1 iff both AT/PAR pairs were actually executed and published** — **0 ⇒ NO V-AT VERDICT** | set at publish | recorder |
+| `xnu_live_abt_**wdatparpr**` | 32 | **the privileged cross-check (K7)**: same with `c7,c8,0` (`va2pa_pr_ns`, `proc_reg.h:544`), **on the STORM VA** | derived: `par` | recorder |
+| `xnu_live_abt_**wdctlat**` | 32 | **the T-CTL NULL CONTROL, its OWN key** (ruling 2026-10-15): the same privileged `AT` (`c7,c8,0`) issued on the **W-SYNC control VA `_wcva`** (PA `0x80080000`), NOT on the storm VA. Published RAW so the reader can audit the control itself instead of trusting `_wdatok`'s one bit | derived: `par` | recorder |
+| `xnu_live_abt_**wdatok**` | 32 | **1 iff the three AT/PAR pairs were executed and published AND the control passed T-CTL** — **0 ⇒ NO V-AT VERDICT** | set at publish | recorder |
 
 **The AT cell is the strongest instrument in this design, and it is the tree's OWN idiom.** `pmap_extract`
 (`pmap.c:2930`) already does exactly this: `armreg_va2pa_ur_ns_write(virt)` (`:3041`), `"xisb sy"`
@@ -275,19 +277,35 @@ re-derives wrongly", which AT alone cannot separate (§5.6).
 
 ### 3a. PRIMARY — the AT/PAR confirmation (the deciding pass; no press-behaviour needed)
 
+> **Citation note (2026-10-15).** This table was §3c before the ENTRY-ONLY revision renumbered the
+> section (the active half moved out to §3c/§2b). `tools/check_1015_capture.py` and
+> `docs/1015-harness.md` still cite it as **"design §3c"** — same table, old number. The key names
+> they read (`_wdatpar`, `_wdatparpr`, `_wdctlat`, `_wdatok`, `_wdsctlr`) are the ones this section
+> defines and are unaffected.
+
 Read on tail rows with `_wdn >= 0x400` and `_wdva == 0xe6000`, with `_wdseen=1` and `_wdatok=1`.
 
 **The instrument's own null control — and it gates everything below.** On each row the recorder also
 issues the SAME AT pair against the W-SYNC control VA (`entry_stubs.c:3153`), whose leaf 1014 already
 read as present at PA `0x80080000` (`_wcleaf=0x8008021a`, `_wcl1=0x80a08001`, `_wck=1`). The
-control's **privileged** AT (`_wdatparpr`) must return `par & 1 == 0` with
-`par & 0xfffff000 == 0x80080000`; if it does not, the AT instrument itself is broken (bad ISB, wrong
-register, wrong VA register) and **no V-AT verdict may be read**. A missing or mis-executed read can
-never impersonate a confirmation.
+control's **privileged** AT is published **on its OWN key, `_wdctlat`** (the lead's 2026-10-15 ruling
+— the first draft reused `_wdatparpr` for it, giving one key two definitions; see the note below) and
+must return `par & 1 == 0` with `par & 0xfffff000 == 0x80080000`; if it does not, the AT instrument
+itself is broken (bad ISB, wrong register, wrong VA register) and **no V-AT verdict may be read**. A
+missing or mis-executed read can never impersonate a confirmation. The recorder folds the same fact
+into `_wdatok` (T-CTL: control unsatisfied ⇒ `_wdatok=0`); the reader checks `_wdctlat` **directly**
+as well, because a gate published as a single bit is not auditable.
+
+> **One key, two definitions — reported and fixed.** `_wdatparpr` is the STORM VA's privileged read
+> (the table's middle column, and the only thing that separates V-AT1 from V-AT4). The control VA's AT
+> is a DIFFERENT reading of a DIFFERENT address and MUST NOT share the key; it is `_wdctlat`. A row
+> whose `_wdatparpr` still carries PA `0x80080000` is a recorder that has not made the change; the
+> reader withholds (V-AT0) and names the collision rather than reading a control value as a storm
+> value.
 
 | # | `_wdatpar` (user write) | `_wdatparpr` (priv. read) | verdict | what it means |
 |---|---|---|---|---|
-| **V-AT0** | — | — | **AT_INSTRUMENT_BROKEN** — the control read did not come back as above, or `_wdatok=0` | withhold V-AT1..4. (The `SILENCE_IS_A_READING` rule: the AT's absence is a reading only because the control proves success is silent-but-readable.) |
+| **V-AT0** | — | — | **AT_INSTRUMENT_BROKEN** — the control read (`_wdctlat`) did not come back as above, or `_wdctlat` is unpublished, or `_wdatok=0` | withhold V-AT1..4. (The `SILENCE_IS_A_READING` rule: the AT's absence is a reading only because the control proves success is silent-but-readable.) |
 | **V-AT1** | `par & 1 == 1` (FAULTS) | `par & 1 == 0` | **H-G CONFIRMED AT THE HARDWARE — the translation is not the user leaf** | the MMU will not translate `0xe6000` for a user write even though the walked leaf is `ap=0b11`, `apx=0`, `domain=0`, `nG=0`. The privileged view succeeds ⇒ this is a **user-AP decision made from a translation that is not the leaf the walk reads** ⇒ a stale/other entry. With `_leafng==0` (§3b note) the culprit is a GLOBAL entry surviving TLBIASID. |
 | **V-AT2** | `par & 1 == 0` and `(par & 0xfffff000) == 0x841e9000` | `par & 1 == 0` | **TRANSLATION IS CORRECT YET THE STORE FAULTED** | the hardware translates the write to exactly the leaf's PA. The store's FS=15 is therefore **not** produced by this translation ⇒ the probe's key/ordering (`g_abtpte_curva`) or the DFSR/DFAR pair describes a different access. **Not a page-table defect** — hand back to the observer. |
 | **V-AT3** | `par & 1 == 0` and `(par & 0xfffff000) != 0x841e9000` | `par & 1 == 0` | **WRONG TRANSLATION IN THE TLB** | the MMU translates the VA successfully but to a PA that is not the leaf's ⇒ a TLB entry is serving a translation the tables no longer hold. Same conclusion as V-AT1, reached from the PA side, and it names the **stale PA** by value. |
@@ -463,7 +481,7 @@ both pre- and post-call bases (`_wwpre`/`_wwpost`) so `_wwnoproof` is a reading,
   reading the register.
 * **AT reportability is assumed, not yet measured on this device.** `pmap_extract` uses the AT path
   (`pmap.c:2930/:3041/:3051`), but whether it is *reached* on D13 was not verified this session —
-  which is exactly what §3a's control read (`_wdatparpr` on the W-SYNC VA) exists to establish
+  which is exactly what §3a's control read (`_wdctlat` on the W-SYNC VA) exists to establish
   **before** any V-AT verdict is read. If the control fails, the rung reports AT_INSTRUMENT_BROKEN
   and 1015 falls back to §3b's ladder alone.
 
@@ -574,9 +592,11 @@ The recorder, the arm-builder, the preflight gate, the checker and this design m
 key name, or a press spends itself on a name the gate never prints. **As the code stands** (verified
 by `grep` this session): the 24 `wd*`/`leafng` names of §2a are published by `entry_stubs.c`
 (`:3638-3675`) and read by `tools/check_1015_capture.py` (`:86-93`) and `scripts/build_1015.sh`.
-**The AT rows landed under the `wd*` prefix** — `xnu_live_abt_wdatpar`, `xnu_live_abt_wdatparpr`,
-`xnu_live_abt_wdatok` — read by the checker at `:128-130`; this doc matches that spelling.
-**OWED at the time of writing** (and outside this doc's lane): the three AT names and
+**The AT rows landed under the `wd*` prefix** — `xnu_live_abt_wdatpar` (storm VA, user write),
+`xnu_live_abt_wdatparpr` (storm VA, privileged read), `xnu_live_abt_wdctlat` (the W-SYNC control VA,
+the T-CTL null control — its OWN key by the 2026-10-15 ruling), `xnu_live_abt_wdatok` (the gate) —
+read by the checker; this doc matches that spelling. FIVE cells in all, with `xnu_live_abt_wdsctlr`.
+**OWED at the time of writing** (and outside this doc's lane): the five AT/control/SCTLR names are
 `xnu_live_abt_wdsctlr` are **not yet emitted by `entry_stubs.c`** (`grep` = 0 there, 0 in
 `build_entry.sh`, 0 in `preflight_boot_check.sh`) even though `check_1015_capture.py` and
 `build_1015.sh` already read them. **This is now on the critical path**, not a nicety: with the

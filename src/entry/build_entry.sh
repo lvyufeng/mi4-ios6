@@ -331,7 +331,7 @@ if [[ $D13_TRACE -eq 1 ]]; then
     # trace object compiles on its own command line, `:2332-2333`). Same env var and same 0 default as
     # the `$CADENCE` validated below, so the two spellings are one value; the append is here because
     # `entry_trace.c`'s compile reads this array, and the switch must be in it before the compile.
-    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}" -DSTAGE90_XNU_ABT_FAR="${STAGE90_XNU_ABT_FAR:-0}" -DSTAGE90_XNU_ABT_PC="${STAGE90_XNU_ABT_PC:-0}" -DSTAGE90_XNU_ABT_PTE="${STAGE90_XNU_ABT_PTE:-0}" -DSTAGE90_XNU_VME_PROT="${STAGE90_XNU_VME_PROT:-0}" -DSTAGE90_XNU_PMP_ENTER="${STAGE90_XNU_PMP_ENTER:-0}" -DSTAGE90_XNU_WRSTRIP="${STAGE90_XNU_WRSTRIP:-0}" -DSTAGE90_XNU_PTE_WITNESS="${STAGE90_XNU_PTE_WITNESS:-0}" -DSTAGE90_XNU_FLUSH_WITNESS="${STAGE90_XNU_FLUSH_WITNESS:-0}")
+    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}" -DSTAGE90_XNU_ABT_FAR="${STAGE90_XNU_ABT_FAR:-0}" -DSTAGE90_XNU_ABT_PC="${STAGE90_XNU_ABT_PC:-0}" -DSTAGE90_XNU_ABT_PTE="${STAGE90_XNU_ABT_PTE:-0}" -DSTAGE90_XNU_VME_PROT="${STAGE90_XNU_VME_PROT:-0}" -DSTAGE90_XNU_PMP_ENTER="${STAGE90_XNU_PMP_ENTER:-0}" -DSTAGE90_XNU_WRSTRIP="${STAGE90_XNU_WRSTRIP:-0}" -DSTAGE90_XNU_PTE_WITNESS="${STAGE90_XNU_PTE_WITNESS:-0}" -DSTAGE90_XNU_FLUSH_WITNESS="${STAGE90_XNU_FLUSH_WITNESS:-0}" -DSTAGE90_XNU_PERM_WITNESS="${STAGE90_XNU_PERM_WITNESS:-0}")
 else
     # **946: 4570's list drops the one name D13's keeps.** `timer_call_enter1` is in the literal above so
     # `tools/check_timer_sources.py` can read the tree's wrap set out of the source; here the *other* tree
@@ -1444,10 +1444,69 @@ fi
 # construction (MEASURED as well: with `-I` and without, both `entry_stubs.o` and `entry_trace.o`
 # are `cmp`-identical under the full 1013 switch set).
 FLWIT_INCLUDES=()
+# **1015 note: PERM_WITNESS owes this SAME `-I`, and it is appended BELOW at :1498 (after `$PERMWIT`
+# is assigned and validated) rather than here.** PERM_WITNESS does NOT require FLUSH_WITNESS, and the
+# rigour is one-sided: reading `$PERMWIT` here would be reading it before its own assignment. The
+# `-I` is still empty when both switches are 0, which is what keeps the OFF arm byte-identical.
 [[ $FLWIT -eq 1 && -d $XNU_TREE/osfmk ]] && FLWIT_INCLUDES=(-I "$XNU_TREE/osfmk")
 if [[ $FLWIT -eq 1 && ${#FLWIT_INCLUDES[@]} -eq 0 ]]; then
     echo "REFUSING: STAGE90_XNU_FLUSH_WITNESS=1 but $XNU_TREE/osfmk is not a directory - the CONTEXTIDR recorder includes <arm/proc_reg.h> and there is nowhere to find it" >&2
     exit 1
+fi
+# **1015 (PASSIVE HALF): THE PERMISSION-INPUTS WITNESS (`STAGE90_XNU_PERM_WITNESS`).** The ONE
+# recorder `entry_note_abt_wd` (entry_stubs.c) and its ONE call (in `__wrap_sleh_abort`,
+# entry_trace.c, beside 1013's key) are entry-toolchain objects threaded through `STUB_DEFINES`
+# (here) and `STUB_DEFINES_TRACE` (appended at its own assignment above); OFF (PERM_WITNESS=0), the
+# guards delete the recorder and the call and both files are the exact 1014 token set. There is NO
+# `--wrap`, NO TRACE_LDFLAGS clause and NO kernel-pool edit: the recorder is reached from the abort
+# wrapper this file already links. Its guard is the FULL CONJUNCTION `ABT_FAR && ABT_PC && ABT_PTE &&
+# PMP_ENTER && PTE_WITNESS && PERM_WITNESS` - it keys on 1013's `g_abtpte_curva`, which PTE_WITNESS
+# is what writes (`build_entry.sh:1431`'s lesson), and rides the PMP_ENTER latch chain - so the build
+# REFUSES `PERM_WITNESS=1` unless every one of the five is already 1.
+PERMWIT=${STAGE90_XNU_PERM_WITNESS:-0}
+case "$PERMWIT" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_PERM_WITNESS='$PERMWIT' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $PERMWIT -eq 1 && $ABTFAR -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_PERM_WITNESS=1 requires STAGE90_XNU_ABT_FAR=1 - the 1015 recorder's guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS && PERM_WITNESS, so ABT_FAR=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $PERMWIT -eq 1 && $ABTPC -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_PERM_WITNESS=1 requires STAGE90_XNU_ABT_PC=1 - the 1015 recorder's guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS && PERM_WITNESS, so ABT_PC=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $PERMWIT -eq 1 && $ABTPTE -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_PERM_WITNESS=1 requires STAGE90_XNU_ABT_PTE=1 - the 1015 recorder's guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS && PERM_WITNESS, so ABT_PTE=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $PERMWIT -eq 1 && $PMPENTER -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_PERM_WITNESS=1 requires STAGE90_XNU_PMP_ENTER=1 - the 1015 recorder rides the PMP_ENTER wrapper's latch chain, so PMP_ENTER=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $PERMWIT -eq 1 && $PTEWIT -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_PERM_WITNESS=1 requires STAGE90_XNU_PTE_WITNESS=1 - the 1015 recorder keys on 1013's g_abtpte_curva (the current-fault key entry_note_abt_cur writes) and reuses 1013's ABTWS_WINDOW_OFF control VA, both of which exist ONLY under PTE_WITNESS; without it every row would be filtered out and the probe would measure NOTHING while reporting a green build ([[mi4-measurement-defects]])" >&2
+    exit 1
+fi
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_PERM_WITNESS="$PERMWIT")
+# **1015: PERM_WITNESS owes the SAME `-I <XNU_TREE>/osfmk` the flush witness owes, and it is added
+# HERE (after `$PERMWIT` is validated above, not beside `FLWIT_INCLUDES` at :1446) because
+# PERM_WITNESS does NOT require FLUSH_WITNESS: the permission witness reads the tree's own
+# `armreg_va2pa_uw_ns_write`/`armreg_va2pa_pr_ns_write`/`armreg_par_read`/`armreg_sctrl_read`
+# (`osfmk/arm/proc_reg.h:544/547/522/500`) for the AT/PAR/SCTLR cells, and `entry_stubs.c`'s
+# `#include <arm/proc_reg.h>` is gated on `FLUSH_WITNESS || PERM_WITNESS`. Reading `$PERMWIT` at :1446
+# would be reading it before its own assignment (empty under `set -u`), so the flag is appended to the
+# ONE array here - one definition of one include flag ([[mi4-one-value-two-definitions]]). The array
+# stays EMPTY when both switches are 0, which is what keeps the OFF arm byte-identical; a PERM-only
+# arm (FLUSH=0) now finds the header instead of failing to compile for an unstated reason.
+if [[ $PERMWIT -eq 1 && -z ${FLWIT_INCLUDES[*]} ]]; then
+    if [[ -d $XNU_TREE/osfmk ]]; then
+        FLWIT_INCLUDES=(-I "$XNU_TREE/osfmk")
+    else
+        echo "REFUSING: STAGE90_XNU_PERM_WITNESS=1 but $XNU_TREE/osfmk is not a directory - the AT/PAR/SCTLR cells include <arm/proc_reg.h> and there is nowhere to find it" >&2
+        exit 1
+    fi
 fi
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
@@ -1976,6 +2035,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_WRSTRIP
                 STAGE90_XNU_PTE_WITNESS
                 STAGE90_XNU_FLUSH_WITNESS
+                STAGE90_XNU_PERM_WITNESS
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -2247,6 +2307,12 @@ do
         STAGE90_XNU_WRSTRIP)          _v=$WRSTRIP ;;
         STAGE90_XNU_PTE_WITNESS)      _v=$PTEWIT ;;
         STAGE90_XNU_FLUSH_WITNESS)    _v=$FLWIT ;;
+        # 1015 (passive half): the permission-inputs witness. Its consumer is `entry_stubs.c` (via
+        # `STUB_DEFINES`) and the ONE call in `entry_trace.c` (via `STUB_DEFINES_TRACE`), both compiled
+        # here, so the record and the objects cannot be built from two spellings. Read from `$PERMWIT`,
+        # validated 0/1 (and cross-refused against ABT_FAR/ABT_PC/ABT_PTE/PMP_ENTER/PTE_WITNESS) at its
+        # own assignment above this loop.
+        STAGE90_XNU_PERM_WITNESS)     _v=$PERMWIT ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -39976,6 +40042,11 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "STAGE90_XNU_WRSTRIP=$WRSTRIP"
     echo "STAGE90_XNU_PTE_WITNESS=$PTEWIT"
     echo "STAGE90_XNU_FLUSH_WITNESS=$FLWIT"
+    # **1015 (passive half): the permission-inputs witness, written here for 882's and 678's reason**:
+    # this writer is the one site a name-keyed diff does not visit and the only site the gate ever
+    # reads, so a switch that reached the compiler and the arm-key list but not this line would be a
+    # run whose arm nobody read. Written as the RESOLVED `$PERMWIT`.
+    echo "STAGE90_XNU_PERM_WITNESS=$PERMWIT"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

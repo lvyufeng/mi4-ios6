@@ -74,8 +74,18 @@
  * the CONTEXTIDR read the flush witness uses. One definition of one value
  * ([[mi4-one-value-two-definitions]]): the cp15 spelling is NOT re-written here. The header
  * expands `uint32_t` in its macros and includes nothing, so `<stdint.h>` above must be reached
- * first, and the include is gated so OFF is this file's exact previous token set. */
-#if defined(STAGE90_XNU_FLUSH_WITNESS) && STAGE90_XNU_FLUSH_WITNESS
+ * first, and the include is gated so OFF is this file's exact previous token set.
+ *
+ * **1015 widens the gate to `|| PERM_WITNESS`.**  The permission witness reads the tree's OWN
+ * `armreg_va2pa_uw_ns_write`/`armreg_va2pa_pr_ns_write`/`armreg_par_read` (`proc_reg.h:544/547/522`)
+ * and `armreg_sctrl_read` (`:500`) for the AT/PAR/SCTLR cells, and `PERM_WITNESS=1` does NOT require
+ * `FLUSH_WITNESS=1` (its own refusal set is ABT_FAR/ABT_PC/ABT_PTE/PMP_ENTER/PTE_WITNESS). A gate on
+ * FLUSH alone would leave the 1015 recorder unable to name the macros in a legal arm, so the header
+ * is reached when EITHER switch is on. Both-off still skips the include entirely, so the OFF arm is
+ * this file's exact previous token set - the byte-identity proof in `docs/1015-entry-half.md` is a
+ * `cmp` of the two objects at `PERM_WITNESS=0`, and it holds. */
+#if (defined(STAGE90_XNU_FLUSH_WITNESS) && STAGE90_XNU_FLUSH_WITNESS) \
+ || (defined(STAGE90_XNU_PERM_WITNESS) && STAGE90_XNU_PERM_WITNESS)
 #include <arm/proc_reg.h>
 #endif
 
@@ -2899,6 +2909,19 @@ static uint32_t g_abtpte_wknx;      /* DISTINCT `_wkleaf` values at W-WALK (mono
 static uint32_t g_abtpte_wcn;       /* the W-SYNC ordinal */
 static uint32_t g_abtpte_curva;     /* 1013: THIS abort's far, set BEFORE the handler (see entry_note_abt_cur) */
 
+#if defined(STAGE90_XNU_PERM_WITNESS) && STAGE90_XNU_PERM_WITNESS
+/*
+ * **1015: W-APEX's PRE-CALL `pm_l1_phys` - the sample the owed 1014 §6 fix needs.** Non-static
+ * because the sample is taken in `entry_trace.c` (`__wrap_pmap_enter_options` reads `*pmap` BEFORE
+ * it calls `__real_pmap_enter_options`, which is the one moment the PRE-call table base is still
+ * observable) and consumed here, after the call. `entry_note_abt_wleaf`'s own read of `*pmap` is
+ * necessarily POST-call, so without this word the recorder cannot tell a table that `pmap_expand_ttb`
+ * MOVED inside this enter from one that stayed put. Guarded by PERM_WITNESS so a 1013/1014 build
+ * compiles none of it (the store in entry_trace.c is under the same guard).
+ */
+uint32_t g_abtpte_wleaf_pre;
+#endif
+
 /* The leaf's APX bit, as a 0/1 READING (1 = user READ-ONLY). */
 static inline uint32_t
 stage90_w_apx(uint32_t leaf)
@@ -2964,6 +2987,41 @@ entry_note_abt_wleaf(uint32_t va, const void *pmap, uint32_t pa, uint32_t fault_
     __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
     ttbrbase = entry_ttbr_base(ttbr, ttbcr & 7u);
     proof = (ttbrbase != 0u && ttbrbase == entry_ttbr_base(pm_l1_phys, ttbcr & 7u)) ? 1u : 0u;
+#if defined(STAGE90_XNU_PERM_WITNESS) && STAGE90_XNU_PERM_WITNESS
+    /*
+     * **1015, the OWED 1014 §6 FIX - and why it is INSIDE the PERM_WITNESS guard.**
+     *
+     * `_wwnoproof` was intended as the W-APEX null control ("this table is not provably live"), but
+     * `proof` above compares TWO POST-call samples of the SAME field - `entry_ttbr_base(pm_l1_phys)`
+     * against the live TTBR0 - and the only path that reaches this line has `pm_l1_phys != 0`.  A
+     * re-read of `*pmap` AFTER `__real_pmap_enter_options` cannot disagree with itself, so the cell
+     * could report 1 only when the pmap's table and the live TTBR0 differ - which is a real condition,
+     * but NOT the one 1014 §6 named: whether `pmap_expand_ttb` MOVED the L1 base inside this enter
+     * (`pmap.c:3084-3086`).  That question needs a PRE-call sample, and the recorder has none.
+     *
+     * So the trace side samples `*pmap` BEFORE the call into `g_abtpte_wleaf_pre` and this block makes
+     * both bases READINGS: `_wwpre` is the pre-call base, `_wwpost` the post-call one the walk above
+     * actually read, and `_wwmoved` = 1 iff they name different 4 KB-aligned tables - i.e. the enter
+     * moved the table under this reading, which is exactly the case the 1013 W-APEX comment warns
+     * about.  `_wwnoproof` is left publishing `proof` UNCHANGED (its value is a function of the same
+     * two live words, so a reader can still fold it), and `_wwpre`/`_wwpost`/`_wwmoved` are ADDED
+     * beside it - a reading next to a claim, never a claim replaced by a shrug.
+     *
+     * ENTIRELY under `#if PERM_WITNESS`, which is what keeps 1013/1014's OFF arms byte-identical: the
+     * pre-call sample on the trace side sits under the same guard, so a build without PERM_WITNESS
+     * compiles not one new load, not one new store, and not one new call argument.
+     */
+    {
+        uint32_t pre = g_abtpte_wleaf_pre, post = pm_l1_phys, moved;
+
+        moved = (entry_ttbr_base(pre, ttbcr & 7u) != entry_ttbr_base(post, ttbcr & 7u)) ? 1u : 0u;
+        if (n <= 4u || (n & (n - 1u)) == 0u) {
+            entry_write_kv("xnu_live_abt_wwpre",   pre);
+            entry_write_kv("xnu_live_abt_wwpost",  post);
+            entry_write_kv("xnu_live_abt_wwmoved", moved);   /* 1 = the enter replaced the L1 table */
+        }
+    }
+#endif
 
     l1e = 0u; l2pa = 0u; leaf = 0u;
     l1p = pm_l1_phys + (((va >> 20) & 0xfffu) << 2);      /* tte_offset, pmap.h:198 */
@@ -3358,6 +3416,390 @@ entry_note_abt_wctx(uint32_t va)
     entry_write_kv("xnu_live_abt_wctxn",  n);    /* the CONTEXTIDR-witness ordinal */
     entry_write_kv("xnu_live_abt_wctx",   ctx);  /* CONTEXTIDR & 0xFF at the abort */
     entry_write_kv("xnu_live_abt_wctxva", va);   /* the abort's far this row is keyed on */
+}
+#endif
+
+/*
+ * ================================================================================================
+ * 1015 (PASSIVE HALF): THE PERMISSION-INPUTS WITNESS - with H-G killed or confirmed, is the fault's
+ * OWN table/permission input wrong?  docs/1015-design.md §2b.
+ * ================================================================================================
+ *
+ * WHERE THIS SITS. 1014 read the leaf VALUE (`_wkleaf` = 0x841e91bb, user-RW) and the FLUSH
+ * (`_wfkind` = 2, ASID-scoped, ASID matching CONTEXTIDR) and the store STILL takes FS=15 permission
+ * faults at a constant `far`/`pc`, ~2^20 times. So the fault is not the leaf's AP bits. The rung's
+ * leading hypothesis is that a stale GLOBAL TLB entry - every user leaf is GLOBAL because
+ * `L2_NG_BIT` is never ORed anywhere in the tree - survives TLBIASID and shadows the newer RW leaf.
+ * That hypothesis is decided by an EXPERIMENT (the active half, `STAGE90_XNU_USER_FULL_FLUSH`), not
+ * by this file. THIS recorder is the FALLBACK: if the experiment refutes H-G, the same press must
+ * already carry the answer to H-P - are the permission INPUTS wrong (domain/DACR, TTBCR routing, the
+ * wrong table, the wrong leaf)? Every one of those looks correct in 1014's capture, so 1015 measures
+ * them BY VALUE rather than re-arguing them.
+ *
+ * THE ONE WALKER, NOT A SECOND. The L1 word and the leaf come from `stage90_read_l2_pte` (above) -
+ * the SAME walker W-WALK and W-SYNC use. Re-spelling a TTBR walker is exactly how 1010 and 1010b
+ * each produced a defective reading (one wrong base mask each), so this recorder adds NO walk of its
+ * own; it calls the ONE function and publishes its raw word.
+ *
+ * THE SINGLE-READ RULE (1013 V6). `_wdleaf` is read ONCE into a local and EVERY derived cell
+ * (`_wdap`, `_wdapx`, `_wdtex`, `_wdcb`, `_wdsmall`, `_leafng`) is computed from THAT local. A second
+ * read for a second cell is how two cells come to describe two different words
+ * ([[mi4-one-value-two-definitions]]) - and on a recursive fault storm the table really does move
+ * under the reader.
+ *
+ * THE KEY. `g_abtpte_curva`, exactly as `entry_note_abt_wleaf` and W-WALK use it: written by
+ * `entry_note_abt_cur` BEFORE `__real_sleh_abort` runs, so it is THIS fault's `far` and not the
+ * previous abort's (`docs/1012-probe-keying.md` §1.4). The call site is in `__wrap_sleh_abort`,
+ * beside `entry_note_abt_wctx`, i.e. BEFORE the handler - the values therefore describe the context
+ * the fault was TAKEN in, which is what a permission reading must describe.
+ *
+ * THE NULL CONTROL, and it is not decorative. `_wdctlok` is 1 iff the CONTROL read (the W-SYNC KEY
+ * VA, `entry_stubs.c:'_wcva'`, a known-good writable page) was taken at this same abort. `_wdctlok
+ * = 0` WITHHOLDS EVERY PASSIVE VERDICT: a control that could not be read says this method cannot
+ * read a table on this device at this moment, which is not evidence about the fault's table. That is
+ * the 1013 `WITNESS_METHOD_BROKEN` discipline, and it is the same shape as 1014's `_wfseen`.
+ *
+ * GATED by the FULL CONJUNCTION `ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS &&
+ * PERM_WITNESS`: it keys on `g_abtpte_curva` (which only PTE_WITNESS writes) and rides the PMP_ENTER
+ * wrapper's latch chain, so any upstream switch OFF would make it measure NOTHING while reporting a
+ * green build. OFF, the preprocessor removes every line here and the one call in entry_trace.c.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER && defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS && defined(STAGE90_XNU_PERM_WITNESS) && STAGE90_XNU_PERM_WITNESS
+
+/* The leaf's field widths, cited to `osfmk/arm/pmap.h:'the L2 small-page descriptor'` - the SAME
+ * constants the 1013 block names, re-derived here from the design's §2 table so this row is
+ * readable without decoding the packed leaf by hand:
+ *   bits[5:4] AP     -> `L2_ACCESS_PRW (1<<4)` / `L2_ACCESS_USER (1<<5)`  (pmap.h:218/:221)
+ *   bit9      APX    -> `L2_ACCESS_APX (1<<9)`                            (pmap.h:217)
+ *   bits[8:6] TEX    -> the memory-attribute hint                        (pmap.h:216)
+ *   bits[3:2] C/B    -> cacheable / bufferable                           (pmap.h:214/:215)
+ *   bit1      TYPE   -> `L2_SMALL_PAGE (1<<1)` = 0b1X with NX in bit0     (pmap.h:226-227)
+ *   bit11     nG     -> `L2_NG_BIT (1<<11)`; 0 = GLOBAL (the H-G cell)    (pmap.h:231)
+ * `_wdsmall` is published as the TYPE bit itself (1 = a small page), NOT as "present" - the walk
+ * already refused anything whose bit 1 was clear (`stage90_read_l2_pte`'s 1013c fix), so a 0 there
+ * means the walk answered nothing and the leaf is a null reading.
+ */
+#define ABTWD_AP_SHIFT          4u
+#define ABTWD_AP_MASK           0x3u
+#define ABTWD_APX_SHIFT         9u
+#define ABTWD_APX_MASK          0x1u
+#define ABTWD_TEX_SHIFT         6u
+#define ABTWD_TEX_MASK          0x7u
+#define ABTWD_CB_SHIFT          2u
+#define ABTWD_CB_MASK           0x3u
+#define ABTWD_SMALL_SHIFT       1u
+#define ABTWD_SMALL_MASK        0x1u
+#define ABTWD_NG_SHIFT          11u
+#define ABTWD_NG_MASK           0x1u
+
+static uint32_t g_abt_wdn;                 /* the permission-witness ladder ordinal */
+
+void
+entry_note_abt_wd(uint32_t va)
+{
+    uint32_t n, cur, onladder;
+    uint32_t l1 = 0u, l2 = 0u, ttbr0 = 0u, ttbr1 = 0u, ttbcr = 0u, dacr = 0u, wdleaf;
+    uint32_t n_ttbcr, split, dom, thrmap, mapok, pcpu, ctl, ctlok, ctlva, ctll1 = 0u;
+    uint32_t atpar, atparpr, atctl, atok, wdsctlr = 0u;
+
+    /*
+     * PROVENANCE: only THIS fault's VA publishes. `__wrap_sleh_abort` runs on every abort in the run
+     * (the storm alone is ~2.1 M) and the console channel is finite (the 998 cap), so without the key
+     * the ladder would be spent before the storm reached its tail - the 1007 lesson. The row also
+     * publishes its own `_wdva`, so the pairing is READABLE and never assumed.
+     */
+    cur = g_abtpte_curva;
+    if (cur == 0u || va != cur)
+        return;
+
+    n = ++g_abt_wdn;
+    onladder = (n <= 4u || (n & (n - 1u)) == 0u) ? 1u : 0u;
+    if (!onladder)
+        return;   /* nothing below is published off-ladder; the ordinal still advances */
+
+    /*
+     * ---------------------------------------------------------------------------------------------
+     * THE ABORT'S OWN FACTS: far, the live table registers, the leaf the ONE walker reads.
+     * ---------------------------------------------------------------------------------------------
+     */
+    g_abtpte_walk_oow = 0u;                        /* THIS walk's window reading, not (A)'s / W-WALK's */
+    l2 = stage90_read_l2_pte(va, &l1, &ttbr0, 1u); /* the ONE walker; alias allowed ON THE LADDER only */
+
+    /*
+     * `_wdleaf` IS THE SINGLE READ. Every field cell below is a shift of THIS local - never a second
+     * call, never a second dereference (the 1013 V6 rule).
+     */
+    wdleaf = l2;
+
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 1" : "=r"(ttbr1));   /* TTBR1, for the routing cells */
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));   /* TTBCR: N decides the split */
+    /* The DACR spelling is the tree's own, reused verbatim from the console init (`:3824`). */
+    __asm__ volatile ("mrc p15, 0, %0, c3, c0, 0" : "=r"(dacr));
+
+    /*
+     * TTBCR.N and the split it implies. `entry_ttbr_base` (above) is the ONE definition of the base
+     * alignment; N = 0 means TTBR0 owns every address and there IS no split, so `_wdsplit` is
+     * published 0 rather than a `1 << 32` (undefined, and wrong even if it compiled). This port runs
+     * N = 2 (`arm_vm_init.c:475`), i.e. a 0x40000000 split.
+     */
+    n_ttbcr = ttbcr & 7u;
+    split = (n_ttbcr == 0u) ? 0u : (1u << (32u - n_ttbcr));
+
+    /*
+     * THE L1's DOMAIN (bits[8:5], `pmap.h:208 ARM_TTE_DOMAIN`). P-D1 fires on a nonzero domain: the
+     * MMU checks DACR for the DOMAIN THE DESCRIPTOR NAMES, so a nonzero domain the DACR does not mark
+     * client is a permission refusal that has nothing to do with the leaf's AP bits. Published RAW.
+     */
+    dom = (l1 >> 5) & 0xfu;
+
+    /*
+     * THE FAULTING THREAD'S OWN PMAP L1 BASE - the 1011 (A) chain, reused (NOT re-derived):
+     * TPIDRPRW -> thread->map (STAGE90_ACT_MAP) -> map->pmap (STAGE90_MAP_PMAP) ->
+     * pmap->pm_l1_phys (STAGE90_PMAP_L1_PHYS). The offsets are NAMED macros from
+     * `entry_saved_state.h:102-115`, never literals, so this row cannot drift from 1011's reader.
+     * D13-only by the SAME gate 1011's reader carries: on 4570 `struct pmap` has no `pm_l1_phys`, and
+     * publishing a different field under this name is the [[mi4-one-value-two-definitions]] defect.
+     *
+     * `_wdmapok` is the lineage's OWN null control: 1 iff every dereference landed in the kernel-VA
+     * window the mmap recorder names ([0x80000000, 0xFFFEFFFF]). A NULL map, a user pointer or a
+     * non-kernel thread answers 0 - "the chain did not land", never "the pmap base is 0".
+     */
+    pcpu = entry_stubs_thread_pointer();
+    thrmap = 0u;
+    mapok = 0u;
+#if defined(STAGE90_ENTRY_D13) && STAGE90_ENTRY_D13
+    {
+        uint32_t th = pcpu, mp;
+
+        if (th >= 0x80000000u && th <= 0xFFFEFFFFu) {
+            mp = *(volatile uint32_t *)(uintptr_t)(th + STAGE90_ACT_MAP);
+            if (mp >= 0x80000000u && mp <= 0xFFFEFFFFu) {
+                th = *(volatile uint32_t *)(uintptr_t)(mp + STAGE90_MAP_PMAP);
+                if (th >= 0x80000000u && th <= 0xFFFEFFFFu) {
+                    thrmap = *(volatile uint32_t *)(uintptr_t)(th + STAGE90_PMAP_L1_PHYS);
+                    mapok = 1u;
+                }
+            }
+        }
+    }
+#endif
+
+    /*
+     * ---------------------------------------------------------------------------------------------
+     * THE CONTROL, READ AT THIS SAME ABORT. This is what makes the ladder falsifiable on the box: it
+     * asks the SAME question ("can this method read a table on this device right now?") about a
+     * KNOWN-GOOD page, through the SAME walker, in the SAME abort context. `entry_note_abt_wsync`
+     * (1013) already reads that VA and publishes the control's own leaf `_wcleaf`; this recorder
+     * re-walks it here because the ladder's verdicts are about THIS abort, and reusing a control
+     * value captured at a different ordinal would be exactly the pairing-by-coincidence 1013's
+     * `_wkva` was added to kill.
+     *
+     * It is not a second definition of W-SYNC's VA: the VA is W-SYNC's own expression
+     * (`gPhysBase + ABTWS_WINDOW_OFF`, the byte offset the boot has mapped writable), and `_wdctl` is
+     * a DIFFERENT cell answering a different question (the domain and DACR bits that govern it), so
+     * the two rows are two readings of one VA rather than one value in two places. If the read cannot
+     * be taken - the walker refuses it, or its slot is outside the window - `_wdctlok = 0` and the
+     * ladder WITHHOLDS EVERY PASSIVE VERDICT (design §3b P-CTL). The row's OWN cells are still
+     * published, because they ARE readings of the fault's table and are exactly what a reader needs in
+     * order to judge the method; `_wdctlok` is the gate, and `_wdseen` stays 1 because the cells were
+     * in fact produced. A withheld verdict is therefore legible AS withheld (`_wdctlok = 0` on a row
+     * that still carries its numbers) rather than manufactured by zero-filling them - the distinction
+     * 1014's `_wfseen` draws for the same reason.
+     *
+     * THE VA IS COMPUTED UNCONDITIONALLY, and that is load-bearing: `_wdctlat` (the T-CTL hardware
+     * control) issues its AT pair against this SAME VA, and the checker holds `_wdatok` to that
+     * control's satisfaction. If the VA were computed only inside the PTE_WITNESS branch, an arm
+     * where PTE_WITNESS is off and PERM_WITNESS is on would AT address 0 and publish a control read
+     * of the wrong page - a control that cannot fail, which is worse than no control.
+     */
+    ctlva = (uint32_t)gPhysBase + ABTWS_WINDOW_OFF;
+
+    /*
+     * THE WALK AND THE PACKING ARE ONE READING: `ctll1`, `dacr` and the walker's "which table
+     * answered" tag all belong to THIS call, so they are taken together and are never split across
+     * another reader's walk (`entry_note_abt_wsync` is the other writer of that tag). The AT block
+     * below does not touch the tag - AT is a hardware instruction, not the walker - but the ordering
+     * is kept anyway so the cell cannot become a join of two different moments by a later edit
+     * ([[mi4-one-value-two-definitions]]).
+     */
+#if defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+    g_abtpte_walk_oow = 0u;
+    {
+        /* A local: the walker's `out_ttbr0_used` word. Its value IS published (in `_wdctl`'s bit 16),
+         * but not as an instruction - "TTBR0 answered the control" is 0 for this VA by construction
+         * (it is above this port's N = 2 split), so the ONLY thing to do with it is compare it. */
+        uint32_t ctl_ttbr0 = 0u;
+
+        ctl = stage90_read_l2_pte(ctlva, &ctll1, &ctl_ttbr0, 0u);  /* no alias: the control VA is in-window */
+        /*
+         * `_wdctl` = the control's DOMAIN in bits[11:8] and the DACR field in bits[1:0] - the two
+         * permission inputs the ladder's P-D1/P-D2 clauses read, for a page whose leaf is known
+         * writable. Bit 16 is "TTBR0 answered it" (0 here, by construction) published rather than
+         * assumed. All three come from THIS walk, so the cell is a reading of one call.
+         */
+        ctl = (ctl != 0u)
+            ? ((((ctll1 >> 5) & 0xfu) << 8) | (dacr & 0x3u) | (ctl_ttbr0 << 16))
+            : 0u;
+    }
+    ctlok = (ctl != 0u) ? 1u : 0u;
+#else
+    ctl = 0u; ctlok = 0u;
+#endif
+
+    /*
+     * ---------------------------------------------------------------------------------------------
+     * THE HARDWARE'S OWN ANSWER - `AT`/`PAR` against the storm VA (the design's §2b K6/K7, §3c).
+     *
+     * This is the ONE cell in the rung that asks the CPU's OWN TRANSLATION PATH rather than reading
+     * a page table: `AT` (Address Translate) walks `va` "as if" the access were being made, this core
+     * MAY satisfy it from TLB entries, and returns the `PAR` the MMU itself would use. `PAR` bit0 = 1
+     * means the MMU FAULTS that access; bit0 = 0 means `PAR & 0xfffff000` is the PA. So a user-WRITE
+     * AT that FAULTS while the walk from the SAME abort context reads the leaf present/user-RW/global
+     * is a measurement that the translation the CPU uses is NOT the leaf in the tables - the H-G
+     * mechanism, measured by the hardware, with no dependence on the flush widening or the press.
+     *
+     * THE SPELLINGS ARE THE TREE'S OWN, never re-written here ([[mi4-one-value-two-definitions]]):
+     * `armreg_va2pa_uw_ns_write` (`proc_reg.h:547`, `mcr p15,0,%0,c7,c8,3` = AT, stage-1, user
+     * WRITE), `armreg_va2pa_pr_ns_write` (`:544`, `c7,c8,0` = privileged READ) and `armreg_par_read`
+     * (`:522`, `mrc p15,0,%0,c7,c4,0`). The sequence is `pmap.c:3039-3051`'s own: write the VA, then
+     * `isb sy` (the ISB the AT/PAR pair REQUIRES - `pmap.c:2432`'s `"xisb sy"`), then read the PAR
+     * into a named result. `par & 1 == 1` is a fault and `par & 0xfffff000` is the PA, exactly as
+     * `pmap_extract` (`pmap.c:3051-3057`) reads it - this copies a PROVEN pattern, it does not invent
+     * one.
+     *
+     * The two PARs are independent cp15 reads, so the single-read rule (which governs the LEAF-derived
+     * decodes) does not apply - but each is read ONCE into its own local and published RAW, never
+     * decoded into a verdict here. `_wdatok` is 1 iff both AT/PAR pairs were actually executed; the
+     * checker's V-AT0 withholds EVERY V-AT verdict when it is 0 (`SILENCE_IS_A_READING`: the AT's
+     * absence is a reading only because the control proves success is silent-but-readable).
+     *
+     * ORDERING: these read cp15 only, and they run BEFORE `__real_sleh_abort` (this whole recorder is
+     * called from `__wrap_sleh_abort` before the handler), so the TLB/register state is the faulting
+     * context's, not a later one's.
+     */
+    atpar = 0u; atparpr = 0u; atctl = 0u; atok = 0u;
+    {
+        armreg_va2pa_uw_ns_write(va);             /* AT: user WRITE, this VA, this context */
+        __asm__ __volatile__ ("isb sy");          /* the ISB the AT/PAR pair requires (pmap.c:2432) */
+        atpar = armreg_par_read();                /* PAR after the user-write AT */
+
+        armreg_va2pa_pr_ns_write(va);             /* AT: privileged READ, same VA */
+        __asm__ __volatile__ ("isb sy");
+        atparpr = armreg_par_read();              /* PAR after the privileged AT */
+
+        /*
+         * THE THIRD PAR - T-CTL, THE LEG'S OWN NULL CONTROL, and it is the CONTROL VA's AT, not the
+         * storm VA's. `ctlva` is W-SYNC's known-good page (`_wcleaf=0x8008021a`, read present and
+         * writable, identity-mapped by the boot: its VA is its PA). Its PRIVILEGED AT must return
+         * `par & 1 == 0` with `par & 0xfffff000 == 0x80080000`. If it does not, the AT instrument
+         * itself is broken - a wrong VA register, a missing ISB, the wrong PAR - and a faulting user
+         * view could then not be told apart from that breakage (`SILENCE_IS_A_READING`).
+         *
+         * It is a SEPARATE KEY (`_wdctlat`), not the storm VA's privileged column: one key carrying
+         * two readings is [[mi4-one-value-two-definitions]], and it is what the first draft of design
+         * §3c did before the lead's ruling.
+         */
+        armreg_va2pa_pr_ns_write(ctlva);          /* AT: privileged READ of the CONTROL VA */
+        __asm__ __volatile__ ("isb sy");
+        atctl = armreg_par_read();                /* PAR: the control's own answer */
+
+        /*
+         * `_wdatok` IS THE LEG'S GATE, AND IT CARRIES T-CTL: 1 only if all three pairs ran AND the
+         * control came back as the design requires. Folding the control in here is what makes
+         * `_wdatok=0` mean "the instrument did not demonstrate itself" rather than merely "a read
+         * did not happen" - the checker reads `_wdctlat` independently as well, because a one-bit
+         * gate is not auditable on its own ([[mi4-a-status-is-a-verdict-only-if-its-producer-delivered-one]]).
+         */
+        if ((atctl & 1u) == 0u && (atctl & 0xfffff000u) == (ctlva & 0xfffff000u))
+            atok = 1u;
+    }
+    /* SCTLR raw AT THE ABORT - the CPU's own control word (perm-static cause #2). The tree spells it
+     * `armreg_sctrl_read` (`proc_reg.h:500`, `mrc p15,0,%0,c1,c0,0`); the latched console copy is at
+     * `:4140`, and THIS is the storm's own. */
+    wdsctlr = armreg_sctrl_read();
+
+    /*
+     * ---------------------------------------------------------------------------------------------
+     * THE ROW - WRITTEN IN `WD_LADDER_KEYS` ORDER, VERBATIM.
+     *
+     * `tools/check_1015_capture.py` declares ONE fixed order for this row and its reader binds by
+     * it; the parser happens to assign by key NAME, so a reordering here would not break it today -
+     * which is exactly why the order is spelled out and matched: a contract that only holds because
+     * the reader is lenient is not a contract ([[mi4-one-value-two-definitions]]). Any change to
+     * the order here must be made in `WD_LADDER_KEYS` in the same edit.
+     *
+     * `_wdseen` is the `_wfseen` shape (1014): 1 iff the row's cells were actually produced. The
+     * cells are unconditional on the ladder, so a row that exists has `_wdseen = 1`; it is
+     * `_wdctlok` - not `_wdseen` - that withholds the verdicts when the CONTROL read fails.
+     * ---------------------------------------------------------------------------------------------
+     */
+    entry_write_kv("xnu_live_abt_wdn",     n);
+    entry_write_kv("xnu_live_abt_wdva",    va);
+    /* `_leafng`: the leaf's bit 11, published RAW - the H-G precondition, not a verdict (§3b's note). */
+    entry_write_kv("xnu_live_abt_leafng",  (wdleaf >> ABTWD_NG_SHIFT)    & ABTWD_NG_MASK);
+    entry_write_kv("xnu_live_abt_wdempty", (wdleaf == 0u) ? 1u : 0u);
+
+    /* The permission INPUTS. */
+    entry_write_kv("xnu_live_abt_wddacr",  dacr);
+    entry_write_kv("xnu_live_abt_wddom",   dom);
+    entry_write_kv("xnu_live_abt_wdttbcr", ttbcr);
+    entry_write_kv("xnu_live_abt_wdsplit", split);
+    entry_write_kv("xnu_live_abt_wdttbr0", ttbr0);
+    entry_write_kv("xnu_live_abt_wdttbr1", ttbr1);
+
+    /* The table and the leaf - the L1 word pairs with `_ptel1`/`_wkl1`, the leaf with `_wkleaf`. */
+    entry_write_kv("xnu_live_abt_wdl1",    l1);
+    entry_write_kv("xnu_live_abt_wdleaf",  wdleaf);
+
+    /*
+     * EVERY FIELD CELL FROM THE ONE LOCAL (the 1013 V6 rule) - never a second read of the table.
+     */
+    entry_write_kv("xnu_live_abt_wdap",    (wdleaf >> ABTWD_AP_SHIFT)    & ABTWD_AP_MASK);
+    entry_write_kv("xnu_live_abt_wdapx",   (wdleaf >> ABTWD_APX_SHIFT)   & ABTWD_APX_MASK);
+    entry_write_kv("xnu_live_abt_wdtex",   (wdleaf >> ABTWD_TEX_SHIFT)   & ABTWD_TEX_MASK);
+    entry_write_kv("xnu_live_abt_wdcb",    (wdleaf >> ABTWD_CB_SHIFT)    & ABTWD_CB_MASK);
+    entry_write_kv("xnu_live_abt_wdsmall", (wdleaf >> ABTWD_SMALL_SHIFT) & ABTWD_SMALL_MASK);
+
+    /* TPIDRPRW at the abort - the register the chain starts from, published so the chain can be
+     * re-walked by the reader rather than trusted. */
+    entry_write_kv("xnu_live_abt_wdpcpu",   pcpu);
+    /* The thread's own pmap base, with its own null control. */
+    entry_write_kv("xnu_live_abt_wdthrmap", thrmap);
+    entry_write_kv("xnu_live_abt_wdmapok",  mapok);
+
+    /* The row's own precondition and the control that gates every verdict. */
+    entry_write_kv("xnu_live_abt_wdseen",  1u);
+    entry_write_kv("xnu_live_abt_wdctl",   ctl);
+    entry_write_kv("xnu_live_abt_wdctlok", ctlok);
+
+    /*
+     * THE CPU'S OWN CONTROL WORD, and the HARDWARE'S OWN ANSWER - the AT/PAR triple.
+     *
+     * `_wdsctlr` is SCTLR raw AT THE ABORT (`armreg_sctrl_read`), the storm's own value rather than
+     * the latched console copy (:4140) - perm-static cause #2 lives here (TRE/AFE and their effect on
+     * the attribute remap), and the design's §3b P-X1 clause reads it.
+     *
+     * THE AT TRIPLE IS A FLAT GROUP, not a ladder, and it is opened by `_wdatok` - the checker's
+     * `at_records` binds `_wdatok` then every AT key that FOLLOWS it, exactly as `wd_records` binds
+     * `_wdn` then its row. So `_wdatok` is written FIRST here and the other four immediately after,
+     * in the checker's own order: `AT_KEYS = (AT_OK_KEY, AT_WRITE_KEY, AT_PR_KEY, AT_CTL_KEY,
+     * AT_SCTLR_KEY)` - i.e. `_wdatok`, `_wdatpar`, `_wdatparpr`, `_wdctlat`, `_wdsctlr`. **The order is load-bearing, not
+     * cosmetic:** `at_records` does not begin binding until it has seen `_wdatok`, so a `_wdsctlr`
+     * written BEFORE it lands in no row at all and the check prints `_wdsctlr=?` - a silent downgrade
+     * of the CPU-state half of §3c's re-rank, MEASURED by running the real parser over a synthetic
+     * capture (see `docs/1015-entry-half.md` §2.7). The reader DOES assign by name, so this is not a
+     * parse error - it is a reading that quietly disappears, which is exactly the failure mode the
+     * declared order exists to prevent ([[mi4-measurement-defects]]).
+     *
+     * `_wdatok` is the LEG'S OWN GATE: 0 means the AT/PAR reads did not run, and the checker's V-AT0
+     * then withholds every V-AT verdict. It is set 1 only after BOTH pairs completed above, so it is
+     * a reading of what happened, never an assumption.
+     */
+    entry_write_kv("xnu_live_abt_wdatok",   atok);
+    entry_write_kv("xnu_live_abt_wdatpar",  atpar);
+    entry_write_kv("xnu_live_abt_wdatparpr", atparpr);
+    entry_write_kv("xnu_live_abt_wdctlat",  atctl);
+    entry_write_kv("xnu_live_abt_wdsctlr",  wdsctlr);
 }
 #endif
 

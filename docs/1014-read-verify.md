@@ -213,12 +213,17 @@ with `wkstable=1`. The leaf is real and user-writable; the flush ran.
 3. **§7 line 96 decodes `tex=0b011`**; it is `0b110`.
 4. **"three INDEPENDENT probes"** overcounts: W-WALK and A-walk share the one walker `stage90_read_l2_pte`;
    only W-APEX is independent.
-5. **"~2^20 re-faults at a constant far/pc" conflates two numbers.** `pcn=0x00100000` is the TOTAL abort count.
-   The constant-far tail is `pcn 0x400 … 0x40000` (the last three published rows: 0x40000 far=0xe6000,
-   0x80000 far=**0x3a1141e8**, 0x100000 far=**0x3a0138e0**, with `pc` changing to 0x38413ad0/0x3840ea3e). The
-   storm's steady state holds through ordinal 0x40000; the run's LAST two samples are a different VA/pc. The
-   claim should read "~2.6e5 constant-far re-faults (through ordinal 0x40000); the run ended on a different
-   fault at ~pcn 0x80000".
+5. **"~2^20 re-faults at a constant far/pc" conflates two numbers — the §0.5 NON-UNIFORM TAIL, CONFIRMED
+   (9+2).** `pcn=0x00100000` is the TOTAL abort count. The sampled tail (`farn ≥ 0x400`) is **11** rows, in
+   two shapes: **nine STORM rows** at `far=0x000e6000`, `pc=0x2bed61a0`, `pcfar=0xe6000` (farn/pcn =
+   0x400,0x800,0x1000,0x2000,0x4000,0x8000,0x10000,0x20000,0x40000; @32938,33057,33144,33231,33318,33412,
+   33499,33593,33687), then **two DYLD rows** with a different VA *and* pc: `farn=0x80000 far=0x3a1141e8
+   pc=0x38413ad0` (@34253-34260) and `farn=0x100000 far=0x3a0138e0 pc=0x3840ea3e` (@34324-34331), both with
+   `pcfar == far` (a different PC re-faulting its own address, i.e. NOT the storm). So the storm's steady state
+   holds through ordinal **0x40000**; the run's last two samples are a different VA/pc. The claim should read
+   "~2.6e5 constant-far re-faults (through ordinal 0x40000); the run ended on two unrelated dyld faults at
+   ~pcn 0x80000/0x100000". The record's own §0 line 9-11 states this correctly; only the "~2^20" phrasing in
+   the headline conflates the total with the steady-state count.
 
 None of these corrections changes F2 or V1. The two HARDs are probe/rule defects, as the record states.
 

@@ -5719,6 +5719,16 @@ extern void entry_note_abt_wctx(uint32_t va);
 #endif
 
 /*
+ * 1015 (PASSIVE HALF): THE PERMISSION-INPUTS WITNESS - its OWN guard, so the PTE_WITNESS guard count
+ * (1 in entry_stubs.c / 4 in this file) stays undisturbed, exactly as 1011's VME_PROT block and
+ * 1014's FLUSH_WITNESS block do. Unlike 1014's `entry_note_abt_wf`, this one has NO kernel-pool call
+ * site: it is called from THIS file, in the abort wrapper, and reads nothing the kernel pool owns.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER && defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS && defined(STAGE90_XNU_PERM_WITNESS) && STAGE90_XNU_PERM_WITNESS
+extern void entry_note_abt_wd(uint32_t va);
+#endif
+
+/*
  * 1011 (E'): the vm_map_entry EFFECTIVE PROTECTION for the faulting VA - the F1a/F1b discriminator.
  * Its own guard (ABT_FAR && ABT_PC && ABT_PTE && VME_PROT), so the declaration is only live where the
  * call is; the ABT_PTE guard count (2: extern + call) is undisturbed.
@@ -5782,6 +5792,24 @@ void __wrap_sleh_abort(void *regs, int type)
      * cp15 by THIS file - the recorder (entry_stubs.c) uses `proc_reg.h:583`'s own macro.
      */
     entry_note_abt_wctx(far_);
+#endif
+
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER && defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS && defined(STAGE90_XNU_PERM_WITNESS) && STAGE90_XNU_PERM_WITNESS
+    /*
+     * 1015 (PASSIVE HALF): THE PERMISSION-INPUTS WITNESS - read HERE, immediately after 1013's
+     * current-fault key, BESIDE 1014's CONTEXTIDR witness, and for the SAME reason both are here:
+     * the values must describe the context the fault was TAKEN in. `__real_sleh_abort` runs the
+     * handler, which may switch pmaps, move a table, or install the leaf that settles the fault - so a
+     * permission reading taken after it describes a context that no longer exists. The recorder keys
+     * itself on `g_abtpte_curva`, which the `entry_note_abt_cur` call ABOVE has just written, so this
+     * row is THIS fault's and not the previous abort's (docs/1012-probe-keying.md §1.4).
+     *
+     * The recorder owns all the reading (it calls the ONE walker and reads DACR/TTBCR/TTBR itself);
+     * nothing new is read from cp15 in THIS file. Placed before the contiguous `recover = ...;
+     * entry_note_sleh(...); __real_sleh_abort(...)` span `tools/check_fault_recovery.py` mutates
+     * (`the_wrapper_reads_after_the_handler`), the same rule 1007's clock read follows.
+     */
+    entry_note_abt_wd(far_);
 #endif
 
 #if defined(STAGE90_XNU_ABT_SPAN) && STAGE90_XNU_ABT_SPAN
@@ -5986,6 +6014,18 @@ uint32_t __wrap_vm_map_lookup_locked(void *var_map, uint32_t vaddr, uint32_t fau
  */
 #if defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER
 extern void entry_note_abt_pmp(uint32_t va, uint32_t prot, uint32_t pa, uint32_t pm_l1_phys);
+#if defined(STAGE90_XNU_PERM_WITNESS) && STAGE90_XNU_PERM_WITNESS
+/*
+ * **1015, the owed 1014 §6 fix's trace half.** `g_abtpte_wleaf_pre` (entry_stubs.c, same guard) is
+ * the pmap's own `pm_l1_phys` sampled BEFORE `__real_pmap_enter_options` runs - the only moment the
+ * PRE-call table base is observable, since `pmap_expand_ttb` can replace it inside the enter
+ * (`pmap.c:3084-3086`). W-APEX then publishes `_wwpre`/`_wwpost`/`_wwmoved` so "the enter moved the
+ * L1 table under this reading" is a READING rather than something the reader has to infer from
+ * `_wwnoproof`. Under the PERM_WITNESS guard, so a 1013/1014 build compiles neither this store nor
+ * the recorder's block that reads it - OFF is byte-identical.
+ */
+extern uint32_t g_abtpte_wleaf_pre;
+#endif
 uint32_t __real_pmap_enter_options(void *pmap, uint32_t va, uint32_t pa, uint32_t prot,
                                    uint32_t fault_type, uint32_t flags, uint32_t wired,
                                    uint32_t options);
@@ -5996,6 +6036,16 @@ uint32_t __wrap_pmap_enter_options(void *pmap, uint32_t va, uint32_t pa, uint32_
 {
     /* `pm_l1_phys` is offset 0 of `struct pmap` (pmap.c:1280 `pmap_paddr_t ttb = pmap->pm_l1_phys`). */
     uint32_t pm_l1_phys = (pmap != 0) ? *(uint32_t *)pmap : 0u;
+#if defined(STAGE90_XNU_PERM_WITNESS) && STAGE90_XNU_PERM_WITNESS
+    /*
+     * The PRE-call sample, taken from the SAME word `pm_l1_phys` was just read from - not a second
+     * field, not a second pmap. It is the raw pmap word, unmasked: `entry_note_abt_wleaf` masks both
+     * bases with `entry_ttbr_base` before comparing, so publishing the raw word keeps this a
+     * measurement rather than baking a mask into the store. A NULL pmap publishes 0, which the
+     * recorder reads as "not sampled" and reports as `_wwmoved = 0` - never as a table that moved.
+     */
+    g_abtpte_wleaf_pre = pm_l1_phys;
+#endif
 
     /* The pass-through FIRST, into a named result - the shape `__wrap_vm_fault` and
      * `__wrap_vm_map_lookup_locked` use. A `return __real_(...)` as the final statement (or an
