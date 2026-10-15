@@ -70,15 +70,23 @@ whatever the capped channel does.
   writer (`xnu_arm_entry-config.txt`), `scripts/preflight_boot_check.sh`'s config read, the build
   script, and the checker.
 * **Inside `__wrap_sleh_undef` (`entry_trace.c:5537-5561`)**, under that switch, route the FIRST
-  `UNDEF_LIVE_MAX` entries' keys through `entry_write_kv` instead of `entry_live_write` — **and add
-  the one field the capped version never carried: `_far`.** An undefined instruction has no fault
-  pair, but on this path the *store that follows a returning trap* is a data abort, so pairing the
-  undef entry with the next data-abort's `far` is what distinguishes "re-traps forever" (identical
-  pairs) from "outer retry re-enters" (advancing `lr`). `_lr` and `_spsr` are already read.
+  `UNDEF_LIVE_MAX` entries' keys (`_seq`, `_user_seq`, `_pc`, `_lr`, `_spsr`, `_user`) through
+  `entry_write_kv` instead of `entry_live_write` so they survive the cap. **This is the whole
+  change**; the six keys already exist and are already read correctly.
 * **Raise `UNDEF_LIVE_MAX`** (currently `4u`, `entry_trace.c:5534`) **only on the direct channel**:
   on the direct path the band is bounded by the console's own `max = 0x00200000u - 12u`
   (`entry_stubs.c:4019`), which the capture uses ~1.5 MB of 2 MB of. 64 entries is ~nothing and
   makes a re-trap loop a *ladder*, not a single row.
+
+> **⚠ SCOPE REDUCTION, stated rather than hidden.** An earlier draft of this section added a `_far`
+> field, "pairing each undef with the next data abort's `far`". **It is DROPPED**, and the reason is
+> [[mi4-a-claim-in-a-comment-is-not-a-check]]: an undefined-instruction entry reads **no** cp15 fault
+> pair (they are stale — `entry_trace.c:5514`), so a `_far` there could only be a *label for a stale
+> register*, and a field whose meaning is "the previous abort's address" is a field that will be read
+> as "this undef's address". **The re-trap-vs-retry question needs no `_far`**: `_seq` climbing with
+> an invariant `_pc` at the frontier is a re-trap loop, and `_seq == 1` then a moving sampler pc is a
+> transition. Both are already readable from the six existing keys. Adding `_far` would have been
+> instrument for instrument's sake.
 * **Entry-toolchain only.** This touches `entry_trace.c` (an entry object) and the switch plumbing —
   **no kernel-pool edit, no `--wrap` change, no `external/` source change**. The 1015b
   `XNU_KERNEL_EXTRA_DEFINES`-only rule is **not** needed here.
@@ -145,7 +153,7 @@ lesson): confirm `xnu_live_capped` is absent or its value is the raised cap.
 | **a key name trusted, not read** | 1016a cited `_farn` for a value that is `_nfar` (`records/1018-recon.txt` §2) | every key in this doc is cited to its WRITER's file:line, and the recon corrected the existing record in place |
 | **a ladder's top row read as a frontier** | `_pcn`'s top row is `0x200`, `_farn`'s is `0x200`, `usvc_n`'s is `0x40` | §0 relies on the DIRECT `_nfar`=959 and the window argument (per `records/1016a-read.txt` §3), never on a ladder's top row |
 | **an instrument with no control** | the direct witness could be USR-only by construction and "prove" the vector fires | §1.2 REQUIRES a kernel-mode or boot-self-test control; §4 withholds if absent |
-| **a fault pair read for an undefined instruction** | `IFSR`/`DFSR` are stale on the undef path (`entry_trace.c:5514`) | §1 does NOT read a cp15 fault pair; it reads the frame's own `pc`/`lr`/`cpsr` and pairs with the NEXT data abort's `far` |
+| **a fault pair read for an undefined instruction** | `IFSR`/`DFSR` are stale on the undef path (`entry_trace.c:5514`) | §1 does NOT read a cp15 fault pair at all — it carries only the frame's own `pc`/`lr`/`cpsr`, and the dropped `_far` (scope note above) is why it does not |
 
 **Honest limit.** §2/§3/§4 are mutually exclusive and jointly exhaustive over the witness's outcome.
 The one new instrument (§1) is a NEW routing of an EXISTING recorder — its absence withholds (§4)
@@ -159,8 +167,10 @@ rather than passing. **No number is invented below.**
   console at all under the raised cap; the entry-toolchain clause must prove the `entry_write_kv`
   call is in the LINKED `__wrap_sleh_undef` (read the linked disassembly by value, bound to the
   function's own base — [[mi4-linked-code-order-is-not-source-order]]).
-* `# UNMEASURED` the `_far` pairing: whether a data abort actually FOLLOWS a returning undef on this
-  path. If none does, the field is meaningless and §1 drops it (recorded, not silently kept).
+* `# UNMEASURED` the `_seq` band's true ceiling: 64 direct entries is a guess sized to the console
+  headroom, not to a measured undef rate. If `_seq` pins at 64 the band is the wall and the rung must
+  re-size it (a ladder top row read as a frontier is `records/1016a-read.txt` §3's defect — do not
+  repeat it).
 * `# UNMEASURED` whether the run is RESIDENT under the new arm (the 1015b fix is retained, so the
   storm should stay gone — but that is a prediction, not a measurement).
 * `# UNMEASURED — measure at first build` the seven-way name set and the checker, per §8d of
