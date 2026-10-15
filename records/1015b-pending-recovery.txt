@@ -1,0 +1,33 @@
+1015b PENDING RECOVERY — the run's log is not yet recovered; do NOT overwrite out/stage90
+2026-10-15
+
+STATE
+  * The 1015b press RAN (runner exit 2 = resident non-return, the expected shape). The
+    device is DARK; /proc/last_kmsg is not reachable, so the G-* cell is UNREAD.
+  * The run's log lives in the top of DRAM and its only carrier is the FLASHED ROM's
+    /proc/last_kmsg. It survives a warm reset but is DESTROYED by (a) a cold power
+    transition or (b) a NEW `fastboot boot` (any later kernel clears the buffer on entry).
+
+ORDERING CONSTRAINT (why host-side build work is HELD)
+  * out/stage90/xnu_arm_entry.{bin,elf} is the 1015b arm (sha8 16fe8885). Any build that
+    targets out/stage90 would REPLACE it BEFORE the recovery, and the recovery (if the
+    device returns on the watchdog / a warm path) needs nothing rebuilt - but a rebuild
+    also risks a `fastboot boot` in a later step that would clear the DRAM log.
+  * Therefore: do NOT run build_1015*.sh / build_entry.sh (they write out/stage90) until the
+    1015b run's log is recovered or declared unrecoverable.
+
+RECOVERY SEQUENCE (once the device is back)
+  1. If adb lists 4a2fe00b: `scripts/recover_last_kmsg.sh --read-only`, then
+     `python3 tools/check_1015b_capture.py <capture>` -> G-CONFIRMED / G-REFUTED / G-WITHHOLD.
+  2. If only fastboot lists it: `fastboot boot <stock boot.img>` (NEVER flash), then adb
+     -> /proc/last_kmsg. Do NOT boot TWRP (it eats the slot).
+  3. If neither: the operator power press is owed; after it, the log is likely GONE
+     (a cold transition destroys it) - record that honestly rather than claiming a G cell.
+
+HOST-SIDE WORK THAT IS SAFE WHILE WAITING (no out/stage90 write)
+  * design docs, records, checks, audits - all done this cycle and committed.
+
+DOCS READY FOR AFTER THE READ
+  * docs/1016-design.md   - both branches (A = storm stopped, B = storm persists)
+  * docs/915b-next-rung.md - R3 (the 2nd allocator interval); R3a buildable, press-gated on
+                             the un-pressed 958 arm; R3b gated on R5's bounce window.
