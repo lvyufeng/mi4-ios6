@@ -130,3 +130,40 @@ NEXT
 
 Arm: armed-d13-ffdc8ba1.  Checker: tools/check_1012_capture.py, EXIT=0 (2 soft findings, 2 HARD
 anomalies, both named above).
+====================================================================================
+SUPPLEMENT (2026-10-15, host-side static verification — docs/1012-probe-keying.md)
+====================================================================================
+A by-value audit of THIS press's own instrument found the apex cell's PROVENANCE is
+UNPROVEN, so RESULT 1 must be read with these two caveats:
+
+ (1) ORDERING DEFECT. `__wrap_sleh_abort` calls `__real_sleh_abort(regs,type)` at
+     entry_trace.c:5746 but sets the key `g_abtpte_pmpva` (via `entry_note_abt_pte(far_)`)
+     at :5788 — AFTER the handler ran. The handler's `vm_fault`→`pmap_enter_options`→
+     `__wrap_pmap_enter_options`→`entry_note_abt_pmp` therefore filters against the
+     PREVIOUS abort's far, not the current fault. Under a fixed-VA storm the two
+     coincide (the tail far is constant 0x2e000), so the rows are self-consistent —
+     but the identity is not general and is not proven here.
+
+ (2) OBJECT (pa) SMELL. All 22 apex rows carry the SAME `pa=0x8421a` (PA 0x8421a000),
+     an identical physical page while the storm's fault VA is 0x2e000. That is
+     consistent with the apex having observed a PAGE-TABLE-PAGE install (the pmap
+     entering the L1/L2 page itself, whose own `prot` is correctly 0x3 as kernel memory),
+     NOT the storm's own small page. The apex probe did not capture `fault_type` or the
+     enter's own `va`/`pa` identity, so "the write reaches the apex FOR THE FAULTING VA"
+     is UNPROVEN by this cell.
+
+CONSEQUENCE: RESULT 1's verdict ((c) apex-agrees ⇒ the loss is inside/below leo_enter)
+is NARROWED to "the apex cell observed SOME write-bearing enter of the SAME base table;
+whether it is the storm page's enter is unproven." The (A)-walk cross-check is also
+weaker than first stated: the walk is NOT globally broken — 3 of 22 rows return VALID
+small-page leaves (ordinals 0x20/0x100/0x200, `pteu=1`, leaf `…ba` = APX-set read-only):
+     ord=0x20  va=0x2be20fe8  l1=0x81b7a001  l2=0x81b993ba
+     ord=0x100 va=0x2fafe84c  l1=0x8234b001  l2=0x8238d3ba
+     ord=0x200 va=0x349603c8  l1=0x81ab7001  l2=0x832453ba
+So `ptel2=0` at the tail is a REAL read of a 0x0 word (not a mask artifact), most likely a
+stale/racing read of the L1->L2 descriptor the concurrent apex enter is writing — a
+timing artifact. "The walk still returns 0" (RESULT 3) is thereby OVER-STATED as written.
+
+Rung 1013 (docs/1013-design.md) is hardened to not inherit (1)/(2): W-APEX records
+unconditionally with its OWN va/pa/fault_type, and W-WALK double-reads. The decisive
+measurement — the leaf the pmap ACTUALLY wrote at the storm VA — is deferred to 1013.

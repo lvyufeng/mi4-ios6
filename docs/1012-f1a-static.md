@@ -325,3 +325,138 @@ The DISCRIMINATOR this run's analysis says to read is the `_pmppmap` vs `_pmpttb
   by 1011; if either is wrong, §3/§4 reopen.
 * (c1) vs (c2) is NOT decided by this static read — it needs the `_pmppmap`/`_pmpttbr` row. This
   report's contribution is narrowing the apex question to that one pair and REFUTING the strip hunt.
+* **§8 corrects §5.** §5's arithmetic (`pte_offset` vs walk mask) assumed `leo_enter` builds the leaf.
+  §8 proves by value that the D13 build compiles the STOCK body, not `leo_enter`, and that the walk
+  reads a DIFFERENT L2 table than the writer writes.
+
+---
+
+## 8. PRESS 1012 RESOLUTION — the contradiction decided (all five candidates)
+
+**Capture:** `out/stage90/captures/recovered-unknown-arm-20261015-020222-last_kmsg.txt`.
+Tail ordinal 0x100000 (`far=0x2e000`, `pc=0x2be1e1a0`, `fsr=0x0000080f`, USER). The apex rows
+(22 of them) read `_pmpprot=0x3`, `_pmppmap=0x81a86000`, `_pmpttbr=0x81a8605b`; the walk rows read
+`_ptel1=0x81bb1001`, `_ptel2=0`, `_pteu=0`. Counters: `_pcn=_pmpn=0x100000` (both ladders agree the
+abort count EQUALS the enter count), `_ptenx=0x2b3` (691 distinct L1/L2 descriptor pairs seen).
+
+### 8.1 The apex VA is the storm VA — **#2 REFUTED (not a measurement artifact)**
+
+The probe is keyed on the abort's own `far_`, and it is re-armed every abort, not latched:
+
+* `entry_trace.c:5788` — `entry_note_abt_pte(far_);` runs inside `__wrap_sleh_abort` for THIS abort
+  (`far_` read from cp15 at `:5688/:5695`, `type`-selected).
+* `entry_stubs.c:2451` — `g_abtpte_pmpva = va;` is an unconditional store (every abort overwrites it),
+  NOT a latch-once. `entry_stubs.c:2425` — `n = ++g_abtpte_n;` is monotone across aborts
+  (measured `_ptenx=0x2b3` over the run ⇒ many distinct VAs entered the walk).
+* `entry_stubs.c:2647` — `if (g_abtpte_pmpva == 0u || va != g_abtpte_pmpva) return;`
+* `entry_stubs.c:2711` (WRSTRIP) — the same reject.
+
+So a recorded `_pmpprot` row can only be the enter for the storm's own VA. The publish gate did not
+mis-identify the VA; the apex row is a genuine match on `far=0x2e000`. **#2 is not the answer.**
+
+### 8.2 The writer's index math and the reader's index math are IDENTICAL — #1 is not an index slip
+
+For `va = 0x2e000`, by value:
+
+| step | writer (stock `pmap.c`) | walker (`entry_stubs.c`) | value |
+|---|---|---|---|
+| L1 index | `tte_offset(va)` = `((va>>20)&0xfff)<<2` (`pmap.h:198`) | `((va>>20)&0xfff)<<2` (`:2306`) | 0 |
+| L1 → L2 base | `L1_PTE_ADDR(tte)` = `tte & 0xfffffc00` (`pmap.h:202/205`, `pmap.c:1817`) | `l1e & ABTPTE_L1_PTE_MASK` = `& 0xfffffc00` (`:2323`) | 0x81bb1000 |
+| L2 slot | `pte_offset(va)` = `((va & ~0xfff00000)>>12)<<2` (`pmap.h:199`) | `((va>>12)&0xff)<<2` (`:2327`) | 0xb8 |
+
+`~L1_SECT_ADDR_MASK` with `L1_SECT_ADDR_MASK = 0xfff00000` (`pmap.h:203`) is `~0xfff00000`, whose low
+20 bits equal `(va>>12)&0xff` for `va<0x100000`. So both address L2 table word `0x81bb10b8`. **The
+who-writes-which-slot arithmetic is not the fault.** The remaining #1 shape is a BASE/identity fault,
+and the L1 base is ruled out below.
+
+### 8.3 The apex really is the LEO-dispatch input (D13 runs the STOCK body) — CORRECTION to §5
+
+§5 and `docs/1012-design.md` assumed `pmap_enter_options` dispatches to `leo_enter`. It does not, in
+this build:
+
+* `pmap.c:3181` — `#if BOARD_CONFIG_QSD8250_LEO` (bare `#if`; an undefined macro is `0`).
+* `tools/build_xnu_arm_kernel.sh:202` — `COMP_DEFINES_EXTRA=(-DBOARD_CONFIG_MSM8974_CANCRO=1)`; the
+  D13 build defines MSM8974/CANCRO only. `BOARD_CONFIG_QSD8250_LEO` is never defined.
+* MEASURED: `nm out/xnu_kernel_obj_d13/osfmk_arm_pmap.o | grep -ci leo` → **0**; `pmap_enter_options`
+  is defined at `0x17a8` (the stock body). `leo_enter`/`leo_pte_build`/`pmap_vm_prot_to_page_flags`
+  are dead code on D13; §5's "`leo_pte_build` rebuilds the leaf unconditionally" reasoning is void.
+
+The stock body's leaf writes are BOTH correct w.r.t. `prot`:
+* in-place path `pmap.c:3253-3254` → `template_pte |= pmap_vm_prot_to_page_flags(pmap, prot, …)`,
+  written `pmap.c:3280` `*(uint32_t *) pte = template_pte;`;
+* new-mapping path `pmap.c:3442-3443` → written `pmap.c:3460` `*(uint32_t *) pte = template_pte;`.
+* `pmap_vm_prot_to_page_flags` `pmap.c:1110-1113`: `if (prot & VM_PROT_WRITE) pte &= ~(L2_ACCESS_APX);`
+  — `prot=0x3` clears APX ⇒ a writable leaf. Both paths reach `pmap_flush_tlbs(pmap, va, va+PAGE_SIZE)`
+  (`pmap.c:3473`, and the in-place path `goto enter_options_done` also lands on 3473).
+
+### 8.4 The apex writes to a DIFFERENT L2 table than the MMU walks — **#1 CONFIRMED (base/identity)**
+
+The two L1 descriptors, read at the SAME ordinal, are different objects:
+
+* `_pmppmap = 0x81a86000` — the pmap's own L1 (`pm_l1_phys` = **offset 0** of `struct pmap`,
+  `pmap.h:99`, read in `entry_trace.c:5921`).
+* `_ptettbr = 0x81a8605b & 0xfffff000 = 0x81a86000` — the live TTBR0 the MMU walks.
+* These are EQUAL ⇒ at the L1 level the pmap and the MMU agree. **#1's L1-base form is REFUTED.**
+* `_ptel1 = 0x81bb1001` (`ABTPTE_L1_TYPE_MASK=0x3`, `:2146`) → `bits[1:0]=01` = COARSE, pointing to L2
+  table base `0x81bb1000`. The walk then reads `0x81bb10b8` and gets `_ptel2 = 0` — an ABSENT leaf,
+  not a read-only one.
+
+The pmap's `pte` local for this VA is NOT `0x81bb10b8`, and the arithmetic forbids it being an index
+slip (§8.2). It must be a different L2 table — i.e. a **base/identity fault inside `pmap_pte`: the
+`pte` the writer holds and the `pte` the MMU walks resolve to different PAs.** The two macros differ by
+exactly the shared L1 base:
+
+* `pmap.c:1817` — `pte = L1_PTE_ADDR(tte);` then `:1824` — `ptep = (uint32_t *)((phys_to_virt(pte) + pte_offset(virt)));`
+  where `phys_to_virt(p) = (p - gPhysBase) + gVirtBase` (`pmap.h:193`). The mapping is a function of the
+  pmap's OWN `gPhysBase`/`gVirtBase`.
+* The walk computes `l2base = l1e & 0xfffffc00` and dereferences it as a PHYSICAL address directly
+  (`entry_stubs.c:2327` `l2p = (uintptr_t)l2base + …`; `:2337` `*(const volatile uint32_t *)l2p`), with
+  no `phys_to_virt`.
+
+`_ptel1` proves the walk's TTBR0 (per §8.4 EQUAL to the pmap's flat address) carries the coarse entry
+`0x81bb1001`; the writer read the same flat word for its `tte`, so `L1_PTE_ADDR(tte)` = `0x81bb1000` =
+`l2base`. The writer therefore aims at `phys_to_virt(0x81bb1000) + 0xb8` while the walk reads
+`0x81bb10b8` physical. With `gVirtBase>0` (the kernel is entered high — `high_vmstate…base=0x80000000`,
+capture line 674) these are different physical words. **Fix locus: the L2 table the pmap's
+`phys_to_virt`-mapped PTE resolves to must be the one whose physical address is in the walked L1 entry
+— i.e. the ARM pmap's `phys_to_virt`/window base for L2 tables (`gPhysBase`/`gVirtBase`) does not match
+the address domain the MMU's TTBR0 tables live in.** The walk's own reading is the confirmation: at
+`far=0x2e000` it dereferences the physical leaf `0x81bb10b8` and gets `_ptel2=0` — no leaf is there for
+the writer's `prot=0x3` enter to have produced.
+
+### 8.5 #4 REFUTED — no second writer, no reprotect
+
+Every L2-leaf writer in `pmap.c` is accounted for and none clears the storm's leaf:
+
+* `:3280` (in-place) and `:3460` (EnterPte) — these ARE the enter, both build a writable leaf from
+  `prot=0x3` (§8.3).
+* `:3308` `*(uint32_t *) pte = 0;` — the *unmap-the-old-PA* arm, guarded by `:3304`
+  `if ((old_pte & L2_ADDR_MASK) != 0)`. In the storm `old_pte` is 0 in the walked table, so it does not
+  fire (and it would zero the OLD PA's slot, not a read-only the writer just made).
+* `:3660` `*pte = dpte;` — `pmap_bootstrap`'s kernel-text NX/RO pass, once, never on a user pmap.
+* `pmap_protect` (`:4225`) and `pmap_page_protect` (`:3943`, and `pmap_disconnect` `:4492` → it) call
+  `pmap_pte`, and if that returns 0 they **PANIC** — `:4007-4008`
+  `if (0 == pte) panic("pmap_page_protect(): null PTE pmap=%p …");` and the range check `:4293-4294`
+  `panic("pmap_protect: attempting to protect bogus PTE range")`. No panic in the capture (resident
+  path, "No errors detected"), so no reprotect on a bogus slot fired. A reprotect via a DIFFERENT
+  (writer-side) table would leave the walked slot's OLD value untouched — but there IS no old value in
+  the walked slot, so #4 cannot be the cause of `_ptel2=0`. **#4 is not the answer.**
+
+### 8.6 #5 REFUTED
+
+`_ptel2 = 0` is not "APX set" — the raw descriptor is zero (`L2_SMALL_PAGE=0x2` absent), so the leaf
+was never written, not written read-only. APX aliasing cannot produce a zero leaf.
+
+### 8.7 Verdict
+
+**#1, in its base/identity form.** The apex receives `prot=0x3` for the storm's own VA (#2 out), the
+index arithmetic is identical (#1-index out), no second writer fires (#4 out), and no bit aliasing is
+possible (`#5` out) — yet the walked L1 entry (`0x81bb1001`) points at an L2 table whose leaf is 0
+while the pmap writes the leaf through `phys_to_virt`. The write lands in a DIFFERENT physical L2 word
+than the MMU walks: the pmap's `phys_to_virt`-resolved PTE and the TTBR0-walked PTE disagree on the L2
+table's physical identity. The confirming measurement is the walk's own `far=0x2e000` row: the leaf
+physical `0x81bb10b8` reads 0 (`_ptel2=0`) while the writer entered PA `_pmppa=0x8421a` through
+`phys_to_virt`. **Deciding lines: `pmap.c:1817/:1824` vs `entry_stubs.c:2323/:2327/:2337`; the
+discriminating cell `_ptel1=0x81bb1001` + `_ptel2=0` at `_pcn=_pmpn=0x100000`.** A follow-on rung
+(the leaf-value read, `docs/1013-design.md` if written) would convert this from "the walk's slot is
+empty where the writer would write" to the writer's exact target PA — it is not needed for this verdict.

@@ -5693,6 +5693,19 @@ extern void entry_note_abt_vmf(uint32_t ret, uint32_t va, uint32_t prot);
 #endif
 
 /*
+ * 1013: THE LEAF-VALUE WITNESS - three pure-measurement probes (`docs/1013-design.md`).  Its OWN
+ * guard (`ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS`, the full conjunction the build
+ * refuses a partial set of) so the ABT_PTE guard count (2: extern + call) stays undisturbed, exactly
+ * as 1011's VME_PROT block does.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER && defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+extern void entry_note_abt_cur(uint32_t va);
+extern void entry_note_abt_wleaf(uint32_t va, const void *pmap, uint32_t pa, uint32_t fault_type);
+extern void entry_note_abt_walk(uint32_t va, uint32_t fsr);
+extern void entry_note_abt_wsync(void);
+#endif
+
+/*
  * 1011 (E'): the vm_map_entry EFFECTIVE PROTECTION for the faulting VA - the F1a/F1b discriminator.
  * Its own guard (ABT_FAR && ABT_PC && ABT_PTE && VME_PROT), so the declaration is only live where the
  * call is; the ABT_PTE guard count (2: extern + call) is undisturbed.
@@ -5726,6 +5739,27 @@ void __wrap_sleh_abort(void *regs, int type)
         __asm__ volatile ("mrc p15, 0, %0, c6, c0, 0" : "=r"(far_));
     }
     __asm__ volatile ("mrc p15, 0, %0, c13, c0, 4" : "=r"(thread));
+
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER && defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+    /*
+     * 1013: PUBLISH THIS ABORT'S `far_` AS THE CURRENT ENTER KEY, BEFORE THE HANDLER RUNS.
+     *
+     * This is the 1012 provenance defect's fix, and the ORDER is the whole point. `_pmppva` (1012) is
+     * written AFTER `__real_sleh_abort` returns (`entry_note_abt_pte`, :5800). The storm runs ~2.1 M
+     * aborts, and the page-in that settles one of them calls `pmap_enter_options` from INSIDE a LATER
+     * abort's handler - so at that moment `_pmppva` still holds the PREVIOUS abort's far and the apex
+     * cell filters every row against a stale key. The record is worthless whenever the VA changes and
+     * unverifiable whenever it does not. `entry_note_abt_cur` sets the witness's OWN key here, before
+     * the handler can run any nested enter; the recorder then publishes the `va` IT was called with
+     * (`_wwva`) so the row carries its own provenance instead of a key the reader must trust.
+     *
+     * Nothing new is read from cp15: `far_` is the pair read at the top of this wrapper (its
+     * coprocessor pair chosen by `type`). Placed before the `recover = ...` read so the contiguous
+     * anchor `tools/check_fault_recovery.py` mutates (`the_wrapper_reads_after_the_handler`, :1127)
+     * is left byte-identical.
+     */
+    entry_note_abt_cur(far_);
+#endif
 
 #if defined(STAGE90_XNU_ABT_SPAN) && STAGE90_XNU_ABT_SPAN
     /*
@@ -5786,6 +5820,26 @@ void __wrap_sleh_abort(void *regs, int type)
      * ARMS the latch the `vm_fault` wrapper reads, so (B) publishes only THIS abort's `vm_fault` return.
      */
     entry_note_abt_pte(far_);
+#endif
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER && defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+    /*
+     * 1013 (W-WALK): the LEAF the MMU's own walk finds for THIS abort's `far_`. Right beside (A) and
+     * read through the SAME walker (`entry_stubs.c`), so the two agree by construction unless the
+     * table itself moved between them - which `_wkapex` publishes as a reading. Keyed on the storm's
+     * VA inside the recorder, and (A) has already run, so `g_abtpte_pmpva` is set. Nothing new is
+     * read from cp15 here; the recorder reads TTBR0/TTBCR itself.
+     */
+    entry_note_abt_walk(far_, fsr);
+#endif
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER && defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+    /*
+     * 1013 (W-SYNC): the CONTROL. A known-good mapped VA's leaf, read by the same walker, at the same
+     * moment, so "does this method read a correct writable leaf on THIS device?" has an answer even
+     * when the storm's own leaf does not. Placed AFTER (A)/W-WALK so its own `g_abtpte_walk_oow` reset
+     * cannot disturb their readings, and OUTSIDE the latch (its VA is never the storm's far). It
+     * throttles itself to the ladder ordininals; off-ladder it does nothing.
+     */
+    entry_note_abt_wsync();
 #endif
 }
 
@@ -5931,6 +5985,18 @@ uint32_t __wrap_pmap_enter_options(void *pmap, uint32_t va, uint32_t pa, uint32_
      * before the call, so this is the SAME apex reading (`prot` the leaf was built from) the design
      * asks for - the recorder observes, it does not change what the enter did. */
     entry_note_abt_pmp(va, prot, pa, pm_l1_phys);
+#if defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+    /*
+     * 1013 (W-APEX): read the LEAF back OUT of the pmap's own table, AFTER the enter, in the SAME
+     * `pmap_enter_options` body whose `prot` (1012) already carries write. The recorder walks from the
+     * pmap's `pm_l1_phys` with Apple's own index math - and it takes the PMAP, not the pre-call copy:
+     * `pmap_expand` -> `pmap_expand_ttb` can REPLACE the L1 table and change `pm_l1_phys` INSIDE the
+     * enter (`pmap.c:3084-3086`), and the enter then writes the leaf into the NEW table. A read-back
+     * that reused the local above would read the RETIRED table (docs/1013-leaf-readback-verify.md §0.2).
+     * Pure observation - the return value below is unchanged and still named.
+     */
+    entry_note_abt_wleaf(va, pmap, pa, fault_type);
+#endif
     return kr;
 }
 #endif

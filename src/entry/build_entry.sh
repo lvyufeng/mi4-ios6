@@ -331,7 +331,7 @@ if [[ $D13_TRACE -eq 1 ]]; then
     # trace object compiles on its own command line, `:2332-2333`). Same env var and same 0 default as
     # the `$CADENCE` validated below, so the two spellings are one value; the append is here because
     # `entry_trace.c`'s compile reads this array, and the switch must be in it before the compile.
-    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}" -DSTAGE90_XNU_ABT_FAR="${STAGE90_XNU_ABT_FAR:-0}" -DSTAGE90_XNU_ABT_PC="${STAGE90_XNU_ABT_PC:-0}" -DSTAGE90_XNU_ABT_PTE="${STAGE90_XNU_ABT_PTE:-0}" -DSTAGE90_XNU_VME_PROT="${STAGE90_XNU_VME_PROT:-0}" -DSTAGE90_XNU_PMP_ENTER="${STAGE90_XNU_PMP_ENTER:-0}" -DSTAGE90_XNU_WRSTRIP="${STAGE90_XNU_WRSTRIP:-0}")
+    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}" -DSTAGE90_XNU_ABT_FAR="${STAGE90_XNU_ABT_FAR:-0}" -DSTAGE90_XNU_ABT_PC="${STAGE90_XNU_ABT_PC:-0}" -DSTAGE90_XNU_ABT_PTE="${STAGE90_XNU_ABT_PTE:-0}" -DSTAGE90_XNU_VME_PROT="${STAGE90_XNU_VME_PROT:-0}" -DSTAGE90_XNU_PMP_ENTER="${STAGE90_XNU_PMP_ENTER:-0}" -DSTAGE90_XNU_WRSTRIP="${STAGE90_XNU_WRSTRIP:-0}" -DSTAGE90_XNU_PTE_WITNESS="${STAGE90_XNU_PTE_WITNESS:-0}")
 else
     # **946: 4570's list drops the one name D13's keeps.** `timer_call_enter1` is in the literal above so
     # `tools/check_timer_sources.py` can read the tree's wrap set out of the source; here the *other* tree
@@ -1358,6 +1358,38 @@ if [[ $WRSTRIP -eq 1 && $ABTPTE -ne 1 ]]; then
     exit 1
 fi
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_WRSTRIP="$WRSTRIP")
+# **1013: THE LEAF-VALUE WITNESS (`STAGE90_XNU_PTE_WITNESS`).** The three recorders
+# `entry_note_abt_wleaf` / `entry_note_abt_walk` / `entry_note_abt_wsync` (entry_stubs.c) and their
+# THREE calls (two in `__wrap_sleh_abort`, one in `__wrap_pmap_enter_options`, entry_trace.c) are
+# entry-toolchain objects threaded through `STUB_DEFINES` (here) and `STUB_DEFINES_TRACE` (appended at
+# its own assignment above); OFF (PTE_WITNESS=0), the guards delete all six and both files are the
+# exact 1012 token set. The guard is the FULL CONJUNCTION `ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER
+# && PTE_WITNESS` - W-APEX reads the leaf AT the enter and W-WALK keys on the 1010 latch chain, so
+# neither measures anything without the other's switch. The build therefore REFUSES `PTE_WITNESS=1`
+# unless ABT_FAR, ABT_PC, ABT_PTE and PMP_ENTER are ALL 1.
+PTEWIT=${STAGE90_XNU_PTE_WITNESS:-0}
+case "$PTEWIT" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_PTE_WITNESS='$PTEWIT' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $PTEWIT -eq 1 && $ABTFAR -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_PTE_WITNESS=1 requires STAGE90_XNU_ABT_FAR=1 - the 1013 recorders' guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS, so ABT_FAR=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $PTEWIT -eq 1 && $ABTPC -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_PTE_WITNESS=1 requires STAGE90_XNU_ABT_PC=1 - the 1013 recorders' guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS, so ABT_PC=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $PTEWIT -eq 1 && $ABTPTE -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_PTE_WITNESS=1 requires STAGE90_XNU_ABT_PTE=1 - both the (A) cross-check cell (_wkapex, read from g_abtpte_ptel2rec) and the W-WALK latch key ride entry_note_abt_pte (ABT_PTE), so ABT_PTE=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $PTEWIT -eq 1 && $PMPENTER -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_PTE_WITNESS=1 requires STAGE90_XNU_PMP_ENTER=1 - W-APEX observes the leaf at the pmap_enter_options apex, whose ONLY call site is the PMP_ENTER wrapper, so PMP_ENTER=0 would carry a switch with no apex to witness" >&2
+    exit 1
+fi
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_PTE_WITNESS="$PTEWIT")
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
 # commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
@@ -1883,6 +1915,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_VME_PROT
                 STAGE90_XNU_PMP_ENTER
                 STAGE90_XNU_WRSTRIP
+                STAGE90_XNU_PTE_WITNESS
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -2152,6 +2185,7 @@ do
         # ABT_FAR/ABT_PC/ABT_PTE) at their own assignments above this loop.
         STAGE90_XNU_PMP_ENTER)        _v=$PMPENTER ;;
         STAGE90_XNU_WRSTRIP)          _v=$WRSTRIP ;;
+        STAGE90_XNU_PTE_WITNESS)      _v=$PTEWIT ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -39877,6 +39911,7 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # would be a run whose arm nobody read. Written as the RESOLVED `$PMPENTER`/`$WRSTRIP`.
     echo "STAGE90_XNU_PMP_ENTER=$PMPENTER"
     echo "STAGE90_XNU_WRSTRIP=$WRSTRIP"
+    echo "STAGE90_XNU_PTE_WITNESS=$PTEWIT"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

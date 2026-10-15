@@ -2379,6 +2379,20 @@ static uint32_t g_abtpte_latch;
  */
 static uint32_t g_abtpte_vmelatch;
 
+#if defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+/*
+ * 1013 (W-WALK's cross-check cell). The (A) recorder's raw L2 word for THIS abort, CAPTURED where it
+ * is produced (`entry_note_abt_pte`'s ladder block) so W-WALK can publish `_wkapex` = "my leaf and
+ * the (A) walk's leaf are the SAME value" (design §1 (W-WALK)). Captured, NEVER re-derived: a second
+ * walker is exactly how 1010 and 1010b each produced a defective reading (one wrong mask each), so
+ * the walk stays ONE function used by both callers.
+ *
+ * The DECLARATION is here (before `entry_note_abt_pte`) and the STORE is in that function's ladder
+ * block - the same split `g_abtpte_pmpva` uses, gated by the SAME switch.
+ */
+static uint32_t g_abtpte_ptel2rec;
+#endif
+
 /*
  * 1011 (A) - WHICH page-table base the walk SHOULD read, read from the faulting thread's own state
  * instead of from the live TTBR0 the walk samples. The 1010c record read `ptel1=0xfeedface` at the
@@ -2461,6 +2475,9 @@ entry_note_abt_pte(uint32_t va)
         entry_write_kv("xnu_live_abt_pten",    n);      /* the ordinal */
         entry_write_kv("xnu_live_abt_pteva",   va);     /* the fault VA (far_) */
         entry_write_kv("xnu_live_abt_ptel2",   l2);     /* the raw L2 small-page descriptor */
+#if defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+        g_abtpte_ptel2rec = l2;   /* 1013: the (A) walk's own leaf, for W-WALK's `_wkapex` cross-check */
+#endif
         entry_write_kv("xnu_live_abt_ptel1",   l1);     /* the raw L1 descriptor (a bad walk shows here) */
         entry_write_kv("xnu_live_abt_ptettbr", ttbr);   /* the TTBR0 word the walk used */
         entry_write_kv("xnu_live_abt_pteu",    u);      /* 1 = TTBR0 answered */
@@ -2720,6 +2737,340 @@ entry_note_abt_wr(uint32_t site, uint32_t va, uint32_t prot)
     }
     if (n == 1u) { g_abtpte_wrlastprot = prot; }
     if (prot != g_abtpte_wrlastprot) { g_abtpte_wrlastprot = prot; g_abtpte_wrnx++; entry_write_kv("xnu_live_abt_wrnx", g_abtpte_wrnx); }
+}
+#endif
+
+/*
+ * ================================================================================================
+ * 1013: THE LEAF-VALUE WITNESS - the LEAF the pmap ACTUALLY writes, and the location the MMU's own
+ * walk finds it at.  docs/1013-design.md.
+ * ================================================================================================
+ *
+ * WHERE 1013 SITS. 1012 measured the INPUT to the leaf builder (`prot` = 0x3 at
+ * `pmap_enter_options`) and the L1 identity (`pm_l1_phys & 0xFFFFFF00 == TTBR0 & 0xFFFFFF00`), and
+ * every step is correct BY VALUE (`docs/1012-upstream-diff.md`: `pmap_vm_prot_to_page_flags` clears
+ * APX iff `prot & VM_PROT_WRITE`; `pmap_flush_tlbs` flushes) - yet the USER store permission-faults
+ * ~2.1 M times.  The ONE cell nobody has read is the cell the fault is about: WHAT VALUE IS IN THE
+ * PTE.  These three recorders read it, and read nothing else.
+ *
+ * THE THREE PROBES, and why the walk is REUSED rather than re-written. Re-spelling a TTBR walker is
+ * exactly how 1010 (wrong base mask) and 1010b (a second, still-wrong constant) each produced a
+ * defective reading - one wrong mask each. So there is ONE walker, `stage90_read_l2_pte` above, and
+ * 1013 is its third caller. It is window-bounded (`[gPhysBase, gPhysBase + mem_size)`), it fails
+ * OPEN (a table pointer outside the window is REFUSED, never dereferenced - the 1010b `FS=5` death),
+ * and it reaches an out-of-window L2 table through the 911c temporary-section mechanism.  Nothing
+ * here dereferences an address the boot has not already mapped.
+ *
+ *   (W-APEX) `entry_note_abt_wleaf` - inside `__wrap_pmap_enter_options`, AFTER `__real_...` returns.
+ *            Takes the PMAP (not a pre-call `pm_l1_phys` copy) and re-reads the field HERE, because
+ *            `pmap_expand_ttb` can MOVE it inside the enter (`pmap.c:3084-3086`) and the enter writes
+ *            the leaf into the NEW table.  Walks the PMAP'S OWN table from `pm_l1_phys` with Apple's
+ *            own index math
+ *            (`pmap.c:1786-1824`, `tte_offset`/`pte_offset` `pmap.h:198-199`) and publishes the L1
+ *            descriptor, the L2 TABLE BASE it points at, the LEAF, and the leaf's APX bit. Both
+ *            loads stay inside `[0, 0x40000000)`: `pm_l1_phys` is a physical address built for
+ *            TTBR0, which owns that range under this port's `TTBCR.N = 2` (`arm_vm_init.c:475`), and
+ *            the L2 table base a coarse descriptor carries is a low-RAM PA (this boot's own example
+ *            is `0x46300000`, the base the (A) walk already reaches through the alias).  TTBR1 is
+ *            never needed and never assumed.
+ *            `_wwnoproof` is the honesty cell: `pm_l1_phys != the live TTBR0's base` means the table
+ *            read is NOT provably the live one (1012's identity cell measured them EQUAL, so this is
+ *            a NULL CONTROL row, never a silently re-attributed value - design §2 V4).
+ *   (W-WALK) `entry_note_abt_walk` - from `__wrap_sleh_abort`, beside the 1010 `entry_note_abt_pte`
+ *            call. Walks the LIVE TTBR0 for the storm's own `far`, publishes the L1/L2-base/leaf and
+ *            the location tag `_wk` (1 = a valid small-page leaf answered), the window verdict
+ *            `_wkoow`, the `fsr` it was called with (the FS=15 identity), and `_wkapex` - "the (A)
+ *            walk's OWN recorded leaf and W-WALK's leaf are the SAME value".  `_wkapex` is the
+ *            cross-check for the (A) `ptel2=0` HARD anomaly in the 1012 capture: agreement means the
+ *            anomaly was NOT a walk table defect and W-WALK's value is trustworthy; disagreement
+ *            means at least one walk is wrong and the leaf is published as a null control.  It is
+ *            CAPTURED (`g_abtpte_ptel2rec`, set where (A) produces it), never re-derived.
+ *   (W-SYNC) `entry_note_abt_wsync` - the CONTROL at a KNOWN-GOOD mapped page: the kernel's own
+ *            identity/managed base + a byte offset far inside `[gPhysBase, gPhysBase + mem_size)`
+ *            (the SAME base + length the walk bounds its own loads with, `:2302-2303`).  That window
+ *            is mapped writable by `l2_cache_to_range`/`l2_map_linear_range` (`arm_vm_init.c:239`/
+ *            `174`; note `*ptv |= L2_ACCESS_PRW` and APX is NOT OR'd in), it is RAM, and no device
+ *            may answer it.  Read at the SAME abort as W-WALK, right beside it (and throttled to the
+ *            LADDER ordininals - the storm is ~2.1 M aborts), so it is the control for the MECHANISM
+ *            - "does walking TTBR0 for a known-mapped VA read a correct writable leaf on THIS
+ *            device?" - read by the same code path and library as W-WALK, moments apart.
+ *
+ * THE KEYS ARE A FIXED KEYSPACE so the three probes cannot collide ([[mi4-one-value-two-definitions]]):
+ * `w*` = W-APEX, `wk*` = W-WALK, `wc*` = W-SYNC (the control).  All are DIRECT `entry_write_kv`
+ * writes behind the ladder rule (`n <= 4 || power-of-two`, the SAME rule (A)/(B)/(E')/[PMP] use), so
+ * a row at ordinal k pairs with `_pmpn`/`_pcn`/`_pten` at the same k.  The change-counts (`_wwnx`,
+ * `_wknx`) are written WHERE THEY CHANGE and are WHOLE-RUN OBSERVATIONS - the reader must decide on
+ * the TAIL ROWS' OWN values, never on them (the 1008/1009 measurement defect, not repeated).
+ *
+ * GATED by the full conjunction (ABT_PTE && PMP_ENTER && PTE_WITNESS), which is ALSO the build's
+ * refusal: OFF (or any of the upstream switches OFF) is byte-identical, because the preprocessor
+ * removes every line here and every caller in entry_trace.c.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER && defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+
+/* The APX bit of an L2 small-page descriptor: `L2_ACCESS_APX (1<<9)` (`osfmk/arm/pmap.h:217`), the
+ * AP[2] bit - SET means USER READ-ONLY, CLEAR means writable.  `pmap_vm_prot_to_page_flags`
+ * (`pmap.c:1095`) CLEARS it iff `prot & VM_PROT_WRITE`, which is the whole question of this rung. */
+#define ABTPTE_L2_APX          0x200u
+
+/* W-SYNC's sample offset inside `[gPhysBase, gPhysBase + mem_size)`: 512 KB in - a byte offset far
+ * inside a window the boot has already mapped, never the first bytes a low identity map might leave
+ * absent. The window is the SAME base+length `stage90_read_l2_pte` bounds its own loads with
+ * (`g_abtpte_walk_winbase = gPhysBase`, `g_abtpte_walk_winlen = mem_size`, `:2193-2194`). */
+#define ABTWS_WINDOW_OFF       0x00080000u
+
+static uint32_t g_abtpte_wwn;       /* the W-APEX ladder ordinal */
+static uint32_t g_abtpte_wwlastleaf;
+static uint32_t g_abtpte_wwnx;      /* DISTINCT `_wwleaf` values at W-APEX (monotone, bounded) */
+static uint32_t g_abtpte_wkn;       /* the W-WALK ladder ordinal */
+static uint32_t g_abtpte_wklastleaf;
+static uint32_t g_abtpte_wknx;      /* DISTINCT `_wkleaf` values at W-WALK (monotone, bounded) */
+static uint32_t g_abtpte_wcn;       /* the W-SYNC ordinal */
+static uint32_t g_abtpte_curva;     /* 1013: THIS abort's far, set BEFORE the handler (see entry_note_abt_cur) */
+
+/* The leaf's APX bit, as a 0/1 READING (1 = user READ-ONLY). */
+static inline uint32_t
+stage90_w_apx(uint32_t leaf)
+{
+    return (leaf & ABTPTE_L2_APX) ? 1u : 0u;
+}
+
+/*
+ * 1013: KEY THE APEX ON THE CURRENT FAULT - set from `__wrap_sleh_abort` BEFORE `__real_sleh_abort`
+ * runs, because the enter this witness observes happens INSIDE that handler.
+ *
+ * WHY THIS EXISTS (docs/1012-probe-keying.md §1.4, a PROVENANCE defect W-APEX must not inherit): 1012's
+ * key `g_abtpte_pmpva` is written by `entry_note_abt_pte`, which the abort wrapper calls AFTER the real
+ * handler returns. So during abort N's handler the filter still holds abort N-1's `far`; under a
+ * fixed-VA storm the two coincide, but that is not an identity, and the apex row therefore cannot
+ * reveal WHICH enter it observed. `_curva` is written before the handler, so the W-APEX filter keys on
+ * THE FAULT THIS HANDLER IS SERVICING - an identity, not a coincidence - and the row additionally
+ * publishes its own `va`, so the reader never has to trust the pairing.
+ */
+void
+entry_note_abt_cur(uint32_t va)
+{
+    g_abtpte_curva = va;
+}
+
+void
+entry_note_abt_wleaf(uint32_t va, const void *pmap, uint32_t pa, uint32_t fault_type)
+{
+    uint32_t n, pm_l1_phys, ttbr, ttbcr, ttbrbase, l1p, l1e, l2pa, leafp, leaf, proof, cur, pa_is_table;
+
+    /*
+     * READ `pm_l1_phys` NOW, not from a pre-call copy.  `pmap_expand` -> `pmap_expand_ttb` can REPLACE
+     * the L1 table and move `pm_l1_phys` INSIDE `pmap_enter_options` (`pmap.c:3084-3086`), and the enter
+     * then writes the leaf into the NEW table; a read-back that used a value sampled BEFORE the call
+     * would read the RETIRED table and manufacture a false reading
+     * (docs/1013-leaf-readback-verify.md §0.2).  Offset 0 of `struct pmap` (`pmap.h:99`,
+     * `#pragma pack(4)`), the SAME field 1012's apex recorder reads (`pmap.c:1280`).
+     */
+    pm_l1_phys = (pmap != 0) ? *(const volatile uint32_t *)pmap : 0u;
+    if (pm_l1_phys == 0u)
+        return;
+    /*
+     * KEY ON THE CURRENT FAULT (`g_abtpte_curva`, written BEFORE the handler; docs/1012-probe-keying.md
+     * §1.4), NOT on 1012's `g_abtpte_pmpva` (written AFTER the handler, so it names the PREVIOUS
+     * abort's far).  The enter this witness observes happens INSIDE `__real_sleh_abort`, so the current
+     * fault's far is the only key that is an IDENTITY.  The row also publishes its own `va` so the
+     * pairing is READABLE, never assumed.
+     */
+    cur = g_abtpte_curva;
+    if (cur == 0u || va != cur)
+        return;                     /* not THIS abort's VA - do not fill the channel */
+
+    n = ++g_abtpte_wwn;
+
+    /*
+     * `_wwnoproof`: 1 when the pmap's own L1 base is NOT the base the MMU is walking with.  1012's
+     * identity cell measured them EQUAL (`docs/1012-press-read.txt` RESULT 1), so 1 is the NULL
+     * CONTROL outcome and the reader MUST NOT pair the leaf across it (design §2 V4) - that is a
+     * by-value contradiction with 1012 and is REPORTED, not concluded from.  Same base rule the
+     * walk uses (`entry_ttbr_base`), same `TTBCR.N`, no second spelling.
+     */
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr));
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
+    ttbrbase = entry_ttbr_base(ttbr, ttbcr & 7u);
+    proof = (ttbrbase != 0u && ttbrbase == entry_ttbr_base(pm_l1_phys, ttbcr & 7u)) ? 1u : 0u;
+
+    l1e = 0u; l2pa = 0u; leaf = 0u;
+    l1p = pm_l1_phys + (((va >> 20) & 0xfffu) << 2);      /* tte_offset, pmap.h:198 */
+    if (l1p >= (uintptr_t)gPhysBase && l1p < (uintptr_t)gPhysBase + (uintptr_t)mem_size) {
+        l1e = *(const volatile uint32_t *)(uintptr_t)l1p;
+        if ((l1e & ABTPTE_L1_TYPE_MASK) == ABTPTE_L1_TYPE_COARSE) {
+            l2pa = l1e & ABTPTE_L1_PTE_MASK;              /* L1_PTE_ADDR, pmap.h:202 */
+            leafp = l2pa + (((va >> 12) & 0xffu) << 2);   /* pte_offset, pmap.h:199 */
+            if (l2pa != 0u &&
+                leafp >= (uintptr_t)gPhysBase && leafp < (uintptr_t)gPhysBase + (uintptr_t)mem_size)
+                leaf = *(const volatile uint32_t *)(uintptr_t)leafp;
+        }
+    }
+
+    /*
+     * THE PROVENANCE CELL (docs/1012-probe-keying.md §1.6, §3.3).  1012's apex row carried `pa=0x8421a`
+     * but NOT the `fault_type`, so a table-page install and the storm's own WRITE enter were
+     * indistinguishable BY VALUE - "the write reaches the apex" was plausible but unproven.  `pa<<12`
+     * is the physical page the enter named; `pa_is_table` is 1 when that page is the pmap's OWN L1
+     * table or the L2 table THIS VA resolves through, i.e. the enter is installing a page-table page
+     * rather than the faulting page.  Published so the reader can SEE the object, never infer it.
+     */
+    pa_is_table = (((pa << 12) == (pm_l1_phys & 0xfffff000u)) ||
+                   ((pa << 12) == (l2pa & 0xfffff000u))) ? 1u : 0u;
+
+    if (n <= 4u || (n & (n - 1u)) == 0u) {
+        entry_write_kv("xnu_live_abt_wwn",      n);     /* the ordinal */
+        entry_write_kv("xnu_live_abt_wwl1",     l1e);   /* the raw L1 descriptor of pm_l1_phys */
+        entry_write_kv("xnu_live_abt_wwl2pa",   l2pa);  /* the L2 TABLE base the L1 points at */
+        entry_write_kv("xnu_live_abt_wwleaf",   leaf);  /* THE CELL: the leaf the pmap wrote */
+        entry_write_kv("xnu_live_abt_wwapx",    stage90_w_apx(leaf)); /* 1 = READ-ONLY */
+        entry_write_kv("xnu_live_abt_wwnoproof", proof); /* 1 = this table is not provably live */
+        /*
+         * THE PROVENANCE CELLS (design §1 W-APEX). The row SELF-IDENTIFIES: `_wwva` is the enter's own
+         * first argument (never the abort key), `_wwft` the fault_type it was called with (`0x3` =
+         * READ|WRITE = the storm's WRITE fault), `_wwpa` the physical page number entered, and
+         * `_wwpatbl` = 1 when that page is a page-TABLE page, not the faulting page.  A row whose
+         * `_wwva != far` or `_wwft != 0x3` or `_wwpatbl == 1` is a NULL CONTROL, never a "write reaches
+         * the apex for the faulting VA" reading (docs/1012-probe-keying.md §1.4/§1.6).
+         */
+        entry_write_kv("xnu_live_abt_wwva",   va);
+        entry_write_kv("xnu_live_abt_wwft",   fault_type);
+        entry_write_kv("xnu_live_abt_wwpa",   pa);
+        entry_write_kv("xnu_live_abt_wwpatbl", pa_is_table);
+        entry_write_kv("xnu_live_abt_wwpaok", ((leaf & 0xfffff000u) == (pa << 12)) ? 1u : 0u);
+    }
+
+    /* The change-count, written WHERE IT CHANGES (the `g_sleh_armed` rule) - an OBSERVATION on the
+     * whole run, NEVER the headline. */
+    if (n == 1u) { g_abtpte_wwlastleaf = leaf; }
+    if (leaf != g_abtpte_wwlastleaf) {
+        g_abtpte_wwlastleaf = leaf; g_abtpte_wwnx++;
+        entry_write_kv("xnu_live_abt_wwnx", g_abtpte_wwnx);
+    }
+}
+
+void
+entry_note_abt_walk(uint32_t va, uint32_t fsr)
+{
+    uint32_t n, l1 = 0u, u = 0u, l2, ttbr, type, l2pa, onladder, oow;
+    uint32_t l1b = 0u, ub = 0u, l2b, stable;
+
+    if (g_abtpte_pmpva == 0u || va != g_abtpte_pmpva)
+        return;                     /* keyed on the storm's own far - only the storm publishes */
+
+    n = ++g_abtpte_wkn;
+    onladder = (n <= 4u || (n & (n - 1u)) == 0u) ? 1u : 0u;
+
+    /*
+     * REUSE the ONE walker (design §1): it is window-bounded, it fails OPEN, and it reaches an
+     * out-of-window L2 table the way this port already reaches a low-RAM page.  The alias is allowed
+     * on the LADDER ordininals alone, so a 2.1 M-abort storm does not install/restore a section on
+     * every abort.  `g_abtpte_walk_oow` is reset HERE so `_wkoow` is THIS walk's own reading and not
+     * the (A) walk's, which ran moments earlier on the same abort and published its own `_pteoow`.
+     */
+    g_abtpte_walk_oow = 0u;
+    l2 = stage90_read_l2_pte(va, &l1, &u, onladder);
+    /*
+     * LATCH `_wkoow` FROM THE FIRST WALK, BEFORE the second one touches it.  `stage90_read_l2_pte`
+     * ASSIGNS `g_abtpte_walk_oow` (it never ORs), so the double-read below would RESET this reading -
+     * and on this storm's own VA the L2 table is OUT OF WINDOW (the 1010b/1010c case), so the second
+     * walk WOULD set it.  Reading it here is what makes `_wkoow` describe the walk the other cells
+     * describe.
+     */
+    oow = g_abtpte_walk_oow;
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr));
+
+    /* The L2 TABLE BASE the (live) L1 descriptor points at: the identity cell W-APEX's `_wwl2pa` is
+     * compared against (`!=` => the two probes are looking at different L2 tables => design §2 V3). */
+    type = l1 & ABTPTE_L1_TYPE_MASK;
+    l2pa = (type == ABTPTE_L1_TYPE_COARSE) ? (l1 & ABTPTE_L1_PTE_MASK) : 0u;
+
+    /*
+     * THE DOUBLE-READ (docs/1012-probe-keying.md §2.3a/§2.4, §3.5): the (A) walk's tail `ptel2=0` is
+     * a REAL reading of a raw 0x0 word, but a raw 0x0 at a COARSE L1's L2 slot contradicts FS=15 (an
+     * absent descriptor gives FS=5/6/7).  So the zero must be disentangled from a RACE with a
+     * concurrent table write.  A `dsb` then a SECOND walk of the SAME VA settles it: the two agreeing
+     * makes the value STABLE and the race hypothesis dead; a disagreement means the table moved
+     * between the reads and the leaf is a NULL CONTROL, not a verdict.  Published as `_wkleaf2` and
+     * `_wkstable` so the reader decides, never infers.
+     *
+     * THE SECOND READ USES THE SAME `allow_alias` AS THE FIRST.  On this storm's own VA the L2 table
+     * is OUT OF WINDOW (the 1010b/1010c case), so a second read with `allow_alias=0` would fail OPEN
+     * and return 0 while the first returned the real word - `stable` would be 0 on EVERY storm row,
+     * an INSTRUMENT artifact that would disqualify the very reading the double-read exists to
+     * validate ([[mi4-measurement-defects]]).  Same walk, same arguments, one `dsb` between.
+     */
+    __asm__ volatile ("dsb" ::: "memory");
+    l2b = stage90_read_l2_pte(va, &l1b, &ub, onladder);
+    stable = ((l1b == l1) && (l2b == l2) && (ub == u)) ? 1u : 0u;
+
+    if (onladder) {
+        entry_write_kv("xnu_live_abt_wkn",    n);      /* the ordinal (lockstep with (A)'s `_pten`) */
+        entry_write_kv("xnu_live_abt_wk",     u);      /* LOCATION TAG: 1 = a valid small-page leaf
+                                                        * answered (TTBR0 below the split, L1 COARSE,
+                                                        * leaf in-window or aliased); 0 = nothing */
+        entry_write_kv("xnu_live_abt_wktb",   ttbr);   /* the LIVE TTBR0 this walk used */
+        entry_write_kv("xnu_live_abt_wkl1",   l1);     /* the raw L1 descriptor the walk read */
+        entry_write_kv("xnu_live_abt_wkl2pa", l2pa);   /* the L2 table PA the L1 points at */
+        entry_write_kv("xnu_live_abt_wkleaf", l2);     /* the raw leaf the MMU walks to */
+        entry_write_kv("xnu_live_abt_wkleaf2", l2b);   /* the SECOND read (after `dsb`) - real vs race */
+        entry_write_kv("xnu_live_abt_wkstable", stable); /* 1 = both reads agree (the leaf is real) */
+        entry_write_kv("xnu_live_abt_wkapx",  stage90_w_apx(l2)); /* 1 = READ-ONLY */
+        entry_write_kv("xnu_live_abt_wkoow",  oow);   /* 1 = the FIRST walk's table pointer left the window
+                                                        * (latched before the double-read re-assigns the global) */
+        entry_write_kv("xnu_live_abt_wkfsr",  fsr);    /* the FSR this abort was taken on (0x80f) */
+        /*
+         * THE (A) CROSS-CHECK. `_wkapex` = 1 iff W-WALK resolved a valid small-page leaf AND it is
+         * the SAME value the (A) walk recorded for THIS abort. Guarded on the tag, so "both walked
+         * nothing and both read 0" is NOT published as agreement. This is how the 1012 capture's
+         * `ptel2=0` HARD anomaly is settled by MEASUREMENT instead of by inference: agreement => the
+         * anomaly was not a walk table defect and this value is trustworthy; disagreement => at least
+         * one walk is wrong and the leaf is a NULL CONTROL (design §1 (W-WALK)).
+         */
+        entry_write_kv("xnu_live_abt_wkapex",
+                       (u && (l2 & ABTPTE_L1_TYPE_MASK) == ABTPTE_L2_SMALL_PAGE && l2 == g_abtpte_ptel2rec) ? 1u : 0u);
+    }
+
+    if (n == 1u) { g_abtpte_wklastleaf = l2; }
+    if (l2 != g_abtpte_wklastleaf) {
+        g_abtpte_wklastleaf = l2; g_abtpte_wknx++;
+        entry_write_kv("xnu_live_abt_wknx", g_abtpte_wknx);
+    }
+}
+
+void
+entry_note_abt_wsync(void)
+{
+    uint32_t n, va, l1 = 0u, u = 0u, l2, type, l2pa;
+
+    n = ++g_abtpte_wcn;
+
+    /*
+     * THE CONTROL runs on the LADDER ordininals ALONE (the same throttle W-WALK's alias uses): the
+     * storm is ~2.1 M aborts, and this walk's target table is in-window, so a control on every abort
+     * would buy nothing and cost the console a walk per abort. Off-ladder it does nothing at all.
+     */
+    if (n > 4u && (n & (n - 1u)) != 0u)
+        return;
+
+    /* THE CONTROL VA: the kernel's OWN identity/managed base + a byte offset far inside the window
+     * the walk itself bounds with. Mapped writable by the boot (`arm_vm_init.c:239`/`174`,
+     * `L2_ACCESS_PRW`, no APX), RAM, and no device may answer it. */
+    va = (uint32_t)gPhysBase + ABTWS_WINDOW_OFF;
+
+    g_abtpte_walk_oow = 0u;                      /* `_wcoow` is THIS walk's reading, not (A)'s/W-WALK's */
+    l2 = stage90_read_l2_pte(va, &l1, &u, 0u);   /* no alias: the control VA must be IN-window */
+    type = l1 & ABTPTE_L1_TYPE_MASK;
+    l2pa = (type == ABTPTE_L1_TYPE_COARSE) ? (l1 & ABTPTE_L1_PTE_MASK) : 0u;
+
+    entry_write_kv("xnu_live_abt_wcnt",   n);      /* the control ordinal */
+    entry_write_kv("xnu_live_abt_wcva",   va);     /* the known-good VA the control read */
+    entry_write_kv("xnu_live_abt_wck",    u);      /* the location tag (1 = a leaf answered) */
+    entry_write_kv("xnu_live_abt_wcl1",   l1);     /* the raw L1 descriptor */
+    entry_write_kv("xnu_live_abt_wcl2pa", l2pa);   /* the L2 table PA */
+    entry_write_kv("xnu_live_abt_wcleaf", l2);     /* the leaf of a page the boot mapped WRITABLE */
+    entry_write_kv("xnu_live_abt_wcapx",  stage90_w_apx(l2)); /* EXPECTED 0 */
+    entry_write_kv("xnu_live_abt_wcoow",  g_abtpte_walk_oow); /* 1 = the table pointer left the window */
 }
 #endif
 
