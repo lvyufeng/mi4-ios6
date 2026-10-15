@@ -34,3 +34,15 @@ DOCS READY FOR AFTER THE READ
   * docs/1016-design.md   - both branches (A = storm stopped, B = storm persists)
   * docs/915b-next-rung.md - R3 (the 2nd allocator interval); R3a buildable, press-gated on
                              the un-pressed 958 arm; R3b gated on R5's bounce window.
+
+--------------------------------------------------------------------------------
+RESOLVED 2026-10-15 — THE RECOVERY LANDED; the ordering constraint is DISCHARGED.
+
+  * The device returned on adb (4a2fe00b). `scripts/recover_last_kmsg.sh --read-only` captured
+    out/stage90/captures/recovered-unknown-arm-20261015-163856-last_kmsg.txt (34011 lines,
+    RESIDENT, terminal marker present).
+  * Adjudicated in records/1015b-press-read.txt ('e209163') and re-read by shape in
+    records/1016a-read.txt ('dbe6793'): the storm is GONE by value (11/11 distinct ladder `far`,
+    959 aborts, a 2187x collapse vs 1014).
+  * ⇒ This file's constraint (no new `fastboot boot` until the log is recovered) is DISCHARGED.
+    A NEW PRESS is now unblocked, and the next arm is rung 1017 (docs/1017-design.md).
