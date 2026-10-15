@@ -62,16 +62,35 @@ table EQUALS the live TTBR0 base, which is 1012's own identity cell. And the tai
 `wfttb == wflive == 0x81a86000`. So the row's OWN evidence says `pm_l1_phys` IS the live table, while
 `_wwnoproof` says it is not. **The two cells disagree and the pmp/flush cells are the corroborated ones.**
 
-Cause (by value): `entry_note_abt_wleaf` (`src/entry/entry_stubs.c:2928`) re-reads
-`pm_l1_phys = *(uint32_t*)pmap` AFTER `__real_pmap_enter_options` — deliberately, for the pmap_expand hazard.
-`entry_note_abt_pmp` reads it BEFORE (the `__wrap` local). If `pmap_expand_ttb` fires inside the enter the two
-differ; the `proof` comparison `entry_ttbr_base(pm_l1_phys, n) == entry_ttbr_base(ttbr, n)` then fails on the
-NEW table. The pmp cell preserved the PRE-enter value and matches TTBR0. **This is the documented
-post-call-read hazard reproducing itself as a false negative** — the cell is a NULL CONTROL outcome, and the
-checker correctly refuses to pair across it. It is REPORTED, not concluded from (design §3 V4).
+Cause (by value): the key is POLARITY-INVERTED. `entry_note_abt_wleaf`
+(`src/entry/entry_stubs.c:2966`) computes
+`proof = (ttbrbase != 0u && ttbrbase == entry_ttbr_base(pm_l1_phys, n)) ? 1u : 0u;`
+= **1 when the two bases are EQUAL** (the table IS provably live), and publishes that value verbatim as
+`xnu_live_abt_wwnoproof` (`:2998`), whose comment claims "1 = this table is not provably live" — the OPPOSITE
+meaning. On the tail rows `pm_l1_phys` (`pmppmap=0x81a86000`) == the live TTBR0 base (`pmpttbr & 0xFFFFFF00 =
+0x81a86000`), so the code records `proof=1`, the key is named/read as "NOT proof", and
+`check_1013_capture.py:5158` (`noproof = [r for r in apex_tail if r["wwnoproof"] == 1]`) fires APEX_NOT_PROOF and
+WITHHOLDS V1-V3 — **on a row that actually PROVES the apex table is the live one.** The "contradiction with
+1012" is between the key's name/comment and its producer, not between two measurements. **The 1014 tail rows'
+V0 provenance gate PASSES by value** (table == live TTBR0, `wwva==far`, `wwft==3`, `wwpatbl==0`, `wwpaok==1`);
+V1 stands without the caveat the checker printed. (A second, smaller probe note applies only to the NON-tail
+rows: those are where the post-enter re-read of `pm_l1_phys` could move the table.)
 
 Consequence: the leaf PAIRING is still valid, because W-WALK read the leaf through the LIVE TTBR0
 (`wktb=0x81a8605b`) — the ground-truth walk does not depend on the apex provenance gate at all.
+
+INDEPENDENT CORROBORATION that the enter's pmap IS the aborted thread's pmap (so "a different pmap
+explains the fault" is RULED OUT): the tail rows carry `xnu_live_abt_ptethr=0x81a86000` (the L1 base the
+FAULTING THREAD's own map names, 1011 (A)), and it EQUALS both the live TTBR0 base (`ptettbr &
+0xFFFFFF00 = 0x81a86000`) and the apex's `pmppmap=0x81a86000` and the walk's `wktb=0x81a8605b`. Four cells,
+one table: the thrower, the walk, the enter and the faulting thread all name 0x81a86000.
+
+LEAF DECODE AUDIT (`0x841e91bb` against the tree's own `arm_l2_entry_t`, `pmap.h:132`): bit0 nx=1, bit1
+valid=1, bit2 B=0, bit3 C=1, bits[5:4] ap=0b11, bits[8:6] tex=0b011, bit9 apx=0, bit11 nG=0 (GLOBAL; see §7). Under
+`L2_ACCESS_USER (1<<5)` set and client domain, **AP[2:0]=0b011 = privileged RW + user RW** — fully writable
+for the USR-mode access that faults. The L1 descriptor `0x81bb2001`: bits[8:5] domain = 0, and DACR=0x1
+makes domain 0 a client, so the AP bits ARE enforced (a manager domain would bypass them). No bit in either
+descriptor denies this write.
 
 ================================================================================
 4. HARD #2 — the 7 `_wfself=1` "disagreeing bases" rows are all `wfkind=1` (FULL flush of a NON-current pmap)
@@ -110,6 +129,53 @@ permission inputs: the L1 descriptor's DOMAIN + the DACR, and TTBCR.N's routing 
 through TTBR0 at all, or through TTBR1 with N=2?), plus the leaf's TEX/CB and nG. **Rung 1015 = the permission
 INPUTS witness** (L1 domain field, DACR, TTBCR.N, and the leaf's full AP/TEX/nG decode at the SAME cell), not
 another leaf-value probe.
+
+================================================================================
+7. ROOT-CAUSE HYPOTHESIS (by value, this session) — a stale GLOBAL TLB entry the ASID flush cannot evict
+================================================================================
+The leaf `0x841e91bb` has **bit11 = 0**. In the tree's struct that bit is `non_global` (`pmap.h:137`), whose
+mask is `L2_NG_BIT 0x800` (`pmap.h:231`). **bit11=0 => nG=0 => the mapping is GLOBAL.** And `L2_NG_BIT` is
+NEVER emitted: tree-wide (`src/` + `external/xnu-hd2-darwin13/`) it appears ONLY at its definition — no leaf
+template ORs it (`pmap.c:3295`/`:3484`/`:1110` set only PRW/USER/APX/NX; `L2_ADDR_MASK 0xfffff000` and
+`L2_SMALL_PAGE 0x2` touch neither bit11). **Every user leaf in this tree is GLOBAL.**
+
+The storm's flush is `arm_tlb_flushID_ASID` (`pmap.c:1349`, the 1014 tail `wfkind=2`), = TLBIASID (`c8,c7,2`).
+**ARMv7: TLBIASID invalidates only ASID-tagged entries; a GLOBAL entry (nG=0) is NOT invalidated by it** —
+only TLBIALL (`c8,c7,0`) evicts it. So a stale GLOBAL entry survives every ASID flush, and the re-fault at a
+CONSTANT (far=0xe6000, pc=0x2bed61a0, fsr=0x80f) against a leaf that IS present+writable is exactly what a
+stale entry produces. `arm_context_switch` (`cpufunc-v7.s:49-64`) DOES do a full TLBIALL, but only on a pmap
+CHANGE (`pmap_switch`, `pmap.c:2556/2565`) — a storm re-entering one thread's own context never triggers it.
+
+NOTE — this is NOT a D13 port regression: the canonical upstream HTC-Leo-Revival `gary_codeunfuckery` arm pmap
+(FETCHED and diffed this session) has the SAME code (no nG emission, same TLBIASID). So the defect is either
+latent-upstream (harmless on HD2's single-ASID/different path, fatal here) or something upstream does on the
+retry path that this tree does not. **Under adjudication** by `perm-forensics` (docs/1015-perm-static.md
+"STALE-GLOBAL-TLB") and carried into rung 1015's verdict table as a measurable cell.
+
+CANDIDATE FIXES (pre-specified for a later rung, NOT built now): (a) emit `L2_NG_BIT` on user-pmap leaves in
+`pmap_vm_prot_to_page_flags` (`pmap.c:1110`, guarded `pmap != kernel_pmap`); or (b) make `pmap_flush_tlbs` take
+the full `arm_tlb_flushID()` for user pmaps. (b) is broader/safer-per-fault; (a) is the architecturally correct
+one and the smaller blast radius per flush.
+
+MECHANISM CHAIN, CLOSED BY VALUE (this session, post-read; three links, each cited):
+  * LINK 1 — the leaf IS global: `0x841e91bb` bit11 (non_global, `pmap.h:137`) = **0** (re-decoded digitally;
+    the §2 "nG=1" was a typo, now fixed). And NO user leaf is ever emitted non-global: every user template ORs
+    only `L2_ACCESS_USER|L2_ACCESS_APX|L2_NX_BIT` (`:1947`/`:3704`/`:3896`), and `L2_NG_BIT` (`pmap.h:231`) greps
+    tree-wide (our tree AND pristine upstream `/tmp/leo-up`) to ONLY its definition — never ORed. **All user leaves global.**
+  * LINK 2 — the leaf-mutating flush is ASID-scoped and cannot touch a global entry: `pmap_enter` upgrade routes
+    through `pmap_flush_tlbs` (`pmap.c:1284`), whose ARMv7 body IGNORES `startv/endv` and, for a non-shared
+    (`!pm_shared`) pmap, runs `arm_tlb_flushID_ASID` (`:1349` = the measured F2 `wfkind=2`). TLBIASID evicts only
+    ASID-tagged (nG=1) entries; a **global** entry survives. `pmap_asid.c:161`'s full `arm_tlb_flushID()` runs
+    ONCE at boot. `/tmp/leo-up/pmap.c` is byte-identical here ⇒ latent-upstream, not a port regression.
+  * LINK 3 — no full flush on the storm's re-entry: `pmap_switch` (`pmap.c:2537`) takes the full TLBIALL
+    (`arm_context_switch`, `pmap.c:2565`) ONLY when `user_pmap != new_pmap`; re-entering the SAME pmap (the
+    storm) hits `switch_return` at `:2556` with **no flush**.
+  ⇒ Chain: a COW leaf first mapped read-only leaves a GLOBAL RO TLB entry; the write fault upgrades the leaf
+    to user-RW, but `pmap_enter`'s ASID flush cannot evict the global RO entry; the CPU re-walks the same VA in
+    the same pmap (no context switch ⇒ no TLBIALL) and keeps the stale RO translation ⇒ the constant
+    `far=0xe6000`/`pc=0x2bed61a0` FS=15 write re-faults (~2^20 = the 1010 CS-retry re-execution shape).
+  **This predicts rung 1015's decisive test (design1015's primary): full TLBIALL for non-kernel pmaps STOPS the
+    storm (H-G CONFIRMED); if the storm persists, H-G is REFUTED and the permission-inputs fallback (C1/C2) runs.**
 
 OWED (probe/rule, for the next arm — not device facts):
   * `entry_note_abt_wleaf` publishes `_wwnoproof` from a POST-enter `pm_l1_phys`; publish BOTH (pre and post)
