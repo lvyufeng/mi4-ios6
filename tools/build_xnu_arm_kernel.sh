@@ -800,6 +800,24 @@ DEFINES=(
 # probe, so this object is the tree's ORIGINAL bytes - the define IS the patch.
 [[ ${STAGE90_XNU_WRSTRIP:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_WRSTRIP=1)
 
+# 1014's TLB-FLUSH WITNESS (`osfmk/arm/pmap.c`: `pmap_flush_tlbs` gains a gated `entry_note_abt_wf(...)`
+# call at the enter and at the exit of its flush decision, inserted by
+# `tools/patch_d13_flushwitness.py`, each behind `#if defined(STAGE90_XNU_FLUSH_WITNESS) &&
+# STAGE90_XNU_FLUSH_WITNESS`). It names WHICH flush arm ran for the faulting pmap (`_wfkind` 0 = none /
+# 1 = full `arm_tlb_flushID` / 2 = `arm_tlb_flushID_ASID`), under WHICH ASID, with WHICH live TTBR0 -
+# the ONE mechanism 1013's writable-leaf reading left unread. `pmap.c` is a kernel-pool file
+# (`out/xnu_kernel_obj_d13/osfmk_arm_pmap.o`), so the switch goes to the SAME array as the kext/login
+# guard, the alignment switch, the memq_hint guard, the submap-pmap skip and 1012's strip trace, NOT to
+# `EXTRA_DEFINES`; the entry-side recorder `entry_note_abt_wf` is gated separately through
+# `STUB_DEFINES` in `src/entry/build_entry.sh`. OFF (FLUSH_WITNESS unset or 0) the `#if` excludes every
+# probe, so this object is the tree's ORIGINAL bytes - the define IS the patch.
+#
+# **A `--wrap=pmap_flush_tlbs` WOULD BE A HOOK THAT CANNOT FIRE** (`mi4-hooks-live-at-calls`), which is
+# why this one is a source edit: MEASURED on this object, all 13 `R_ARM_CALL pmap_flush_tlbs`
+# relocations are INTRA-object (11 caller functions, every one of them in `pmap.c`), so a wrap would
+# redirect zero of the calls the storm rides.
+[[ ${STAGE90_XNU_FLUSH_WITNESS:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_FLUSH_WITNESS=1)
+
 # 992's iOS 7 commpage alias (`osfmk/arm/pmap.c` + `osfmk/arm/commpage/commpage.c`: the six dormant
 # IOS7LAB board gates open, so `pmap_create_sharedpage` maps the commpage page a second time at
 # 0xFFFF4000 - user read-only, XN - and `commpage_populate` fills the iOS 7 count bytes at

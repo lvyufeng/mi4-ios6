@@ -70,6 +70,14 @@
  * a second writer could only have copied them. See the header for why that is the one thing not to
  * do. */
 #include "entry_reset.h"
+/* 1014: `proc_reg.h:583`'s own `ARMREG_READ_INLINE(contextidr, "p15,0,%0,c13,c0,1")` -
+ * the CONTEXTIDR read the flush witness uses. One definition of one value
+ * ([[mi4-one-value-two-definitions]]): the cp15 spelling is NOT re-written here. The header
+ * expands `uint32_t` in its macros and includes nothing, so `<stdint.h>` above must be reached
+ * first, and the include is gated so OFF is this file's exact previous token set. */
+#if defined(STAGE90_XNU_FLUSH_WITNESS) && STAGE90_XNU_FLUSH_WITNESS
+#include <arm/proc_reg.h>
+#endif
 
 #define RAM_CONSOLE_BASE   0xde500000u
 #define RAM_CONSOLE_SIG    0x43474244u  /* 'DBGC' */
@@ -2145,7 +2153,23 @@ void entry_write_kv(const char *key, uint32_t value);   /* identically to :1920/
 #define ABTPTE_L1_TYPE_MASK    0x3u          /* L1_TYPE_MASK    pmap.h:207 */
 #define ABTPTE_L1_TYPE_COARSE  0x1u          /* L1_TYPE_PTE     pmap.h:210 */
 #define ABTPTE_L1_PTE_MASK     0xfffffc00u   /* L1_PTE_ADDR_MASK pmap.h:202 (coarse base bits[31:10]) */
-#define ABTPTE_L2_SMALL_PAGE   0x2u          /* L2_SMALL_PAGE   pmap.h:226 (bits[1:0]=0b10) */
+/*
+ * THE L2 SMALL-PAGE TEST — 1013c. `L2_SMALL_PAGE 0x2` (pmap.h:226) is BIT 1, the descriptor TYPE
+ * bit. Bit 0 is NOT part of the type: it is `L2_NX_BIT 0x1` (pmap.h:227, the XN/"execute never"
+ * bit) and `pmap_vm_prot_to_page_flags` (`pmap.c:1128`) SETS it for every non-executable page — so
+ * a DATA page is `bits[1:0]=0b11`, not 0b10. The build tree says it in its own enum:
+ * `ARM_PTE_DESCRIPTOR_4K = 0x02` (0b1X) at `pmap.c:193-195`, and 11 present-tests in `pmap.c`
+ * use `*p & 2U` — bit 1 ALONE — never `& 3U` (`:1542`, `:1694`, `:1725`, `:1744`, …).
+ *
+ * Testing the WHOLE 2-bit field against 0x2 rejected every XN page, so the walk returned 0 exactly
+ * when the page was present-but-non-executable — i.e. on EVERY FS=15 fault, since a level-2
+ * PERMISSION fault requires a present leaf. That is the "`ptel2=0` contradicts FS=15" anomaly that
+ * the 1010→1013 ladder kept flagging as a HARD anomaly: it was this test, not a vanished leaf
+ * ([[mi4-measurement-defects]]). 1013b's own pairing is the proof: at VA 0xee000 the apex read
+ * `0x841e91bb` (bits[1:0]=0b11, present, APX=0 = writable, XN set) and W-WALK read 0 — the SAME
+ * L2 table 0x81bb2000, the SAME slot. The mask is `0x2` (the type bit), never `0x3`.
+ */
+#define ABTPTE_L2_SMALL_PAGE   0x2u          /* L2_SMALL_PAGE   pmap.h:226 (bit 1; 0b1X with NX=bit 0) */
 
 /*
  * 1010c - THE WINDOW BOUND, and the temporary section that reaches an out-of-window L2 table.
@@ -2383,9 +2407,14 @@ stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used
         l2e = stage90_read_l2_word_aliased((uint32_t)l2p);
     }
 
-    /* A small-page leaf (bits[1:0]=0b10) is the only L2 entry that carries this page's AP bits; any
-     * other shape (64K-large 0b01, absent 0b00, invalid 0b11) means the walk found no small page. */
-    if ((l2e & ABTPTE_L1_TYPE_MASK) != ABTPTE_L2_SMALL_PAGE)
+    /* A small page is bits[1:0]=0b1X — bit 1 is the TYPE, bit 0 is XN and is SET on every
+     * non-executable page (`pmap.h:226-227`; `pmap_vm_prot_to_page_flags` `pmap.c:1128`;
+     * `ARM_PTE_DESCRIPTOR_4K = 0x02` (0b1X) at `pmap.c:194`). Test BIT 1 ONLY, exactly as the
+     * tree's own 11 present-tests do (`*p & 2U`, `pmap.c:1542/:1694/:1725/:1744`): `& 3 == 2` would
+     * refuse every XN page, which is why the walk returned 0 on every FS=15 (permission, level-2)
+     * fault — the 1010→1013 HARD "ptel2=0 contradicts FS=15" anomaly. The other 2-bit shapes are a
+     * 64K-large page (0b01) or an absent/invalid entry (0b00); neither is a small page. */
+    if ((l2e & ABTPTE_L2_SMALL_PAGE) == 0u)
         return 0u;
 
     if (out_ttbr0_used != 0)
@@ -3082,7 +3111,7 @@ entry_note_abt_walk(uint32_t va, uint32_t fsr)
          * one walk is wrong and the leaf is a NULL CONTROL (design §1 (W-WALK)).
          */
         entry_write_kv("xnu_live_abt_wkapex",
-                       (u && (l2 & ABTPTE_L1_TYPE_MASK) == ABTPTE_L2_SMALL_PAGE && l2 == g_abtpte_ptel2rec) ? 1u : 0u);
+                       (u && (l2 & ABTPTE_L2_SMALL_PAGE) != 0u && l2 == g_abtpte_ptel2rec) ? 1u : 0u);
     }
 
     if (n == 1u) { g_abtpte_wklastleaf = l2; }
@@ -3148,6 +3177,187 @@ entry_note_abt_wsync(void)
     entry_write_kv("xnu_live_abt_wcoow",  g_abtpte_walk_oow); /* 1 = the table pointer left the window */
     entry_write_kv("xnu_live_abt_wctb0",  ttbr0);  /* the live TTBR0 word (raw; cf. `_wktb` for W-WALK) */
     entry_write_kv("xnu_live_abt_wctb1",  ttbr1);  /* the live TTBR1 word (raw; the table the control used) */
+}
+#endif
+
+/*
+ * ================================================================================================
+ * 1014 (V1): THE TLB-FLUSH WITNESS - did the flush that should have invalidated the stale
+ * translation for the storm's VA actually RUN, and under WHICH ASID and WHICH live TTBR0?
+ * docs/1014-design.md §2.
+ * ================================================================================================
+ *
+ * WHERE 1014 SITS. 1013 measured the leaf `pmap_enter_options` actually WROTE and found it
+ * USER-WRITABLE (`_wwapx=0` at `_wwl2pa`) - and 1012 had already measured `prot` arriving at the
+ * enter carrying WRITE.  Every INPUT to the leaf builder is correct BY VALUE and the USER store
+ * still permission-faults ~2.1 M times (`far`/`pc`/`fsr=0x80f` constant).  The ONE mechanism left
+ * unread is the TLB: the flush that should invalidate the entry the store is retrying against.
+ *
+ * THE PROBE.  `pmap_flush_tlbs` (`osfmk/arm/pmap.c`, the function whose whole body is about which
+ * flush runs) gains ONE gated call at the exit of its flush decision - `tools/patch_d13_flushwitness.py`
+ * plants it, `tools/stage_d13_flushwitness.sh` stages it, and `tools/build_xnu_arm_kernel.sh`'s
+ * `DEFINES` carries the switch to the KERNEL-POOL compile (`out/xnu_kernel_obj_d13/osfmk_arm_pmap.o`).
+ * It is a SOURCE EDIT and not a `--wrap` because ALL 13 `R_ARM_CALL pmap_flush_tlbs` relocations in
+ * that object are INTRA-object: a `--wrap` would be a hook that cannot fire
+ * ([[mi4-hooks-live-at-calls]]).
+ *
+ * THE CELLS, and the line of `pmap.c` each is read from:
+ *   `_wfn`     the ladder ordinal (opens the row)
+ *   `_wfva`    `startv` - the VA this flush was called for (:1275)
+ *   `_wfttb`   `ttb` = `pmap->pm_l1_phys` (:1280)
+ *   `_wflive`  `armreg_ttbr_read() & 0xFFFFFF00` AS READ INSIDE THE LOOP (:1295) - flush-time, not
+ *              enter-time; the value the `:1298` comparison was actually made against
+ *   `_wfself`   `flush_self` - 0 means the flush did NOT run for this pmap (:1281/:1301)
+ *   `_wfshared` `pmap_is_shared` (:1282)
+ *   `_wfncpus`  `pmap_asid_ncpus` as a RUNTIME value at the call (:1287/:1314)
+ *   `_wfasid`   `pmap->pm_asid & 0xFF` - the ASID the flush would use (:1319)
+ *   `_wfkind`   0 = NO FLUSH RAN; 1 = `arm_tlb_flushID()` (full TLBIALL); 2 = `arm_tlb_flushID_ASID`
+ *   `_wfseen`   1 iff the loop's `:1295` read executed (see below)
+ * `_wfkind` is the cell the rung turns on.  `_wfnx` is a change-count (DISTINCT `(self,kind,asid)`
+ * triples) and is an OBSERVATION, never the headline - the verdict is read on the TAIL ROWS' OWN
+ * values (the 1008/1009 measurement defect, not repeated).
+ *
+ * `_wfseen` - THE NULL-CONTROL CELL, and why the design's eight keys needed a ninth.  `ttbr_pmap`
+ * is read INSIDE the cpu loop, but the loop's `continue` for a `!cpu_running` cpu happens BEFORE
+ * that read.  On a call where no cpu was running the read never executes, so the row would carry an
+ * UNINITIALIZED `_wflive` and `_wfself = 0` - INDISTINGUISHABLE from verdict cell F1 (H-FF
+ * CONFIRMED: "no flush ran at all"), when in truth no decision was even reached.  `_wfseen = 0`
+ * says so, and the checker is required to treat such a row as a NULL CONTROL
+ * ([[mi4-measurement-defects]]: a measurement can be the thing that is wrong).
+ *
+ * PROVENANCE - and the rung's OWN caveat, stated at the site rather than discovered from the log.
+ * `pmap_flush_tlbs` has 13 call sites in 11 functions and the probe names the CALL, not the caller.
+ * It is called with `endv = 0xFFFFFFFF` from `pmap_init` (`pmap.c:3666`), for whole ranges from
+ * `pmap_remove`/`pmap_protect`, and per-page from `pmap_enter_options` (`:3473`, the flush the
+ * storm's enter rides) and `pmap_expand` (`:3168`).  So `_wfva` is what attributes a row: the
+ * storm's own `far`.  The filter below keys on `far` and on nothing else.
+ *
+ * THE KEY AND ITS 1012 CLASS OF DEFECT, NOT INHERITED.  1012's key `g_abtpte_pmpva` is written
+ * AFTER `__real_sleh_abort` returns, so during abort N's handler it still holds abort N-1's `far`
+ * (docs/1012-probe-keying.md §1.4).  This recorder uses 1013's `g_abtpte_curva`, which the abort
+ * wrapper writes BEFORE the handler - the only key that is an IDENTITY rather than a coincidence.
+ * The row ALSO publishes its own `_wfva`, so the pairing is READABLE, never assumed.
+ *
+ * GATED by the FULL CONJUNCTION `ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS &&
+ * FLUSH_WITNESS`, which is ALSO the build's refusal: OFF (or any upstream switch OFF) is
+ * byte-identical, because the preprocessor removes every line here and the one call in `pmap.c`.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER && defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS && defined(STAGE90_XNU_FLUSH_WITNESS) && STAGE90_XNU_FLUSH_WITNESS
+
+/* The ladder rule, spelled ONCE for this rung (`n <= 4 || power-of-two`), the SAME rule (A)/(B)/(E')
+ * /[PMP]/W-* use, so a 1014 row at ordinal k pairs with `_pmpn`/`_pcn`/`_pten`/`_wwn` at the same k. */
+#define ABTWF_ON_LADDER(n)     ((n) <= 4u || (((n) & ((n) - 1u)) == 0u))
+
+static uint32_t g_abt_wfn;          /* the flush-witness ladder ordinal */
+static uint32_t g_abt_wctn;         /* the CONTEXTIDR-witness ladder ordinal */
+static uint32_t g_abt_wfnx;         /* DISTINCT (self,kind,asid) triples (monotone, bounded) */
+static uint32_t g_abt_wflastriple;  /* the previous triple, packed - the change-count's baseline */
+
+/*
+ * 1014: THE ONE RECORDER.  Called from `pmap_flush_tlbs`'s exit, behind the gate above.  NINE
+ * arguments, every one a plain READ of a local that already existed - except `seen`, which the
+ * patch also sets, and which exists for the null-control reason stated above.
+ *
+ * The filter is the rung's whole provenance statement: `va` must be the CURRENT fault's `far`
+ * (`g_abtpte_curva`, written BEFORE the handler by 1013's `entry_note_abt_cur`).  `pmap_flush_tlbs`
+ * runs for other VAs constantly - `pmap_init` alone calls it with `endv = 0xFFFFFFFF` - so without
+ * the filter the channel would be spent before the storm (the 998 cap, the 1007 ladder lesson).
+ *
+ * `_wflive` IS PUBLISHED RAW, at its natural 256-byte alignment, and NOT masked to
+ * `entry_ttbr_base`'s 4 KB.  The comparison at `:1298` is `ttb == ttbr_pmap` with `ttbr_pmap`
+ * masked only by `0xFFFFFF00`; masking the published value to a coarser alignment would make
+ * `_wfttb == _wflive` TRUE on bases that `:1298` compares UNEQUAL - i.e. it would manufacture
+ * agreement exactly at the verdict cell (F2 vs F1) this rung turns on
+ * ([[mi4-one-value-two-definitions]]).  The reader applies `entry_ttbr_base`'s rule, against the
+ * SAME `TTBCR.N`, if it wants the base.
+ */
+void
+entry_note_abt_wf(uint32_t va, uint32_t ttb, uint32_t live, uint32_t self, uint32_t shared,
+                  uint32_t ncpus, uint32_t asid, uint32_t kind, uint32_t seen)
+{
+    uint32_t n, cur, triple, onladder;
+
+    /*
+     * PROVENANCE: only THIS fault's VA publishes.  `pmap_flush_tlbs` is called for whole ranges and
+     * for other pmaps throughout the boot; keying on the storm's `far` is what keeps the 24576-entry
+     * channel from being spent before the storm reaches its tail (the 998 cap, the 1007 lesson).
+     */
+    cur = g_abtpte_curva;
+    if (cur == 0u || va != cur)
+        return;
+
+    n = ++g_abt_wfn;
+    onladder = ABTWF_ON_LADDER(n) ? 1u : 0u;
+
+    if (onladder) {
+        entry_write_kv("xnu_live_abt_wfn",     n);       /* the ordinal */
+        entry_write_kv("xnu_live_abt_wfva",    va);      /* startv - the VA this flush was called for */
+        entry_write_kv("xnu_live_abt_wfttb",   ttb);     /* pmap->pm_l1_phys (:1280) */
+        entry_write_kv("xnu_live_abt_wflive",  live);    /* in-loop TTBR0 & 0xFFFFFF00 (:1295), RAW */
+        entry_write_kv("xnu_live_abt_wfself",  self ? 1u : 0u);   /* flush_self: 0 = NO FLUSH RAN */
+        entry_write_kv("xnu_live_abt_wfshared", shared ? 1u : 0u);
+        entry_write_kv("xnu_live_abt_wfncpus", ncpus);   /* pmap_asid_ncpus, a RUNTIME value here */
+        entry_write_kv("xnu_live_abt_wfasid",  asid);    /* pmap->pm_asid & 0xFF - the ASID used */
+        entry_write_kv("xnu_live_abt_wfkind",  kind);    /* 0 = none, 1 = full, 2 = ASID-scoped */
+        /*
+         * THE NULL CONTROL.  `seen = 0` means the loop's `:1295` read never executed, so `_wflive`
+         * is not a reading and `_wfself = 0` is not a DECISION - the row must NOT be read as
+         * verdict cell F1.  Published on the same row so the pairing is by construction, never by
+         * the reader's assumption.
+         */
+        entry_write_kv("xnu_live_abt_wfseen",  seen ? 1u : 0u);
+    }
+
+    /*
+     * The change-count, written WHERE IT CHANGES (the `g_sleh_armed` rule) - an OBSERVATION on the
+     * whole run, NEVER the headline (the 1008/1009 measurement defect).  The triple is packed
+     * `(self, kind, asid)` so one compare answers "did the flush DECISION move".
+     */
+    triple = ((self ? 1u : 0u) << 16) | ((kind & 0xffu) << 8) | (asid & 0xffu);
+    if (n == 1u) { g_abt_wflastriple = triple; }
+    if (triple != g_abt_wflastriple) {
+        g_abt_wflastriple = triple; g_abt_wfnx++;
+        entry_write_kv("xnu_live_abt_wfnx", g_abt_wfnx);
+    }
+}
+
+/*
+ * 1014: THE CONTEXTIDR WITNESS - the OTHER half of "which ASID does the hardware tag this fault's
+ * translation with?".  The flush at `pmap.c:1319` invalidates only entries tagged with
+ * `pmap->pm_asid & 0xFF`; the STORE's translation is tagged with CONTEXTIDR.  Those are written
+ * from two different places (`pmap.c:2520` in `pmap_switch`, `pmap_asid.c:296` in
+ * `pmap_asid_activate`), so "the flush was for ASID A while the CPU was running under ASID B" is a
+ * real shape this rung has to be able to see - and 1014's `_wfasid` alone cannot answer it.
+ *
+ * THE READ IS `proc_reg.h`'s OWN, NOT A NEW cp15 SPELLING.  `ARMREG_READ_INLINE(contextidr,
+ * "p15,0,%0,c13,c0,1")` is `osfmk/arm/proc_reg.h:583` in THIS tree; `entry_stubs.c` reaches it
+ * through a gated `#include <arm/proc_reg.h>` (the header declares `uint32_t` in its macros, so
+ * `<stdint.h>` is included first, above).  Writing `mrc p15,0,rX,c13,c0,1` by hand here would be a
+ * second definition of one value ([[mi4-one-value-two-definitions]]).
+ *
+ * CALLED from `__wrap_sleh_abort`, beside 1013's `entry_note_abt_cur(far_)` - BEFORE
+ * `__real_sleh_abort`, for the SAME reason that key is set there: the CONTEXTIDR that governs the
+ * faulting store is the one live when the abort was TAKEN, and the handler may switch pmaps.
+ */
+void
+entry_note_abt_wctx(uint32_t va)
+{
+    uint32_t n, cur, ctx;
+
+    cur = g_abtpte_curva;
+    if (cur == 0u || va != cur)
+        return;
+
+    n = ++g_abt_wctn;
+    if (!ABTWF_ON_LADDER(n))
+        return;
+
+    /* `& 0xFF`: the ASID field the MMU compares against `pm_asid & 0xFF` at `pmap.c:1319`. */
+    ctx = armreg_contextidr_read() & 0xffu;
+
+    entry_write_kv("xnu_live_abt_wctxn",  n);    /* the CONTEXTIDR-witness ordinal */
+    entry_write_kv("xnu_live_abt_wctx",   ctx);  /* CONTEXTIDR & 0xFF at the abort */
+    entry_write_kv("xnu_live_abt_wctxva", va);   /* the abort's far this row is keyed on */
 }
 #endif
 

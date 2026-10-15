@@ -331,7 +331,7 @@ if [[ $D13_TRACE -eq 1 ]]; then
     # trace object compiles on its own command line, `:2332-2333`). Same env var and same 0 default as
     # the `$CADENCE` validated below, so the two spellings are one value; the append is here because
     # `entry_trace.c`'s compile reads this array, and the switch must be in it before the compile.
-    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}" -DSTAGE90_XNU_ABT_FAR="${STAGE90_XNU_ABT_FAR:-0}" -DSTAGE90_XNU_ABT_PC="${STAGE90_XNU_ABT_PC:-0}" -DSTAGE90_XNU_ABT_PTE="${STAGE90_XNU_ABT_PTE:-0}" -DSTAGE90_XNU_VME_PROT="${STAGE90_XNU_VME_PROT:-0}" -DSTAGE90_XNU_PMP_ENTER="${STAGE90_XNU_PMP_ENTER:-0}" -DSTAGE90_XNU_WRSTRIP="${STAGE90_XNU_WRSTRIP:-0}" -DSTAGE90_XNU_PTE_WITNESS="${STAGE90_XNU_PTE_WITNESS:-0}")
+    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}" -DSTAGE90_XNU_ABT_FAR="${STAGE90_XNU_ABT_FAR:-0}" -DSTAGE90_XNU_ABT_PC="${STAGE90_XNU_ABT_PC:-0}" -DSTAGE90_XNU_ABT_PTE="${STAGE90_XNU_ABT_PTE:-0}" -DSTAGE90_XNU_VME_PROT="${STAGE90_XNU_VME_PROT:-0}" -DSTAGE90_XNU_PMP_ENTER="${STAGE90_XNU_PMP_ENTER:-0}" -DSTAGE90_XNU_WRSTRIP="${STAGE90_XNU_WRSTRIP:-0}" -DSTAGE90_XNU_PTE_WITNESS="${STAGE90_XNU_PTE_WITNESS:-0}" -DSTAGE90_XNU_FLUSH_WITNESS="${STAGE90_XNU_FLUSH_WITNESS:-0}")
 else
     # **946: 4570's list drops the one name D13's keeps.** `timer_call_enter1` is in the literal above so
     # `tools/check_timer_sources.py` can read the tree's wrap set out of the source; here the *other* tree
@@ -1390,6 +1390,65 @@ if [[ $PTEWIT -eq 1 && $PMPENTER -ne 1 ]]; then
     exit 1
 fi
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_PTE_WITNESS="$PTEWIT")
+# **1014 (V1): THE TLB-FLUSH WITNESS (`STAGE90_XNU_FLUSH_WITNESS`).** The two recorders
+# `entry_note_abt_wf` (called from `pmap_flush_tlbs`) and `entry_note_abt_wctx` (called from
+# `__wrap_sleh_abort`) live in `entry_stubs.c`; their ONE call site apiece is one in the KERNEL POOL
+# (`osfmk/arm/pmap.c`, a source edit - see below) and one in `entry_trace.c`. The entry-toolchain half
+# is threaded through `STUB_DEFINES` (here) and `STUB_DEFINES_TRACE` (appended at its own assignment
+# above); OFF (FLUSH_WITNESS=0), the guards delete the two recorders and the one trace call and both
+# files are the exact 1013 token set. The pmap.c call site is a KERNEL-POOL object
+# (`out/xnu_kernel_obj_d13/osfmk_arm_pmap.o`), so its switch goes to
+# `tools/build_xnu_arm_kernel.sh`'s `DEFINES` array - the SAME place 1012's WRSTRIP goes - and the
+# tree text is staged by `tools/stage_d13_flushwitness.sh` / `tools/patch_d13_flushwitness.py`. **A
+# `--wrap` is NOT possible here** ([[mi4-hooks-live-at-calls]]): all 13 `R_ARM_CALL pmap_flush_tlbs`
+# relocations in that object are INTRA-object, so a wrap would redirect zero call sites. The guard is
+# the FULL CONJUNCTION `ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS && FLUSH_WITNESS` -
+# the recorder keys on 1013's `g_abtpte_curva`, which PTE_WITNESS is what writes - so the build
+# REFUSES `FLUSH_WITNESS=1` unless every one of the five is already 1.
+FLWIT=${STAGE90_XNU_FLUSH_WITNESS:-0}
+case "$FLWIT" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_FLUSH_WITNESS='$FLWIT' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $FLWIT -eq 1 && $ABTFAR -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_FLUSH_WITNESS=1 requires STAGE90_XNU_ABT_FAR=1 - the 1014 recorders' guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS && FLUSH_WITNESS, so ABT_FAR=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $FLWIT -eq 1 && $ABTPC -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_FLUSH_WITNESS=1 requires STAGE90_XNU_ABT_PC=1 - the 1014 recorders' guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS && FLUSH_WITNESS, so ABT_PC=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $FLWIT -eq 1 && $ABTPTE -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_FLUSH_WITNESS=1 requires STAGE90_XNU_ABT_PTE=1 - the 1014 recorders' guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS && FLUSH_WITNESS, so ABT_PTE=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $FLWIT -eq 1 && $PMPENTER -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_FLUSH_WITNESS=1 requires STAGE90_XNU_PMP_ENTER=1 - the 1014 recorders' guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER && PTE_WITNESS && FLUSH_WITNESS, so PMP_ENTER=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $FLWIT -eq 1 && $PTEWIT -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_FLUSH_WITNESS=1 requires STAGE90_XNU_PTE_WITNESS=1 - the 1014 flush recorder keys on 1013's g_abtpte_curva (the current-fault key entry_note_abt_cur writes), which exists ONLY under PTE_WITNESS; without it every row would be filtered out and the probe would measure NOTHING while reporting a green build ([[mi4-measurement-defects]])" >&2
+    exit 1
+fi
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_FLUSH_WITNESS="$FLWIT")
+# **The one include path the flush witness needs, and why it is a SEPARATE array.** The recorder
+# `entry_note_abt_wctx` reads CONTEXTIDR through `osfmk/arm/proc_reg.h:583`'s own
+# `ARMREG_READ_INLINE(contextidr, "p15,0,%0,c13,c0,1")` rather than re-spelling cp15 here
+# ([[mi4-one-value-two-definitions]]), and that header lives in the XNU tree - so the two files that
+# include it need `-I <XNU_TREE>/osfmk`. It is NOT added to `STUB_DEFINES`: that array reaches
+# `entry_timebase.c` and every other stub object, and `-I <XNU_TREE>/osfmk` would let THEIR
+# `#include <kern/...>`/`<vm/...>` resolve to Apple's headers instead of the project's - a
+# whole-image change from a flag whose stated purpose is one recorder. It is added ONLY to the two
+# compile lines that need it, and ONLY when the switch is on, so OFF is byte-identical by
+# construction (MEASURED as well: with `-I` and without, both `entry_stubs.o` and `entry_trace.o`
+# are `cmp`-identical under the full 1013 switch set).
+FLWIT_INCLUDES=()
+[[ $FLWIT -eq 1 && -d $XNU_TREE/osfmk ]] && FLWIT_INCLUDES=(-I "$XNU_TREE/osfmk")
+if [[ $FLWIT -eq 1 && ${#FLWIT_INCLUDES[@]} -eq 0 ]]; then
+    echo "REFUSING: STAGE90_XNU_FLUSH_WITNESS=1 but $XNU_TREE/osfmk is not a directory - the CONTEXTIDR recorder includes <arm/proc_reg.h> and there is nowhere to find it" >&2
+    exit 1
+fi
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
 # commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
@@ -1916,6 +1975,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_PMP_ENTER
                 STAGE90_XNU_WRSTRIP
                 STAGE90_XNU_PTE_WITNESS
+                STAGE90_XNU_FLUSH_WITNESS
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -2186,6 +2246,7 @@ do
         STAGE90_XNU_PMP_ENTER)        _v=$PMPENTER ;;
         STAGE90_XNU_WRSTRIP)          _v=$WRSTRIP ;;
         STAGE90_XNU_PTE_WITNESS)      _v=$PTEWIT ;;
+        STAGE90_XNU_FLUSH_WITNESS)    _v=$FLWIT ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -2338,7 +2399,8 @@ run python3 "$REPO_ROOT/tools/check_block_result_slots.py" --verbose || exit 1
 
 say "== compiling the symbols start.s needs =="
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
-    -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
+    -O2 -Wall -Wextra -Werror -std=gnu11 ${FLWIT_INCLUDES[@]+"${FLWIT_INCLUDES[@]}"} \
+    "${STUB_DEFINES[@]}" \
     ${STUB_DEFINES_TRACE[@]+"${STUB_DEFINES_TRACE[@]}"} \
     -c "$BOOT_DIR/entry_stubs.c" -o "$OUT/xnu_arm_entry_stubs.o"
 # **481: the timer's owner.** Compiled in every build rather than only in a traced one, because the
@@ -2626,6 +2688,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_USB_ENUM="$USB_ENUM" \
         -DSTAGE90_XNU_USB_STREAM="$USB_STREAM" \
         -DSTAGE90_XNU_SMEM_PROBE="$SMEM_PROBE" \
+        ${FLWIT_INCLUDES[@]+"${FLWIT_INCLUDES[@]}"} \
         ${STUB_DEFINES_TRACE[@]+"${STUB_DEFINES_TRACE[@]}"} \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
@@ -39912,6 +39975,7 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "STAGE90_XNU_PMP_ENTER=$PMPENTER"
     echo "STAGE90_XNU_WRSTRIP=$WRSTRIP"
     echo "STAGE90_XNU_PTE_WITNESS=$PTEWIT"
+    echo "STAGE90_XNU_FLUSH_WITNESS=$FLWIT"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

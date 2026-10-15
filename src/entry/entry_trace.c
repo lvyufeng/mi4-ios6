@@ -5706,6 +5706,19 @@ extern void entry_note_abt_wsync(void);
 #endif
 
 /*
+ * 1014 (V1): THE TLB-FLUSH WITNESS - its OWN guard, so the PTE_WITNESS guard count (1 in
+ * entry_stubs.c / 4 in this file) stays undisturbed, exactly as 1011's VME_PROT block does for
+ * ABT_PTE.  The CALL SITE of `entry_note_abt_wf` is NOT here: it is a SOURCE EDIT into
+ * `osfmk/arm/pmap.c` (`tools/patch_d13_flushwitness.py`), because all 13 `R_ARM_CALL
+ * pmap_flush_tlbs` relocations in `out/xnu_kernel_obj_d13/osfmk_arm_pmap.o` are INTRA-object and a
+ * `--wrap` would redirect zero of them ([[mi4-hooks-live-at-calls]]).  Only the CONTEXTIDR witness
+ * is called from this file.
+ */
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER && defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS && defined(STAGE90_XNU_FLUSH_WITNESS) && STAGE90_XNU_FLUSH_WITNESS
+extern void entry_note_abt_wctx(uint32_t va);
+#endif
+
+/*
  * 1011 (E'): the vm_map_entry EFFECTIVE PROTECTION for the faulting VA - the F1a/F1b discriminator.
  * Its own guard (ABT_FAR && ABT_PC && ABT_PTE && VME_PROT), so the declaration is only live where the
  * call is; the ABT_PTE guard count (2: extern + call) is undisturbed.
@@ -5759,6 +5772,16 @@ void __wrap_sleh_abort(void *regs, int type)
      * is left byte-identical.
      */
     entry_note_abt_cur(far_);
+#endif
+
+#if defined(STAGE90_XNU_ABT_FAR) && STAGE90_XNU_ABT_FAR && defined(STAGE90_XNU_ABT_PC) && STAGE90_XNU_ABT_PC && defined(STAGE90_XNU_ABT_PTE) && STAGE90_XNU_ABT_PTE && defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER && defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS && defined(STAGE90_XNU_FLUSH_WITNESS) && STAGE90_XNU_FLUSH_WITNESS
+    /*
+     * 1014: THE CONTEXTIDR WITNESS - read HERE, immediately after 1013's current-fault key and for
+     * the SAME reason it is set here: the CONTEXTIDR that governs the faulting store is the one live
+     * when the abort was TAKEN, and `__real_sleh_abort` may switch pmaps.  Nothing new is read from
+     * cp15 by THIS file - the recorder (entry_stubs.c) uses `proc_reg.h:583`'s own macro.
+     */
+    entry_note_abt_wctx(far_);
 #endif
 
 #if defined(STAGE90_XNU_ABT_SPAN) && STAGE90_XNU_ABT_SPAN

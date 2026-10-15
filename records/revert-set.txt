@@ -15589,3 +15589,140 @@ set=armed-d13-9bf25f8f sha256=b18494150c1bc37e7c248967fb0469f6aa723d70962406c054
 set=armed-d13-9bf25f8f sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1013-ptewitness;stage90_fixture.macho
 set=armed-d13-9bf25f8f sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1013-ptewitness;stage90-build-config.txt
 set=armed-d13-9bf25f8f sha256=dca3808b9ca5db77ffee771ffa98027807b5510f59dcf50956d0d6137dbf949d bytes=560 file=SHA256SUMS.txt role=1013-ptewitness;SHA256SUMS.txt
+# armed-d13-29ec9e48  -  1014 (V1): THE TLB-FLUSH WITNESS - did the flush that should invalidate the stale
+# translation actually REACH this CPU, for the ASID the store ran under? (design docs/1014-design.md)
+# Switch set is 1013-s VERBATIM plus STAGE90_XNU_FLUSH_WITNESS=1 (PTE_WITNESS, PMP_ENTER, VME_PROT,
+# ABT_PTE, ABT_PC, ABT_FAR, ABT_SPAN, FREEZE_WITNESS, CADENCE, STALL, ABORT_TRACE, DYLD_WITNESS,
+# SHREG_PROBE, SHREG_WIRE, SHREG_GEOM, RESIDENT, USVC and SUBMAP_PMAP_SKIP all stay 1); the ENTRY
+# BIN moves (9cf2f15e -> 29ec9e48); the PAYLOAD moves (it embeds the entry blob; the 29 s watchdog
+# constant is 999-s, unchanged); the TREE DOES move - 1014 has ONE tree edit (osfmk/arm/pmap.c, the
+# pmap_flush_tlbs probe, staged by tools/stage_d13_flushwitness.sh + tools/patch_d13_flushwitness.py,
+# both idempotent and re-runnable because external/ is GITIGNORED) and NO new --wrap.
+#
+# WHY 1014 (V1) FOLLOWS 1013.  The 1013 press (arm armed-d13-9cf2f15e, records/1013-press-read.txt)
+# was JUDGED a MEASUREMENT DEFECT: its W-SYNC control reads wcva=0x80080000, ABOVE the TTBR0/TTBR1
+# split 0x40000000 for TTBCR.N=2, so wck=0 (a TTBR1 walk) and the rung-s OWN control WITHHELD V1-V3;
+# its W-APEX rows read a REAL writable leaf (wwleaf=0x841e61bb, wwapx=0) but their own provenance
+# cell says wwnoproof=1 (pm_l1_phys != the live TTBR0 base), so the cell is not provably the
+# fault-s; and W-WALK read the SAME L2 table yet published wkleaf=0 AND NO VA, so no (VA, L1, L2)
+# pair could be formed.  What 1013 DID establish BY VALUE: the leaf the pmap writes carries APX=0
+# (user-WRITABLE) in a table whose L1 base equals the live TTBR0 base, AND the store still faults
+# (fsr=0x80f, FS=15 level-2, WnR=1) ~2.1 M times.  A WRITABLE LEAF THAT STILL FAULTS means the
+# MMU is not reading that leaf - so the ONE unread link in the chain is the INVALIDATION: whether
+# pmap_flush_tlbs RAN at all, on WHICH cpu, and for WHICH ASID.  That is this rung.
+#
+# WHAT 1014 (V1) MEASURES.  `pmap_flush_tlbs` (osfmk/arm/pmap.c:1274-1328) takes the GATE at
+# :1298 `flush_self = (ttb == ttbr_pmap || pmap_is_shared)`.  If the gate is FALSE, NO ARM flush
+# instruction executes and the stale translation SURVIVES the pmap-s own write - the leaf in
+# MEMORY is writable while the TLB still holds the old read-only entry, which is EXACTLY the
+# shape 1013 measured.  The probe records, per call: the VA (startv), pmap->pm_l1_phys, the
+# IN-LOOP TTBR0 read & 0xFFFFFF00 (the value :1298 actually compares), flush_self,
+# pmap_is_shared, pmap_asid_ncpus (a RUNTIME value - project records that say 0 are WRONG; it is
+# 1 here), pmap->pm_asid & 0xFF, and the FLUSH KIND: 0 = no flush, 1 = full flushID,
+# 2 = ASID-scoped flushID.  A `seen` null-control cell covers the shape where :1295 never ran, so
+# a `self=0` row cannot be misread as a DECISION.  In parallel __wrap_sleh_abort records
+# CONTEXTIDR & 0xFF - the ASID the HARDWARE tags this fault-s translation with - so "the flush
+# was for ASID A while the CPU ran under ASID B" is visible rather than assumed; _wfasid alone
+# cannot answer that.
+#
+# THE 1014 (V1) VERDICT CELLS (docs/1014-design.md §2.5, read from the TAIL ROWS-OWN values -
+# any _wfn >= 0x400 - NEVER a whole-run max(); the 1008/1009 measurement defect is not repeated).
+# The W-SYNC control (1013) must still be sound, else WITNESS_METHOD_BROKEN and the cells are
+# WITHHELD:
+#   F1  _wfself = 0 at EVERY tail row for this VA => FLUSH_REFUSED_TTB_MISMATCH - H-FF CONFIRMED.
+#       The test at pmap.c:1298-1299 was FALSE: pmap->pm_l1_phys != (armreg_ttbr_read() &
+#       0xFFFFFF00) AT FLUSH TIME and the pmap is not shared, so NO FLUSH RAN AT ALL.  This is
+#       the surviving V1 mechanism, and it agrees with 1013-s wwl1=0x81bb1000 != the storm-s
+#       TTBR0 base 0x81a86000.  _wfkind = 0 is the same row read another way.
+#   F2  _wfself = 1 AND _wfttb == _wflive (the bases agree at flush time) and the fault persists
+#       => FLUSH_RAN_STILL_FAULTS: the enter-s flush was NOT refused; combined with 1013-s
+#       writable leaf this REFUTES H-FF and forces the "the table read is not the table walked"
+#       branch.  NOTE: with arm_context_switch-s full TLBIALL on every TTBR0 change and pm_asid
+#       single-written, an ASID-scoped mismatch cannot be the cause - this cell must NOT be read
+#       as one.
+#   F3  _wfself = 1 AND _wfkind = 2 and the fault persists => ASID_PATH_RAN_STILL_FAULTS: the
+#       ASID-scoped invalidate ran and the store still permission-faults => NOT ASID staleness.
+#       Remaining V1-adjacent suspects, NAMED NOT GUESSED: the TLB-s own view (a section mapping
+#       at this VA, a TTBR1 walk) or the DACR/DOMAIN - the L1 domain field built at pmap.c:3163
+#       is 0 and src/mmu.c:5526 sets DACR to 0x00000003 (domain 0 = manager, which bypasses AP
+#       checks), so a domain that is not manager on the faulting CPU produces FS=15 with no leaf
+#       defect at all.
+#   F4  _wfself = 1 AND _wfkind = 1 (the FULL arm_tlb_flushID) and the fault persists =>
+#       FULL_FLUSH_STILL_FAULTS: the whole TLB was invalidated for this CPU and the store still
+#       faults => staleness is DEAD; the entry is rebuilt from the TABLE, so the table the MMU
+#       walks is not the table 1013 read.  CROSS-CHECK against 1013-s V3 cell (wwl2pa vs wkl2pa):
+#       if they were EQUAL this is a HARD CONTRADICTION and the next rung must re-open the walk.
+#   F5  _wfn = 0 at the tail while the storm ran => NO_FLUSH_WITNESS: the flush recorder never
+#       fired on the storm VA (a provenance/keying failure - the flush runs outside the handler-s
+#       g_abtpte_curva window) => REBUILD, DO NOT CONCLUDE.
+#   F6  _wfncpus differs from the boot-s own "All ASID/asids enabled" line => HARD (stale
+#       decode): the published runtime value disagrees with the boot-s own print.
+#   (HARD) any _wfkind/_wfasid that does NOT match the disassembled branch taken - the same
+#       stale-decode class.
+#   (NULL CONTROL) _wfseen = 0 on a row means the cpu loop-s :1295 read never executed, so that
+#       row-s _wflive is not a reading and its _wfself = 0 is NOT a DECISION - such a row must
+#       NEVER be counted toward F1.
+# The filter is the rung-s provenance statement: pmap_flush_tlbs runs for other VAs constantly
+# (pmap_init alone calls it with endv = 0xFFFFFFFF), so without keying on 1013-s
+# g_abtpte_curva the 24576-entry channel would be spent before the storm (the 998 cap, the 1007
+# ladder lesson, [[mi4-measurement-defects]]).
+#
+# KEYS (the fixed keyspace, docs/1014-design.md §2.2): the flush witness wfn/wfva/wfttb/wflive/
+# wfself/wfshared/wfncpus/wfasid/wfkind/wfseen/wfnx; the CONTEXTIDR witness wctxn/wctx/wctxva.
+# wflive is published RAW (pmap.c:1298 masks by 0xFFFFFF00 only) - masking it to the 4 KB
+# entry_ttbr_base would manufacture agreement at the F1/F2 cell ([[mi4-one-value-two-definitions]]).
+# No two probes share a key (the §2.2 collision proof: every one of the 14 greps to 0 tree-wide
+# before it was added; xnu_live_abt_wfmap was DROPPED from the design table this run - it has no
+# source - and replaced by xnu_live_abt_wfseen, the null-control cell).
+#
+# THE PROBE IS A SOURCE EDIT, NOT A --wrap (docs/1014-design.md §2.3, measured):
+# `pmap_flush_tlbs` has 13 R_ARM_CALL relocations and ALL 13 are INTRA-OBJECT (11 caller
+# functions inside arm/pmap.c); `grep -rln pmap_flush_tlbs` matches arm/pmap.c ONLY.  A
+# --wrap=pmap_flush_tlbs would therefore redirect ZERO call sites and report a green build while
+# measuring NOTHING ([[mi4-a-claim-in-a-comment-is-not-a-check]]).  The probe is gated by
+# `#if defined(STAGE90_XNU_FLUSH_WITNESS) && STAGE90_XNU_FLUSH_WITNESS`, so with the switch OFF
+# the tree-s pmap.c compiles to byte-identical .text (proven in build_1014_v1.sh by rebuilding
+# patched-OFF against reverted-OFF with the SAME command line - the whole object is identical
+# after normalising the `pmap.c:NNNN` __LINE__ strings in asserts; the 42-line gate shifts every
+# assert message below it EVEN WITH THE GATE CLOSED, so a raw cmp can never succeed and the
+# normalisation is stated rather than hidden).
+#
+# THE ONE PLACE THE DESIGN COULD NOT BE FOLLOWED EXACTLY (stated, not papered over): §2.1(a1)
+# places the recorder call at the function-s single exit and passes Apple-s `ttbr_pmap`.  That
+# identifier is declared INSIDE the cpu loop-s body (:1295), so the single-exit call did not
+# compile (`use of undeclared identifier ttbr_pmap`).  The fix is a gated function-scope
+# `static uint32_t wf_live;` carrying the in-loop `armreg_ttbr_read() & 0xFFFFFF00` (reset to 0
+# per call, and a `seen` flag set at the same statement).  Apple-s own declarator is left
+# BYTE-IDENTICAL in both the #if and the #else arm, so the OFF path is unchanged.
+#
+# VERIFIED BY VALUE (build_1014_v1.sh + this park): the image carries 100 xnu_live_abt_ key
+# literals (49 through 1012 + 1013-s 37 + 1014-s 14) and all 14 1014 keys; entry_note_abt_wf and
+# entry_note_abt_wctx are DEFINED T/t with exactly ONE `(b|bl)` call site each (the (b|bl) rule -
+# the compiler TAILS a void call that ends its function); the CONTEXTIDR call lives inside
+# __wrap_sleh_abort, which still calls <sleh_abort> (pass-through) AND <entry_note_abt_cur> (the
+# fault-VA latch the recorder keys on); the pool-s osfmk_arm_pmap.o carries `U entry_note_abt_wf`
+# with exactly ONE R_ARM_CALL relocation and ZERO wf literals (the pmap.c source edit DID compile
+# into the kernel pool - the 1012 pool-define hazard); with the FROZEN 1013 elf
+# (armed-d13-9cf2f15e) as a REQUIRED NEGATIVE CONTROL (xnu_live_abt_ x82, the 1013 symbols x4,
+# but the 1014 symbols x0 and the 1014 literals x0 - the 1014 change is NOT in the 1013 arm, so
+# the reader CAN fail); the 1013 witness, the 1012 apex, the 1011 (E-prime)/(A) witness, the
+# 1010/1009/1008/1007 witnesses, the 1006 freeze witness, the 1005 cadence witness, the 1004
+# abort trace (xnu_live_sleh_upc x1), the 1003 stall instrument and the 1002 six-word save set
+# asserted present (regressions).  The 996-1013 checkers rerun ON the 1014 image - the probe
+# checker-s ONE by-design frozen 20 B clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-29ec9e48 sha256=29ec9e489c010d178c10e911a5cd6ba21847af775722fb581df8f5299f73b3a7 bytes=6351956 file=xnu_arm_entry.bin role=1014a-flushwitness;xnu_arm_entry.bin
+set=armed-d13-29ec9e48 sha256=88bca13c733004be18f996617b10f54fe816a2e3dc7e1324bd7dbd8979cca07b bytes=7396280 file=xnu_arm_entry.elf role=1014a-flushwitness;xnu_arm_entry.elf
+set=armed-d13-29ec9e48 sha256=276d64491bf5063be798af303ef21e2eb880f80cc731c26f67bc96715d067d09 bytes=1912 file=xnu_arm_entry.h role=1014a-flushwitness;xnu_arm_entry.h
+set=armed-d13-29ec9e48 sha256=ca4a0641729347482220239618f52078a47a4f51d7bcf5b5ef01234a99fc71c0 bytes=2000 file=xnu_arm_entry-config.txt role=1014a-flushwitness;xnu_arm_entry-config.txt
+set=armed-d13-29ec9e48 sha256=c10c95945e1c90343bdfe7664e11a41d2c94f12feb3858aae5a2cff6d5045e1c bytes=3149 file=xnu_arm_entry-sources.txt role=1014a-flushwitness;xnu_arm_entry-sources.txt
+set=armed-d13-29ec9e48 sha256=2ff501f995aa7388c4fc87bce8d9272ae4fd3f4c9a5c023981606ed63dae66db bytes=6847364 file=stage90.bin role=1014a-flushwitness;stage90.bin
+set=armed-d13-29ec9e48 sha256=16c44c3123b12539a6c7a3ef7d0af61534f133fb2955c46c4b0b5eea757b6b46 bytes=6909436 file=stage90.elf role=1014a-flushwitness;stage90.elf
+set=armed-d13-29ec9e48 sha256=d01853cd134d82ba875d430d603db7adaf4b281c56dd10fd032d9e1dfd3dbd1d bytes=6850560 file=stage90.img role=1014a-flushwitness;stage90.img
+set=armed-d13-29ec9e48 sha256=39561289910655a29708c241b3a5e10da4e957d296d6ae911d1d7af9bf5b629e bytes=9371648 file=stage90-qcdt.img role=1014a-flushwitness;stage90-qcdt.img
+set=armed-d13-29ec9e48 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1014a-flushwitness;stage90_fixture.macho
+set=armed-d13-29ec9e48 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1014a-flushwitness;stage90-build-config.txt
+set=armed-d13-29ec9e48 sha256=a034602d689662aec5893a21505430e60593939ea5249d1bc222ebab983e597b bytes=560 file=SHA256SUMS.txt role=1014a-flushwitness;SHA256SUMS.txt
