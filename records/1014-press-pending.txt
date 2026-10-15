@@ -1,0 +1,18 @@
+1014 press (arm armed-d13-29ec9e48) — PRESS EXECUTED 2026-10-15 08:50 UTC; DEVICE DARK, RECOVERY PENDING.
+================================================================================
+ARM: armed-d13-29ec9e48 = 1013's verbatim switch set + STAGE90_XNU_FLUSH_WITNESS=1
+     (the superset: 1013c walker L2 XN fix rides entry_stubs.c + the TLB-flush witness).
+PRESS: `scripts/press_1014.sh` (fastboot boot ONLY; device 4a2fe00b; 33e80afe absent at gate time).
+  - gate preflight_boot_check.sh --allow-xnu-entry: rc 0
+  - card image (896 MiB iOS 7.1.2 HFSX rootfs) written to userdata head, read-back matched
+  - fastboot boot: 9152 KB sent, bytes unchanged (39561289910655a2...b629e)
+OUTCOME: the payload did NOT return within the 180 s window (runner exit 2 — normal for a RESIDENT
+  rung, exactly as 1013b behaved). USB console reader captured EMPTY (the payload never idles).
+  The device is now DARK (no adb, no fastboot, no USB serial): it needs the OPERATOR'S POWER PRESS.
+NEXT: after the power press, recover with `scripts/recover_last_kmsg.sh --read-only` (Android up),
+  then adjudicate with BOTH:
+    python3 tools/check_1013_capture.py <capture>   # the leaf cell V1-V6
+    python3 tools/check_1014_capture.py <capture>   # the flush cell F1-F6
+  F-cell: wfkind 0=>F1 STALE_TLB_NO_FLUSH; 2&asid==ctx=>F2; 2&asid!=ctx=>F3; 1=>F4; all wfseen0=>F5;
+  no tail row=>F6.
+NOTHING WAS FLASHED. No brick. the arm still sits in out/stage90 as 29ec9e48.

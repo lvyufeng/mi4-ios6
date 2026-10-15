@@ -611,16 +611,22 @@ ABT4_VMF_ROW_KEYS = ("xnu_live_abt_vmfn", "xnu_live_abt_vmfret",
                      "xnu_live_abt_vmfva", "xnu_live_abt_vmfprot")
 ABT4_VMF_FIRST = 4                            # ABTPTE_VMF_FIRST in entry_stubs.c: the first-four rule
 # ---- THE ARM SHORT-DESCRIPTOR L2 SMALL-PAGE DECODE (docs/1010-pte-walk.md §3; ARM ARMv7-A A3.5).
-#      L2 descriptor bits[1:0]: 0b10 = small page (bit 0 = 0, bit 1 = 1).  For a small page:
-#        bit 0  XN  (Execute Never: 1 = no-exec)
+#      1013c CORRECTION: a small page is bits[1:0]=0b1X — bit 1 is the TYPE bit, bit 0 is XN
+#      (`L2_NX_BIT 0x1`, pmap.h:227) and is SET on every non-executable page
+#      (`pmap_vm_prot_to_page_flags`, pmap.c:1128). So the type test is BIT 1 ALONE (`& 0x2`), which
+#      is what the build tree does in 11 present-tests (`*p & 2U`, pmap.c:1542/:1694/:1725/:1744)
+#      and in its own enum `ARM_PTE_DESCRIPTOR_4K = 0x02 /* 0b1X */` (pmap.c:194). Testing `& 0x3 == 2`
+#      refused every XN/data page — the "ptel2=0 contradicts FS=15" anomaly the 1010→1013 ladder
+#      kept HARD-flagging. For a small page:
+#        bit 0  XN  (Execute Never: 1 = no-exec; NOT part of the type)
 #        bit 5  AP[0] (with AP[2]=bit 9 forms the access permission)
 #        bit 9  AP[2] (1 = READ-ONLY for BOTH user and... - with AP[0]/AP[1] this is APX)
 #        bits[11:6] AP[1:0] etc. (TEX/AP - we name the decisive two)
 #        bits[31:12] PA (the physical base of the 4 KiB page)
 #      THE DECISIVE CELL (design §2.2): APX = bit 9.  APX=1 => the page is USER READ-ONLY; a USER WRITE
 #      fault on it with vm_fault returning KERN_SUCCESS is the cs-taint/prot-downgrade path.
-ABT4_L2_TYPE_MASK = 0x3
-ABT4_L2_SMALL_PAGE = 0x2
+ABT4_L2_TYPE_MASK = 0x3       # kept for decoding/reporting the raw 2-bit type field
+ABT4_L2_SMALL_PAGE = 0x2      # the TYPE bit — test with `& ABT4_L2_SMALL_PAGE`, never `& 0x3 == 0x2`
 ABT4_L2_APX_BIT = 9                           # bit 9 = AP[2]/APX (1 = READ-ONLY)
 ABT4_L2_USER_BIT = 5                          # bit 5 = AP[0] (1 = user-access)
 ABT4_L2_NX_BIT = 0                            # bit 0 = XN (1 = no-exec)
@@ -1047,8 +1053,8 @@ WIT_WINDOW_OFF_MASK = 0x000FFFFF
 WIT_L1_TYPE_MASK = 0x3
 WIT_L1_COARSE = 0x1
 WIT_L1_PTE_MASK = 0xfffffc00          # L1_PTE_ADDR (pmap.h:202): the L2 TABLE base bits[31:10]
-WIT_L2_TYPE_MASK = 0x3
-WIT_L2_SMALL_PAGE = 0x2
+WIT_L2_TYPE_MASK = 0x3                # for DECODING/reporting the raw 2-bit field
+WIT_L2_SMALL_PAGE = 0x2               # the TYPE bit (bit 1); test `& WIT_L2_SMALL_PAGE` (0b1X)
 WIT_L2_APX_BIT = 9                    # AP[2] = L2_ACCESS_APX (1<<9): 1 = USER READ-ONLY
 WIT_L2_PA_MASK = 0xfffff000           # the 4 KiB page PA base (L2_ADDR_MASK)
 # ---- THE PROVENANCE GATE'S OWN VALUES (docs/1012-probe-keying.md §1.6).  The enter the storm's WRITE
@@ -3575,7 +3581,8 @@ def _l2_decode(l2):
     if l2 is None:
         return None
     return {"type": l2 & ABT4_L2_TYPE_MASK,
-            "small": (l2 & ABT4_L2_TYPE_MASK) == ABT4_L2_SMALL_PAGE,
+            # BIT 1 ALONE (0b1X: bit 0 is XN, set on every non-exec page) - see the decode note above.
+            "small": (l2 & ABT4_L2_SMALL_PAGE) != 0,
             "apx": (l2 >> ABT4_L2_APX_BIT) & 1,
             "user": (l2 >> ABT4_L2_USER_BIT) & 1,
             "nx": (l2 >> ABT4_L2_NX_BIT) & 1,
@@ -3703,20 +3710,21 @@ def s_abt4(cap):
         say("PASS", "x%d pte-ladder record(s) carry `%s` (the 1011-v2 (A) cell is in the image)" % (
             len(thr_rows), ABT4_PTETHR_KEY))
 
-    # ---- (abt4-3) THE L2 TYPE: every published `_ptel2` must carry an L2 SMALL-PAGE type (bits[1:0] ==
-    # 0b10).  A non-zero `_ptel2` whose type bits are NOT 0b10 means the walk read a section or a
-    # mismatched word - an INSTRUMENT defect (design §6 falsifier (g)).  A `_ptel2` == 0 is the walk's
+    # ---- (abt4-3) THE L2 TYPE: every published `_ptel2` must carry an L2 SMALL-PAGE type (BIT 1 set,
+    # i.e. bits[1:0] == 0b1X — bit 0 is XN, set on every non-exec page; see the decode note at
+    # ABT4_L2_SMALL_PAGE).  A non-zero `_ptel2` whose TYPE bit is clear means the walk read a 64K-large
+    # page (0b01) - an INSTRUMENT defect (design §6 falsifier (g)).  A `_ptel2` == 0 is the walk's
     # FAIL-OPEN return (the address was not a small-page L2 entry: the `_pteu`/`_ptettbr` say which) -
     # reported, not failed.
     nonzero = [r for r in rows if r["ptel2"] is not None and r["ptel2"] != 0]
-    bad_type = [r for r in nonzero if (r["ptel2"] & ABT4_L2_TYPE_MASK) != ABT4_L2_SMALL_PAGE]
+    bad_type = [r for r in nonzero if (r["ptel2"] & ABT4_L2_SMALL_PAGE) == 0]
     zero_l2 = [r for r in rows if r["ptel2"] == 0]
     if bad_type:
-        hard("x%d pte-ladder record(s) carry a `_ptel2` whose type bits[1:0] are NOT 0b10 (small page) "
-             "(first @:%d ptel2=%s type=0x%x) - the walk's descriptor read is mismatched, an INSTRUMENT "
-             "defect (design §6 falsifier (g))" % (
-                 len(bad_type), bad_type[0]["ln"], fmt(bad_type[0]["ptel2"]),
-                 bad_type[0]["ptel2"] & ABT4_L2_TYPE_MASK))
+        hard("x%d pte-ladder record(s) carry a `_ptel2` whose TYPE bit is clear (bits[1:0]=0x%x, not a "
+             "small page 0b1X) (first @:%d ptel2=%s) - the walk's descriptor read is mismatched, an "
+             "INSTRUMENT defect (design §6 falsifier (g))" % (
+                 len(bad_type), bad_type[0]["ptel2"] & ABT4_L2_TYPE_MASK,
+                 bad_type[0]["ln"], fmt(bad_type[0]["ptel2"])))
     else:
         say("PASS", "every nonzero `_ptel2` carries an L2 small-page type (bits[1:0] == 0b10, x%d rows)"
                     % len(nonzero))
@@ -4794,7 +4802,8 @@ def _wit_l1_is_coarse(l1):
 
 
 def _wit_l2_is_small(leaf):
-    return leaf is not None and (leaf & WIT_L2_TYPE_MASK) == WIT_L2_SMALL_PAGE
+    # BIT 1 ALONE: a small page is 0b1X (bit 0 = XN, set on every non-exec page). See ABT4_L2_SMALL_PAGE.
+    return leaf is not None and (leaf & WIT_L2_SMALL_PAGE) != 0
 
 
 def s_wit(cap):
@@ -4914,9 +4923,9 @@ def s_wit(cap):
                    len(apex_rows), len(walk_rows), len(sync_rows),
                    cap.family_count(WIT_W_NX_KEY), cap.family_count(WIT_K_NX_KEY)))
 
-    # ---- (wit-3) THE CONTROL IS READ FIRST (design §3).  W-SYNC walks a VA the boot itself mapped
-    # writable; the mechanism ("walk the split-selected table for a known-mapped VA and read its
-    # leaf") is SOUND on this device iff the control reads a valid, WRITABLE leaf.
+    # ---- (wit-3) THE CONTROL IS READ FIRST (design §3).  W-SYNC walks a VA the boot itself mapped;
+    # the mechanism ("walk the split-selected table for a known-mapped VA and read its leaf") is SOUND
+    # on this device iff the control reads a SELF-CONSISTENT translation for that VA.
     #
     # 1013 FIX: the control VA is `gPhysBase + 0x80000` = 0x80080000, which on this device is ABOVE the
     # TTBCR.N=2 split `0x40000000` - i.e. TTBR1 territory (the kernel's identity map lives in
@@ -4924,12 +4933,25 @@ def s_wit(cap):
     # row LABELS it (`_wctb` = 1).  So `wctb` is part of the control rule: a row that says
     # "TTBR0 answered" for a VA the split sends to TTBR1 is NOT the control the design describes.
     # A wrong control SHORT-CIRCUITS V1-V3.
+    #
+    # 1013c FIX - THE KNOWN-GOOD IS THE IDENTITY, NOT "WRITABLE".  The control VA 0x80080000 is inside
+    # the kernel's `__TEXT` ([xnu_entry_base 0x80000000, +0x60ec54)), an EXECUTABLE page the port maps
+    # USER-READ-ONLY - so `wcapx=1` on this row is the CORRECT value, and the old rule (`wcapx != 0` =>
+    # bad) demanded user-writability of a kernel-text page and so certified the walker by the WRONG
+    # property: it fired WITNESS_METHOD_BROKEN on a control that was in fact reading the right leaf.
+    # The boot maps this window PHYS==VIRT (identity), so the property that proves the walk is
+    # correct is `(wcleaf & 0xFFFFF000) == wcva`: the leaf's PA field must equal the VA that resolved
+    # it.  That is measured, not assumed - a walk with a wrong mask/table would land on a different
+    # page and this equality would fail.  `wck==1` (a valid small page answered - now with the type
+    # test fixed to `& 0x2`) and `wcoow==0` (in-window) still hold, and the L1 must be COARSE (a
+    # section L1 has no L2, so a leaf could not have been produced through it).
     sync_tail = [r for r in sync_rows
                  if r["wcnt"] is not None and r["wcnt"] >= WIT_TAIL_MIN_N]
     if sync_rows and not sync_tail:
         sync_tail = sync_rows[-8:]     # the storm may not have reached the tail - read what exists
     ctl_bad = []
     ctl_va_off_bad = []
+    ctl_ident_off = []
     for r in sync_tail:
         say("OBS", "  control @:%d wcnt=%s wcva=%s wck=%s wctb=%s wcl1=%s wcl2pa=%s wcleaf=%s "
                    "wcapx=%s wcoow=%s" % (
@@ -4937,12 +4959,27 @@ def s_wit(cap):
             fmt(r["wcl2pa"]), fmt(r["wcleaf"]), fmt(r["wcapx"]), fmt(r["wcoow"])))
         if r["wcva"] is not None and (r["wcva"] & WIT_WINDOW_OFF_MASK) != WIT_WINDOW_OFF:
             ctl_va_off_bad.append(r)
-        if r["wcoow"] == 1 or r["wck"] != 1 or r["wcapx"] != 0 or r["wctb"] != 1:
+        # THE IDENTITY KNOWN-GOOD: the leaf's PA field must equal the VA (phys==virt window).
+        if (r["wcva"] is not None and r["wcleaf"] is not None and r["wcleaf"] != 0
+                and (r["wcleaf"] & 0xFFFFF000) != (r["wcva"] & 0xFFFFF000)):
+            ctl_ident_off.append(r)
+        # A COARSE L1 is the only L1 that HAS an L2, so a leaf can only come through it.
+        if (r["wcoow"] == 1 or r["wck"] != 1 or r["wctb"] != 1
+                or not _wit_l1_is_coarse(r["wcl1"])):
             ctl_bad.append(r)
     if ctl_va_off_bad:
         say("OBS", "x%d control row(s) do not carry `_wcva` low bits == 0x%X (ABTWS_WINDOW_OFF): the "
                    "control VA moved - a SOURCE change, not a device reading" % (
                        len(ctl_va_off_bad), WIT_WINDOW_OFF))
+    if ctl_ident_off:
+        # The identity known-good FAILED: the walk resolved a different PA than the VA it was handed.
+        # That is the real "the method is broken" signal - a wrong mask/table - and it must short-
+        # circuit the verdict (the old `wcapx` rule fired here spuriously on kernel-text pages).
+        ctl_bad.extend(ctl_ident_off)
+        say("OBS", "x%d control row(s) FAIL the identity known-good (`wcleaf & 0xFFFFF000 != wcva`): "
+                   "the walk resolved a different PA than the VA - first @:%d wcva=%s wcleaf=%s" % (
+                       len(ctl_ident_off), ctl_ident_off[0]["ln"], fmt(ctl_ident_off[0]["wcva"]),
+                       fmt(ctl_ident_off[0]["wcleaf"])))
     if not sync_rows:
         WIT_CONTROL_OK = None
         say("OBS", "NO W-SYNC control row in this log: the witness method CANNOT be certified - the "
@@ -4954,16 +4991,24 @@ def s_wit(cap):
         first = ctl_bad[0]
         say("READING", "THE W-SYNC CONTROL IS WRONG @:%d: wck=%s (want 1), wctb=%s (want 1 = the "
                        "high-window TTBR1 table answered, where the kernel's identity map is built), "
-                       "wcapx=%s (want 0), wcoow=%s (want 0) - the witness method does NOT produce a "
-                       "correct writable leaf for a known-good mapped VA on this device" % (
-                           first["ln"], fmt(first["wck"]), fmt(first["wctb"]), fmt(first["wcapx"]),
-                           fmt(first["wcoow"])))
+                       "wcl1=%s (want COARSE), wcoow=%s (want 0), and the identity known-good "
+                       "`wcleaf & 0xFFFFF000 == wcva` = %s - the witness method did NOT produce a "
+                       "self-consistent translation for a known-good VA on this device" % (
+                           first["ln"], fmt(first["wck"]), fmt(first["wctb"]), fmt(first["wcl1"]),
+                           fmt(first["wcoow"]),
+                           "ok" if (first["wcva"] is not None and first["wcleaf"] is not None
+                                    and (first["wcleaf"] & 0xFFFFF000) == (first["wcva"] & 0xFFFFF000))
+                           else "FAIL"))
     else:
         WIT_CONTROL_OK = True
-        say("PASS", "THE W-SYNC CONTROL IS SOUND: x%d control row(s) read a valid, WRITABLE leaf for a "
-                    "VA the boot mapped itself (e.g. wcleaf=%s wcapx=0 wctb=1) - the walk-the-"
-                    "split-selected-table-and-read-the-leaf method works on THIS device" % (
-                        len(sync_tail), fmt(sync_tail[-1]["wcleaf"])))
+        say("PASS", "THE W-SYNC CONTROL IS SOUND: x%d control row(s) read a SELF-CONSISTENT "
+                    "translation for a VA the boot mapped itself - a COARSE L1, a valid small-page "
+                    "leaf, and the IDENTITY known-good `wcleaf & 0xFFFFF000 == wcva` (the boot maps "
+                    "this window phys==virt; 1013c replaced the old `wcapx==0` demand, which wrongly "
+                    "required user-writability of a kernel `__TEXT` page) - first wcleaf=%s wcapx=%s "
+                    "wctb=1. The walk-the-split-selected-table-and-read-the-leaf method works on THIS "
+                    "device" % (
+                        len(sync_tail), fmt(sync_tail[0]["wcleaf"]), fmt(sync_tail[0]["wcapx"])))
 
     # ---- (wit-4) THE STALE-ZERO GUARDS (the task's HARD-anomaly requirement, design §3 V6).
     #      (a) W-APEX: a leaf of 0 under a PRESENT COARSE L1 is impossible AFTER the enter.
@@ -5000,9 +5045,9 @@ def s_wit(cap):
     for lbl, tag_k, leaf_k, rows in (("W-WALK", "wk", "wkleaf", walk_rows),
                                      ("W-SYNC", "wck", "wcleaf", sync_rows)):
         for r in rows:
-            if r[tag_k] == 0 and r[leaf_k] is not None and (r[leaf_k] & WIT_L2_TYPE_MASK) == WIT_L2_SMALL_PAGE:
+            if r[tag_k] == 0 and r[leaf_k] is not None and (r[leaf_k] & WIT_L2_SMALL_PAGE) != 0:
                 stale.append((lbl, r["ln"], "the location tag reads 0 yet the row's OWN published "
-                                            "`_%s`=%s IS a valid small page (bits[1:0]=0b10)" % (
+                                            "`_%s`=%s IS a valid small page (type bit set, 0b1X)" % (
                                                   leaf_k, fmt(r[leaf_k]))))
     if stale:
         tag, ln, detail = stale[0]
