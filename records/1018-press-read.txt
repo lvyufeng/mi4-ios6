@@ -1,0 +1,102 @@
+1018 PRESS-READ — the cap-exempt undef witness FIRED and RE-TRAPPED: U-FIRES-LOOPS
+arm armed-d13-c2168632, pressed 2026-10-15 18:14, capture recovered 18:46
+(a READ of the recovered capture; no build, no press, no device action in THIS step)
+
+CAPTURE
+  out/stage90/captures/recovered-unknown-arm-20261015-184618-last_kmsg.txt
+  (2,097,160 bytes, 50,614 lines, terminal marker `No errors detected` PRESENT)
+  recovered by scripts/recover_last_kmsg.sh --read-only via the watcher, the moment Android
+  returned on its own after the operator's power press.
+
+--------------------------------------------------------------------------------
+## 0. THE FINDING IN ONE LINE
+
+**The undef witness FIRED 8183 times, every entry at ONE invariant USER pc that is exactly 1017's
+`udf #254`, and the run then stopped with that loop filling the console to its 2 MB bound.** The
+handler RETURNS and RE-TRAPS. This is 1017's mechanism (i) — the same shape as 1010-1015, now at a
+`udf` in USER mode, in pid 1's own allocator.
+
+--------------------------------------------------------------------------------
+## 1. THE READING, BY VALUE
+
+    xnu_live_undef_seq      1 .. 0x1ff7   (8183 entries)
+    xnu_live_undef_user_seq 1 .. 0x1ff7   (LOCKSTEP — every entry is USER mode)
+    xnu_live_undef_pc       0x39cdfa54    (all 64 detail rows read the SAME pc)
+    xnu_live_undef_spsr     0x20000030    (USR/Thumb — Apple's user mode test)
+    xnu_live_undef_user     0x00000001    (user, on every detail row)
+    xnu_live_undef_lr       0x00000007    (unchanged)
+
+  64 detail rows (`_pc`/`_lr`/`_spsr`/`_user`) — the `UNDEF_LIVE_MAX` band under
+  `STAGE90_XNU_UNDEF_DIRECT` (64u). `_seq` and `_user_seq` keep climbing past the band, which is the
+  design's own re-trap criterion (docs/1018-design.md §1.1: "`_seq` climbing with an invariant `_pc`
+  at the frontier is a re-trap loop").
+
+## 2. THE PC IS 1017's `udf #254`, BY ARITHMETIC
+
+1017 (docs/1017-shared-cache-naming.md) named the instruction un-slid:
+  file offset 0x0c23aa54 of the dyld shared cache (artifact base 0x2c000000)
+  = libsystem_platform.dylib `__os_alloc_slow`+0x108 = Thumb `udf #254` (bytes `fede`).
+
+This run's slide, from the capture's OWN mapping row (:4105 `cache mapping 0 va=2daa5000`):
+  base = 0x2daa5000 = 0x2c000000 + 0x01aa5000
+  base + 0x0c23aa54 = 0x39cdfa54  ==  xnu_live_undef_pc   (EXACT)
+
+1017's own run's frontier 0x3b04aa54 implies ITS slide was 0x2e10000; this run's is 0x01aa5000.
+**Two different runs, two different slides, the SAME file offset, the SAME instruction.** 1017's
+static identification is CONFIRMED dynamically: the CPU does take the `udf #254` exception, in USER
+mode, at this instruction.
+
+## 3. THE ARM WORKED — the witness survived the cap
+
+    capture :29961   xnu_live_capped=0x00006000   (the capped channel stopped HERE, ENTRY_LIVE_CAP)
+    capture :33993   xnu_live_undef_seq=0x00000001 (the FIRST direct undef record — 4000 lines LATER)
+    capture :50612   xnu_live_undef_user_seq=0x00001ff7 (the LAST record in the console)
+
+Before 1018 the same recorder read ZERO here (records/1018-recon.txt). With the switch on it read
+8183 — all on the DIRECT channel, past the cap. The arm did exactly what it was built to do.
+
+## 4. WHAT THE SAMPLER SAW — and why it is NOT the decider
+
+    xnu_live_stall_pc   10 samples, last at capture :32958 (= BEFORE the loop begins at :33993)
+    distinct pcs        0x2be88420, 0x80010219, 0x8001024d, 0x8001cd5d, 0x8001ce41 (all KERNEL mode)
+    last tick            xnu_live_tick_irq=0x00000080 at :28759 — the tick ladder stops BEFORE the loop
+
+The sampler fires on the timer tick's powers-of-two ladder and reads the INTERRUPTED context
+(src/platform/darwin13/pe_msm8974.c:529). Once the CPU is wedged in the USER-mode trap loop the tick
+no longer runs, so the sampler's last sample PREDATES the loop and reads a kernel pc. **The sampler
+cannot witness this trap** — which is why the reader must decide the loop from `_seq`/`_pc`, exactly
+as design §1.1 says, and not from a sampler intersection.
+
+## 5. THE READER DEFECT THIS RUN EXPOSED (fixed this step)
+
+tools/check_1018_capture.py first returned **U-SILENT** on this capture — a falsification of 1017
+produced by the READER, not the device. Its loop test required the witness pc to intersect the STALL
+SAMPLER's pcs; when it did not, it fell to U-SILENT. That is [[mi4-a-claim-in-a-comment-is-not-a-check]]
+in the reader: the design's §1.1 criterion is `_seq` climbing over an invariant `_pc`, and the sampler
+was only ever corroboration. The checker now:
+  * decides U-FIRES-LOOPS from `_seq` climbing (>=2) over a SINGLE invariant detail `_pc`;
+  * reports the sampler intersection as COUNTS in the cell, not as the decider;
+  * keeps U-SILENT reachable only when the witness did NOT loop AND never read a sampled pc.
+Two self-test cases lock it: `U-FIRES-LOOPS-nosampler` (a climbing invariant pc the sampler never
+reads -> LOOPS) and `U-SILENT-single` (ONE such pc, no climb -> SILENT). Selftest PASS; make check 0.
+
+## 6. THE FRONTIER, NAMED
+
+**pid 1 (`launchd`) is re-executing the Thumb `udf #254` at `__os_alloc_slow`+0x108, in USER mode,
+8183 published times** — `sleh_undef`'s user arm is NOT terminating the process. The `udf` is reached
+only when `__os_alloc_slow`'s `_mach_vm_map` returns non-zero (1017 §3.2), so the allocator's ring
+mapping is being REFUSED and then the trap path loops instead of delivering `EXC_BAD_INSTRUCTION`.
+
+**Next rung (1019):** witness `_mach_vm_map`'s RETURN VALUE and its map ARGUMENTS as pid 1's
+allocator makes them — the SHREG/`map_file` territory of 998. Two sub-questions: (a) WHY does the map
+fail; (b) WHY does `sleh_undef`'s user arm return-and-re-trap instead of `exception_triage`.
+Design: docs/1019-design.md (in progress).
+
+## 7. WHAT THIS DOES AND DOES NOT CLAIM
+
+- **CONFIRMS:** 1017's `udf #254` fires dynamically; the arm's direct channel works; the mech is a
+  return-and-re-trap LOOP (1017 §3.3 mechanism (i)), not a one-shot transition and not a crash.
+- **does NOT claim:** iOS 7 userspace launched. The boot reached pid 1's allocator and wedged there.
+- **does NOT claim** the loop is the run's ONLY frontier — it is where the console FILLED (2 MB),
+  which is a cap, not necessarily the device's last act. But it is the last act RECORDED, and it is
+  the process the design was built to name.

@@ -253,20 +253,16 @@ def adjudicate(cap):
                                 "CAP FIRST (the 1000 lesson); an OLD capture whose witness was still "
                                 "on the capped channel reads here as U-CTL, never as U-SILENT.")
 
-    # The pcs the undef fires at, and the pcs the sampler reads (both THIS run's VAs - the slide is
-    # never assumed; a slid pc compared against a literal would name the wrong instruction).
+    # The pcs the undef witness fires at, and (as CORROBORATION ONLY) the pcs the sampler reads.
+    # Both are THIS run's VAs - the slide is never assumed; a slid pc compared against a literal
+    # would name the wrong instruction ([[mi4-measurement-defects]]).
     undef_pcs = {r["pc"] for r in rows if r["pc"] is not None}
     sampled_pcs = {s["pc"] for s in stalls if s["pc"] is not None}
+    max_seq = rows[-1]["seq"] if rows else 0
 
-    if not (undef_pcs & sampled_pcs):
-        return verdict("U-SILENT", "1017's static identification is CONTRADICTED: the direct "
-                                   "witness is live and fired, but never at a pc the sampler reads "
-                                   "(undef pcs %s vs sampled pcs %s). The sampler reads pc=%s but "
-                                   "the CPU is not taking an undefined-instruction exception on it."
-                      % (", ".join(sorted(C15.fmt(p) for p in undef_pcs)),
-                         ", ".join(sorted(C15.fmt(p) for p in sampled_pcs)), C15.fmt(wedge_pc)))
+    # The witness's DETAIL pcs are INVARIANT iff every row that carries a pc reads the SAME one.
+    invariant_pc = (len(undef_pcs) == 1)
 
-    # The undef DID fire at a pc the sampler reads. Which of DIES / LOOPS / ONCE?
     band_pinned = rows[-1]["seq"] >= UNDEF_BAND and rows[-1]["pc"] is None
     if band_pinned:
         say("BAND", "the last undef seq (%d) is past UNDEF_LIVE_MAX (%d): the BAND may be the wall, "
@@ -280,22 +276,48 @@ def adjudicate(cap):
 
     n_at = len([r for r in rows if r["pc"] in sampled_pcs])
     if killed:
-        return verdict("U-FIRES-DIES", "the undef FIRED at a sampled pc AND the run has a "
-                                       "kill/exit marker -- XNU's sleh_undef user arm terminated "
-                                       "pid 1: the frontier is a CRASH, not a spin. Next rung = the "
-                                       "exception delivery.")
-    if wedged and wedge_pc in undef_pcs and n_at >= 2:
-        # Sampler pc frozen across ticks AND the undef re-fires there => the handler returns and
-        # re-traps.  The sampler's own reading rule (entry_stubs.c:4607-4623).
-        return verdict("U-FIRES-LOOPS", "the undef FIRED at the sampler's wedged pc %s (%d entries) "
-                                        "and the sampler did not move (tail run x%d) -- the handler "
+        return verdict("U-FIRES-DIES", "the undef FIRED and the run has a kill/exit marker -- XNU's "
+                                       "sleh_undef user arm terminated pid 1: the frontier is a "
+                                       "CRASH, not a spin. Next rung = the exception delivery.")
+
+    # **THE RE-TRAP LOOP IS NAMED BY THE DESIGN'S OWN CRITERION (docs/1018-design.md §1.1), NOT BY
+    # THE STALL SAMPLER.**  §1.1 says it in as many words: "`_seq` climbing with an invariant `_pc`
+    # at the frontier is a re-trap loop".  The sampler was only ever CORROBORATION, and the
+    # 2026-10-15 184618 run (arm c2168632) is the proof it CANNOT be the criterion: the sampler fires
+    # on the timer tick's powers-of-two ladder and reads the INTERRUPTED context (pe_msm8974.c:529),
+    # so every sample in that run is KERNEL mode and the last is capture :32958 - while the USER-mode
+    # trap loop begins at :33993 and runs to the end of the console.  Reading the sampler as the
+    # decider turned a proven 8183-entry re-trap loop at 1017's own `udf #254` into the false cell
+    # U-SILENT: [[mi4-a-claim-in-a-comment-is-not-a-check]] in the reader itself.  So a climbing `_seq`
+    # over an invariant detail pc IS the loop, sampler or no sampler.
+    if invariant_pc and max_seq >= 2:
+        return verdict("U-FIRES-LOOPS", "the undef FIRED at an INVARIANT pc %s and `_seq` climbed to "
+                                        "%d (design §1.1 - the re-trap criterion) -- the handler "
                                         "RETURNS and RE-TRAPS (1017 §3.3 mechanism (i)). Same shape "
-                                        "as 1010-1015, now at a udf in USER mode."
-                      % (C15.fmt(wedge_pc), n_at, tail_run))
-    return verdict("U-FIRES-ONCE", "the undef fired at a sampled pc (%d entries) but the sampler's "
-                                   "tail pc %s MOVES (tail run x%d, %d distinct pcs) -- the trap is "
-                                   "a TRANSITION; the wall is downstream, not here."
-                  % (n_at, C15.fmt(wedge_pc), tail_run, len(pcs)))
+                                        "as 1010-1015, now at a udf in USER mode. Sampler "
+                                        "corroboration: %d of %d detail entries at a sampled pc; "
+                                        "the sampler read %d sample(s), last pc %s."
+                      % (C15.fmt(next(iter(undef_pcs))), max_seq, n_at, len(rows), len(stalls),
+                         C15.fmt(wedge_pc)))
+
+    if not (undef_pcs & sampled_pcs):
+        # The witness fired, but NOT at the frontier the sampler reads and NOT as a loop.  This is the
+        # honest falsification §3 names - and it is reachable ONLY with the loop test above already
+        # having failed, so a real loop can never be misfiled here (the 184618 defect).
+        return verdict("U-SILENT", "1017's static identification is CONTRADICTED: the direct "
+                                   "witness is live and fired, but never at a pc the sampler reads "
+                                   "(undef pcs %s vs sampled pcs %s) and not as a climbing loop "
+                                   "(`_seq` max %d). The sampler reads pc=%s but the CPU is not "
+                                   "taking an undefined-instruction exception on it."
+                      % (", ".join(sorted(C15.fmt(p) for p in undef_pcs)),
+                         ", ".join(sorted(C15.fmt(p) for p in sampled_pcs)), max_seq,
+                         C15.fmt(wedge_pc)))
+
+    # The undef DID fire at a pc the sampler reads, but did not climb as a loop. Which of ONCE?
+    return verdict("U-FIRES-ONCE", "the undef fired at a sampled pc (%d entries, max `_seq` %d) but "
+                                   "the sampler's tail pc %s MOVES (tail run x%d, %d distinct pcs) "
+                                   "-- the trap is a TRANSITION; the wall is downstream, not here."
+                  % (n_at, max_seq, C15.fmt(wedge_pc), tail_run, len(pcs)))
 
 
 def self_test():
@@ -365,6 +387,30 @@ def self_test():
 
     # The SAME shape at a DIFFERENT pc: the reader must not hold a literal.
     want("no-literal", [ln.replace("0x3b04aa54", "0x3c0bbbbb") for ln in loops], "U-FIRES-LOOPS")
+
+    # **THE 2026-10-15 184618 REGRESSION GUARD (arm c2168632).**  A climbing `_seq` over an INVARIANT
+    # pc, where the sampler reads ONLY a kernel-mode pc elsewhere and NEVER the trap - because the
+    # sampler fires on the timer tick and reads the INTERRUPTED context, while this trap is USER mode
+    # after the last tick.  This is a RE-TRAP LOOP (design §1.1: "`_seq` climbing with an invariant
+    # `_pc`").  The reader that required a sampler intersection read all 8183 entries of that run as
+    # U-SILENT - a falsification of 1017 produced by the reader, not by the device.  The sampler's
+    # absence must NOT withhold the loop cell.
+    loop_nosampler = list(base) + [BOOT,
+        " xnu_live_undef_seq=0x00000001", " xnu_live_undef_pc=0x39cdfa54",
+        " xnu_live_undef_user=0x00000001",
+        " xnu_live_undef_seq=0x00000002", " xnu_live_undef_pc=0x39cdfa54",
+        " xnu_live_undef_user=0x00000001",
+        " xnu_live_undef_seq=0x00000003", " xnu_live_undef_pc=0x39cdfa54",
+        " xnu_live_stall_n=0x0000000b", " xnu_live_stall_pc=0x8001cd5d",
+        " xnu_live_stall_cpsr=0x60000113"]
+    want("U-FIRES-LOOPS-nosampler", loop_nosampler, "U-FIRES-LOOPS")
+
+    # ... and a SINGLE entry at that same out-of-sampler pc is NOT a loop: it is the honest
+    # U-SILENT (the witness fired once, the sampler never read it, `_seq` did not climb).
+    want("U-SILENT-single", list(base) + [BOOT,
+        " xnu_live_undef_seq=0x00000001", " xnu_live_undef_pc=0x39cdfa54",
+        " xnu_live_stall_n=0x0000000b", " xnu_live_stall_pc=0x8001cd5d",
+        " xnu_live_stall_cpsr=0x60000113"], "U-SILENT")
 
     # U-FIRES-ONCE: one undef at the frontier, then the sampler MOVES.
     once = list(base) + [BOOT,
