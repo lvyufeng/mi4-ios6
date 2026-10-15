@@ -15380,3 +15380,212 @@ set=armed-d13-9cf2f15e sha256=7a9e22d179762d1aecbf9bb8cdd2f123944049d81ea395131f
 set=armed-d13-9cf2f15e sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1013-ptewitness;stage90_fixture.macho
 set=armed-d13-9cf2f15e sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1013-ptewitness;stage90-build-config.txt
 set=armed-d13-9cf2f15e sha256=d1aa534e4c579c8432ca7e9814e622710acb83838a49941865458b6a26df79f5 bytes=560 file=SHA256SUMS.txt role=1013-ptewitness;SHA256SUMS.txt
+# armed-d13-124cd528  -  1013: THE LEAF-VALUE WITNESS - the leaf the pmap ACTUALLY writes, and the location
+# the MMU-s own walk finds it at (design docs/1013-design.md)
+# Switch set is 1012-s VERBATIM plus STAGE90_XNU_PTE_WITNESS=1 (PMP_ENTER, VME_PROT, ABT_PTE,
+# ABT_PC, ABT_FAR, ABT_SPAN, FREEZE_WITNESS, CADENCE, STALL, ABORT_TRACE, DYLD_WITNESS,
+# SHREG_PROBE, SHREG_WIRE, SHREG_GEOM, RESIDENT, USVC and SUBMAP_PMAP_SKIP all stay 1); the ENTRY
+# BIN moved (ffdc8ba1 -> 124cd528); the PAYLOAD moves (it embeds the entry blob; the 29 s watchdog
+# constant is 999-s, unchanged); the TREE does NOT move - 1013 has NO tree edit, NO stage driver and
+# NO new --wrap (the change is TWO src/ files: entry_stubs.c the four recorders
+# entry_note_abt_wleaf/walk/wsync/cur + g_abtpte_ptel2rec + g_abtpte_curva, entry_trace.c the four
+# declarations + the four call sites; it rides 1012-s --wrap=pmap_enter_options and the existing
+# --wrap=sleh_abort).
+#
+# WHY 1013 FOLLOWS 1012.  The 1012 press (arm armed-d13-ffdc8ba1, records/1012-press-read.txt)
+# MEASURED the apex BY VALUE: every TAIL row (ordinal >= 0x400) carries xnu_live_abt_pmpprot=0x3
+# (READ|WRITE) AND xnu_live_abt_pmppmap & 0xFFFFFF00 (0x81a86000) == xnu_live_abt_pmpttbr &
+# 0xFFFFFF00 - so the write ARRIVES at pmap_enter_options and the pmap writes the SAME L1 table the
+# MMU walks.  strip-above-the-apex (the last F1a candidate) is REFUTED BY MEASUREMENT.  Yet the
+# USER store still permission-faults (fsr=0x80f, FS=15 level-2, WnR=1) ~2.1 M times.  The ONE cell
+# nobody has read is the cell the fault is about: THE VALUE OF THE LEAF.  1013 reads it, three
+# ways, and changes nothing.
+#
+# THE 1013 PRESS PRE-REGISTRATION (frozen once embedded; deviations reported, not interpreted):
+# THE HEADLINE MUST be decided from the TAIL ROWS-OWN values (ordinal >= 0x400), NEVER on a
+# whole-run change count (the 1008/1009 measurement defect, not repeated).  THE DECISION TABLE
+# (docs/1013-design.md §3):
+#   V1  W-APEX leaf APX=0 (WRITABLE) at W-APEX-s own location AND W-WALK-s wkl2pa == wwl2pa =>
+#       LEAF_WRITABLE_STILL_FAULTS: the leaf IS writable in the table the pmap wrote and the MMU
+#       walks, yet the store still faults => a STALE TLB / a second table the TLB holds / the
+#       flush did not reach this CPU.  Next rung instruments pmap_flush_tlbs + the ASID at the
+#       fault.
+#   V2  W-APEX leaf APX=1 (READ-ONLY) at W-APEX-s own location AND wkl2pa == wwl2pa =>
+#       F1a_CONFIRMED_LEAF_DEFECT: the pmap-s write did NOT stick, or a SECOND writer re-RO-d the
+#       leaf.  Next rung instruments the second writer (pmap_page_protect etc.).
+#   V3  any readable W-APEX leaf AND wkl2pa != wwl2pa => IDENTITY_FAULT_L2: the apex writes one L2
+#       and the MMU walks another.  (1012 measured the L1 bases EQUAL, so the divergence is at the
+#       L2 - a pmap_expand hoist / a pm_l1_virt vs pm_l1_phys L2 mismatch.)
+#   V4  W-APEX present but wwnoproof=1 (pm_l1_phys != the live TTBR0 base at that row) =>
+#       APEX_NOT_PROOF: a by-value CONTRADICTION with 1012; REPORT it, do not conclude from it.
+#   V5  W-APEX absent (wwn == 0) yet the storm ran => NO_APEX_WITNESS: the enter never reached the
+#       wrapper; fall back to the tree instrument.
+#   V6  W-APEX leaf absent/0 while wwl1 is a COARSE descriptor => HARD (stale 0): a present L2 with
+#       no leaf is impossible for a correct walk - a MEASUREMENT defect, never a value.
+#   V0  THE PROVENANCE GATE (applied BEFORE V1-V3; the 1012 apex defect this rung must not inherit,
+#       docs/1012-probe-keying.md §1.4/§1.6).  EVERY TAIL W-APEX row must carry wwva == the storm-s
+#       far AND wwft == 0x3 (READ|WRITE) AND wwpatbl == 0 (the entered page is NOT a page-table
+#       page).  A row failing ANY of the three is a NULL CONTROL, NOT a "write reaches the apex for
+#       the faulting VA" reading: if EVERY tail row fails => APEX_OBSERVED_A_TABLE_PAGE (or
+#       APEX_WRONG_VA / APEX_WRONG_FAULT_TYPE): the 1012 cell-s real shape - every row carried
+#       pa=0x8421a (PA 0x8421a000), a PAGE-TABLE-PAGE install.  REPORT it; do NOT conclude V1/V2/V3
+#       from a table-page row.  V0 short-circuits V1-V3 exactly as the control does.
+#   V0-prime  THE WALK GATE (applied BEFORE V1-V3): the tail W-WALK row must carry wkstable == 1
+#       (the double-read AGREED).  wkstable == 0 => the L2 word MOVED between the two walks =>
+#       WALK_UNSTABLE_NULL, a NULL CONTROL: the location comparison V1/V2/V3 rest on was taken over
+#       a table that does not hold still.  V1-V3 withheld; REPORT it (a moving table under a
+#       faulting VA is itself a finding).  A MISSING wkstable (pre-double-read capture) does NOT gate.
+#   W-SYNC control wrong (wcoow=1 OR wck=0 OR wcapx != 0) => WITNESS_METHOD_BROKEN: the witness
+#       method itself is broken on this device (or the managed window is TTBR1 territory, which is
+#       the EXPECTED null-control outcome).  Report the measurement defect.  DO NOT CONCLUDE.
+# The W-SYNC control is read FIRST and short-circuits V1-V3 into WITNESS_METHOD_BROKEN, exactly as
+# the rung requires; the provenance gate V0 then short-circuits V1-V3 into APEX_*_TABLE_PAGE/
+# WRONG_VA/WRONG_FAULT_TYPE.  W-WALK also publishes xnu_live_abt_wkapex = "my leaf and the (A)
+# walk-s OWN recorded leaf agree" AND the DOUBLE-READ xnu_live_abt_wkleaf2 + xnu_live_abt_wkstable
+# (the L2 word read a SECOND time after a dsb): wkstable=1 => the zero is STABLE and no race with a
+# concurrent table write can explain it; wkstable=0 => the leaf is a NULL CONTROL (the table moved
+# between the reads).  This is the MEASUREMENT that settles 1012-s ptel2=0 HARD anomaly instead of
+# an inference.
+#
+# KEYS (the fixed keyspace, docs/1013-design.md §2): W-APEX wwn/wwl1/wwl2pa/wwleaf/wwapx/
+# wwnoproof/wwpa/wwpaok/wwva/wwft/wwpatbl/wwnx; W-WALK wkn/wk/wktb/wkl1/wkl2pa/wkleaf/wkleaf2/
+# wkstable/wkapx/wkoow/wkfsr/wkapex/wknx; W-SYNC wcnt/wcva/wck/wctb/wcl1/wcl2pa/wcleaf/wcapx/
+# wcoow + the raw TTBR words wctb0/wctb1.
+# No two probes share a key.
+#
+# VERIFIED BY VALUE (build_1013.sh): the image carries the 85 xnu_live_abt_ key literals and all 36
+# 1013 keys; the four recorders DEFINED T/t with exactly ONE call site each; the W-APEX call inside
+# __wrap_pmap_enter_options (which still calls <pmap_enter_options>, the pass-through) and W-WALK
+# NOT in it; with the FROZEN 1012 elf (armed-d13-ffdc8ba1) as the NEGATIVE CONTROL (xnu_live_abt_
+# x49, the 1012 symbols present, but the 1013 symbols x0 and the 1013 leaf literals x0 - the 1013
+# change is NOT in the 1012 arm); the 1012 apex, the 1011 (E-prime)/(A) witness, the 1010/1009/
+# 1008/1007 witnesses, the 1006 freeze witness, the 1005 cadence witness, the 1004 abort trace
+# (xnu_live_sleh_upc x1), the 1003 stall instrument and the 1002 six-word save set asserted present
+# (regressions).  The 996-1012 checkers rerun ON the 1013 image - the probe checker-s ONE by-design
+# frozen 20 B clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-124cd528 sha256=124cd52833592eaaac54dc002cf3c272a8813db04522a8ece8a730fb8376cfb5 bytes=6351956 file=xnu_arm_entry.bin role=1013-ptewitness;xnu_arm_entry.bin
+set=armed-d13-124cd528 sha256=6e3360c9aca183e771a12ffa359aeb73e7835eb7ddd79fbe0acd854b093a7ec6 bytes=7396020 file=xnu_arm_entry.elf role=1013-ptewitness;xnu_arm_entry.elf
+set=armed-d13-124cd528 sha256=276d64491bf5063be798af303ef21e2eb880f80cc731c26f67bc96715d067d09 bytes=1912 file=xnu_arm_entry.h role=1013-ptewitness;xnu_arm_entry.h
+set=armed-d13-124cd528 sha256=20347b919c231d54922ad0b8e09a9f01280e2bc37ce376b8eb4c5b56f415383f bytes=1972 file=xnu_arm_entry-config.txt role=1013-ptewitness;xnu_arm_entry-config.txt
+set=armed-d13-124cd528 sha256=a57e3bd450d48a1e22ee139291f5726b48f3df74eb946a5166476d7b19b6581a bytes=3149 file=xnu_arm_entry-sources.txt role=1013-ptewitness;xnu_arm_entry-sources.txt
+set=armed-d13-124cd528 sha256=ec253b0e8658b458693e76bbfcb39c067c7df88ddbc367c4c0d908aa768572ec bytes=6847364 file=stage90.bin role=1013-ptewitness;stage90.bin
+set=armed-d13-124cd528 sha256=b7b934adca857fdea1fd501543d0cc1d74e7ff76ebeb45d5b83ebb26a66c1dc2 bytes=6909436 file=stage90.elf role=1013-ptewitness;stage90.elf
+set=armed-d13-124cd528 sha256=2769b08b0bbc968333385f78dbd8ab891019cdb69f81763408ad3c9ac0ad7992 bytes=6850560 file=stage90.img role=1013-ptewitness;stage90.img
+set=armed-d13-124cd528 sha256=e650cd0264cb61b118f2d12bb7b22e54955005c689de0f14854d9d15a1f37711 bytes=9371648 file=stage90-qcdt.img role=1013-ptewitness;stage90-qcdt.img
+set=armed-d13-124cd528 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1013-ptewitness;stage90_fixture.macho
+set=armed-d13-124cd528 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1013-ptewitness;stage90-build-config.txt
+set=armed-d13-124cd528 sha256=ad3d030a0f7f660fd76c20c62719e62b98742331c28c29b36c0034bcffd0a640 bytes=560 file=SHA256SUMS.txt role=1013-ptewitness;SHA256SUMS.txt# armed-d13-9bf25f8f  -  1013: THE LEAF-VALUE WITNESS - the leaf the pmap ACTUALLY writes, and the location
+# the MMU-s own walk finds it at (design docs/1013-design.md)
+# Switch set is 1012-s VERBATIM plus STAGE90_XNU_PTE_WITNESS=1 (PMP_ENTER, VME_PROT, ABT_PTE,
+# ABT_PC, ABT_FAR, ABT_SPAN, FREEZE_WITNESS, CADENCE, STALL, ABORT_TRACE, DYLD_WITNESS,
+# SHREG_PROBE, SHREG_WIRE, SHREG_GEOM, RESIDENT, USVC and SUBMAP_PMAP_SKIP all stay 1); the ENTRY
+# BIN moved (ffdc8ba1 -> 9bf25f8f); the PAYLOAD moves (it embeds the entry blob; the 29 s watchdog
+# constant is 999-s, unchanged); the TREE does NOT move - 1013 has NO tree edit, NO stage driver and
+# NO new --wrap (the change is TWO src/ files: entry_stubs.c the four recorders
+# entry_note_abt_wleaf/walk/wsync/cur + g_abtpte_ptel2rec + g_abtpte_curva, entry_trace.c the four
+# declarations + the four call sites; it rides 1012-s --wrap=pmap_enter_options and the existing
+# --wrap=sleh_abort).
+#
+# WHY 1013 FOLLOWS 1012.  The 1012 press (arm armed-d13-ffdc8ba1, records/1012-press-read.txt)
+# MEASURED the apex BY VALUE: every TAIL row (ordinal >= 0x400) carries xnu_live_abt_pmpprot=0x3
+# (READ|WRITE) AND xnu_live_abt_pmppmap & 0xFFFFFF00 (0x81a86000) == xnu_live_abt_pmpttbr &
+# 0xFFFFFF00 - so the write ARRIVES at pmap_enter_options and the pmap writes the SAME L1 table the
+# MMU walks.  strip-above-the-apex (the last F1a candidate) is REFUTED BY MEASUREMENT.  Yet the
+# USER store still permission-faults (fsr=0x80f, FS=15 level-2, WnR=1) ~2.1 M times.  The ONE cell
+# nobody has read is the cell the fault is about: THE VALUE OF THE LEAF.  1013 reads it, three
+# ways, and changes nothing.
+#
+# THE 1013 PRESS PRE-REGISTRATION (frozen once embedded; deviations reported, not interpreted):
+# THE HEADLINE MUST be decided from the TAIL ROWS-OWN values (ordinal >= 0x400), NEVER on a
+# whole-run change count (the 1008/1009 measurement defect, not repeated).  THE DECISION TABLE
+# (docs/1013-design.md §3):
+#   V1  W-APEX leaf APX=0 (WRITABLE) at W-APEX-s own location AND W-WALK-s wkl2pa == wwl2pa =>
+#       LEAF_WRITABLE_STILL_FAULTS: the leaf IS writable in the table the pmap wrote and the MMU
+#       walks, yet the store still faults => a STALE TLB / a second table the TLB holds / the
+#       flush did not reach this CPU.  Next rung instruments pmap_flush_tlbs + the ASID at the
+#       fault.
+#   V2  W-APEX leaf APX=1 (READ-ONLY) at W-APEX-s own location AND wkl2pa == wwl2pa =>
+#       F1a_CONFIRMED_LEAF_DEFECT: the pmap-s write did NOT stick, or a SECOND writer re-RO-d the
+#       leaf.  Next rung instruments the second writer (pmap_page_protect etc.).
+#   V3  any readable W-APEX leaf AND wkl2pa != wwl2pa => IDENTITY_FAULT_L2: the apex writes one L2
+#       and the MMU walks another.  (1012 measured the L1 bases EQUAL, so the divergence is at the
+#       L2 - a pmap_expand hoist / a pm_l1_virt vs pm_l1_phys L2 mismatch.)
+#   V4  W-APEX present but wwnoproof=1 (pm_l1_phys != the live TTBR0 base at that row) =>
+#       APEX_NOT_PROOF: a by-value CONTRADICTION with 1012; REPORT it, do not conclude from it.
+#   V5  W-APEX absent (wwn == 0) yet the storm ran => NO_APEX_WITNESS: the enter never reached the
+#       wrapper; fall back to the tree instrument.
+#   V6  (1013b, A PAIRING CHECK, NOT A SHAPE CHECK) a row-s location tag reads 0 while ITS OWN
+#       published leaf is a valid small page (bits[1:0]=0b10) => HARD (self-contradictory 0).  The
+#       old shape rule (COARSE L1 + nonzero wwl2pa yet leaf 0) fired on the CORRECT shape of an
+#       ABSENT L2 slot - one L1 slot maps 256 L2 slots - and manufactured a stale 0 in the 1013
+#       press log out of two UNPAIRED rows (see V0-prime below).
+#   V0  THE PROVENANCE GATE - 1013b RETIRED IT AS AN ADJUDICATOR, KEPT IT AS A REPORT.  It used to
+#       withhold V1-V3 when every tail W-APEX row failed wwva == far / wwft == 0x3 / wwpatbl == 0.
+#       The 1013 press log killed that: its tail rows carry wwnoproof=1 (pm_l1_phys != the live
+#       TTBR0 base), so the by-value identity the gate would rest on is itself UNPROVEN - and a
+#       class decided over rows whose own identity cell says "not provably your fault" is a verdict
+#       over a NULL CONTROL.  The three cells stay PUBLISHED (W-APEX prints wwva/wwft/wwpatbl) and
+#       are PRINTED per row; the leaf classes no longer rest on them.
+#   V0-dprime  THE PAIRING (1013b) - what replaced the gate, applied BEFORE V1-V3.  The ladders
+#       fire on DIFFERENT EVENTS, so the same ordinal is NOT the same cell: the 1013 press log has
+#       W-APEX wwn=0x40000 reading wwleaf=0x8411e1bb at L2 index 0x67 for the storm VA
+#       (wwva=0x3d767000) while W-WALK wkn=0x80000 reads wkleaf=0 at L2 index 0x01 for a DIFFERENT
+#       VA (wkva=0x3d7801e8) - same wkl2pa=0x841bf000, DIFFERENT SLOT.  W-WALK now publishes ITS OWN
+#       VA (xnu_live_abt_wkva, 1013b) exactly as W-APEX publishes wwva, so a pair is compared ONLY
+#       when both name one cell: same VA AND same L1 AND same L2 table.  A leaf difference at ONE
+#       cell => PAIRED_CELL_DISAGREES - a REAL finding (a second writer re-RW/RO-d or cleared the
+#       slot between the enter and the re-abort), never a stale zero.  No paired row => the walk
+#       side is a READING IN ITS OWN RIGHT, never a comparison partner.
+#   V0-prime  THE WALK GATE (applied BEFORE V1-V3): the tail W-WALK row must carry wkstable == 1
+#       (the double-read AGREED).  wkstable == 0 => the L2 word MOVED between the two walks =>
+#       WALK_UNSTABLE_NULL, a NULL CONTROL: the location comparison V1/V2/V3 rest on was taken over
+#       a table that does not hold still.  V1-V3 withheld; REPORT it (a moving table under a
+#       faulting VA is itself a finding).  A MISSING wkstable (pre-double-read capture) does NOT gate.
+#   W-SYNC control wrong (wcoow=1 OR wck=0 OR wcapx != 0) => WITNESS_METHOD_BROKEN: the witness
+#       method itself is broken on this device (or the managed window is TTBR1 territory, which is
+#       the EXPECTED null-control outcome).  Report the measurement defect.  DO NOT CONCLUDE.
+# The W-SYNC control is read FIRST and short-circuits V1-V3 into WITNESS_METHOD_BROKEN, exactly as
+# the rung requires; the provenance gate V0 then short-circuits V1-V3 into APEX_*_TABLE_PAGE/
+# WRONG_VA/WRONG_FAULT_TYPE.  W-WALK also publishes xnu_live_abt_wkapex = "my leaf and the (A)
+# walk-s OWN recorded leaf agree" AND the DOUBLE-READ xnu_live_abt_wkleaf2 + xnu_live_abt_wkstable
+# (the L2 word read a SECOND time after a dsb): wkstable=1 => the zero is STABLE and no race with a
+# concurrent table write can explain it; wkstable=0 => the leaf is a NULL CONTROL (the table moved
+# between the reads).  This is the MEASUREMENT that settles 1012-s ptel2=0 HARD anomaly instead of
+# an inference.
+#
+# KEYS (the fixed keyspace, docs/1013-design.md §2): W-APEX wwn/wwl1/wwl2pa/wwleaf/wwapx/
+# wwnoproof/wwpa/wwpaok/wwva/wwft/wwpatbl/wwnx; W-WALK wkn/WKVA/wk/wktb/wkl1/wkl2pa/wkleaf/wkleaf2/
+# wkstable/wkapx/wkoow/wkfsr/wkapex/wknx; W-SYNC wcnt/wcva/wck/wctb/wcl1/wcl2pa/wcleaf/wcapx/
+# wcoow + the raw TTBR words wctb0/wctb1.
+# No two probes share a key.
+#
+# VERIFIED BY VALUE (build_1013.sh): the image carries the 86 xnu_live_abt_ key literals and all 37
+# 1013 keys; the four recorders DEFINED T/t with exactly ONE call site each; the W-APEX call inside
+# __wrap_pmap_enter_options (which still calls <pmap_enter_options>, the pass-through) and W-WALK
+# NOT in it; with the FROZEN 1012 elf (armed-d13-ffdc8ba1) as the NEGATIVE CONTROL (xnu_live_abt_
+# x49, the 1012 symbols present, but the 1013 symbols x0 and the 1013 leaf literals x0 - the 1013
+# change is NOT in the 1012 arm); the 1012 apex, the 1011 (E-prime)/(A) witness, the 1010/1009/
+# 1008/1007 witnesses, the 1006 freeze witness, the 1005 cadence witness, the 1004 abort trace
+# (xnu_live_sleh_upc x1), the 1003 stall instrument and the 1002 six-word save set asserted present
+# (regressions).  The 996-1012 checkers rerun ON the 1013 image - the probe checker-s ONE by-design
+# frozen 20 B clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-9bf25f8f sha256=9bf25f8f4571481518f95796d801426574c9a4138fe361ccaae86873ca186192 bytes=6351956 file=xnu_arm_entry.bin role=1013-ptewitness;xnu_arm_entry.bin
+set=armed-d13-9bf25f8f sha256=3e9f0b9c41b4e1785c4f9af6a1abbced5a5c5a13c49933df58f2bfaa63801559 bytes=7396020 file=xnu_arm_entry.elf role=1013-ptewitness;xnu_arm_entry.elf
+set=armed-d13-9bf25f8f sha256=276d64491bf5063be798af303ef21e2eb880f80cc731c26f67bc96715d067d09 bytes=1912 file=xnu_arm_entry.h role=1013-ptewitness;xnu_arm_entry.h
+set=armed-d13-9bf25f8f sha256=a857a35ec121d117866238006dab6c7e5c8a26f969856cdc9921edc6e412ff93 bytes=1972 file=xnu_arm_entry-config.txt role=1013-ptewitness;xnu_arm_entry-config.txt
+set=armed-d13-9bf25f8f sha256=3bc00b58ed9e2b9c32fa7f6cfc54913c603fcedadb1d2aebf1c22b97dc4adc2d bytes=3149 file=xnu_arm_entry-sources.txt role=1013-ptewitness;xnu_arm_entry-sources.txt
+set=armed-d13-9bf25f8f sha256=c31b853b957868e08ec32fb11c796cc83e3245935ce221323410c51472534bf6 bytes=6847364 file=stage90.bin role=1013-ptewitness;stage90.bin
+set=armed-d13-9bf25f8f sha256=4061405194c106472be2d1c1031397172e11d2dc37335b866c6424fecd8ac532 bytes=6909436 file=stage90.elf role=1013-ptewitness;stage90.elf
+set=armed-d13-9bf25f8f sha256=3c2cdf2d4aff0446341e071cd2f0760bfce425463fa36f9bd48b16884bef1350 bytes=6850560 file=stage90.img role=1013-ptewitness;stage90.img
+set=armed-d13-9bf25f8f sha256=b18494150c1bc37e7c248967fb0469f6aa723d70962406c054ae35a966cf64fe bytes=9371648 file=stage90-qcdt.img role=1013-ptewitness;stage90-qcdt.img
+set=armed-d13-9bf25f8f sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1013-ptewitness;stage90_fixture.macho
+set=armed-d13-9bf25f8f sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1013-ptewitness;stage90-build-config.txt
+set=armed-d13-9bf25f8f sha256=dca3808b9ca5db77ffee771ffa98027807b5510f59dcf50956d0d6137dbf949d bytes=560 file=SHA256SUMS.txt role=1013-ptewitness;SHA256SUMS.txt

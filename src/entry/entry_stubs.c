@@ -2192,6 +2192,20 @@ static uint32_t g_abtpte_walk_mapok;    /* 1 = a section was installed (0 = refu
 static uint32_t g_abtpte_walk_slot;     /* the slot_before of that install (0 = the slot was free) */
 static uint32_t g_abtpte_walk_winbase;  /* the window base the walk bounded with (gPhysBase) */
 static uint32_t g_abtpte_walk_winlen;   /* the window length the walk bounded with (mem_size) */
+#if defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+/*
+ * 1013 - WHICH TABLE ANSWERED.  The walker selects its table by the TTBCR.N split, so a VA at/above
+ * `2^(32-N)` is walked via TTBR1.  1013's control (W-SYNC) uses a VA in the boot's identity window
+ * (`gPhysBase + 0x80000` = 0x80080000), which is ABOVE this port's N=2 split `0x40000000` - i.e.
+ * TTBR1 territory - because the kernel's identity/managed tables are built into `cpu_ttb`, the table
+ * TTBR1 points at (`arm_vm_init.c:388/391` build them into `phys_to_virt(cpu_ttb)`, and `cpu_ttb` is
+ * the ONE table `set_mmu_ttb`/`set_mmu_ttb_alt` write).  So the control must be read THROUGH TTBR1,
+ * and the row must SAY SO rather than let the reader infer it: `*out_ttbr0_used` is the legacy name
+ * for "a table answered a leaf" (pinned by the 1010/1011/1012 build assertions - [[mi4-one-value-
+ * two-definitions]]), and this cell is the DISAMBIGUATOR: 1 = that table was TTBR1, 0 = TTBR0.
+ */
+static uint32_t g_abtpte_walk_tt1;      /* 1 = this walk answered from TTBR1 (the high window) */
+#endif
 
 /*
  * 1010c - reach ONE 32-bit L2 word through a temporary 1 MB section. Returns the raw word, or 0 if
@@ -2257,9 +2271,15 @@ stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used
 {
     uint32_t ttbr0, ttbcr, n, base, l1e, l2base, l2e;
     uintptr_t l1p, l2p;
+#if defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+    uint32_t ttbr1;                               /* 1013: the high-window table (only under the witness) */
+#endif
 
     if (out_l1_desc != 0)    *out_l1_desc = 0u;
     if (out_ttbr0_used != 0) *out_ttbr0_used = 0u;
+#if defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+    g_abtpte_walk_tt1 = 0u;                       /* 1013: this walk's own "TTBR1 answered" reading */
+#endif
 
     __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));   /* TTBR0 (pmap.c:1295) */
     __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));   /* TTBCR (trap.c:453) */
@@ -2268,16 +2288,37 @@ stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used
 
     /*
      * The hardware split: TTBCR.N = n means TTBR0 owns [0, 2^(32-n)). This port programs N=2
-     * (`set_mmu_ttbcr(2)`, arm_vm_init.c:475), so TTBR0 owns [0, 0x40000000) and TTBR1 owns the rest.
-     * A VA below the split is walked via TTBR0; one at/above it via TTBR1, which this instrument does
-     * not read (every address it is about is below the split - `far=0x9a000`).
+     * (`set_mmu_ttbcr(2)`, arm_vm_init.c:475), so TTBR0 owns [0, 0x40000000) and TTBR1 owns the rest
+     * [0x40000000, 4 GiB). A VA below the split is walked via TTBR0; one at/above it via TTBR1.
+     *
+     * 1013 READS THE HIGH WINDOW.  Through 1011 the instrument was TTBR0-only because every address it
+     * was about (`far=0x9a000`/`0x2e000`) is below the split.  1013's CONTROL (W-SYNC) is the FIRST
+     * reading that is not: the boot's identity window is `[gPhysBase, gPhysBase+gMemSize)` = 0x80000000+,
+     * which is ABOVE the split.  The kernel's identity/managed tables are built into `cpu_ttb` - the
+     * ONE table TTBR1 points at (`arm_vm_init.c:388/391` + `set_mmu_ttb_alt(cpu_ttb)` at :474) - so the
+     * control's leaf is readable THROUGH TTBR1 and is REFUSED by a TTBR0-only walk.  The high-window
+     * branch is therefore armed under the SAME switch that owns the control, and the answer is labelled
+     * (`g_abtpte_walk_tt1`) rather than quietly re-attributed to TTBR0.  The read is BOUNDED exactly
+     * like the low one (both derefs against [gPhysBase, gPhysBase+mem_size)), so it can never fault.
      */
     if (n == 0u)
         base = ttbr0;                             /* N=0: TTBR0 answers every address */
     else if (va < (1u << (32u - n)))
         base = ttbr0;                             /* the low window */
-    else
+    else {
+#if defined(STAGE90_XNU_PTE_WITNESS) && STAGE90_XNU_PTE_WITNESS
+        /*
+         * 1013 reads the high window through TTBR1 (see the block comment above).  The two TTBR0
+         * branches are spelled ONCE, outside this guard, so the 1010 mask/selection assertions (which
+         * count the TTBR0 selection in the walk body) see the SAME two they always did.
+         */
+        __asm__ volatile ("mrc p15, 0, %0, c2, c0, 1" : "=r"(ttbr1));   /* TTBR1 (trap.c:452) */
+        base = ttbr1;
+        g_abtpte_walk_tt1 = 1u;
+#else
         return 0u;                                /* the high window (TTBR1) - out of scope */
+#endif
+    }
 
     /*
      * THE BASE MASK IS `2^(14 - N)`, NOT A CONSTANT - 1011's outcome. A TTBR's table is 2^(14 - n)
@@ -2777,7 +2818,8 @@ entry_note_abt_wr(uint32_t site, uint32_t va, uint32_t prot)
  *            read is NOT provably the live one (1012's identity cell measured them EQUAL, so this is
  *            a NULL CONTROL row, never a silently re-attributed value - design §2 V4).
  *   (W-WALK) `entry_note_abt_walk` - from `__wrap_sleh_abort`, beside the 1010 `entry_note_abt_pte`
- *            call. Walks the LIVE TTBR0 for the storm's own `far`, publishes the L1/L2-base/leaf and
+ *            call. Walks the LIVE TTBR0 for the storm's own `far`, publishes THE VA IT WALKED
+ *            (`_wkva`, 1013b), the L1/L2-base/leaf and
  *            the location tag `_wk` (1 = a valid small-page leaf answered), the window verdict
  *            `_wkoow`, the `fsr` it was called with (the FS=15 identity), and `_wkapex` - "the (A)
  *            walk's OWN recorded leaf and W-WALK's leaf are the SAME value".  `_wkapex` is the
@@ -3006,6 +3048,18 @@ entry_note_abt_walk(uint32_t va, uint32_t fsr)
 
     if (onladder) {
         entry_write_kv("xnu_live_abt_wkn",    n);      /* the ordinal (lockstep with (A)'s `_pten`) */
+        /*
+         * THE VA THIS ROW WALKED - the W-WALK twin of W-APEX's `_wwva` (1013b).  Without it the row
+         * is not SELF-IDENTIFYING: a reader can see `_wkl1`/`_wkl2pa` but cannot say whether W-WALK
+         * and W-APEX (same ordinal) walked the SAME L2 SLOT.  The 1013 press log is exactly that
+         * case: W-APEX publishes `_wwleaf`=0x8411e1bb at `_wwl2pa`=0x841bf000 for the storm's VA,
+         * W-WALK publishes `_wkleaf`=0 at the SAME `_wkl2pa`=0x841bf000 - two readings of ONE slot
+         * that cannot be told apart from two readings of two slots in the same 1 MB section (one L1
+         * slot maps 256 L2 slots).  With `_wkva` published the checker pairs BY LOCATION
+         * (`va` + `l1` + `l2pa`), so "nonzero in the apex, zero in the walk" becomes a REAL V1-class
+         * leaf reading instead of a "stale 0" shrug ([[mi4-one-value-two-definitions]]).
+         */
+        entry_write_kv("xnu_live_abt_wkva",   va);     /* THE VA WALKED (= the abort's `far`) */
         entry_write_kv("xnu_live_abt_wk",     u);      /* LOCATION TAG: 1 = a valid small-page leaf
                                                         * answered (TTBR0 below the split, L1 COARSE,
                                                         * leaf in-window or aliased); 0 = nothing */
@@ -3041,7 +3095,7 @@ entry_note_abt_walk(uint32_t va, uint32_t fsr)
 void
 entry_note_abt_wsync(void)
 {
-    uint32_t n, va, l1 = 0u, u = 0u, l2, type, l2pa;
+    uint32_t n, va, l1 = 0u, u = 0u, l2, type, l2pa, ttbr0, ttbr1;
 
     n = ++g_abtpte_wcn;
 
@@ -3054,8 +3108,19 @@ entry_note_abt_wsync(void)
         return;
 
     /* THE CONTROL VA: the kernel's OWN identity/managed base + a byte offset far inside the window
-     * the walk itself bounds with. Mapped writable by the boot (`arm_vm_init.c:239`/`174`,
-     * `L2_ACCESS_PRW`, no APX), RAM, and no device may answer it. */
+     * the walk itself bounds with. Mapped writable by the boot (`arm_vm_init.c:388/391` builds the
+     * identity + managed L2 ranges, `l2_map_linear_range`/`l2_cache_to_range`: `L2_ACCESS_PRW`, no
+     * APX), RAM, and no device may answer it.
+     *
+     * WHICH TABLE ANSWERS IT (1013's fix - the 1013-as-built control was REFUSED here).  `gPhysBase +
+     * 0x80000` = 0x80080000 is ABOVE this port's `TTBCR.N = 2` split `0x40000000`, i.e. TTBR1
+     * territory, because the kernel's identity/managed tables live in `cpu_ttb` - the ONE table
+     * TTBR1 points at (`arm_vm_init.c:352`).  A TTBR0-only walk refuses it (`return 0u`, `wck=0`), the
+     * checker calls the control wrong and withholds V1-V3.  The walker now READS TTBR1 for a
+     * high-window VA (`stage90_read_l2_pte`), bounded to the same window, and the row LABELS the answer
+     * with `_wctb` (1 = TTBR1).  So the control is read from the table the boot actually mapped it
+     * into - the same mechanism W-WALK uses, moments apart - and the label is published, never assumed.
+     */
     va = (uint32_t)gPhysBase + ABTWS_WINDOW_OFF;
 
     g_abtpte_walk_oow = 0u;                      /* `_wcoow` is THIS walk's reading, not (A)'s/W-WALK's */
@@ -3063,14 +3128,26 @@ entry_note_abt_wsync(void)
     type = l1 & ABTPTE_L1_TYPE_MASK;
     l2pa = (type == ABTPTE_L1_TYPE_COARSE) ? (l1 & ABTPTE_L1_PTE_MASK) : 0u;
 
+    /*
+     * The table that ANSWERED, by value: `_wctb` = 1 iff the walk took the high-window (TTBR1) branch
+     * (`g_abtpte_walk_tt1`), else 0 (TTBR0).  Published so the control's own identity is readable -
+     * "the control read a real leaf" and "the control read it through TTBR1, where the kernel's
+     * identity map lives" are the same reading, and the reader must not have to infer which.
+     */
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 1" : "=r"(ttbr1));
+
     entry_write_kv("xnu_live_abt_wcnt",   n);      /* the control ordinal */
     entry_write_kv("xnu_live_abt_wcva",   va);     /* the known-good VA the control read */
     entry_write_kv("xnu_live_abt_wck",    u);      /* the location tag (1 = a leaf answered) */
+    entry_write_kv("xnu_live_abt_wctb",   g_abtpte_walk_tt1); /* 1 = TTBR1 answered (the high window) */
     entry_write_kv("xnu_live_abt_wcl1",   l1);     /* the raw L1 descriptor */
     entry_write_kv("xnu_live_abt_wcl2pa", l2pa);   /* the L2 table PA */
     entry_write_kv("xnu_live_abt_wcleaf", l2);     /* the leaf of a page the boot mapped WRITABLE */
     entry_write_kv("xnu_live_abt_wcapx",  stage90_w_apx(l2)); /* EXPECTED 0 */
     entry_write_kv("xnu_live_abt_wcoow",  g_abtpte_walk_oow); /* 1 = the table pointer left the window */
+    entry_write_kv("xnu_live_abt_wctb0",  ttbr0);  /* the live TTBR0 word (raw; cf. `_wktb` for W-WALK) */
+    entry_write_kv("xnu_live_abt_wctb1",  ttbr1);  /* the live TTBR1 word (raw; the table the control used) */
 }
 #endif
 

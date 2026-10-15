@@ -22,10 +22,13 @@
 #              `fsr`, and `_wkapex` = "my leaf and the (A) walk's OWN recorded leaf agree" - the
 #              MEASUREMENT that settles 1012's `ptel2=0` HARD anomaly instead of an inference.
 #     (W-SYNC) `entry_note_abt_wsync` - the CONTROL at a known-good mapped VA (`gPhysBase + 0x80000`,
-#              the same window `stage90_read_l2_pte` bounds its loads with). If the control reads a
-#              correct writable leaf and the storm VA reads a read-only/absent one the witness is
-#              sound; if the control is itself wrong, 1013 reports a MEASUREMENT defect and concludes
-#              NOTHING (design §3, the WITNESS_METHOD_BROKEN row).
+#              the same window `stage90_read_l2_pte` bounds its loads with). That VA (0x80080000) is
+#              ABOVE this port's `TTBCR.N=2` split 0x40000000, i.e. TTBR1 territory (the kernel's
+#              identity map lives in `cpu_ttb`, the table TTBR1 points at, arm_vm_init.c:352) - so the
+#              walker reads TTBR1 for it and the control row LABELS the answer `_wctb` (=1). If the
+#              control reads a correct writable leaf and the storm VA reads a read-only/absent one the
+#              witness is sound; if the control is itself wrong, 1013 reports a MEASUREMENT defect and
+#              concludes NOTHING (design §3, the WITNESS_METHOD_BROKEN row).
 #
 #   THE SWITCH: STAGE90_XNU_PTE_WITNESS (default 0). Its two consumers are `entry_stubs.c` (the three
 #   recorders + `g_abtpte_ptel2rec`) and `entry_trace.c` (the three call sites), both compiled by
@@ -1236,8 +1239,8 @@ echo "   (a) the source shape: 1+4 guards + 1 recorder def + 1 bracket call + th
 #     not reach the image; a count below the 1007/1008/1009 floors means a regression.
 #     docs/1012-design.md §2/§4.
 ab_lit=$(strings "$elf" | grep -c 'xnu_live_abt_' || true)
-[[ "$ab_lit" == "82" ]] || { echo "FAIL: the image carries $ab_lit \`xnu_live_abt_\` literals (want 82: the 6 span + the 5 far + 1009's 7 pc + 1010's 12 (pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx/vmfn/vmfret/vmfva/vmfprot/vmfnret) + 1010c's 6 (pteoow/ptealias/ptemapok/pteslot/ptewbase/ptewlen) + 1011's 7 (vmen/vmekr/vmeprot/vmefault/vmeva/vmenx/ptethr) + 1012's 6 (pmpn/pmpprot/pmppa/pmppmap/pmpttbr/pmpnx) = 49 + 1013's 33 witness keys (11 W-APEX + 12 W-WALK + 8 W-SYNC + 2 change-counts)) - a store did not reach the linked image"; exit 1; }
-echo "   (b) the linked image carries the 82 \`xnu_live_abt_\` key literals (49 through 1012 + 1013's 33)"
+[[ "$ab_lit" == "86" ]] || { echo "FAIL: the image carries $ab_lit \`xnu_live_abt_\` literals (want 86: the 6 span + the 5 far + 1009's 7 pc + 1010's 12 (pten/pteva/ptel2/ptel1/ptettbr/pteu/ptenx/vmfn/vmfret/vmfva/vmfprot/vmfnret) + 1010c's 6 (pteoow/ptealias/ptemapok/pteslot/ptewbase/ptewlen) + 1011's 7 (vmen/vmekr/vmeprot/vmefault/vmeva/vmenx/ptethr) + 1012's 6 (pmpn/pmpprot/pmppa/pmppmap/pmpttbr/pmpnx) = 49 + 1013's 35 witness keys (11 W-APEX + 13 W-WALK incl. the 1013b VA cell wkva + 9 W-SYNC incl. the TTBR1 label wctb) + the 2 change-counts + the 2 raw TTBR words wctb0/wctb1) - a store did not reach the linked image"; exit 1; }
+echo "   (b) the linked image carries the 86 \`xnu_live_abt_\` key literals (49 through 1012 + 1013's 35 + the 2 raw TTBR words)"
 arm-none-eabi-nm "$elf" | grep -E '^[0-9a-f]+ [Tt] entry_note_abt_span$' || { echo "FAIL: entry_note_abt_span is not a DEFINED text symbol in $elf - an object did not rebuild or a generated stand-in was used"; exit 1; }
 echo "   (b) entry_note_abt_span is DEFINED T/t in the image"
 
@@ -1856,6 +1859,29 @@ echo "   (a) W-APEX is keyed on the CURRENT fault, set before the handler (cur l
 [[ $(grep -cF 'entry_write_kv("xnu_live_abt_wkoow",  oow);' src/entry/entry_stubs.c || true) == 1 ]] || { echo "FAIL: _wkoow is not published from the LATCHED 'oow' - it would report the double-read's own (reset) reading"; exit 1; }
 [[ $(grep -cF 'entry_write_kv("xnu_live_abt_wkleaf2", l2b);' src/entry/entry_stubs.c || true) == 1 && $(grep -cF 'entry_write_kv("xnu_live_abt_wkstable", stable);' src/entry/entry_stubs.c || true) == 1 ]] || { echo "FAIL: the double-read does not publish BOTH _wkleaf2 and _wkstable - the reader must decide, not infer"; exit 1; }
 echo "   (a) the double-read: same VA, same allow_alias, one dsb; _wkoow latched before it (oow) and published from it"
+# THE VA CELL (1013b).  A W-WALK row that does not publish the VA it walked is not SELF-IDENTIFYING:
+# the 1013 press log shows W-APEX `_wwleaf`=0x8411e1bb and W-WALK `_wkleaf`=0 at the SAME
+# `_wkl2pa`=0x841bf000, and without `_wkva` a reader cannot tell "one slot read twice, the leaf
+# vanished" from "two slots in the same 1 MB section" (one L1 slot maps 256 L2 slots).  Assert the
+# publisher by value, and that it is published on the SAME row as the leaf it identifies.
+[[ $(grep -cF 'entry_write_kv("xnu_live_abt_wkva",   va);' src/entry/entry_stubs.c || true) == 1 ]] || { echo "FAIL: W-WALK does not publish the VA it walked (_wkva) - the apex/walk leaf pair cannot be paired BY LOCATION and a zero leaf stays a 'stale 0' shrug instead of a V1-class reading"; exit 1; }
+[[ $(grep -cE 'entry_note_abt_walk\(uint32_t va, uint32_t fsr\)' src/entry/entry_stubs.c || true) == 1 ]] || { echo "FAIL: entry_note_abt_walk's signature (uint32_t va, uint32_t fsr) is gone - _wkva has no source"; exit 1; }
+echo "   (a) W-WALK publishes the VA it walked (_wkva), on the row whose leaf it identifies"
+# THE CONTROL'S TABLE (1013's fix).  The control VA `gPhysBase + ABTWS_WINDOW_OFF` = 0x80080000 is
+# ABOVE this port's `TTBCR.N = 2` split `0x40000000` - i.e. TTBR1 territory, because the kernel's
+# identity/managed tables live in `cpu_ttb` (`arm_vm_init.c:352/388/391` + `set_mmu_ttb_alt(cpu_ttb)`
+# :474), the table TTBR1 points at.  As built, the walker returned 0 for every such VA (`:2280`), so
+# W-SYNC published `wck=0` on every row and the checker withheld V1-V3 (WITNESS_METHOD_BROKEN).  The
+# walker now READS TTBR1 for a high-window VA under THIS switch, bounded to the same window, and the
+# control row LABELS the answer (`_wctb`).  Assert by value - a reverted walker or an unlabeled
+# control is a REFUSAL, not a silent null.
+[[ $(grep -cF 'g_abtpte_walk_tt1 = 1u;' <<<"$ab_walk" || true) -ge 1 ]] || { echo "FAIL: the walk does not LABEL a TTBR1 (high-window) answer (g_abtpte_walk_tt1 = 1u;) - as built it returned 0 for every VA above the split and the W-SYNC control could never read"; exit 1; }
+[[ $(grep -cF 'mrc p15, 0, %0, c2, c0, 1' <<<"$ab_walk" || true) == 1 ]] || { echo "FAIL: the walk does not read TTBR1 (mrc p15,0,Rt,c2,c0,1) in its high-window branch - the control VA 0x80080000 is TTBR1 territory"; exit 1; }
+[[ $(grep -cF 'g_abtpte_walk_tt1 = 0u;' <<<"$ab_walk" || true) == 1 ]] || { echo "FAIL: the walk does not RESET g_abtpte_walk_tt1 at entry - a stale TTBR1 label would leak into a TTBR0 answer"; exit 1; }
+d13_wsync_body=$(awk '/^entry_note_abt_wsync\(void\)$/{f=1} f{print} f&&/^}$/{exit}' src/entry/entry_stubs.c)
+[[ $(grep -cF 'entry_write_kv("xnu_live_abt_wctb",   g_abtpte_walk_tt1);' <<<"$d13_wsync_body" || true) == 1 ]] || { echo "FAIL: the W-SYNC control does not publish its own table label (_wctb = g_abtpte_walk_tt1) - the control's identity would be unreadable"; exit 1; }
+[[ $(grep -cF 'stage90_read_l2_pte(va, &l1, &u, 0u)' <<<"$d13_wsync_body" || true) == 1 ]] || { echo "FAIL: the W-SYNC control no longer reads with the ONE walker (stage90_read_l2_pte(va, &l1, &u, 0u))"; exit 1; }
+echo "   (a) the control is READABLE: the walker reads TTBR1 for the high-window control VA (bounded) and W-SYNC labels it (_wctb)"
 # THE EXPAND HAZARD (docs/1013-leaf-readback-verify.md §0.2/§6.2): the W-APEX call must pass the PMAP,
 # and the recorder must re-read `pm_l1_phys` INSIDE itself - `pmap_expand_ttb` can MOVE the L1 table
 # inside the enter (pmap.c:3084-3086). A call passing a pre-call `pm_l1_phys` copy would read a RETIRED
@@ -1875,10 +1901,10 @@ echo "   (a) the pmap wrapper is still a PURE PASS-THROUGH (kr named, __real_ ca
 #     AND BOTH recorders; image-wide exactly ONE call site of each recorder.
 elf=out/stage90/xnu_arm_entry.elf
 # The full fixed keyspace (`docs/1013-design.md` §2): W-APEX `w*`, W-WALK `wk*`, W-SYNC `wc*`.
-for d13_key in     xnu_live_abt_wwn xnu_live_abt_wwl1 xnu_live_abt_wwl2pa xnu_live_abt_wwleaf xnu_live_abt_wwapx xnu_live_abt_wwnoproof xnu_live_abt_wwpa xnu_live_abt_wwpaok xnu_live_abt_wwva xnu_live_abt_wwft xnu_live_abt_wwpatbl xnu_live_abt_wwnx     xnu_live_abt_wkn xnu_live_abt_wk xnu_live_abt_wktb xnu_live_abt_wkl1 xnu_live_abt_wkl2pa xnu_live_abt_wkleaf xnu_live_abt_wkleaf2 xnu_live_abt_wkstable xnu_live_abt_wkapx xnu_live_abt_wkoow xnu_live_abt_wkfsr xnu_live_abt_wkapex xnu_live_abt_wknx     xnu_live_abt_wcnt xnu_live_abt_wcva xnu_live_abt_wck xnu_live_abt_wcl1 xnu_live_abt_wcl2pa xnu_live_abt_wcleaf xnu_live_abt_wcapx xnu_live_abt_wcoow ; do
+for d13_key in     xnu_live_abt_wwn xnu_live_abt_wwl1 xnu_live_abt_wwl2pa xnu_live_abt_wwleaf xnu_live_abt_wwapx xnu_live_abt_wwnoproof xnu_live_abt_wwpa xnu_live_abt_wwpaok xnu_live_abt_wwva xnu_live_abt_wwft xnu_live_abt_wwpatbl xnu_live_abt_wwnx     xnu_live_abt_wkn xnu_live_abt_wkva xnu_live_abt_wk xnu_live_abt_wktb xnu_live_abt_wkl1 xnu_live_abt_wkl2pa xnu_live_abt_wkleaf xnu_live_abt_wkleaf2 xnu_live_abt_wkstable xnu_live_abt_wkapx xnu_live_abt_wkoow xnu_live_abt_wkfsr xnu_live_abt_wkapex xnu_live_abt_wknx     xnu_live_abt_wcnt xnu_live_abt_wcva xnu_live_abt_wck xnu_live_abt_wctb xnu_live_abt_wcl1 xnu_live_abt_wcl2pa xnu_live_abt_wcleaf xnu_live_abt_wcapx xnu_live_abt_wcoow xnu_live_abt_wctb0 xnu_live_abt_wctb1 ; do
   grep -qx "$d13_key" <<<"$(strings "$elf")" || { echo "FAIL: the image does not carry the \`$d13_key\` literal - the 1013 store did not reach the linked image"; exit 1; }
 done
-echo "   (b) the image carries all 33 1013 key literals (11 W-APEX incl. the provenance cells wwva/wwft/wwpatbl + 12 W-WALK incl. the double-read wkleaf2/wkstable + 8 W-SYNC + the 2 change-counts wwnx/wknx)"
+echo "   (b) the image carries all 35+2 1013 key literals (11 W-APEX incl. the provenance cells wwva/wwft/wwpatbl + 13 W-WALK incl. the 1013b VA cell wkva and the double-read wkleaf2/wkstable + 9 W-SYNC incl. the TTBR1 label wctb + the 2 change-counts wwnx/wknx + the 2 raw TTBR words wctb0/wctb1)"
 for d13_s in entry_note_abt_wleaf entry_note_abt_walk entry_note_abt_wsync entry_note_abt_cur; do
   arm-none-eabi-nm "$elf" | grep -E "^[0-9a-f]+ [Tt] $d13_s\$" || { echo "FAIL: $d13_s is not a DEFINED text symbol in $elf - an object did not rebuild or a generated stand-in was used"; exit 1; }
 done

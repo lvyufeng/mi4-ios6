@@ -93,7 +93,7 @@ MEMBERS=(xnu_arm_entry.bin xnu_arm_entry.elf xnu_arm_entry.h xnu_arm_entry-confi
 # The arm name IS the entry bin's sha8 (the project's rule). Derive it, and refuse to re-park the
 # PRESSED/known arms under a new name.
 ARM=armed-d13-$(sha256sum "$LIVE/xnu_arm_entry.bin" | cut -c1-8)
-[[ $ARM == armed-d13-ffdc8ba1 ]] && { echo "REFUSING: $LIVE holds 1012's arm (ffdc8ba1), the PRESSED predecessor (VERDICT: the PTE-build apex is MEASURED - `_pmpprot=0x3` READ|WRITE ARRIVES at pmap_enter_options AND `_pmppmap & 0xFFFFFF00 == _pmpttbr & 0xFFFFFF00`, so the pmap writes the SAME L1 table the MMU walks and strip-above-the-apex is REFUTED BY MEASUREMENT; the leaf's VALUE was still never read - that is 1013's question; adjudicated in records/1012-press-read.txt; design docs/1013-design.md); build 1013 first"; exit 1; }
+[[ $ARM == armed-d13-ffdc8ba1 ]] && { echo "REFUSING: $LIVE holds 1012's arm (ffdc8ba1), the PRESSED predecessor (VERDICT: the PTE-build apex is MEASURED - \`_pmpprot=0x3\` READ|WRITE ARRIVES at pmap_enter_options AND \`_pmppmap & 0xFFFFFF00 == _pmpttbr & 0xFFFFFF00\`, so the pmap writes the SAME L1 table the MMU walks and strip-above-the-apex is REFUTED BY MEASUREMENT; the leaf's VALUE was still never read - that is 1013's question; adjudicated in records/1012-press-read.txt; design docs/1013-design.md); build 1013 first"; exit 1; }
 [[ $ARM == armed-d13-fce83837 ]] && { echo "REFUSING: $LIVE holds 1011's arm (fce83837), the PRESSED predecessor (VERDICT: F1a is MEASURED - the (E') tail rows carry vmeprot=0x3 READ|WRITE with vmekr=0 KERN_SUCCESS, so the vm_map ENTRY GRANTS write and the write is LOST between the entry and the PTE; F1b is DENIED BY VALUE; adjudicated in records/1011-press-read.txt; design docs/1012-design.md); build 1012 first"; exit 1; }
 [[ $ARM == armed-d13-64391319 ]] && { echo "REFUSING: $LIVE holds 1010b's arm (64391319), the PRESSED predecessor (VERDICT: the mask fix is CORRECT but exposed a SECOND defect - the corrected TTBR0 base reads the TRUE L1, whose L2 table is at PA 0x46300000 OUTSIDE the entry window and the unbounded L2 deref faulted FS=5; adjudicated in records/1010b-press-read.txt); build 1012 first"; exit 1; }
 [[ $ARM == armed-d13-0f39207c ]] && { echo "REFUSING: $LIVE holds 1010's arm (0f39207c), the PRESSED predecessor (VERDICT: the storm reproduced, but the (A) L2 walk is INVALID - it read ptel2=0/pteu=0 at the tail, because the TTBR0 base was masked with 0xfffffc00 instead of 0xffffc000; adjudicated in records/1010-press-read.txt); build 1012 first"; exit 1; }
@@ -143,8 +143,8 @@ grep -q '^STAGE90_XNU_SUBMAP_PMAP_SKIP=1$' "$LIVE/xnu_arm_entry-config.txt" || {
 # BY VALUE, at the freeze point: the 1012 delta FIRST, then the regressions, then the control.
 # 1012's NEW instrument (the `prot` at pmap_enter_options), BY VALUE, FIRST.
 _ab_lit=$(strings "$LIVE/xnu_arm_entry.elf" | grep -c 'xnu_live_abt_' || true)
-[[ "$_ab_lit" == 82 ]] || {
-  echo "REFUSING: the parked image does not carry the 82 xnu_live_abt_ key literals (49 through 1012 + 1013's 33 witness keys) (x$_ab_lit, want 82) - the 1011 vme/ptethr store, the 1012 pmp store or the 1013 witness store is gone"; exit 1; }
+[[ "$_ab_lit" == 86 ]] || {
+  echo "REFUSING: the parked image does not carry the 86 xnu_live_abt_ key literals (49 through 1012 + 1013's 35 witness keys + the 2 raw TTBR words) (x$_ab_lit, want 86) - the 1011 vme/ptethr store, the 1012 pmp store or the 1013 witness store is gone"; exit 1; }
 _ab_nm=$(arm-none-eabi-nm "$LIVE/xnu_arm_entry.elf")
 
 for _ab_1012sym in entry_note_abt_pmp __wrap_pmap_enter_options; do
@@ -166,7 +166,7 @@ _pmpwx=$(arm-none-eabi-nm -n "$LIVE/xnu_arm_entry.elf" | awk -v s="${_pmpw#0x}" 
 _pmpwb=$(arm-none-eabi-objdump -d "$LIVE/xnu_arm_entry.elf" --start-address="$_pmpw" --stop-address="${_pmpwx:-0xffffffff}")
 grep -qE 'bl[[:space:]]+[0-9a-f]+ <pmap_enter_options>' <<<"$_pmpwb" || { echo "REFUSING: __wrap_pmap_enter_options does not call the real pmap_enter_options body - it is not a pass-through (docs/1012-design.md §4)"; exit 1; }
 grep -qE 'bl[[:space:]]+[0-9a-f]+ <entry_note_abt_pmp>' <<<"$_pmpwb" || { echo "REFUSING: __wrap_pmap_enter_options does not call entry_note_abt_pmp - the apex record never fires"; exit 1; }
-echo "park_1012: by value - xnu_live_abt_* literals x$_ab_lit (49 through 1012 + 1013's 33), entry_note_abt_pmp/__wrap_pmap_enter_options DEFINED T/t, exactly ONE b/bl to entry_note_abt_pmp, and the wrapper calling pmap_enter_options AND entry_note_abt_pmp (the prot-at-the-apex witness is present)"
+echo "park_1012: by value - xnu_live_abt_* literals x$_ab_lit (49 through 1012 + 1013's 35 + the 2 raw TTBR words), entry_note_abt_pmp/__wrap_pmap_enter_options DEFINED T/t, exactly ONE b/bl to entry_note_abt_pmp, and the wrapper calling pmap_enter_options AND entry_note_abt_pmp (the prot-at-the-apex witness is present)"
 
 # THE 1011 CHANGE (the vm_map_entry effective protection + the faulting thread's own L1 base) is a
 # REGRESSION: the wrapper/pass-through, the two 1011 symbols, the ONE b/bl to entry_note_abt_vme, and
@@ -295,20 +295,23 @@ for _wk_sym in entry_note_abt_wleaf entry_note_abt_walk entry_note_abt_wsync ent
     echo "REFUSING: $_wk_sym is not a DEFINED text symbol in the parked image - the 1013 witness is gone (an object did not rebuild, or a generated stand-in was used)"; exit 1; }
 done
 # The fixed keyspace (`docs/1013-design.md` §2), read as whole-line `strings` matches so a truncated or
-# re-spelled key is a refusal. 33 literals: 11 W-APEX (incl. the provenance cells wwva/wwft/wwpatbl),
-# 12 W-WALK (incl. the double-read wkleaf2/wkstable) + the 2 change-counts wwnx/wknx = 13 in the `wk`
-# family count below, 8 W-SYNC.  The ladder counts the 33 the build asserts.
+# re-spelled key is a refusal. 37 literals: 11 W-APEX (incl. the provenance cells wwva/wwft/wwpatbl),
+# 13 W-WALK (incl. the 1013b VA cell wkva and the double-read wkleaf2/wkstable) + the 2 change-counts
+# wwnx/wknx = 14 in the `wk`
+# family count below, 9 W-SYNC (incl. the TTBR1 label wctb), PLUS the 2 raw TTBR words wctb0/wctb1.
+# The ladder counts the 37 the build asserts.
 _wk_keys=0
 for _wk_key in \
     xnu_live_abt_wwn xnu_live_abt_wwl1 xnu_live_abt_wwl2pa xnu_live_abt_wwleaf xnu_live_abt_wwapx xnu_live_abt_wwnoproof xnu_live_abt_wwpa xnu_live_abt_wwpaok xnu_live_abt_wwva xnu_live_abt_wwft xnu_live_abt_wwpatbl xnu_live_abt_wwnx \
-    xnu_live_abt_wkn xnu_live_abt_wk xnu_live_abt_wktb xnu_live_abt_wkl1 xnu_live_abt_wkl2pa xnu_live_abt_wkleaf xnu_live_abt_wkleaf2 xnu_live_abt_wkstable xnu_live_abt_wkapx xnu_live_abt_wkoow xnu_live_abt_wkfsr xnu_live_abt_wkapex xnu_live_abt_wknx \
-    xnu_live_abt_wcnt xnu_live_abt_wcva xnu_live_abt_wck xnu_live_abt_wcl1 xnu_live_abt_wcl2pa xnu_live_abt_wcleaf xnu_live_abt_wcapx xnu_live_abt_wcoow ; do
+    xnu_live_abt_wkn xnu_live_abt_wkva xnu_live_abt_wk xnu_live_abt_wktb xnu_live_abt_wkl1 xnu_live_abt_wkl2pa xnu_live_abt_wkleaf xnu_live_abt_wkleaf2 xnu_live_abt_wkstable xnu_live_abt_wkapx xnu_live_abt_wkoow xnu_live_abt_wkfsr xnu_live_abt_wkapex xnu_live_abt_wknx \
+    xnu_live_abt_wcnt xnu_live_abt_wcva xnu_live_abt_wck xnu_live_abt_wctb xnu_live_abt_wcl1 xnu_live_abt_wcl2pa xnu_live_abt_wcleaf xnu_live_abt_wcapx xnu_live_abt_wcoow \
+    xnu_live_abt_wctb0 xnu_live_abt_wctb1 ; do
   grep -qx "$_wk_key" <<<"$(strings "$LIVE/xnu_arm_entry.elf")" || {
     echo "REFUSING: the parked image does not carry the \`$_wk_key\` literal - the 1013 store is gone"; exit 1; }
   _wk_keys=$((_wk_keys + 1))
 done
-[[ "$_wk_keys" == 33 ]] || { echo "REFUSING: the key ladder counted $_wk_keys (want 33)"; exit 1; }
-echo "park_1013: by value - the four recorders DEFINED T/t and all 33 1013 key literals present (11 W-APEX incl. wwva/wwft/wwpatbl + 13 W-WALK incl. wkleaf2/wkstable/wknx + 8 W-SYNC)"
+[[ "$_wk_keys" == 37 ]] || { echo "REFUSING: the key ladder counted $_wk_keys (want 37)"; exit 1; }
+echo "park_1013: by value - the four recorders DEFINED T/t and all 37 1013 key literals present (11 W-APEX incl. wwva/wwft/wwpatbl + 14 W-WALK incl. the 1013b VA cell wkva, wkleaf2/wkstable, wknx + 9 W-SYNC incl. the TTBR1 label wctb + the 2 raw TTBR words wctb0/wctb1)"
 # Exactly ONE call site of each recorder, and the W-APEX one lives INSIDE the pmap wrapper while
 # W-WALK must NOT ([[mi4-hooks-live-at-calls]] - W-WALK's recording belongs to the abort path).
 _wk_w=$(arm-none-eabi-nm "$LIVE/xnu_arm_entry.elf" | awk '$3=="__wrap_pmap_enter_options"{print "0x" $1; found=1} END{exit(found?0:1)}') || { echo "REFUSING: __wrap_pmap_enter_options not in the parked image - the 1012 apex the 1013 leaf is read at is gone"; exit 1; }
@@ -368,16 +371,28 @@ for m in "${MEMBERS[@]}"; do cp -p "$LIVE/$m" "$PARK/$m"; done
   printf '#       APEX_NOT_PROOF: a by-value CONTRADICTION with 1012; REPORT it, do not conclude from it.\n'
   printf '#   V5  W-APEX absent (wwn == 0) yet the storm ran => NO_APEX_WITNESS: the enter never reached the\n'
   printf '#       wrapper; fall back to the tree instrument.\n'
-  printf '#   V6  W-APEX leaf absent/0 while wwl1 is a COARSE descriptor => HARD (stale 0): a present L2 with\n'
-  printf '#       no leaf is impossible for a correct walk - a MEASUREMENT defect, never a value.\n'
-  printf '#   V0  THE PROVENANCE GATE (applied BEFORE V1-V3; the 1012 apex defect this rung must not inherit,\n'
-  printf '#       docs/1012-probe-keying.md §1.4/§1.6).  EVERY TAIL W-APEX row must carry wwva == the storm-s\n'
-  printf '#       far AND wwft == 0x3 (READ|WRITE) AND wwpatbl == 0 (the entered page is NOT a page-table\n'
-  printf '#       page).  A row failing ANY of the three is a NULL CONTROL, NOT a "write reaches the apex for\n'
-  printf '#       the faulting VA" reading: if EVERY tail row fails => APEX_OBSERVED_A_TABLE_PAGE (or\n'
-  printf '#       APEX_WRONG_VA / APEX_WRONG_FAULT_TYPE): the 1012 cell-s real shape - every row carried\n'
-  printf '#       pa=0x8421a (PA 0x8421a000), a PAGE-TABLE-PAGE install.  REPORT it; do NOT conclude V1/V2/V3\n'
-  printf '#       from a table-page row.  V0 short-circuits V1-V3 exactly as the control does.\n'
+  printf '#   V6  (1013b, A PAIRING CHECK, NOT A SHAPE CHECK) a row-s location tag reads 0 while ITS OWN\n'
+  printf '#       published leaf is a valid small page (bits[1:0]=0b10) => HARD (self-contradictory 0).  The\n'
+  printf '#       old shape rule (COARSE L1 + nonzero wwl2pa yet leaf 0) fired on the CORRECT shape of an\n'
+  printf '#       ABSENT L2 slot - one L1 slot maps 256 L2 slots - and manufactured a stale 0 in the 1013\n'
+  printf '#       press log out of two UNPAIRED rows (see V0-prime below).\n'
+  printf '#   V0  THE PROVENANCE GATE - 1013b RETIRED IT AS AN ADJUDICATOR, KEPT IT AS A REPORT.  It used to\n'
+  printf '#       withhold V1-V3 when every tail W-APEX row failed wwva == far / wwft == 0x3 / wwpatbl == 0.\n'
+  printf '#       The 1013 press log killed that: its tail rows carry wwnoproof=1 (pm_l1_phys != the live\n'
+  printf '#       TTBR0 base), so the by-value identity the gate would rest on is itself UNPROVEN - and a\n'
+  printf '#       class decided over rows whose own identity cell says "not provably your fault" is a verdict\n'
+  printf '#       over a NULL CONTROL.  The three cells stay PUBLISHED (W-APEX prints wwva/wwft/wwpatbl) and\n'
+  printf '#       are PRINTED per row; the leaf classes no longer rest on them.\n'
+  printf '#   V0-dprime  THE PAIRING (1013b) - what replaced the gate, applied BEFORE V1-V3.  The ladders\n'
+  printf '#       fire on DIFFERENT EVENTS, so the same ordinal is NOT the same cell: the 1013 press log has\n'
+  printf '#       W-APEX wwn=0x40000 reading wwleaf=0x8411e1bb at L2 index 0x67 for the storm VA\n'
+  printf '#       (wwva=0x3d767000) while W-WALK wkn=0x80000 reads wkleaf=0 at L2 index 0x01 for a DIFFERENT\n'
+  printf '#       VA (wkva=0x3d7801e8) - same wkl2pa=0x841bf000, DIFFERENT SLOT.  W-WALK now publishes ITS OWN\n'
+  printf '#       VA (xnu_live_abt_wkva, 1013b) exactly as W-APEX publishes wwva, so a pair is compared ONLY\n'
+  printf '#       when both name one cell: same VA AND same L1 AND same L2 table.  A leaf difference at ONE\n'
+  printf '#       cell => PAIRED_CELL_DISAGREES - a REAL finding (a second writer re-RW/RO-d or cleared the\n'
+  printf '#       slot between the enter and the re-abort), never a stale zero.  No paired row => the walk\n'
+  printf '#       side is a READING IN ITS OWN RIGHT, never a comparison partner.\n'
   printf '#   V0-prime  THE WALK GATE (applied BEFORE V1-V3): the tail W-WALK row must carry wkstable == 1\n'
   printf '#       (the double-read AGREED).  wkstable == 0 => the L2 word MOVED between the two walks =>\n'
   printf '#       WALK_UNSTABLE_NULL, a NULL CONTROL: the location comparison V1/V2/V3 rest on was taken over\n'
@@ -395,10 +410,11 @@ for m in "${MEMBERS[@]}"; do cp -p "$LIVE/$m" "$PARK/$m"; done
   printf '# between the reads).  This is the MEASUREMENT that settles 1012-s ptel2=0 HARD anomaly instead of\n'
   printf '# an inference.\n#\n'
   printf '# KEYS (the fixed keyspace, docs/1013-design.md §2): W-APEX wwn/wwl1/wwl2pa/wwleaf/wwapx/\n'
-  printf '# wwnoproof/wwpa/wwpaok/wwva/wwft/wwpatbl/wwnx; W-WALK wkn/wk/wktb/wkl1/wkl2pa/wkleaf/wkleaf2/\n'
-  printf '# wkstable/wkapx/wkoow/wkfsr/wkapex/wknx; W-SYNC wcnt/wcva/wck/wcl1/wcl2pa/wcleaf/wcapx/wcoow.\n'
+  printf '# wwnoproof/wwpa/wwpaok/wwva/wwft/wwpatbl/wwnx; W-WALK wkn/WKVA/wk/wktb/wkl1/wkl2pa/wkleaf/wkleaf2/\n'
+  printf '# wkstable/wkapx/wkoow/wkfsr/wkapex/wknx; W-SYNC wcnt/wcva/wck/wctb/wcl1/wcl2pa/wcleaf/wcapx/\n'
+  printf '# wcoow + the raw TTBR words wctb0/wctb1.\n'
   printf '# No two probes share a key.\n#\n'
-  printf '# VERIFIED BY VALUE (build_1013.sh): the image carries the 82 xnu_live_abt_ key literals and all 33\n'
+  printf '# VERIFIED BY VALUE (build_1013.sh): the image carries the 86 xnu_live_abt_ key literals and all 37\n'
   printf '# 1013 keys; the four recorders DEFINED T/t with exactly ONE call site each; the W-APEX call inside\n'
   printf '# __wrap_pmap_enter_options (which still calls <pmap_enter_options>, the pass-through) and W-WALK\n'
   printf '# NOT in it; with the FROZEN 1012 elf (armed-d13-ffdc8ba1) as the NEGATIVE CONTROL (xnu_live_abt_\n'

@@ -124,6 +124,7 @@ adds, right beside it, `entry_note_abt_walk(far_, fsr)` (`entry_stubs.c`), which
 | key | value |
 |---|---|
 | `xnu_live_abt_wkn` | the ladder ordinal |
+| `xnu_live_abt_wkva` | **1013b: THE VA THIS ROW WALKED** (the abort's own `far`) — W-WALK's twin of W-APEX's `_wwva`. Without it a W-WALK row is not self-identifying: the 1013 press log shows W-APEX `_wwleaf=0x8411e1bb` at `_wwl2pa=0x841bf000` and W-WALK `_wkleaf=0` at the **same** `_wkl2pa`, and **one L1 slot maps 256 L2 slots**, so "one slot read twice" is indistinguishable from "two slots in the same 1 MB section" until the VA is published. |
 | `xnu_live_abt_wk` | a location tag: **0** = `stage90_read_l2_pte` did not resolve a valid small-page leaf for this VA (out of window / not COARSE / alias refused), **1** = it did |
 | `xnu_live_abt_wktb` | the LIVE TTBR0 the walk used (raw; low byte = the attribute) |
 | `xnu_live_abt_wkl1` | the raw L1 descriptor the walk read |
@@ -185,9 +186,10 @@ arguments, one `dsb` between; `_wkoow` describes the walk the other cells descri
 
 ### (W-SYNC) — the CONTROL, at a KNOWN-GOOD mapped page
 
-`entry_note_abt_wsync(va)` (`entry_stubs.c`) walks the live TTBR0 for **the kernel's own managed base
-VA**, which the boot has already mapped writable by `l2_cache_to_range`/`l2_map_linear_range`
-(`arm_vm_init.c:239`/`174`; note `*ptv |= L2_ACCESS_PRW` and the APX bit is NOT OR'd in):
+`entry_note_abt_wsync(va)` (`entry_stubs.c`) walks the live split-selected table for **the kernel's
+own identity/managed base VA**, which the boot has already mapped writable by
+`l2_cache_to_range`/`l2_map_linear_range` (`arm_vm_init.c:388`/`391`; note `*ptv |= L2_ACCESS_PRW`
+and the APX bit is NOT OR'd in):
 
     va = gPhysBase + 0x00080000          /* 512 KB into the identity/managed window */
 
@@ -199,17 +201,33 @@ first ~256 MB a low identity map might leave absent. It is
 mapped by the identity section/leaf the boot itself built; it is RAM; no device may answer it; it is
 TRUNK (not a boot range or kmem region) inside a MAPPED window.
 
+**WHICH TABLE ANSWERS IT — the fix that makes the control READABLE (1013's static audit).** The
+control VA is `gPhysBase + 0x80000` = **0x80080000** (measured `gPhysBase = 0x80000000`), and this port
+runs `TTBCR.N = 2` (`arm_vm_init.c:475`), so the split is `0x40000000` and 0x80080000 is **above it —
+TTBR1 territory**. That is exactly where the kernel's identity/managed tables ARE: `arm_vm_init` builds
+them into `cpu_ttb` (`arm_vm_init.c:352` `cpu_ttb = gTopOfKernel + L1_SIZE`; the two `l2_*` calls write
+`phys_to_virt(cpu_ttb)`; `:473-474` load it into **both** TTBR0 and TTBR1 via
+`set_mmu_ttb`/`set_mmu_ttb_alt`). So the control's leaf is reachable — but **through TTBR1**, and the
+walker as first written was TTBR0-only (`return 0u` for any VA at/above the split, the old
+`entry_stubs.c:2280`). That made the control publish `wck=0` on **every** row, the checker classify it
+wrong, and the rung short-circuit to `WITNESS_METHOD_BROKEN` without ever reading a leaf. The fix is in
+the ONE walker, not a second one: for a VA at/above the split the walker now reads **TTBR1** (same
+`entry_ttbr_base(ttbr1, n)` mask, same `[gPhysBase, gPhysBase+mem_size)` bound on both derefs, so it
+can never fault), and the control row **labels** which table answered with `xnu_live_abt_wctb` (1 =
+TTBR1). `xnu_live_abt_wctb0`/`_wctb1` publish the raw TTBR0/TTBR1 words the label is derived from.
+
 Publishes `xnu_live_abt_wcnt` (the ordinal), `xnu_live_abt_wcva` (the exact VA read),
-`xnu_live_abt_wck`, `xnu_live_abt_wcl1`, `xnu_live_abt_wcl2pa`, `xnu_live_abt_wcleaf`,
-`xnu_live_abt_wcapx`, `xnu_live_abt_wcoow`.
+`xnu_live_abt_wck`, `xnu_live_abt_wctb` (1 = TTBR1 answered), `xnu_live_abt_wcl1`,
+`xnu_live_abt_wcl2pa`, `xnu_live_abt_wcleaf`, `xnu_live_abt_wcapx`, `xnu_live_abt_wcoow`, plus the raw
+`xnu_live_abt_wctb0`/`_wctb1`.
 
 It is called **at the same abort as W-WALK, right beside it** — so it is the control for the
-*mechanism* (does "walk TTBR0 for a known-mapped VA and read its leaf" produce a correct writable leaf
-on THIS device?), read by the same code path and library as W-WALK, moments apart. Two deliberate
-properties of the call: it is **throttled to the ladder ordininals** (the same `n <= 4 ||
-power-of-two` rule, checked BEFORE anything is read), because the storm is ~2.1 M aborts and a control
-per abort would buy nothing; and it passes **no alias** to the walker, so a control VA that is not
-in-window reads a covered refusal rather than installing a temporary section. It is a fixed, cheap,
+*mechanism* (does "walk the split-selected table for a known-mapped VA and read its leaf" produce a
+correct writable leaf on THIS device?), read by the same code path and library as W-WALK, moments
+apart. Two deliberate properties of the call: it is **throttled to the ladder ordininals** (the same `n
+<= 4 || power-of-two` rule, checked BEFORE anything is read), because the storm is ~2.1 M aborts and a
+control per abort would buy nothing; and it passes **no alias** to the walker, so a control VA that is
+not in-window reads a covered refusal rather than installing a temporary section. It is a fixed, cheap,
 safe read that never touches the faulted address.
 
 ---
@@ -224,16 +242,19 @@ The two walks are in different *address spaces*, and that is the point:
   `[0, 0x40000000)`: the L1 slot (`0x81a86000 + 12 bits`) *and* the L2 table base (the coarse
   descriptor base is a low-RAM PA, this boot's own example being `0x46300000`, which the (A) walk
   already reaches through the alias mechanism). **`TTBR1` is never needed and is never assumed.**
-* **W-WALK / W-SYNC read through TTBR0 with `stage90_read_l2_pte`**, which picks its table by
-  `TTBCR.N` (`entry_ttbr_base`) and refuses a VA above the split.
+* **W-WALK reads through TTBR0 with `stage90_read_l2_pte`** for the storm VA (below the split);
+  **W-SYNC (0x80080000) is above the split and is read through TTBR1** by the same walker (the fix
+  above) — the walker picks its table by `TTBCR.N` via `entry_ttbr_base`, and now answers a VA above
+  the split from TTBR1 instead of refusing it, labelling the answer `_wctb`.
 
-**The one honest caveat, stated because the alternative is a stale zero.** On this device
-`TTBR0 == TTBR1` (`entry_smem.h:53`, the live channel's `xnu_live_ttbr0 == xnu_live_ttbr1`), but the
-kernel *managed* window is `MANAGED_BASE = 0xC0000000` (`arm_vm_init.c:142`) — above the `0x40000000`
-split, i.e. **TTBR1 territory**. So W-SYNC's leaf is only guaranteed readable if the kernel's managed
-tables share the walked base or another TTBR0-resident mapping answers at that VA. W-SYNC therefore
+**The caveat, now closed by the walker's TTBR1 branch.** On this device
+`TTBR0 == TTBR1` (`entry_smem.h:53`, the live channel's `xnu_live_ttbr0 == xnu_live_ttbr1`), and the
+kernel's identity window is `[gPhysBase, gPhysBase+gMemSize)` = `0x80000000`, above the `0x40000000`
+split — i.e. **TTBR1 territory**, where `arm_vm_init` built the identity/managed tables (in `cpu_ttb`).
+W-SYNC's leaf is therefore read through **TTBR1** by the same walker (the fix above), and the row
+publishes which table answered (`_wctb = 1`). Should TTBR1 still fail to answer, W-SYNC
 **fails open** and says so: `xnu_live_abt_wcoow = 1` + `wck = 0` is the published reading
-"TTBR0 does not answer for the managed base", and that outcome is a configured null control, not a
+"the split-selected table does not answer for the managed base", and that outcome is a configured null control, not a
 crashed probe. (The read is bounded to `[gPhysBase, gPhysBase + mem_size)`; a table pointer outside
 it is refused, never dereferenced — the 1010b `FS=5` death.)
 
@@ -262,9 +283,37 @@ location mismatch.
 | V0 | every tail row carries `wwva != far` (the storm's tail `far`, from the 1008 ladder) | **APEX_WRONG_VA** | the apex observed a different VA's enter — exactly what a stale post-handler key looks like, now READABLE instead of assumed. V1–V3 withheld (NULL CONTROL). |
 | V0 | every tail row carries `wwft != 0x3` | **APEX_WRONG_FAULT_TYPE** | the apex observed a non-WRITE enter; the storm's WRITE fault did not produce this leaf. V1–V3 withheld. |
 
-A row that fails ANY of the three is a NULL CONTROL (reported individually); the class above fires
-only when **every** tail row fails that one test, so a single stray row cannot manufacture a verdict.
-V0 is applied **after** the control and **before** V1–V3, on the same tail rows.
+A row that fails ANY of the three is a NULL CONTROL (reported individually).
+
+> **1013b — THIS GATE IS RETIRED AS AN ADJUDICATOR.** The 1013 press log made both halves of it
+> unusable.  (i) Its tail W-APEX rows carry `wwnoproof = 1`: `pm_l1_phys` is **not** the live TTBR0
+> base at that measurement, so the by-value identity the gate would rest on is itself unproven (V4's
+> own rule: report, never conclude).  (ii) A class ("the apex observed a table page / another VA / a
+> non-write") decided over rows whose **own** identity cell says "this is not provably your fault" is
+> a verdict over a NULL CONTROL.  The three cells stay **published** (W-APEX still prints
+> `_wwva`/`_wwft`/`_wwpatbl`) and are **printed per row**; the checker no longer withholds V1–V3 on
+> them.  What the leaf classes DO need is a **pairing** (below), which does not depend on them.
+
+### The pairing that replaced it — V0″, PAIR BY LOCATION
+
+The ladders fire on **different events** (W-APEX inside the pmap enter; W-WALK at the abort), so the
+same ordinal is **not** the same cell.  The 1013 press log is the proof: `_wwn=0x40000` read
+`_wwleaf=0x8411e1bb` at L2 index `0x67` for the storm's VA (`_wwva=0x3d767000`) while `_wkn=0x80000`
+read `_wkleaf=0` at L2 index `0x01` for a **different** VA (`_wkva=0x3d7801e8`) — same `_wkl2pa`
+`0x841bf000`, **different slot** (one 1 MB section holds 256 L2 slots).  Comparing by ordinal
+manufactured a "stale 0" out of a pair that was never a pair.
+
+A W-APEX row and a W-WALK row are two readings of **one table slot** and may be compared **only** when
+both name that slot: the same **VA** (now published on both sides: `_wwva` and `_wkva`), the same
+**L1 descriptor** and the same **L2 table base**.  Only then is a leaf difference a class:
+
+| # | condition | verdict | what it means |
+|---|---|---|---|
+| **V1p** | same `(va, l1, l2pa)` on both sides, yet `wkleaf != wwleaf` | **PAIRED_CELL_DISAGREES** | the pmap's own table holds one word and the MMU's live walk of the SAME slot reads another: the slot **changed** between the enter and the re-abort (a second writer, or a table re-allocated under the VA). A **real finding**, not a stale zero. |
+| — | no W-WALK row names the apex tail row's cell | (no class) | the walk side is a **reading in its own right**, never a comparison partner; the verdict says so explicitly. |
+
+V0″ is applied **after** the control and **before** V1–V3, on the paired row when one exists and on
+the tail row otherwise.
 
 | # | W-APEX leaf (`wwleaf`/`wwapx`) | W-WALK location (`wkl2pa`) | verdict | what it means / what follows |
 |---|---|---|---|---|
@@ -273,17 +322,19 @@ V0 is applied **after** the control and **before** V1–V3, on the same tail row
 | V3 | any, readable | **a DIFFERENT L2 table** (`wkl2pa != wwl2pa`) | **IDENTITY_FAULT_L2** | the apex writes one L2 and the MMU walks another. 1012 measured the L1 bases EQUAL, so the divergence is at the **L2** (an `pmap_expand` hoist / a `pm_l1_virt` vs `pm_l1_phys` L2 mismatch). |
 | V4 | `wwn` **present but `wwnoproof` = 1** (`pm_l1_phys != live TTBR0 base` at that row) | any | **APEX_NOT_PROOF** | the pmap's own table is not the live table at that measurement, so the apex leaf cannot be paired with the walk. A by-value CONTRADICTION with 1012 — report it, do not conclude from it. |
 | V5 | **absent** (`wwn` == 0) yet the storm ran | any | **NO_APEX_WITNESS** | the enter never reached the wrapper. The fault is not a leaf defect at this apex; fall back to the tree instrument. |
-| V6 | apex leaf **absent/0** while `wwl1` is a COARSE descriptor **and `wwl2pa != 0`** | any | **HARD (stale 0)** | a present L2 with no leaf at the fault VA is impossible for a correct walk — a MEASUREMENT defect, never a value. The same class covers a published `_xxapx` that is not the APX bit of the published leaf, in any of the three ladders. |
+| V6 | a row's **location tag reads 0 while its OWN published leaf is a valid small page** (bits[1:0] = 0b10), in W-WALK or W-SYNC | any | **HARD (self-contradictory 0)** | 1013b: a **PAIRING** check, not a shape check. The old rule ("a COARSE L1 + a nonzero L2 base, yet the leaf reads 0") fired on the **correct** shape of an absent L2 slot — one L1 slot maps 256 L2 slots, so the table base says nothing about the slot this VA indexes, and the 1013 press log's `wkleaf=0` at `wkl2pa=0x841bf000` for `_wkva=0x3d7801e8` was exactly that. A defect is now only a row that **contradicts itself**: the walker sets the tag exactly when it read a valid small-page leaf, so tag 0 + a small-page leaf on the same row is impossible for a correct recorder. (The `_xxapx`-vs-leaf decode-integrity check is unchanged.) |
 | V0′ | the tail W-WALK row carries **`wkstable = 0`** (the double-read disagreed) | any | **WALK_UNSTABLE_NULL** | the L2 word was NOT the same on a second walk of the **same VA** after a `dsb`: the table **moved** between the reads, so the location comparison V1/V2/V3 rest on was taken over a table that does not hold still. NULL CONTROL — V1–V3 withheld. A moving table under a faulting VA is itself a finding (a concurrent writer, or the `pmap_expand` hoist). |
-| — | **W-SYNC control wrong** (`wcoow=1` **or** `wck=0` **or** `wcapx != 0`) | any | **WITNESS_METHOD_BROKEN** | the witness method itself is broken on this device (or the managed window is TTBR1 territory, which is the EXPECTED null-control outcome). Report the measurement defect. **Do NOT conclude.** |
+| — | **W-SYNC control wrong** (`wcoow=1` **or** `wck=0` **or** `wcapx != 0` **or** `wctb != 1`) | any | **WITNESS_METHOD_BROKEN** | the witness method itself is broken on this device. `wctb != 1` is included because the control VA (`0x80080000`) is TTBR1 territory by measurement, so a control row that says TTBR0 answered is not the control the design describes. Report the measurement defect. **Do NOT conclude.** |
 
 **V1/V2/V3 are the three real outcomes; V0/V4/V5/V6/WITNESS_METHOD_BROKEN are the ways the
 measurement can refuse to be a verdict.** The control (W-SYNC) is read FIRST: a wrong control
-short-circuits every one of V1–V3 into **WITNESS_METHOD_BROKEN**, exactly as the task requires. The
-provenance gate **V0** is applied NEXT, before V1–V3: an apex row that is not provably THIS storm's
-own fault (a table page, a different VA, a non-WRITE fault type) withholds V1–V3 into
-`APEX_OBSERVED_A_TABLE_PAGE` / `APEX_WRONG_VA` / `APEX_WRONG_FAULT_TYPE` — the 1012 defect made a
-refusal instead of an inference.
+short-circuits every one of V1–V3 into **WITNESS_METHOD_BROKEN**, exactly as the task requires. Next
+comes the **V0″ PAIRING** (`_wwva`/`_wkva` + `wwl1`/`wkl1` + `wwl2pa`/`wkl2pa`): only a W-WALK row that
+names the apex row's OWN cell may be compared with it, and a disagreement at one cell is
+**PAIRED_CELL_DISAGREES**, a real finding. The provenance gate **V0** (a table page / a different VA /
+a non-WRITE fault type) was retired as an adjudicator in 1013b — its three cells stay published and
+printed, but the 1013 press log showed them failing on every tail row (`wwnoproof=1`), and a class
+built over rows whose own identity cell is unproven is a verdict over a NULL CONTROL.
 
 **A second pre-verdict gate — V0′ — guards the WALK side.** Before the location comparison that
 decides V1/V2/V3, the double-read must have AGREED: `wkstable = 0` at the W-WALK tail means the L2
@@ -365,18 +416,32 @@ carries other agents' uncommitted work).
 
 * 1013 installs **no fix**; the run is EXPECTED to freeze at the same (b2) shape (~24.39 s). The
   verdict is a successful READ (exit 0); the only HARD paths are a broken recorder and the V6
-  stale-zero.
-* W-SYNC's expected-null outcome (managed base in TTBR1 territory) is stated up front; if the
-  control is null the run reports **WITNESS_METHOD_BROKEN** and concludes nothing. That is the
-  designed behaviour, not a bug to be tuned away.
+  self-contradictory-zero (a row whose tag is 0 while its own leaf is a valid small page).
+* **1013b — what the 1013 press log changed.** The recovered log
+  (`out/stage90/captures/1013-press-armed-d13-9cf2f15e-20261015-044036-last_kmsg.txt`) confirmed the
+  control defect on hardware (every `wcva=0x80080000`, `wck=0` ⇒ WITNESS_METHOD_BROKEN) **and**
+  exposed two recorder/reader defects, both fixed here: (1) W-WALK published no VA, so the apex/walk
+  leafs could only be compared by ordinal — a comparison between two ladders that fire on different
+  events; W-WALK now publishes `_wkva` and the checker pairs by `(va, l1, l2pa)`; (2) the V6
+  "stale 0" rule fired on the **correct** shape of an absent L2 slot, and is now a pairing check
+  (tag 0 contradicting the row's own leaf). The tail `wwnoproof=1` rows are kept as published cells,
+  and the V0 provenance withhold is retired to a printed report.
+* W-SYNC's control VA **is** in TTBR1 territory (measured: 0x80080000 > the N=2 split 0x40000000),
+  which is *why* the walker must read TTBR1 to answer it — the managed/identity tables the boot built
+  live in `cpu_ttb`, the table TTBR1 points at. The control therefore reads a real leaf through TTBR1
+  (`_wctb=1`); if it is still null the run reports **WITNESS_METHOD_BROKEN** and concludes nothing.
 * The (A) walk's remaining `ptel2 = 0` anomaly is not re-derived here; 1013 publishes
   `wkapex = (ptel2 == wkleaf)` **and** the double-read pair `wkleaf2`/`wkstable`, so (i) the two
   walks' agreement and (ii) whether the value was STABLE across a `dsb`-separated second read are
   both **readings**; a disagreement or an unstable read is a null control rather than a silent
   re-attribution.
-* **The provenance caveat travels with V1-V3.** When the gate passes, the verdict is stated with the
-  apex cell's provenance attached (`wwva == far`, `wwft == 0x3`, `wwpatbl == 0`); when it does not,
-  the run reports the table-page / wrong-VA / wrong-fault-type class and concludes nothing. A future
+* **1013b: the provenance caveat is PRINTED, the pairing is what ADJUDICATES.** The apex cell still
+  publishes `wwva`/`wwft`/`wwpatbl` and the checker prints every tail row's values, but the class
+  built on them ("the apex observed a table page / another VA / a non-write") is no longer a
+  withhold: the 1013 press log's tail rows all carry `wwnoproof = 1`, so their own identity cell says
+  "this is not provably your fault", and a verdict resting on them would rest on a NULL CONTROL.
+  What decides V1/V2/V3 is the **pairing by location** — `_wwva`/`_wkva` + `wwl1`/`wkl1` +
+  `wwl2pa`/`wkl2pa` — which needs no provenance cell at all. A future
   rung that needs the storm VA's OWN page-in observed must gate the apex on the enter's `pa` matching
   that VA's object page — a strictly stronger cell than `_wwnoproof` (which only compares table
   bases, `docs/1012-probe-keying.md` §2.2/§3.2/§6).

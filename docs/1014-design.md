@@ -38,6 +38,180 @@ is correct by value — and the store still permission-faults. 1013 reads the le
 
 ---
 
+## 0.5 THE 1013 RESULT IS IN — REFRAMING: this document is the DECISION PROCEDURE for 1013b's paired reading
+
+The 1013 log was recovered (the device was alive: `wdt_pets>0`, no panic). Read by value this
+session from
+`out/stage90/captures/1013-press-armed-d13-9cf2f15e-20261015-044036-last_kmsg.txt`:
+
+* **The W-APEX leaf WAS read, and it IS writable.** Tail W-APEX rows carry
+  `wwleaf=0x841e61bb` / `0x8411e1bb`, **`wwapx=0x00000000`** (APX clear = user-writable),
+  `wwl2pa=0x81bb1000` (resp. `0x841bf000`). `wwpatbl=0`, `wwft=0x3`, `wwva=0x00024000`.
+  **This is V1's premise — a writable leaf in a table that the pmap wrote — and it is the
+  first time the leaf VALUE itself has been read on this device.**
+* **But the row is not certified: `wwnoproof=0x00000001` on all 20 rows** — the pmap's own L1
+  base `wwl1=0x81bb1001` differs from the storm's live TTBR0 base
+  `_ptettbr=0x81a8605b & 0xfffff000 = 0x81a86000`. `phys_to_virt` on this port is the identity
+  (`pmap.h:192-193`, `gPhysBase == gVirtBase`), so `pm_l1_phys != live TTBR0` is a **real**
+  disagreement, not an alias — though `pmap_expand_ttb` (`pmap.c:3084-3085`) legally moves a
+  pmap's table, so it does not by itself prove the wrong table.
+* **The V0 provenance gate also fired: `wwpatbl` is 0, not 1.** §3's V0 (`docs/1013-design.md`)
+  says `wwpatbl=1` ⇒ `APEX_OBSERVED_A_TABLE_PAGE`; a 0 means the apex did **not** observe a
+  table page, yet it published a leaf value anyway. That is a provenance gap in the recorder.
+* **The W-SYNC control is void**: every row is `wcva=0x80080000 wck=0 wcoow=0 wcl1=0
+  wcl2pa=0`. `0x80080000 > 2^(32-2) = 0x40000000`, so the control VA is **TTBR1 territory**
+  and `stage90_read_l2_pte` returns 0 **before touching any table**
+  (`src/entry/entry_stubs.c:2281-2283`: `else` / `return 0u;` /
+  `/* the high window (TTBR1) - out of scope */`). The control cannot fail-by-design, so it
+  certifies nothing. The storm itself
+  runs at N=2: `_ptettbr=0x81a8605b` with `_ptethr=0x81a86000` uses the **N=2** mask
+  `0xfffff000` (`entry_stubs.c:2126`, `:2292`), so the port is not at N=0 at the storm.
+* **The W-WALK rows read a zero leaf** in a table that is present
+  (`wkl1=0x841bf001`, `wkl2pa=0x841bf000`, `wkleaf=0 wkleaf2=0 wkstable=1 wkapex=0`) — and
+  **W-WALK publishes no VA of its own** (`wkn` only), so it cannot be paired against the
+  W-APEX row. The two recorders disagree and the log cannot say why.
+
+**Dispatch: `WITNESS_METHOD_BROKEN` ⇒ §5.** Per §1's rule, **no branch of §2/§3/§4 is
+selected**, and the by-value reason is not the storm — it is that **the control leg is void by
+construction** and **the provenance gate says the apex row is not proof**. §2/§3/§4 are kept
+below as the design set for whoever the *next* press's reading selects, but they are **not**
+this round's work. The concrete owed rung is **1013b**, specified in §5.
+
+**The §8 flag stands and is independent of this:** `records/1012-press-read.txt:84` and
+`docs/1012-second-writer.md:160-165` assert `pmap_asid_ncpus=0` as a **runtime** value; the
+runtime value is **1** (`pmap_asid.c:121` is a static initializer; `pmap_asid_configure` at
+`:157` does `OSIncrementAtomic`, called from `pmap_init`), and 27 captures say so at line 4003.
+**But §0.6.3(iv) then kills the ASID-staleness mechanism anyway** — the `#else` arm of
+`arm_context_switch` (`cpufunc-v7.s:60`) is a full TLBIALL on every TTBR0 change — so the
+correcting of the record and the death of the mechanism are **two separate findings**, and §2's
+live mechanism is **H-FF (flush refused by a TTB mismatch)**, not the ASID.
+
+---
+
+## 0.6 THE PAIRED DECISION PROCEDURE (1013b's reading), and the ASID lead answered BY VALUE
+
+1013b's job is to make W-WALK publish its VA (`xnu_live_abt_wkva`) so the **W-APEX leaf at the
+enter** and the **W-WALK leaf at the abort** can be proven same-slot. This section is the
+decision procedure for that pair, and it answers the team-lead's ASID lead by value.
+
+### 0.6.1 The pairing, and the three/four outcomes
+
+| W-APEX @ enter (same `(va, l1, l2pa)`) | W-WALK @ abort | verdict | what it implies for the strip site |
+|---|---|---|---|
+| **APX = 0 (writable)** | **same leaf, APX = 0** | **V1 — `LEAF_WRITABLE_STILL_FAULTS`** | the leaf is writable in memory and the MMU walks *this* table, yet a WRITE permission fault fires ⇒ **the fault is not the leaf**. The strip site is **not** `pmap_vm_prot_to_page_flags`; the next measurement is the **flush**, §2. |
+| **APX = 0 (writable)** | **absent (leaf = 0)** | **V2′ — `LEAF_VANISHED_BETWEEN_ENTER_AND_ABORT`** | the leaf went writable → **cleared**. This is *more* alarming than V1: something **removed** the mapping after the enter. §3 (`pmap_page_protect`'s remove arm, `pmap.c:4023`) becomes the prime suspect, with the ordinals proving the order. Report it as a **new** class, not as V2. |
+| **APX = 1 (read-only)** | same, APX = 1 | **V2 — `F1a_CONFIRMED_LEAF_DEFECT`** | the store did not produce a writable leaf ⇒ either `prot` lacked `VM_PROT_WRITE` at `pmap.c:3254`/`:3443` (contradicting 1012's `_pmpprot=0x3`), or a second writer RO'd it. §3. |
+| **APX = 0** | **a leaf in a *different* L2 base** | **V3 — `IDENTITY_FAULT_L2`** | the pairing itself fails at the L2 level ⇒ §4. |
+| any | `wkstable = 0` or `wkoow = 1` | **not a verdict** | the walk refused; §5. |
+
+**The strip site, stated precisely:** the site 1012 named as "`pmap.c:1640-1682`" is a
+**misnomer** — that range is the **DEAD** `leo_pte_build`/`leo_enter` block (gated by
+`#if BOARD_CONFIG_QSD8250_LEO` at `pmap.c:3181-3183`, and the D13 build does not define that
+macro; `nm out/xnu_kernel_obj_d13/osfmk_arm_pmap.o` exports `pmap_enter_options` and **no**
+`leo_enter`). The **live** strip site — the only place `prot` becomes the APX bit — is
+`pmap_vm_prot_to_page_flags` (`pmap.c:1095`), called from `pmap.c:3254` and `:3443`; this is
+already confirmed by 1013 (`wwapx=0` ⇒ the CLEAR branch at `:1110-1111` ran). **So V1 does not
+implicate the strip site at all** — it is exonerated by value — and the branch points at the
+flush instead.
+
+### 0.6.2 Is the L1 difference (`wwl1=0x81bb1000` vs TTBR0 base `0x81a86000`) legitimate?
+
+**A legal move is possible — by value.** `pmap_expand_ttb` re-points a pmap's L1 **and** its
+live TTBR0 (§4.1 above), so a pmap whose L1 grew after the thread last switched away can carry
+a `pm_l1_phys` at *enter* different from the CPU's TTBR0 at the *abort*. **But that same
+mechanism makes the pair dangerous:** if the thread is still running with the **old** table in
+TTBR0, then W-APEX's leaf is in a table the MMU is **no longer walking** — a stale-table
+reading, which is exactly `wwnoproof`. The two hypotheses are distinguished by **one cell 1013b
+must publish**: **when** the divergence arose. If the W-APEX `wwl1` equals the abort's
+`_ptettbr` base, the move happened **after** the enter ⇒ the enter's leaf was in a table that
+was live **at the enter** and the CORE window is still valid; if not, it was **already** stale
+at the enter and the row is void. **This cell is the reason 1013b must read TTBR0 at both
+ends, not once.**
+
+### 0.6.3 The ASID lead, answered BY VALUE
+
+**(i) `_pmpttbr[7:0] = 0x5b` is NOT an ASID — it is the TTBR0 walk attribute.** Read at
+`armv/cpufunc-v7.s:49-58`: `arm_context_switch` takes the table address in `r0` and does
+`orrge r0, r0, #0x1b` / `orrlt r0, r0, #0x5b` (MPIDR-dependent), then `mcr p15, 0, r0, c2, c0, 0`
+— i.e. it ORs the attribute into the stored TTBR0 value. The decode in (ii) yields `pm_l1_phys = 0x81a86000` and `0x81a8605b & ~0x7f = 0x81a86000`, consistent with the pmap's alignment mask. **`0x5b` must not be read as ASID 0x5b=91.**
+
+**(ii) There is NO `fcseidr` in this tree, and CONTEXTIDR has exactly ONE writer.**
+`grep -rn fcseidr external/xnu-hd2-darwin13/xnu/osfmk/arm/` returns **nothing**. The register
+file is `proc_reg.h:583-584` (`ARMREG_READ_INLINE(contextidr, "p15,0,%0,c13,c0,1")` /
+`ARMREG_WRITE_INLINE(contextidr, ...)`), and the only user of it **anywhere** in the arm tree is
+`arm_set_context_id` (`cpufunc-v7.s:166-170`: `mcr p15, 0, r0, c13, c0, 1`), whose only caller
+is `pmap.c:2520`. The only callers of `pmap_switch` are `pcb.c:211`, `pcb.c:276`,
+`bsd_kern.c:309`, and `PMAP_SWITCH_USER` (`pmap.h:156`). **⇒ The "thread path writes a
+different ASID" conjecture is REFUTED by value: no such path exists in this tree.**
+
+**(iii) The `pm_asid` assignment chain, verbatim:** allocated once per pmap at `pmap.c:2612`
+(`map->pm_asid = pm_asid_hint++;`, from `KERNEL_ASID_PID = 0` at `pmap.c:530`, so the first
+user pmap gets **1** and the `assert(map->pm_asid > KERNEL_ASID_PID)` at `:2631` forbids 0);
+mirrored to the per-CPU value at `pmap_asid_activate` `pmap_asid.c:296` (`tpmap->pm_asid =
+new_asid;`, with the assert at `:300` that a non-kernel asid is `!= 0`); written to the
+register **only** at `pmap.c:2517` and `:2520`, inside the `else` branch at `pmap.c:2509-2521`
+that is skipped by `goto switch_return;` at `:2512-2513` when
+`current_cpu_datap()->user_pmap == new_pmap`.
+
+**(iv) ⇒ V1's ASID-staleness form is REFUTED by value, and the reason is the flush inside
+`arm_context_switch`.** `cpufunc-v7.s:49-63`, read verbatim this session:
+
+```asm
+ 49 ENTRY(arm_context_switch)
+ 50 	dsb
+ 51 	mrc	p15, 0, r2, c0, c0, 5	@ get MPIDR
+ 53 	orrlt	r0, r0, #0x5b		@ MP, cachable (Normal WB)
+ 54 	orrge	r0, r0, #0x1b		@ Non-MP, cacheable, normal WB
+ 55 	mcr	p15, 0, r0, c2, c0, 0 	@ set the new TTB
+ 57 #ifdef MULTIPROCESSOR
+ 58 	mcr	p15, 0, r0, c8, c3, 0	@ flush the I+D
+ 59 #else
+ 60 	mcr	p15, 0, r0, c8, c7, 0	@ flush the I+D
+ 61 #endif
+```
+
+**The `#else` arm runs on this device** (`MULTIPROCESSOR` is not defined), so
+`arm_context_switch` ends with **TLBIALL (`c8,c7,0`) — a FULL TLB invalidate.** Every path that
+changes TTBR0 or CONTEXTIDR goes through it: `pmap_switch:2520-2521` (the `user_pmap` diff
+path) and `pmap_expand_ttb:3095` (`if (map == current_cpu_datap()->user_pmap)
+arm_context_switch(map->pm_l1_phys);`). **⇒ On every TTBR0/CONTEXTIDR change the whole TLB is
+flushed, so the ASID logic in `pmap_flush_tlbs` cannot leave a stale entry behind.** The lead's
+candidate (A) is dead by value.
+
+### 0.6.4 The surviving V1 form, and V1 as a FALSIFIABLE PREDICTION for the re-press
+
+With (A) dead, **exactly one V1 shape survives**, and it is the one 1013's own data points at —
+call it **H-FF (flush refused by a TTB mismatch)**:
+
+> `pmap_flush_tlbs` (`pmap.c:1280`, `:1295`, `:1298`) computes `ttb = pmap->pm_l1_phys` and
+> `ttbr_pmap = armreg_ttbr_read() & 0xFFFFFF00`; if they differ **and** `pmap_is_shared` is 0
+> (set only by `pmap_nest`, `pmap.c:4368`), `flush_self` stays `FALSE` and **no flush runs at
+> all**. So if `pmap_enter_options` wrote its writable leaf into a table TTBR0 does not walk
+> (1013 measured exactly this: `wwl1=0x81bb1000` vs the storm's TTBR0 base `0x81a86000`), the
+> enter's own flush is a **no-op**, and the MMU keeps translating through the other table.
+
+**H-FF reconciles every 1013 reading at once:** `wwapx=0` (the pmap's table holds a writable
+leaf) + `wwnoproof=1` (that table is not the one TTBR0 walks) + `wkleaf=0` (the live table has
+no leaf there) + the storm (FS=15, WnR=1, ~2.1M retries). **It is the leading hypothesis.**
+
+**The prediction, stated so the re-press refutes or confirms it:**
+
+> **P-V1.** On the storm's tail flush rows (`xnu_live_abt_wf*`, §2), one of:
+> 1. **`_wfself = 0`** — the flush was refused by the TTB mismatch. **⇒ H-FF CONFIRMED**, and
+>    the fix direction becomes §4's identity question (why `pm_l1_phys` ≠ TTBR0), **not** the
+>    flush;
+> 2. **`_wfself = 1` and `_wfttb == _wflive`** — the bases agree at flush time, so the enter's
+>    flush did run; combined with a writable leaf this **refutes H-FF** and forces §4 (the
+>    table read is not the table walked) or §3;
+> 3. **`_wfkind = 1`** (the full `arm_tlb_flushID`) **and the store still faults** — refutes
+>    *all* staleness; §4.
+
+`pm_asid` is never 0 for a user pmap (`pmap.c:2612`, `:2631`), and CONTEXTIDR has a single
+writer whose every invocation is followed by a full TLBIALL — so the "wrong ASID" and
+"asid 0" shapes are **both excluded by value** and P-V1 no longer tests them.
+
+---
+
 ## 1. Which branch is selected (the mechanical rule)
 
 The checker already computes `WIT_CLASS`; 1014's dispatch is a total function of it, and it is
@@ -313,9 +487,9 @@ Read on the **TAIL rows' own values** (any `_wfn >= 0x400`), never a whole-run `
 
 | # | tail-row condition | verdict | what it means |
 |---|---|---|---|
-| **F1** | `_wfself = 0` at every tail row for this VA | **FLUSH_NEVER_FIRED** | the test at `pmap.c:1298-1299` was FALSE: `pmap->pm_l1_phys != (armreg_ttbr_read() & 0xFFFFFF00)` **at flush time** and the pmap is not shared ⇒ **no flush ran at all**. A by-value CONTRADICTION with 1012/1013 (which measured the two bases EQUAL at the *enter*): it would mean TTBR0 changes between the enter and the flush. |
-| **F2** | `_wfself = 1`, `_wfkind = 2`, and `(_wfasid != (_wctx & 0xFF))` on the **tail** pair | **ASID_MISMATCH** | the flush fired, but it was `TLBIASID(pm_asid)` while the CPU translates the faulting store under a **different** CONTEXTIDR: the invalidated entries are not the entries the store walks. This is the by-value mechanism (`pmap.c:1319` vs `pmap.c:2520`), and it is the shape 1012's records **dismissed** on a mis-read static initializer. |
-| **F3** | `_wfself = 1`, `_wfkind = 2`, `_wfasid == (_wctx & 0xFF)`, and the fault persists | **ASID_CONSISTENT_STILL_FAULTS** | the correct ASID was invalidated and the store still permission-faults ⇒ **NOT a TLB staleness in the ASID sense**. Next rung must read the TLB shape itself (a section mapping at this VA, or a TTBR1 walk, or the domain/DACR). Named, not guessed. |
+| **F1** | `_wfself = 0` at every tail row for this VA | **FLUSH_REFUSED_TTB_MISMATCH — H-FF CONFIRMED** | the test at `pmap.c:1298-1299` was FALSE: `pmap->pm_l1_phys != (armreg_ttbr_read() & 0xFFFFFF00)` **at flush time** and the pmap is not shared ⇒ **no flush ran at all**. This is the surviving V1 mechanism (§0.6.4), and it agrees with 1013's `wwl1=0x81bb1000` ≠ the storm's TTBR0 base `0x81a86000`. |
+| **F2** | `_wfself = 1`, `_wfttb == _wflive` (the bases agree at flush time), fault persists | **FLUSH_RAN_STILL_FAULTS** | the enter's flush was **not** refused; combined with 1013's writable leaf this **refutes H-FF** and forces §4 (the table read is not the table walked) or §3. Note: with `arm_context_switch`'s full TLBIALL on every TTBR0 change (§0.6.3(iv)) and `pm_asid` single-written, an *ASID*-scoped mismatch cannot be the cause — this cell must not be read as one. |
+| **F3** | `_wfself = 1`, `_wfkind = 2`, and the fault persists | **ASID_PATH_RAN_STILL_FAULTS** | the ASID-scoped invalidate ran and the store still permission-faults ⇒ **not ASID staleness**. The remaining V1-adjacent suspects are the TLB's own view (a section mapping at this VA, a TTBR1 walk) or the **DACR/domain** — the domain field of the L1 descriptor built at `pmap.c:3163` is `0` and `src/mmu.c:5526` sets DACR to `0x00000003` (domain 0 = **manager**, which bypasses AP checks entirely), so a domain that is not manager on the faulting CPU would produce FS=15 without any leaf defect. Named, not guessed. |
 | **F4** | `_wfself = 1` and `_wfkind = 1` (the **full** `arm_tlb_flushID`) and the fault persists | **FULL_FLUSH_STILL_FAULTS** | the whole TLB was invalidated for this CPU and the store still faults ⇒ staleness is dead; the entry is rebuilt from the *table*, so the table the MMU walks is not the table 1013 read. **Cross-check with 1013's V3 cell** (`_wwl2pa` vs `_wkl2pa`) — if they were equal, this is a hard contradiction and the rung after must re-open the walk. |
 | **F5** | `_wfn = 0` at the tail while the storm ran | **NO_FLUSH_WITNESS** | the flush recorder never fired on the storm VA: a provenance/keying failure (the flush runs outside the handler's `g_abtpte_curva` window) ⇒ **rebuild, do not conclude** (§5). |
 | **F6** | `_wfncpus` differs from the `All ASID/asids enabled` line's value | **HARD (stale decode)** | the published runtime value disagrees with the boot's own print ⇒ a broken recorder (`tools/check_1013_capture.py:4939-4947` precedent). |
@@ -619,17 +793,27 @@ As §2.4, plus:
 
 ---
 
-## 5. The refusal path — V4 / V5 / V6 (`wwnoproof=1` / `wwn=0` / a stale 0)
+## 5. The refusal path — V4 / V5 / V6 (`wwnoproof=1` / `wwn=0` / a stale 0), now the OWED RUNG (1013b)
 
 **This is not a new rung. It is a rebuild of 1013 with the named defect fixed**, and it is
-specified here so the branch is a decision rather than an improvisation.
+specified here so the branch is a decision rather than an improvisation. **Per §0.5 this is
+the branch 1013 actually selected**, so the three defects below are the concrete work.
 
-| 1013 class | the named defect | the rebuild |
+| 1013 class | the named defect (BY VALUE from the 1013 log) | the rebuild |
 |---|---|---|
-| **V4 `APEX_NOT_PROOF`** (`_wwnoproof = 1`) | `pm_l1_phys` ≠ the live TTBR0 base at the apex row, so the apex leaf is not provably the live table (`entry_stubs.c:2894-2895`) | The apex must read **the table the MMU walks** rather than the pmap's own field. Rebuild: `entry_note_abt_wleaf` walks from `entry_ttbr_base(armreg_ttbr_read(), ttbcr & 7)` **when** `proof == 0`, publishing both leaves (`_wwleaf` from the pmap's table, `_wwleafq` from the live TTBR0) and the flag. `entry_ttbr_base` (`entry_stubs.c:2131-2139`) is already the ONE spelling of the alignment rule — 1010b's fixed-constant mask is the defect this must not repeat. |
-| **V5 `NO_APEX_WITNESS`** (`_wwn = 0`) | the enter never reached the wrapper on the storm VA | Re-assert the **keying**: the build already asserts `entry_note_abt_cur(far_)` is **strictly before** `__real_sleh_abort(regs, type);` by line number (`scripts/build_1013.sh:1840-1842`). Rebuild with the assertion re-run **and** a new cell: publish the recorder's `g_abtpte_curva` at the moment of the abort **and** the count of `pmap_enter_options` calls seen by the wrapper at all (`_wwall`), so "the wrapper saw nothing" separates from "the wrapper's filter dropped everything". |
-| **V6 `HARD (stale 0)`** | a present L2 with no leaf, or a published decode that is not the decode of the published leaf (`tools/check_1013_capture.py:4939-4947`) | The recorder is broken: the decode (`_wwapx` from `_wwleaf`) and the leaf must be published from **one read into one local**, and the build must assert that the store of the leaf and the store of its decode share that local (a source-level check, `grep -c` on the published expression, mirroring `scripts/build_1013.sh:1857`). Rebuild and re-press. |
+| **V4 `APEX_NOT_PROOF`** (`_wwnoproof = 1` — **all 20 rows**) | `pm_l1_phys` (`wwl1=0x81bb1001` ⇒ `0x81bb1000`) ≠ the live TTBR0 base at the apex row (`_ptettbr=0x81a8605b` ⇒ `0x81a86000`), so the apex leaf is not provably the live table (`entry_stubs.c:2894-2895`). The pmap's table legally moves (`pmap_expand_ttb`, `pmap.c:3084-3085`), so this is a real disagreement and not an alias — but it does not prove the wrong table either. | The apex must read **the table the MMU walks** and, when `proof == 0`, also walk from `entry_ttbr_base(armreg_ttbr_read(), ttbcr & 7)`, publishing both leaves and the flag: `_wwleafq` (the live-TTBR0 leaf), `_wwl1q` (its L1 entry) and `_wwl2paq`. `entry_ttbr_base` (`entry_stubs.c:2131-2139`) is the ONE spelling of the alignment rule; a fixed-constant mask is the 1010b/1010c defect this must not repeat. **AND the provenance gate must be resolved, not bypassed: `wwpatbl=0` on every row** — either the apex's "is this a table page" test (`entry_stubs.c:2918-2919`) is wrong, or the row is genuinely not a leaf-in-a-table. Publish the test's own input (`_wltb`, `_wltbkind`) so a 0 is a reading rather than a gap. |
+| **V5 `NO_APEX_WITNESS`** (`_wwn = 0` — did **not** occur; 20 rows) | the enter never reached the wrapper on the storm VA | (Not this round's defect — recorded for completeness.) Re-assert the keying: the build already asserts `entry_note_abt_cur(far_)` is **strictly before** `__real_sleh_abort(regs, type);` by line number (`scripts/build_1013.sh:1840-1842`), and add `_wwall` = the wrapper's total call count so "saw nothing" separates from "filter dropped everything". |
+| **V6 / CONTROL VOID** (`wck = 0` on all 22 rows — **this is what returned `WITNESS_METHOD_BROKEN`**) | the control VA `wcva=0x80080000` is **TTBR1 territory** at the storm's N=2 (`0x80080000 >= 0x40000000`), so `stage90_read_l2_pte` returns 0 before touching a table (`entry_stubs.c:2281-2283`). A control that cannot take its success branch is not a control. | **Move the control VA below the split**: a VA that is mapped, ≤ `(1u << (32 - n)) - 1`, and known-readable. The build must **assert** `control_va < (1u << (32u - n))` **by evaluating the same `n` the storm uses** — not by a hard-coded `0x40000000`. The 1013 defect was a hard-coded boundary vs a runtime `n`; the rebuild's refusal is the same class of guard as `entry_ttbr_base` itself. If no such VA is known, the honest control is the **storm VA's neighbour page** in the same L2, which is mapped by construction. |
+| **PAIRING** (new, from §0.5) | W-WALK publishes **no VA** (`wkn` only), so its `wkleaf=0` rows cannot be compared with the W-APEX `wwleaf=0x841e61bb` rows: 22 W-WALK rows and 20 W-APEX rows disagree and the log cannot say whether it is the same slot. | Publish `xnu_live_abt_wkva` from `entry_note_abt_walk` (`entry_stubs.c:2952-3039`) and have the checker pair rows by `(va, l1, l2pa)` — not by ordinal. **This key is owed regardless of which branch is selected later.** |
+| **V6 `HARD (stale 0)`** | a present L2 with no leaf, or a published decode that is not the decode of the published leaf (`tools/check_1013_capture.py:4939-4947`) | The recorder is broken: the decode (`_wwapx` from `_wwleaf`) and the leaf must be published from **one read into one local**, and the build must assert that the store of the leaf and the store of its decode share that local (a source-level check, `grep -c` on the published expression, mirroring `scripts/build_1013.sh:1857`). |
 | any `*_NULL` / `MEASUREMENT_DEFECT` | the named gate that fired | Rebuild **only that instrument**, never the kernel; the run installs no fix in any branch. |
+
+**What 1013b must NOT do.** It must **not** "fix" the `wwnoproof` gate by relaxing it. The
+gate is correct: a leaf read from a table that is not the one TTBR0 walks is not evidence about
+the fault. 1013b's job is to make the apex read the **live** table (and publish both when they
+differ), so the gate can be **satisfied by measurement** rather than waived. The apex's own
+`wwapx=0` — the writable leaf — is the prize, and it is **withheld until the gate is met by
+value**.
 
 **The rule for all of §5:** the rebuild changes the **measurement**, never the kernel's
 behaviour, and it must re-pass §2.4's OFF-byte-identity and negative-control clauses before it
@@ -743,8 +927,25 @@ which 1012's exhaustive sweep (`docs/1012-second-writer.md`) found unreachable o
 (iii) V3 requires the L1 bases to differ, and 1012 measured them equal at the enter — the same
 cell this rung would have to overturn.
 
-**This is a judgement of likelihood, not a result.** 1013's leaf reading decides, and §1 says
-so mechanically: V2 and V3 are designed here in full, and either may be what the log shows.
+**This is a judgement of likelihood, not a result — and 1013 has since partly confirmed the
+premise while withholding the verdict.** The recovered 1013 log (§0.5) reads a **writable**
+leaf: `wwapx=0x00000000` with `wwleaf=0x841e61bb` / `0x8411e1bb` in a present L2
+(`wwl2pa=0x81bb1000`). That is **V1's premise, measured on hardware for the first time** — and
+it simultaneously makes V2 much less likely (the leaf is not RO) and V3 conditional (the L2
+table was found). What is missing is **certification**: all 20 rows carry `wwnoproof=1`, and
+the control leg is void. So the honest statement is:
+
+* **if 1013b certifies the apex row** (the live-TTBR0 leaf equals the pmap's leaf, or the
+  divergence is shown to be a legal `pmap_expand_ttb` move), then **§2 (`STAGE90_XNU_FLUSH_WITNESS`)
+  is the rung to arm**, on the reasoning above;
+* **if 1013b shows the two leaves differ**, the rung is **§4 (`STAGE90_XNU_L1ID_WITNESS`)**,
+  because a legal table move would have re-pointed both;
+* **§3 (`STAGE90_XNU_WRITER_WITNESS`)** stays designed for the case where 1013b's live-leaf read
+  comes back RO.
+
+The remaining uncertainty is a **measurement** uncertainty, not a mechanism one: the project's
+"a measurement can be the thing that is wrong" class ([[mi4-measurement-defects]]), twice over
+— a control VA outside its own instrument's domain, and a provenance gate that never opens.
 
 ---
 
@@ -755,6 +956,13 @@ so mechanically: V2 and V3 are designed here in full, and either may be what the
 * **The dispatch presumes 1013's checker is correct**, including its `WIT_CLASS` strings and
   its tail-ordinal rule (`WIT_TAIL_MIN_N = 0x400`, `tools/check_1013_capture.py:1029`). If the
   log shows a class not in §1's table, that is a **checker defect** and the response is §5.
+  **This has now happened**: 1013 returned `WITNESS_METHOD_BROKEN` (§0.5) and the response is
+  §5's 1013b, not a branch.
+* **The W-APEX leaf value in §0.5 is not a verdict.** `wwapx=0` is the *value the apex read*;
+  with `wwnoproof=1` the apex read it from a table that is **not proven** to be the one TTBR0
+  walks, and with `wwpatbl=0` the recorder's own provenance test says it did not see a table
+  page. Citing `wwapx=0` as "the leaf is writable, therefore V1" would be exactly the
+  stand-in-for-a-value error §8 flags.
 * **Every line number is the working tree at `HEAD` (`f73e026`), read this session.** Line
   numbers are hints; the anchors are the quoted bytes.
 * **The branch choice is a reading, never a fix.** All three rungs are pure measurements, the

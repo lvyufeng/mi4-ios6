@@ -1769,7 +1769,7 @@ d12_t=$(grep -cxF "$d12_guard" src/entry/entry_trace.c || true)
 # `STUB_DEFINES_TRACE` / build_entry.sh occurrences the design names are in the .sh, NOT in the .c.
 echo "   (a) the defined()-first PMP guard: entry_stubs.c x$d12_s (want 1 - the recorder), entry_trace.c x$d12_t (want 1 - the wrapper)"
 [[ "$d12_s" == "1" && "$d12_t" == "1" ]] || { echo "FAIL: the PMP guard is not one-per-file (stubs x$d12_s want 1, trace x$d12_t want 1) - a hand edit moved or dropped one"; exit 1; }
-[[ $(grep -cF 'entry_note_abt_pmp(uint32_t va, uint32_t prot, uint32_t pa, uint32_t pm_l1_phys)' "$stub_src" || true) == 1 ]] || { echo "FAIL: the recorder 'entry_note_abt_pmp(uint32_t va, uint32_t prot, uint32_t pa, uint32_t pm_l1_phys)' is not DEFINED exactly once in $stub_src (the `void` sits on the preceding line)"; exit 1; }
+[[ $(grep -cF 'entry_note_abt_pmp(uint32_t va, uint32_t prot, uint32_t pa, uint32_t pm_l1_phys)' "$stub_src" || true) == 1 ]] || { echo "FAIL: the recorder 'entry_note_abt_pmp(uint32_t va, uint32_t prot, uint32_t pa, uint32_t pm_l1_phys)' is not DEFINED exactly once in $stub_src (the \`void\` sits on the preceding line)"; exit 1; }
 # entry_trace.c: the wrapper DEFINED once, the __real_ DECLARED once AND CALLED once (the pass-through),
 # and the ONE recorder call.
 [[ $(grep -cF 'uint32_t __wrap_pmap_enter_options(' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: __wrap_pmap_enter_options is not defined exactly once in entry_trace.c"; exit 1; }
@@ -1778,7 +1778,7 @@ echo "   (a) the defined()-first PMP guard: entry_stubs.c x$d12_s (want 1 - the 
 #     the final statement compiles to a TAIL call (`b <real>`), and the §8.1 linked check (below) looks
 #     for `bl <real>` - so the result is NAMED and returned, exactly as `__wrap_vm_fault` does.
 [[ $(grep -cF 'uint32_t __real_pmap_enter_options(' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: __real_pmap_enter_options is not DECLARED once in entry_trace.c"; exit 1; }
-[[ $(grep -cF 'uint32_t kr = __real_pmap_enter_options(pmap, va, pa, prot, fault_type, flags, wired, options);' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: the wrapper does not CALL __real_pmap_enter_options into kr - it is not a pass-through (§8.1; a bare `return __real_(...)` would tail-call and leave no `bl`)"; exit 1; }
+[[ $(grep -cF 'uint32_t kr = __real_pmap_enter_options(pmap, va, pa, prot, fault_type, flags, wired, options);' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: the wrapper does not CALL __real_pmap_enter_options into kr - it is not a pass-through (§8.1; a bare \`return __real_(...)\` would tail-call and leave no \`bl\`)"; exit 1; }
 [[ $(grep -cF 'return kr;' src/entry/entry_trace.c || true) -ge 1 ]] || { echo "FAIL: the wrapper does not return the named kr - the real enter's value is lost (§8.1)"; exit 1; }
 [[ $(grep -cF 'entry_note_abt_pmp(va, prot, pa, pm_l1_phys);' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: the wrapper does not call entry_note_abt_pmp(va, prot, pa, pm_l1_phys) - the apex record never fires"; exit 1; }
 [[ $(grep -cF 'uint32_t pm_l1_phys = (pmap != 0) ? *(uint32_t *)pmap : 0u;' src/entry/entry_trace.c || true) == 1 ]] || { echo "FAIL: the wrapper does not read pm_l1_phys (offset 0 of struct pmap, pmap.c:1280) with a null guard"; exit 1; }

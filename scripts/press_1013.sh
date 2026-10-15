@@ -78,12 +78,13 @@ SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 # SUBMAP_PMAP_SKIP=1, ABORT_TRACE=1, FREEZE_WITNESS=1, ABT_SPAN=1, ABT_FAR=1, ABT_PC=1, ABT_PTE=1,
 # VME_PROT=1, PMP_ENTER=1 AND PTE_WITNESS=1 must ALL be in the record.
 #
-# (0) THE 1013 CHANGE IS IN THE IMAGE - READ IT BEFORE ANY JUDGEMENT.  By value: the EIGHTY-TWO (82)
+# (0) THE 1013 CHANGE IS IN THE IMAGE - READ IT BEFORE ANY JUDGEMENT.  By value: the EIGHTY-SIX (86)
 #     `xnu_live_abt_` key literals (1012's 49: the 6 span, the 5 far, the 7 pc, the 12 pte/vmf, the 6
-#     1010c walk-window, the 7 1011 vme+ptethr, the 6 1012 pmp - PLUS 1013's 33: 11 W-APEX
+#     1010c walk-window, the 7 1011 vme+ptethr, the 6 1012 pmp - PLUS 1013's 35: 11 W-APEX
 #     wwn/wwl1/wwl2pa/wwleaf/wwapx/wwnoproof/wwpa/wwpaok/wwva/wwft/wwpatbl + wwnx, 12 W-WALK
-#     wkn/wk/wktb/wkl1/wkl2pa/wkleaf/wkleaf2/wkstable/wkapx/wkoow/wkfsr/wkapex + wknx, 8 W-SYNC
-#     wcnt/wcva/wck/wcl1/wcl2pa/wcleaf/wcapx/wcoow) embedded in out/stage90/xnu_arm_entry.elf, AND
+#     wkn/wk/wktb/wkl1/wkl2pa/wkleaf/wkleaf2/wkstable/wkapx/wkoow/wkfsr/wkapex + wknx, 9 W-SYNC
+#     wcnt/wcva/wck/wctb/wcl1/wcl2pa/wcleaf/wcapx/wcoow, PLUS the 2 raw TTBR words
+#     wctb0/wctb1) embedded in out/stage90/xnu_arm_entry.elf, AND
 #     `entry_note_abt_wleaf`/`entry_note_abt_walk`/`entry_note_abt_wsync`/`entry_note_abt_cur` a DEFINED
 #     text symbol each (a generated stand-in would show 0), AND exactly ONE `bl` to each recorder
 #     ([[mi4-hooks-live-at-calls]]), AND the W-APEX one INSIDE `__wrap_pmap_enter_options` while
@@ -99,7 +100,7 @@ SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 #     text symbols AND exactly ONE `b|bl <entry_note_abt_pmp>` inside `__wrap_pmap_enter_options` must
 #     STILL be present.
 # (0b) THE 1011 (E')/(A) IDENTITY IS A REGRESSION: the seven vme+ptethr key literals (inside the (0)
-#     EIGHTY-TWO (82)) AND `entry_note_abt_vme`/`__wrap_vm_map_lookup_locked` DEFINED text symbols
+#     EIGHTY-SIX (86)) AND `entry_note_abt_vme`/`__wrap_vm_map_lookup_locked` DEFINED text symbols
 #     AND exactly ONE `b|bl <entry_note_abt_vme>` inside `__wrap_vm_map_lookup_locked` must STILL be
 #     present, plus the (A) STAGE90_ACT_MAP immediate (956).
 # (0c) THE 1010c L2-DESCRIPTOR / WALK-WINDOW IS A REGRESSION: the six walk-window literals AND the
@@ -355,14 +356,16 @@ EOF
 echo "   (record carries 1012's verbatim switch set PLUS the new STAGE90_XNU_PTE_WITNESS; USVC, SUBMAP_PMAP_SKIP, STALL, ABORT_TRACE, CADENCE, FREEZE_WITNESS, ABT_SPAN, ABT_FAR, ABT_PC, ABT_PTE, VME_PROT and PMP_ENTER all on)"
 
 echo "== 2-0. the 1013 LEAF-VALUE WITNESS in the image (read by value BEFORE the press) + the 1012 PTE-build apex, the 1011 (E')/(A), the 1010c L2-descriptor/walk-window, the 1009 pc identity, the 1008 far identity, the 1007 span witness, the 1006 freeze witness, the 1005 cadence witness, the 1004 abort trace and the 1002 r3-save fix as regressions =="
-# (0) THE 1013 CHANGE IS IN THE IMAGE: the EIGHTY-TWO (82) `xnu_live_abt_` key literals embedded
-#     (1012's 49 + 1013's 33 witness keys) AND the four witness recorders DEFINED text symbols
+# (0) THE 1013 CHANGE IS IN THE IMAGE: the EIGHTY-SIX (86) `xnu_live_abt_` key literals embedded
+#     (1012's 49 + 1013's 35 witness keys incl. the TTBR1 label _wctb and the 1013b VA cell _wkva
+#     + the 2 raw TTBR words
+#     _wctb0/_wctb1) AND the four witness recorders DEFINED text symbols
 #     AND exactly ONE `bl <entry_note_abt_pmp>` INSIDE `__wrap_pmap_enter_options`, which ALSO calls the
 #     real `pmap_enter_options` body ([[mi4-hooks-live-at-calls]] - the wrapper MUST be a pass-through).
 _abt_lit=$(strings out/stage90/xnu_arm_entry.elf | grep -c 'xnu_live_abt_' || true)
-echo "   (0) xnu_live_abt_* literals x$_abt_lit (want 82: 1012's 49 + 1013's 33 witness keys)"
-[[ "$_abt_lit" == 82 ]] || {
-  echo "REFUSING: the 1013 witness store (or the 1012 pmp, the 1011 (E')/(A) and the 1010c L2-descriptor + walk-window stores) is NOT in the image (literals x$_abt_lit want 82) - rebuild"; exit 1; }
+echo "   (0) xnu_live_abt_* literals x$_abt_lit (want 86: 1012's 49 + 1013's 35 witness keys + the 2 raw TTBR words)"
+[[ "$_abt_lit" == 86 ]] || {
+  echo "REFUSING: the 1013 witness store (or the 1012 pmp, the 1011 (E')/(A) and the 1010c L2-descriptor + walk-window stores) is NOT in the image (literals x$_abt_lit want 86) - rebuild"; exit 1; }
 # NOTE: `nm | grep -q` under `set -o pipefail` is a trap - `grep -q` exits on the first match, SIGPIPEs
 # `nm`, and the pipeline's status becomes 141, vetoing a match that exists (the 487/998 SIGPIPE lesson).
 # Capture `nm` ONCE into a variable and grep the variable: no pipeline, no SIGPIPE.

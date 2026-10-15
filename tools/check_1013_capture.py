@@ -989,6 +989,7 @@ WIT_W_ROW_KEYS = (WIT_W_N_KEY, WIT_W_L1_KEY, WIT_W_L2PA_KEY, WIT_W_LEAF_KEY, WIT
 WIT_W_KEYS = WIT_W_ROW_KEYS + (WIT_W_NX_KEY,)
 # ---- W-WALK: `xnu_live_abt_wkn` OPENS the row.
 WIT_K_N_KEY = "xnu_live_abt_wkn"
+WIT_K_VA_KEY = "xnu_live_abt_wkva"        # 1013b: THE VA THIS ROW WALKED (the abort's own `far`)
 WIT_K_TAG_KEY = "xnu_live_abt_wk"
 WIT_K_TB_KEY = "xnu_live_abt_wktb"
 WIT_K_L1_KEY = "xnu_live_abt_wkl1"
@@ -1001,27 +1002,36 @@ WIT_K_OOW_KEY = "xnu_live_abt_wkoow"
 WIT_K_FSR_KEY = "xnu_live_abt_wkfsr"
 WIT_K_APEX_KEY = "xnu_live_abt_wkapex"
 WIT_K_NX_KEY = "xnu_live_abt_wknx"
-WIT_K_ROW_KEYS = (WIT_K_N_KEY, WIT_K_TAG_KEY, WIT_K_TB_KEY, WIT_K_L1_KEY, WIT_K_L2PA_KEY,
-                  WIT_K_LEAF_KEY, WIT_K_APX_KEY, WIT_K_OOW_KEY, WIT_K_FSR_KEY, WIT_K_APEX_KEY,
-                  WIT_K_LEAF2_KEY, WIT_K_STABLE_KEY)
+WIT_K_ROW_KEYS = (WIT_K_N_KEY, WIT_K_VA_KEY, WIT_K_TAG_KEY, WIT_K_TB_KEY, WIT_K_L1_KEY,
+                  WIT_K_L2PA_KEY, WIT_K_LEAF_KEY, WIT_K_APX_KEY, WIT_K_OOW_KEY, WIT_K_FSR_KEY,
+                  WIT_K_APEX_KEY, WIT_K_LEAF2_KEY, WIT_K_STABLE_KEY)
 WIT_K_KEYS = WIT_K_ROW_KEYS + (WIT_K_NX_KEY,)
 # ---- W-SYNC (the control): `xnu_live_abt_wcnt` OPENS the row.
 WIT_C_N_KEY = "xnu_live_abt_wcnt"
 WIT_C_VA_KEY = "xnu_live_abt_wcva"
 WIT_C_TAG_KEY = "xnu_live_abt_wck"
+WIT_C_TB_KEY = "xnu_live_abt_wctb"        # 1013: 1 = the walk answered from TTBR1 (the high window)
+WIT_C_TB0_KEY = "xnu_live_abt_wctb0"      # the live TTBR0 word (raw)
+WIT_C_TB1_KEY = "xnu_live_abt_wctb1"      # the live TTBR1 word (raw; the table the control used)
 WIT_C_L1_KEY = "xnu_live_abt_wcl1"
 WIT_C_L2PA_KEY = "xnu_live_abt_wcl2pa"
 WIT_C_LEAF_KEY = "xnu_live_abt_wcleaf"
 WIT_C_APX_KEY = "xnu_live_abt_wcapx"
 WIT_C_OOW_KEY = "xnu_live_abt_wcoow"
-WIT_C_ROW_KEYS = (WIT_C_N_KEY, WIT_C_VA_KEY, WIT_C_TAG_KEY, WIT_C_L1_KEY, WIT_C_L2PA_KEY,
-                  WIT_C_LEAF_KEY, WIT_C_APX_KEY, WIT_C_OOW_KEY)
-# The 33 witness key literals `scripts/build_1013.sh` / `scripts/park_1013.sh` / `scripts/press_1013.sh`
-# assert BY NAME - kept here so the checker, the build and the press speak ONE list.
+WIT_C_ROW_KEYS = (WIT_C_N_KEY, WIT_C_VA_KEY, WIT_C_TAG_KEY, WIT_C_TB_KEY, WIT_C_L1_KEY,
+                  WIT_C_L2PA_KEY, WIT_C_LEAF_KEY, WIT_C_APX_KEY, WIT_C_OOW_KEY)
+# `_wctb0`/`_wctb1` are published BESIDE the row (not part of the parsed tuple) - they are the RAW
+# register words the label `_wctb` is derived from, kept so the reader can cross-check the label.
+WIT_C_TB_WORDS = (WIT_C_TB0_KEY, WIT_C_TB1_KEY)
+# The 35 witness key literals `scripts/build_1013.sh` / `scripts/park_1013.sh` / `scripts/press_1013.sh`
+# assert BY NAME - kept here so the checker, the build and the press speak ONE list.  1013's control
+# grew `_wctb` (the TTBR1 label) so the control's own table is a published reading, and 1013b grew
+# `_wkva` (W-WALK's own VA) so a W-APEX/W-WALK leaf pair can be PAIRED BY LOCATION rather than by
+# ordinal (the 1013 press log's V6 "stale 0" was a by-ordinal comparison artifact).
 WIT_KEYS = WIT_W_KEYS + WIT_K_KEYS + WIT_C_ROW_KEYS
-# THE IMAGE'S PINNED TOTAL `xnu_live_abt_` LITERAL COUNT: 1012's 49 + 1013's 33 witness keys = 82
-# (`scripts/build_1013.sh` asserts `strings | grep -c 'xnu_live_abt_'` == 82).
-WIT_IMG_LIT_WANT = 82
+# THE IMAGE'S PINNED TOTAL `xnu_live_abt_` LITERAL COUNT: 1012's 49 + 1013's 35 witness keys + the two
+# raw TTBR words `_wctb0`/`_wctb1` = 86 (`scripts/build_1013.sh` asserts the same total).
+WIT_IMG_LIT_WANT = 86
 # THE TAIL ORDINAL: the SAME 0x400 [ABT3]/[ABT4]/[CFFIX]/[PMP] use.  The storm settles by ~0x200, so
 # the rows at/after 0x400 are the storm's OWN steady state - THE tail.  THE DECISION READS THE TAIL
 # ROWS' OWN VALUES, NEVER a whole-run `max()`/`first()` (the 1008/1009 measurement defect this project
@@ -1638,13 +1648,15 @@ class Capture:
     def wit_walk_records(self):
         """[WIT] W-WALK - the same walk at the ASYNC abort, on the LIVE TTBR0, for the storm's `far`.
 
-        One `{"ln", "wkn", "wk", "wktb", "wkl1", "wkl2pa", "wkleaf", "wkleaf2", "wkstable",
+        One `{"ln", "wkn", "wkva", "wk", "wktb", "wkl1", "wkl2pa", "wkleaf", "wkleaf2", "wkstable",
         "wkapx", "wkoow", "wkfsr", "wkapex", "order"}` per PUBLISHED W-WALK ladder row, in log order.
         `entry_note_abt_walk` writes its ladder keys in ONE fixed order - `xnu_live_abt_wkn` OPENS a
-        row, then `_wk`/`_wktb`/`_wkl1`/`_wkl2pa`/`_wkleaf`/`_wkleaf2`/`_wkstable`/`_wkapx`/`_wkoow`/
-        `_wkfsr`/`_wkapex` - bound the same way as `wit_apex_records()`."""
+        row, then `_wkva`/`_wk`/`_wktb`/`_wkl1`/`_wkl2pa`/`_wkleaf`/`_wkleaf2`/`_wkstable`/`_wkapx`/
+        `_wkoow`/`_wkfsr`/`_wkapex` - bound the same way as `wit_apex_records()`; `_wkva` (1013b) is
+        THE VA THIS ROW WALKED, the cell that lets a reader PAIR this row with the W-APEX row that
+        read the same L2 slot ([[mi4-one-value-two-definitions]])."""
         rows, cur = [], None
-        fkeys = {WIT_K_N_KEY: "wkn", WIT_K_TAG_KEY: "wk", WIT_K_TB_KEY: "wktb",
+        fkeys = {WIT_K_N_KEY: "wkn", WIT_K_VA_KEY: "wkva", WIT_K_TAG_KEY: "wk", WIT_K_TB_KEY: "wktb",
                  WIT_K_L1_KEY: "wkl1", WIT_K_L2PA_KEY: "wkl2pa", WIT_K_LEAF_KEY: "wkleaf",
                  WIT_K_LEAF2_KEY: "wkleaf2", WIT_K_STABLE_KEY: "wkstable",
                  WIT_K_APX_KEY: "wkapx", WIT_K_OOW_KEY: "wkoow", WIT_K_FSR_KEY: "wkfsr",
@@ -1676,6 +1688,7 @@ class Capture:
         order - `xnu_live_abt_wcnt` OPENS a row."""
         rows, cur = [], None
         fkeys = {WIT_C_N_KEY: "wcnt", WIT_C_VA_KEY: "wcva", WIT_C_TAG_KEY: "wck",
+                 WIT_C_TB_KEY: "wctb",
                  WIT_C_L1_KEY: "wcl1", WIT_C_L2PA_KEY: "wcl2pa", WIT_C_LEAF_KEY: "wcleaf",
                  WIT_C_APX_KEY: "wcapx", WIT_C_OOW_KEY: "wcoow"}
         blank = {v: None for v in fkeys.values()}
@@ -4837,9 +4850,9 @@ def s_wit(cap):
     n_wit = sum(cap.family_count(k) for k in WIT_KEYS)
     say("OBS", "`xnu_live_abt_pcn` x%d, MAX=%s; `xnu_live_tick_sum_maxd` x%d, MAX=%s (the storm advance "
                "signals, read as running maxima)" % (len(pcn_vals), fmt(pcn_max), len(maxd_vals), fmt(maxd)))
-    say("OBS", "the 33 `xnu_live_abt_w*` witness key tokens TOTAL x%d (a 1013 image pins %d unique "
-               "`xnu_live_abt_` literals = 1012's 49 + 1013's 33; a count here is RECORDS, not "
-               "literals)" % (n_wit, WIT_IMG_LIT_WANT))
+    say("OBS", "the 35 `xnu_live_abt_w*` witness key tokens TOTAL x%d (a 1013 image pins %d unique "
+               "`xnu_live_abt_` literals = 1012's 49 + 1013's 35 incl. the 1013b VA cell wkva + the 2 raw "
+               "TTBR words wctb0/wctb1; a count here is RECORDS, not literals)" % (n_wit, WIT_IMG_LIT_WANT))
 
     apex_rows = cap.wit_apex_records()
     walk_rows = cap.wit_walk_records()
@@ -4857,7 +4870,7 @@ def s_wit(cap):
             WIT_CLASS, WIT_VERDICT = "NONE", "NO WITNESS INSTRUMENT (waived) - not a 1013 reading"
             say("VERDICT", "[WIT] VERDICT: " + WIT_VERDICT)
             return
-        hard("NO `xnu_live_abt_w*` witness instrument (all 33 keys ABSENT): this log carries NO "
+        hard("NO `xnu_live_abt_w*` witness instrument (all 35 keys ABSENT): this log carries NO "
              "leaf-value witness - either the wrong capture was handed to this tool, or the boot "
              "advanced SO FAR PAST the storm that no witness was recorded. 1013 records the three "
              "ladders at every storm abort/enter, so the absence is not a reading; the DEFAULT refuses "
@@ -4873,10 +4886,27 @@ def s_wit(cap):
                               ("W-WALK", walk_rows, WIT_K_ROW_KEYS),
                               ("W-SYNC", sync_rows, WIT_C_ROW_KEYS)):
         partial = [r for r in rows if any(r[f] is None for f in r if f != "order")]
+        # 1013b: `_wkva` (W-WALK) and `_wctb` (W-SYNC) were ADDED by this rung, so a log made by the
+        # PRE-1013b arm is partial for EVERY row on exactly those two fields - a PRE-1013b LOG, not a
+        # broken recorder.  Distinguish the two: if every partial row's ONLY missing field(s) are the
+        # 1013b additions, say so (OBS) instead of calling the channel broken (HARD).
+        NEW_1013B = {"wkva", "wctb"}
         if partial:
-            hard("x%d %s record(s) are INCOMPLETE (the ordinal opened a row but its fields did not all "
-                 "follow) - the recorder's write order or the channel is broken; first partial @:%d" % (
-                     len(partial), label, partial[0]["ln"]))
+            only_new = all(
+                all(f in NEW_1013B for f in r if f != "order" and r[f] is None)
+                for r in partial)
+            miss = sorted({f for r in partial for f in r
+                           if f != "order" and r[f] is None and f in NEW_1013B})
+            if only_new and miss and len(partial) == len(rows):
+                say("OBS", "%s: x%d row(s) omit the 1013b field(s) %s in EVERY COVERED row - this is "
+                           "a PRE-1013b LOG (e.g. the 1013 press capture, arm armed-d13-9cf2f15e): its "
+                           "rows are complete for the keyspace THAT ARM built; the pairing falls back "
+                           "to l1+l2pa and the TTBR1 label (if any) is reported absent" % (
+                               label, len(partial), "/".join(miss)))
+            else:
+                hard("x%d %s record(s) are INCOMPLETE (the ordinal opened a row but its fields did not "
+                     "all follow) - the recorder's write order or the channel is broken; first partial "
+                     "@:%d" % (len(partial), label, partial[0]["ln"]))
         elif rows:
             say("PASS", "%s: every record carries its full field tuple (x%d)" % (label, len(rows)))
     say("OBS", "rows: W-APEX `_wwn` x%d, W-WALK `_wkn` x%d, W-SYNC `_wcnt` x%d; change-counts "
@@ -4885,8 +4915,15 @@ def s_wit(cap):
                    cap.family_count(WIT_W_NX_KEY), cap.family_count(WIT_K_NX_KEY)))
 
     # ---- (wit-3) THE CONTROL IS READ FIRST (design §3).  W-SYNC walks a VA the boot itself mapped
-    # writable; the mechanism ("walk TTBR0 for a known-mapped VA and read its leaf") is SOUND on this
-    # device iff the control reads a valid, WRITABLE leaf.  A wrong control SHORT-CIRCUITS V1-V3.
+    # writable; the mechanism ("walk the split-selected table for a known-mapped VA and read its
+    # leaf") is SOUND on this device iff the control reads a valid, WRITABLE leaf.
+    #
+    # 1013 FIX: the control VA is `gPhysBase + 0x80000` = 0x80080000, which on this device is ABOVE the
+    # TTBCR.N=2 split `0x40000000` - i.e. TTBR1 territory (the kernel's identity map lives in
+    # `cpu_ttb`, the table TTBR1 points at).  The walk now reads TTBR1 for a high-window VA and the
+    # row LABELS it (`_wctb` = 1).  So `wctb` is part of the control rule: a row that says
+    # "TTBR0 answered" for a VA the split sends to TTBR1 is NOT the control the design describes.
+    # A wrong control SHORT-CIRCUITS V1-V3.
     sync_tail = [r for r in sync_rows
                  if r["wcnt"] is not None and r["wcnt"] >= WIT_TAIL_MIN_N]
     if sync_rows and not sync_tail:
@@ -4894,12 +4931,13 @@ def s_wit(cap):
     ctl_bad = []
     ctl_va_off_bad = []
     for r in sync_tail:
-        say("OBS", "  control @:%d wcnt=%s wcva=%s wck=%s wcl1=%s wcl2pa=%s wcleaf=%s wcapx=%s wcoow=%s" % (
-            r["ln"], fmt(r["wcnt"]), fmt(r["wcva"]), fmt(r["wck"]), fmt(r["wcl1"]),
+        say("OBS", "  control @:%d wcnt=%s wcva=%s wck=%s wctb=%s wcl1=%s wcl2pa=%s wcleaf=%s "
+                   "wcapx=%s wcoow=%s" % (
+            r["ln"], fmt(r["wcnt"]), fmt(r["wcva"]), fmt(r["wck"]), fmt(r["wctb"]), fmt(r["wcl1"]),
             fmt(r["wcl2pa"]), fmt(r["wcleaf"]), fmt(r["wcapx"]), fmt(r["wcoow"])))
         if r["wcva"] is not None and (r["wcva"] & WIT_WINDOW_OFF_MASK) != WIT_WINDOW_OFF:
             ctl_va_off_bad.append(r)
-        if r["wcoow"] == 1 or r["wck"] != 1 or r["wcapx"] != 0:
+        if r["wcoow"] == 1 or r["wck"] != 1 or r["wcapx"] != 0 or r["wctb"] != 1:
             ctl_bad.append(r)
     if ctl_va_off_bad:
         say("OBS", "x%d control row(s) do not carry `_wcva` low bits == 0x%X (ABTWS_WINDOW_OFF): the "
@@ -4914,15 +4952,17 @@ def s_wit(cap):
     elif ctl_bad:
         WIT_CONTROL_OK = False
         first = ctl_bad[0]
-        say("READING", "THE W-SYNC CONTROL IS WRONG @:%d: wck=%s (want 1), wcapx=%s (want 0), wcoow=%s "
-                       "(want 0) - the witness method does NOT produce a correct writable leaf for a "
-                       "known-good mapped VA on this device" % (
-                           first["ln"], fmt(first["wck"]), fmt(first["wcapx"]), fmt(first["wcoow"])))
+        say("READING", "THE W-SYNC CONTROL IS WRONG @:%d: wck=%s (want 1), wctb=%s (want 1 = the "
+                       "high-window TTBR1 table answered, where the kernel's identity map is built), "
+                       "wcapx=%s (want 0), wcoow=%s (want 0) - the witness method does NOT produce a "
+                       "correct writable leaf for a known-good mapped VA on this device" % (
+                           first["ln"], fmt(first["wck"]), fmt(first["wctb"]), fmt(first["wcapx"]),
+                           fmt(first["wcoow"])))
     else:
         WIT_CONTROL_OK = True
         say("PASS", "THE W-SYNC CONTROL IS SOUND: x%d control row(s) read a valid, WRITABLE leaf for a "
-                    "VA the boot mapped itself (e.g. wcleaf=%s wcapx=0) - the walk-the-TTBR0-and-read-"
-                    "the-leaf method works on THIS device" % (
+                    "VA the boot mapped itself (e.g. wcleaf=%s wcapx=0 wctb=1) - the walk-the-"
+                    "split-selected-table-and-read-the-leaf method works on THIS device" % (
                         len(sync_tail), fmt(sync_tail[-1]["wcleaf"])))
 
     # ---- (wit-4) THE STALE-ZERO GUARDS (the task's HARD-anomaly requirement, design §3 V6).
@@ -4940,28 +4980,35 @@ def s_wit(cap):
                      "recorder, not a device value" % (
                          lbl, r["ln"],
                          apx_k, fmt(r[apx_k]), leaf_k, fmt(r[leaf_k]), _wit_apx(r[leaf_k])))
+    # ---- (wit-4) THE STALE-ZERO GUARDS - **A PAIRING CHECK, NOT A SHAPE CHECK (1013b)**.
+    #
+    # THE 1013 PRESS LOG BROKE THE OLD RULE.  It fired on "a COARSE L1 + a nonzero L2 base, yet the
+    # leaf/location tag is 0" - but that SHAPE is exactly what a correctly walked ABSENT L2 slot looks
+    # like: one L1 slot maps 256 L2 slots, so a COARSE L1 with a nonzero table base says NOTHING about
+    # the ONE slot this VA indexes.  The log proves it: W-APEX @`wwn`=0x40000 read `_wwleaf`=0x8411e1bb
+    # at `_wwl2pa`=0x841bf000 for `_wwva`=0x3d767000, while W-WALK @`wkn`=0x80000 read `_wkleaf`=0 at
+    # the SAME `_wkl2pa`=0x841bf000 for a DIFFERENT VA (`_wkva`=0x3d7801e8): l2 index 0x67 vs 0x01 in
+    # the same 1 MB section - two slots, no contradiction.  Comparing by ORDINAL (as the old rule's
+    # neighbourhood did) cannot tell that apart from one slot read twice ([[mi4-measurement-defects]]).
+    #
+    # SO: a zero is a DEFECT only when the row CONTRADICTS ITSELF - the tag says "nothing answered"
+    # while the row's OWN published leaf is a valid small page (the walker sets the tag exactly when it
+    # read such a leaf, so the two cannot disagree in a correct recorder).  An absent L2 slot, and a
+    # W-APEX-nonzero / W-WALK-zero pair at the SAME `(va, l1, l2pa)`, are READINGS, not defects - the
+    # latter is paired below and carried into V1/V2/V3.
     stale = []
-    for r in apex_rows:
-        if (r["wwleaf"] == 0 and _wit_l1_is_coarse(r["wwl1"]) and r["wwl2pa"]):
-            stale.append(("W-APEX", r["ln"], "wwn=%s wwl1=%s wwl2pa=%s wwleaf=0" % (
-                fmt(r["wwn"]), fmt(r["wwl1"]), fmt(r["wwl2pa"]))))
-    #      (b) THE LOCATION TAGS: a tag of 0 ("nothing answered") while the SAME row's own cells show a
-    #          COARSE L1 + a nonzero L2 base means the tag was read from a STALE variable, not from the
-    #          walk this row describes.  (`wkoow == 1` with tag 0 is the walk's own window bound doing
-    #          its job - COVERED, not stale.)
-    for r in walk_rows:
-        if (r["wk"] == 0 and r["wkoow"] != 1 and _wit_l1_is_coarse(r["wkl1"]) and r["wkl2pa"]):
-            stale.append(("W-WALK", r["ln"], "wkn=%s wkl1=%s wkl2pa=%s wk=0 wkoow=%s" % (
-                fmt(r["wkn"]), fmt(r["wkl1"]), fmt(r["wkl2pa"]), fmt(r["wkoow"]))))
-    for r in sync_rows:
-        if (r["wck"] == 0 and r["wcoow"] != 1 and _wit_l1_is_coarse(r["wcl1"]) and r["wcl2pa"]):
-            stale.append(("W-SYNC", r["ln"], "wcnt=%s wcl1=%s wcl2pa=%s wck=0 wcoow=%s" % (
-                fmt(r["wcnt"]), fmt(r["wcl1"]), fmt(r["wcl2pa"]), fmt(r["wcoow"]))))
+    for lbl, tag_k, leaf_k, rows in (("W-WALK", "wk", "wkleaf", walk_rows),
+                                     ("W-SYNC", "wck", "wcleaf", sync_rows)):
+        for r in rows:
+            if r[tag_k] == 0 and r[leaf_k] is not None and (r[leaf_k] & WIT_L2_TYPE_MASK) == WIT_L2_SMALL_PAGE:
+                stale.append((lbl, r["ln"], "the location tag reads 0 yet the row's OWN published "
+                                            "`_%s`=%s IS a valid small page (bits[1:0]=0b10)" % (
+                                                  leaf_k, fmt(r[leaf_k]))))
     if stale:
         tag, ln, detail = stale[0]
-        hard("a %s row @:%d carries a STALE 0: its own cells show a COARSE L1 pointer to a nonzero L2 "
-             "base, yet the leaf/location tag reads 0 - a tag read from a stale variable is not a "
-             "device value (design §3 V6)" % (tag, ln))
+        hard("a %s row @:%d carries a SELF-CONTRADICTORY 0: %s - a tag read from a stale variable is "
+             "not a device value (design §3 V6, 1013b: a PAIRING check, not a shape check)" % (
+                 tag, ln, detail))
         for tag, ln, detail in stale[:4]:
             say("HARD", "  %s @:%d: %s" % (tag, ln, detail))
 
@@ -4977,15 +5024,25 @@ def s_wit(cap):
                        fmt(r["wwapx"]), fmt(r["wwnoproof"]), fmt(r["wwva"]), fmt(r["wwft"]),
                        fmt(r["wwpa"]), fmt(r["wwpatbl"]), fmt(r["wwpaok"])))
     for r in walk_tail[-4:]:
-        say("OBS", "  tail W-WALK @:%d wkn=%s wkl1=%s wkl2pa=%s wkleaf=%s wkleaf2=%s wkstable=%s "
-                   "wkapx=%s wk=%s wkoow=%s wkapx_x=%s" % (
-                       r["ln"], fmt(r["wkn"]), fmt(r["wkl1"]), fmt(r["wkl2pa"]), fmt(r["wkleaf"]),
-                       fmt(r["wkleaf2"]), fmt(r["wkstable"]), fmt(r["wkapx"]), fmt(r["wk"]),
-                       fmt(r["wkoow"]), fmt(r["wkapex"])))
+        say("OBS", "  tail W-WALK @:%d wkn=%s wkva=%s wkl1=%s wkl2pa=%s wkleaf=%s wkleaf2=%s "
+                   "wkstable=%s wkapx=%s wk=%s wkoow=%s wkapx_x=%s" % (
+                       r["ln"], fmt(r["wkn"]), fmt(r["wkva"]), fmt(r["wkl1"]), fmt(r["wkl2pa"]),
+                       fmt(r["wkleaf"]), fmt(r["wkleaf2"]), fmt(r["wkstable"]), fmt(r["wkapx"]),
+                       fmt(r["wk"]), fmt(r["wkoow"]), fmt(r["wkapex"])))
     # THE DOUBLE-READ (docs/1012-probe-keying.md §2.3a/§2.4): the L2 word read a SECOND time after a
     # `dsb`.  `_wkstable`=1 at the tail means the two reads AGREE, so the value is STABLE and a race
     # with a concurrent table write is DEAD as an explanation for a tail 0 - the reading is real.
     # `_wkstable`=0 means the table MOVED between the two reads and the leaf is a NULL CONTROL.
+    # ---- (wit-4b) THE V0 PROVENANCE GATE IS DROPPED TO A NAMED PRECONDITION (1013b).  The gate as
+    # written asked `wwva == far` AND `wwft == 0x3` AND `wwpatbl == 0` of EVERY tail row and, if every
+    # row failed ONE of the three, WITHHELD V1-V3.  The 1013 press log kills that adjudication twice
+    # over: (i) its W-APEX tail rows carry `wwnoproof=1` (`pm_l1_phys` != the live TTBR0 base - the
+    # tables the apex walks are the pmap's CURRENT leaves while the abort walks the storm's, and the
+    # two may legitimately differ across `pmap_expand_ttb`), so the by-value identity the provenance
+    # gate would rest on is NOT available; (ii) an all-fail class built from a provenance cell that the
+    # hardware itself reports as unproven is a verdict over a NULL CONTROL, exactly what 1013's design
+    # forbids.  The provenance cells stay PUBLISHED (`_wwva`/`_wwft`/`_wwpatbl`) and are PRINTED per
+    # row below - the reader decides on them; the checker no longer withholds a leaf class on them.
     n_stable0 = sum(1 for r in walk_tail if r["wkstable"] == 0)
     if walk_tail:
         kk = walk_tail[-1]
@@ -5095,47 +5152,35 @@ def s_wit(cap):
     say("OBS", "(WIT) V0 over x%d tail W-APEX row(s): `_wwva` != far x%d, `_wwft` != 0x%X x%d, "
                "`_wwpatbl` == 1 x%d" % (len(apex_tail), n_va_bad, WIT_WRITE_FAULT, n_ft_bad, n_tbl))
     n_rows_t = len(apex_tail)
+    # ---- 1013b: THE GATE IS RETIRED AS AN ADJUDICATOR, KEPT AS A REPORT.  It used to WITHHOLD V1-V3
+    # when EVERY tail row failed one provenance cell.  The 1013 PRESS LOG shows why that is wrong: its
+    # tail rows carry `wwnoproof=1`, i.e. `pm_l1_phys` is NOT the live TTBR0 base at that measurement
+    # (design §2 V4: REPORT, never conclude) - and a class ("the apex observed a table page / another
+    # VA / a non-write") decided over rows whose OWN identity cell says "this is not provably your
+    # fault" is a verdict over a NULL CONTROL.  The cells stay PUBLISHED and PRINTED; the leaf classes
+    # below are gated on the PAIRING (same VA + same L1 + same L2 table) instead, which is the
+    # identity the leaves actually need ([[mi4-self-written-record-is-not-a-constraint]]).
     if n_rows_t and (n_va_bad == n_rows_t or n_ft_bad == n_rows_t or n_tbl == n_rows_t):
         first = apex_tail[0]
-        say("READING", "(WIT) V0 FIRST ROW: @:%d wwn=%s wwva=%s wwft=%s wwpa=%s wwpatbl=%s wwleaf=%s" % (
+        say("READING", "(WIT) V0 FIRST ROW (REPORTED ONLY - 1013b retired this gate as an adjudicator): "
+                       "@:%d wwn=%s wwva=%s wwft=%s wwpa=%s wwpatbl=%s wwleaf=%s wwnoproof=%s" % (
             first["ln"], fmt(first["wwn"]), fmt(first["wwva"]), fmt(first["wwft"]), fmt(first["wwpa"]),
-            fmt(first["wwpatbl"]), fmt(first["wwleaf"])))
+            fmt(first["wwpatbl"]), fmt(first["wwleaf"]), fmt(first["wwnoproof"])))
         if n_tbl == n_rows_t:
-            WIT_CLASS = "APEX_OBSERVED_A_TABLE_PAGE"
-            WIT_VERDICT = (
-                "APEX_OBSERVED_A_TABLE_PAGE - EVERY one of the x%d tail W-APEX row(s) carries "
-                "`_wwpatbl`=1: the page the enter named (`_wwpa`=%s, PA %s) IS a page-TABLE page (the "
-                "pmap's own L1 table, or the L2 table this VA resolves through), NOT the storm's own "
-                "small page.  This is THE 1012 CELL'S REAL SHAPE (every 1012 apex row carried "
-                "`pa=0x8421a`, PA 0x8421a000 - a page-table-page install), and it means the apex "
-                "observed a TABLE-PAGE ENTER, not the faulting VA's own page-in: 'the write reaches "
-                "the apex FOR THE FAULTING VA' is NOT PROVEN by this log.  V1-V3 are WITHHELD - the "
-                "leaf read back is a table page's own leaf, not the storm VA's.  REPORT it; the next "
-                "rung gates the apex on the enter's `pa` matching the storm VA's object page, or reads "
-                "the leaf through a site the storm's own page-in reaches (docs/1012-probe-keying.md "
-                "§1.6)" % (n_rows_t, fmt(first["wwpa"]), fmt(None if first["wwpa"] is None
-                                                           else (first["wwpa"] << 12))))
-            say("VERDICT", "[WIT] VERDICT: " + WIT_VERDICT)
-            return
+            say("OBS", "(WIT) 1013b PROVENANCE: EVERY tail W-APEX row names a page-TABLE page (the 1012 "
+                       "cell's shape) - the apex leaf may be a table page's own leaf, so read it with "
+                       "that caveat; the leaf classes below are decided on the PAIRING")
         if n_va_bad == n_rows_t:
-            WIT_CLASS = "APEX_WRONG_VA"
-            WIT_VERDICT = (
-                "APEX_WRONG_VA - EVERY one of the x%d tail W-APEX row(s) carries a `_wwva` (%s) that "
-                "is NOT the storm's `far` (%s): the apex observed a DIFFERENT VA's enter.  Under the "
-                "1012 keying (a post-handler key) this is exactly what a stale key looks like; W-APEX's "
-                "own `_wwva` makes it READABLE instead of assumed.  V1-V3 are WITHHELD - the leaf is a "
-                "NULL CONTROL.  REPORT it (docs/1012-probe-keying.md §1.4)" % (
-                    n_rows_t, fmt(first["wwva"]), fmt(storm_far)))
-            say("VERDICT", "[WIT] VERDICT: " + WIT_VERDICT)
-            return
-        WIT_CLASS = "APEX_WRONG_FAULT_TYPE"
-        WIT_VERDICT = (
-            "APEX_WRONG_FAULT_TYPE - EVERY one of the x%d tail W-APEX row(s) carries `_wwft`=%s, not "
-            "0x%X (READ|WRITE): the apex observed a NON-WRITE enter, so the storm's WRITE fault did not "
-            "produce this leaf.  V1-V3 are WITHHELD - the leaf is a NULL CONTROL.  REPORT it "
-            "(docs/1012-probe-keying.md §1.6)" % (n_rows_t, fmt(first["wwft"]), WIT_WRITE_FAULT))
-        say("VERDICT", "[WIT] VERDICT: " + WIT_VERDICT)
-        return
+            say("OBS", "(WIT) 1013b PROVENANCE: EVERY tail W-APEX row names a VA other than the storm "
+                       "`far` (`_wwva`=%s vs far=%s) - a post-handler key would look like this; the "
+                       "pairing below decides on by-value VA equality" % (
+                           fmt(first["wwva"]), fmt(storm_far)))
+        if n_ft_bad == n_rows_t:
+            say("OBS", "(WIT) 1013b PROVENANCE: EVERY tail W-APEX row carries `_wwft`=%s, not 0x%X "
+                       "(READ|WRITE) - the WRITE-enter premise is not shown by this cell; the leaf "
+                       "classes below rest on the PAIRING, not on it" % (
+                           fmt(first["wwft"]), WIT_WRITE_FAULT))
+    apex_prov_bad = bool(n_rows_t) and (n_va_bad == n_rows_t or n_ft_bad == n_rows_t or n_tbl == n_rows_t)
 
     # ---- (wit-9) THE DECISION CELLS, BY VALUE on the TAIL rows' OWN values (NEVER a whole-run
     # max/first - the 1008/1009 measurement defect, not repeated).
@@ -5163,6 +5208,56 @@ def s_wit(cap):
                        "the leaf maps a DIFFERENT page - the walk read a leaf for another VA, or the "
                        "table moved"))
 
+    # ---- (wit-9a) THE PAIRING BY LOCATION (1013b).  A W-APEX row and a W-WALK row are two readings
+    # of a TABLE SLOT, so they may be compared ONLY when they name the SAME SLOT: the SAME VA (the
+    # abort's own `far` - BOTH ladders publish it now: `_wwva` and `_wkva`) AND the same L1 descriptor
+    # AND the same L2 table base.  THE 1013 PRESS LOG is why this exists: the old by-ORDINAL
+    # neighbourhood compared `_wwn`=0x40000 with `_wkn`=0x80000 and manufactured a "stale 0" out of a
+    # pair that was never a pair - W-APEX read `_wwleaf`=0x8411e1bb at L2 index 0x67 for the storm's VA
+    # (`_wwva`=0x3d767000) while W-WALK read `_wkleaf`=0 at L2 index 0x01 for a DIFFERENT VA
+    # (`_wkva`=0x3d7801e8) - ONE 1 MB section holds 256 L2 slots, so the two rows never shared a cell
+    # ([[mi4-measurement-defects]], [[mi4-one-value-two-definitions]]).  A leaf difference between
+    # UNPAIRED rows is EXPECTED and is NOT a V1/V2/V3 class.
+    # A PRE-1013b LOG has no `_wkva` (the key did not exist in that arm), so the VA test is skipped and
+    # the pairing falls back to the two cells BOTH arms always published: the L1 descriptor and the L2
+    # table base.  That is strictly weaker (it can pair the wrong slot within one 1 MB section) and the
+    # reader SAYS SO below; it is never silently treated as a by-VA pairing.
+    wkva_avail = any(r["wkva"] is not None for r in walk_rows)
+    same_va_rows = [r for r in walk_tail
+                    if r["wkva"] is not None and a_last["wwva"] is not None
+                    and r["wkva"] == a_last["wwva"]]
+    if same_va_rows:
+        pair = [r for r in same_va_rows
+                if r["wkl2pa"] == a_last["wwl2pa"] and r["wkl1"] == a_last["wwl1"]]
+    elif not wkva_avail:
+        pair = [r for r in walk_tail
+                if r["wkl2pa"] == a_last["wwl2pa"] and r["wkl1"] == a_last["wwl1"]]
+    else:
+        pair = []
+    paired = bool(pair)
+    if paired:
+        say("PASS", "(WIT) 1013b PAIRING: x%d W-WALK row(s) name the SAME CELL as the apex tail row "
+                    "(`_wkva`=`_wwva`=%s, `wkl1`=%s, `wkl2pa`=%s) - the two leaves ARE comparable "
+                    "(by ORDINAL they are not: the two ladders fire on DIFFERENT events)" % (
+                        len(pair), fmt(a_last["wwva"]), fmt(a_last["wwl1"]), fmt(a_last["wwl2pa"])))
+    elif same_va_rows:
+        say("READING", "(WIT) 1013b PAIRING: x%d W-WALK row(s) walked the apex tail row's VA (%s) but "
+                       "NONE names its L2 table (`_wwl2pa`=%s, `_wwl1`=%s): the SAME VA resolved "
+                       "through a DIFFERENT table - the V3 shape, decided below" % (
+                           len(same_va_rows), fmt(a_last["wwva"]), fmt(a_last["wwl2pa"]),
+                           fmt(a_last["wwl1"])))
+    elif not wkva_avail:
+        say("OBS", "(WIT) 1013b PAIRING: NO `_wkva` in this log (a PRE-1013b capture - the key did not "
+                   "exist in that arm), so the pairing FELL BACK to `l1`+`l2pa` alone: x%d W-WALK row(s) "
+                   "match `_wwl1`=%s `_wwl2pa`=%s.  That is WEAKER than a by-VA pairing (one 1 MB "
+                   "section holds 256 slots), so read the cell comparison with that caveat" % (
+                       len(pair), fmt(a_last["wwl1"]), fmt(a_last["wwl2pa"])))
+    else:
+        say("OBS", "(WIT) 1013b PAIRING: NO W-WALK row walked the apex tail row's VA (`_wwva`=%s; "
+                   "`_wwl1`=%s `_wwl2pa`=%s) - the two ladders observed DIFFERENT slots, so the walk "
+                   "side below is a READING IN ITS OWN RIGHT, never a comparison partner" % (
+                       fmt(a_last["wwva"]), fmt(a_last["wwl1"]), fmt(a_last["wwl2pa"])))
+
     # THE WALK SIDE - a location comparison over a MISSING location is not a verdict.
     if not walk_tail:
         WIT_CLASS = "APEX_ONLY"
@@ -5179,14 +5274,21 @@ def s_wit(cap):
         return
 
     k_last = walk_tail[-1]
+    if paired:
+        # THE PAIRED READER: the walk row that names the APEX TAIL ROW'S OWN CELL.  Compared with the
+        # apex leaf below, this is the ONLY pairing under which a leaf difference is a class (1013b).
+        k_last = pair[-1]
     k_l2pa = k_last["wkl2pa"]
     k_leaf = k_last["wkleaf"]
     k_apx = k_last["wkapx"]
-    say("READING", "(WIT) THE WALK CELL - the W-WALK TAIL (x%d row(s)): `_wkleaf`=%s `_wkapx`=%s at "
-                   "`_wkl2pa`=%s, the LIVE TTBR0 `_wktb`=%s, the FSR `_wkfsr`=%s; `_wkapex`=%s (the (A) "
-                   "walk's own leaf and this walk's leaf are the SAME value)" % (
-                       len(walk_tail), fmt(k_leaf), fmt(k_apx), fmt(k_l2pa), fmt(k_last["wktb"]),
-                       fmt(k_last["wkfsr"]), fmt(k_last["wkapex"])))
+    say("READING", "(WIT) THE WALK CELL - %s: `_wkleaf`=%s `_wkapx`=%s at `_wkl2pa`=%s, the LIVE "
+                   "TTBR0 `_wktb`=%s, the FSR `_wkfsr`=%s; `_wkapex`=%s (the (A) walk's own leaf and "
+                   "this walk's leaf are the SAME value); `_wkva`=%s" % (
+                       ("THE PAIRED ROW (the W-WALK row naming the apex tail row's OWN cell)"
+                        if paired else "the W-WALK TAIL (x%d row(s); NO paired row - read standalone)"
+                        % len(walk_tail)),
+                       fmt(k_leaf), fmt(k_apx), fmt(k_l2pa), fmt(k_last["wktb"]),
+                       fmt(k_last["wkfsr"]), fmt(k_last["wkapex"]), fmt(k_last["wkva"])))
 
     # THE (A) CROSS-CHECK: `wkapex` = 1 means the two walks agree, so the (A) `ptel2=0` anomaly was not
     # a walk table defect.  `wkapex` = 0 is a NULL CONTROL (at least one walk is wrong).
@@ -5227,7 +5329,7 @@ def s_wit(cap):
                 "`_wkl2pa`=%s DIFFER, but `_wkapex`=0 says the two WALKS also disagree, so the walk leaf "
                 "cannot be trusted: this is a NULL CONTROL, NOT V3.  Re-run or instrument the walk "
                 "before reading an identity fault (design §3)" % (fmt(w_l2pa), fmt(k_l2pa)))
-        else:
+        elif paired:
             WIT_CLASS = "IDENTITY_FAULT_L2"
             WIT_VERDICT = (
                 "V3 IDENTITY_FAULT_L2 - the apex leaf and the walk leaf are at DIFFERENT L2 TABLES: "
@@ -5238,6 +5340,24 @@ def s_wit(cap):
                 "one L2 and the MMU walks another.  Next rung instruments the L2 table allocation "
                 "(`pmap_expand`/`pmap_get_l2_tbl`) and the `pm_l1_virt` vs `pm_l1_phys` pair (design "
                 "§3 V3)" % (fmt(w_l2pa), fmt(k_l2pa), fmt(k_last["wktb"]), fmt(ka_last)))
+    elif paired and k_leaf != w_leaf and k_leaf is not None and w_leaf is not None:
+        # THE PAIRED CELL DISAGREES WITH ITSELF (1013b).  Same VA, same L1, same L2 table - and TWO
+        # different words.  This is NOT a "stale 0": it is the ONE reading that says the pmap's write
+        # and the MMU's walk disagree AT THE SAME SLOT, i.e. a SECOND WRITER (or a table swap) between
+        # the enter and the re-abort.  Reported as its own class so it cannot be filed as noise.
+        WIT_CLASS = "PAIRED_CELL_DISAGREES"
+        WIT_VERDICT = (
+            "THE PAIRED CELL DISAGREES - W-APEX and W-WALK name the SAME cell (`_wwva`=`_wkva`=%s, "
+            "`wwl1`=`wkl1`=%s, `wwl2pa`=`wkl2pa`=%s) yet publish DIFFERENT words: the pmap's own table "
+            "holds `_wwleaf`=%s (`_wwapx`=%s) while the LIVE MMU walk of the SAME VA reads `_wkleaf`=%s "
+            "(`_wkapx`=%s).  1013's whole premise is that these two readings are of ONE slot; a "
+            "disagreement at one slot is a REAL finding, not a stale zero - the slot CHANGED between "
+            "the enter and the abort (a second writer re-RW/RO'd or cleared it, or the table was "
+            "re-allocated under the VA).  Next rung instruments the second writer (`pmap_page_protect` "
+            "/`pmap_protect`/`pmap_remove`) and the L2 allocation, keyed on this VA "
+            "(design §3 V1/V2 refinement)" % (
+                fmt(a_last["wwva"]), fmt(a_last["wwl1"]), fmt(w_l2pa), fmt(w_leaf), fmt(w_apx),
+                fmt(k_leaf), fmt(k_apx)))
     elif w_apx == 0:
         WIT_CLASS = "LEAF_WRITABLE_STILL_FAULTS"
         WIT_VERDICT = (
@@ -5264,6 +5384,16 @@ def s_wit(cap):
     if ka_last == 0 and WIT_CLASS != "IDENTITY_FAULT_L2":
         WIT_VERDICT += ("  CAVEAT: `_wkapex`=0 (the two walks disagree), so the walk leaf is a NULL "
                         "CONTROL and this verdict rests on the APEX leaf alone.")
+    if apex_prov_bad:
+        WIT_VERDICT += ("  CAVEAT (1013b): the tail W-APEX rows' OWN provenance cells all fail one "
+                        "test (`_wwva`/`_wwft`/`_wwpatbl`) - the row is NOT self-identifying as THIS "
+                        "storm's WRITE fault, and every tail row carries `wwnoproof`=1.  The verdict "
+                        "above rests on the by-value PAIRING (same VA + same L1 + same L2 table), "
+                        "which does not need the provenance cell; read the leaf with this caveat.")
+    if not paired:
+        WIT_VERDICT += ("  CAVEAT (1013b): NO W-WALK row named the apex tail row's own cell (the "
+                        "ladders fire on different events), so the walk side was read STANDALONE - "
+                        "never as a comparison partner of the apex leaf.")
     WIT_CERTIFIED = True
     say("VERDICT", "[WIT] VERDICT: " + WIT_VERDICT)
     say("OBS", "1013 is a MEASUREMENT (design §5): this verdict classifies the LEAF VALUE and its "
@@ -5422,7 +5552,7 @@ def main():
         "YES (a real witness tail row was read)" if WIT_CERTIFIED else
         "NO (this log carries no witness tail row - the leaf decision was not made)"))
     print("  THE CONTROL (W-SYNC, a known-good mapped VA): %s" % (
-        "SOUND - the walk-the-TTBR0-and-read-the-leaf method works on THIS device" if WIT_CONTROL_OK
+        "SOUND - the walk-the-split-selected-table-and-read-the-leaf method works on THIS device" if WIT_CONTROL_OK
         else "WRONG - the method is broken here; V1-V3 were WITHHELD (design §3)" if WIT_CONTROL_OK is False
         else "ABSENT - the method is UNCERTIFIED (the leaves were read with that caveat stated)"))
     print("  THE PROVENANCE GATE (V0: is each tail row the STORM'S OWN fault?): %s" % (
