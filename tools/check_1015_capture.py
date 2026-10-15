@@ -367,12 +367,20 @@ def at_records(cap):
     blank = {f: None for f in AT_KEY_TO_FIELD.values()}
     pcn_line = cap.pcn_by_line()
     pcfar_line = cap.per_line(ABT_PCFAR_KEY)
+    # `_wdva` IS THE ROW'S OWN ABORT KEY and it does NOT lag the AT keys: the recorder publishes the
+    # `wd*` ladder row with `_wdva` at its HEAD, and the AT keys (`_wdatok`..) after it, whereas
+    # `_pcfar`/`_pcn` are published at the TAIL of the block.  A running read of `_pcfar` therefore
+    # returns the PREVIOUS abort's far at an AT row (measured: the 0x3b3d31e8 AT row @:34895 read
+    # `_pcfar=0x27000`, the storm's, and was mis-attributed to the storm).  `_wdva` at the AT row is
+    # the block's own VA, so the storm filter below uses it.
+    wdva_line = cap.per_line("xnu_live_abt_wdva")
     rows, cur = [], None
     for ln, key, _raw, val in cap.toks:
         if key == AT_OK_KEY:
             if cur is not None:
                 rows.append(cur)
-            cur = {"ln": ln, "pcn": pcn_line.get(ln), "pcfar": pcfar_line.get(ln)}
+            cur = {"ln": ln, "pcn": pcn_line.get(ln), "pcfar": pcfar_line.get(ln),
+                   "wdva": wdva_line.get(ln)}
             cur.update(blank)
             cur["wdatok"] = val
         elif cur is not None and key in fkeys:
@@ -458,12 +466,30 @@ def classify_storm(abt_rows, tail_min):
     `other_fs15`  - the subset of `other_high` with FS=15 WnR=1 (the V-G4 siblings)
     `reached`     - whether ANY tail row exists at all (V-G5's own evidence)"""
     tail = [r for r in abt_rows if r["pcn"] is not None and r["pcn"] >= tail_min]
-    storm_tail = [r for r in tail if r["far"] == STORM_VA]
+    # THE STORM VA IS COMPUTED BY VALUE, NEVER HARDCODED.  The storm's `far` MOVES per run
+    # (1011 0x61000 -> 1012 0x2e000 -> 1014 0xe6000 -> 1015 0x27000): it is the page the COW/CS
+    # retry picks.  Hardcoding it (the original `STORM_VA` constant) turned a COMPLETE 1015 verdict
+    # into V-AT0 + a vacuous "STOPPED" on the 1015 capture - a measurement defect ([[mi4-measurement-
+    # defects]]): the number was an artifact of how it was taken.  The storm is BY DEFINITION the
+    # tail fault that RECURS (the most rows); ties break toward the highest ordinal reached.
+    va = STORM_VA
+    if tail:
+        counts, minord, maxord = {}, {}, {}
+        for r in tail:
+            f = r["far"]
+            counts[f] = counts.get(f, 0) + 1
+            minord[f] = min(minord.get(f, 1 << 62), r["pcn"])
+            maxord[f] = max(maxord.get(f, -1), r["pcn"])
+        # MOST tail rows wins; then EARLIEST first appearance (a storm RECURS from low ordinals up, so
+        # a lone row that first appears at a high ordinal is NOT the storm - it is the V-G4 "moved"
+        # sibling); then the highest ordinal reached.
+        va = max(counts, key=lambda f: (counts[f], -minord[f], maxord[f]))
+    storm_tail = [r for r in tail if r["far"] == va]
     storm_high = [r for r in storm_tail if r["pcn"] >= STORM_MIN_ORD]
-    other_high = [r for r in tail if r["pcn"] >= STORM_MIN_ORD and r["far"] != STORM_VA]
+    other_high = [r for r in tail if r["pcn"] >= STORM_MIN_ORD and r["far"] != va]
     other_fs15 = [r for r in other_high if r["fsr"] is not None and (r["fsr"] & 0x00000F0F) ==
                   (STORM_FSR & 0x00000F0F)]
-    return {"tail": tail, "storm_tail": storm_tail, "storm_high": storm_high,
+    return {"tail": tail, "va": va, "storm_tail": storm_tail, "storm_high": storm_high,
             "other_high": other_high, "other_fs15": other_fs15,
             "reached": bool(tail)}
 
@@ -479,6 +505,7 @@ def s_primary(cap, storm, wf_rows):
     print("\n== [1015] THE INHERITED §3a QUESTION - DID THE STORM STOP WHEN THE FLUSH BECAME A FULL "
           "TLBIALL?  (the widening is NOT compiled in this rung: V-G3 is expected) ==")
     storm_tail, storm_high = storm["storm_tail"], storm["storm_high"]
+    STORM_VA = storm["va"]   # the storm's OWN far, computed by value (never the module literal)
     stopped = len(storm_tail) < STORM_MIN_ROWS and not storm_high
 
     say("OBS", "TAIL (abort `_pcn` >= %s): x%d abort ordinal(s); of them `far=%s` x%d (THE STORM), "
@@ -632,10 +659,15 @@ def s_secondary(cap, storm, decide, primary_cell):
     printed WITHOUT a P verdict, because a green ladder under V-G1 is consistent and is not a
     second verdict."""
     print("\n== [1015 P] THE PASSIVE LADDER - the permission INPUTS at the abort (design §3b) ==")
+    STORM_VA = storm["va"]   # the storm's OWN far, computed by value (never the module literal)
     wd_rows = wd_records(cap)
     wd_storm = [r for r in wd_rows
                 if r["wdn"] is not None and r["wdn"] >= TAIL_MIN_N
-                and (r["wdva"] == STORM_VA or r["pcfar"] == STORM_VA)]
+                and r["wdva"] == STORM_VA]
+    if not wd_storm:   # a capture whose witness's OWN `_wdva` differs from the abort's `far`
+        wd_storm = [r for r in wd_rows
+                    if r["wdn"] is not None and r["wdn"] >= TAIL_MIN_N
+                    and r["pcfar"] == STORM_VA]
     say("OBS", "`%s` rows x%d; at the tail with `_wdva=%s`: x%d" % (
         WD_N_KEY, len(wd_rows), fmt(STORM_VA), len(wd_storm)))
     if not wd_rows:
@@ -810,6 +842,12 @@ def s_at(cap, storm):
     priv-read discriminator that separates V-AT1 from V-AT4 is unavailable - V-AT0, with the reason
     named.  It costs one comparison and it refuses a silently-unfixed recorder."""
     print("\n== [1015-AT] THE HARDWARE'S OWN ANSWER - `AT`/`PAR` at the storm (design §3c) ==")
+    STORM_VA = storm["va"]   # the storm's OWN far, computed by value (never the module literal)
+    _wd_hint = [r for r in wd_records(cap)
+                if r["wdva"] == STORM_VA and r["wdleaf"] is not None
+                and (r["wdleaf"] & 0x03) == 0x03]
+    if _wd_hint:
+        AT_PA_EXPECT = _wd_hint[-1]["wdleaf"] & 0xFFFFF000
     rows = at_records(cap)
     if not rows:
         say("OBS", "no `%s` row in this capture - the AT leg was not armed on this build (a pre-AT "
@@ -835,7 +873,25 @@ def s_at(cap, storm):
                          "a confirmation OR a refutation)." % (
                              len(rows), AT_OK_KEY, fmt(TAIL_MIN_N)))
         return "V-AT0", {"rows": len(rows)}
-    last = tail[-1]
+
+    # ---- THE STORM'S OWN AT ROW, SELECTED BY VALUE.  The tail's LAST AT row is NOT necessarily the
+    # storm's: the tail is a MIX of faults (doc 1014 §2 - the run's last samples are a DIFFERENT
+    # proc's fault), and the AT keys are published once per abort, so `tail[-1]` was a DIFFERENT VA
+    # (`pcfar=0x3b2d28e0`) than the storm (`pcfar=0x27000`).  Select on the row's OWN `_pcfar`
+    # matching the storm's computed VA, falling back to the last tail row only when no storm-keyed
+    # AT row exists (then it is said so, not silently substituted).
+    # `_wdva` FIRST (it is the row's own block VA and does not lag); `_pcfar` only as a fallback for
+    # a capture whose AT rows carry no `_wdva` (an older spelling), where the lag is acknowledged.
+    storm_at = [r for r in tail if r.get("wdva") == STORM_VA]
+    if not storm_at:
+        storm_at = [r for r in tail if r["pcfar"] == STORM_VA]
+    if not storm_at:
+        say("OBS", "  NO tail AT row carries `_pcfar=%s` (the storm's own VA): the cell below is "
+                   "read off a DIFFERENT fault's AT row - report the mismatch, do not attribute it "
+                   "to the storm" % fmt(STORM_VA))
+        last = tail[-1]
+    else:
+        last = storm_at[-1]
     if last["wdatok"] != 1:
         verdict("V-AT0", "AT_INSTRUMENT_BROKEN - NO VERDICT: the storm's own tail row @:%d publishes "
                          "`_wdatok=%s`, so the AT reads did not run - or the T-CTL control read did "
@@ -959,7 +1015,11 @@ def s_at(cap, storm):
     # NOT start with `wd`).  This reader reads `_leafng` and says so rather than inventing a key.
     wd_storm = [r for r in wd_records(cap)
                 if r["wdn"] is not None and r["wdn"] >= TAIL_MIN_N
-                and (r["wdva"] == STORM_VA or r["pcfar"] == STORM_VA)]
+                and r["wdva"] == STORM_VA]
+    if not wd_storm:
+        wd_storm = [r for r in wd_records(cap)
+                    if r["wdn"] is not None and r["wdn"] >= TAIL_MIN_N
+                    and r["pcfar"] == STORM_VA]
     if not wd_storm:
         verdict("V-AT0", "AT_INSTRUMENT_BROKEN - NO VERDICT: the user view FAULTS and the privileged "
                          "view succeeds at the storm, but no `wd*` storm row is present to show the "
