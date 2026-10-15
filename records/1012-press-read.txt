@@ -1,0 +1,132 @@
+1012 press-read — THE PTE-BUILD APEX IS MEASURED: (c) APEX-AGREES.  `prot=0x3` (READ|WRITE)
+ARRIVES at `pmap_enter_options`, and the pmap's own L1 base EQUALS the live TTBR0 base — so the
+pmap writes the WRITE SAME table the MMU walks.  The strip-above-the-apex hypothesis (F1a's
+remaining candidate) is REFUTED BY MEASUREMENT: the write is lost INSIDE leo_enter / below, OR
+the apex reading's VA keying is wrong.  THIS IS THE FRONTIER.
+====================================================================================
+
+Arm:      armed-d13-ffdc8ba1
+Image:    out/stage90/xnu_arm_entry.elf
+Capture:  out/stage90/captures/recovered-unknown-arm-20261015-020222-last_kmsg.txt
+          (recovered via scripts/recover_last_kmsg.sh --read-only after the operator's power
+           press; the carrier is the FLASHED ROM — this log is the PREVIOUS boot's RAM console)
+Runner:   exit 2 (resident rung did not return).  No panic: "No errors detected" is present in
+          the capture.  The machine came back on the operator's power press (device dark ~40 min,
+          no host-side recovery — the watchdog did NOT bite; see the wdt-forensics report).
+
+WHICH RUN THIS IS (proven, not assumed)
+---------------------------------------
+The capture carries the 1012-only cells: the SIX `xnu_live_abt_pmp*` keys (pmpn, pmpprot, pmppa,
+pmppmap, pmpttbr — these exist in NO earlier image; 1011 had 43 `xnu_live_abt_` literals, 1012
+has 49).  `xnu_live_abt_pmpn` has x22 records, first @:31235, last @:31743 (`pmpn=0x00100000`).
+So this IS the 1012 press, not a stale log.
+
+STORM IDENTITY (by value, whole tail)
+--------------------------------------
+    xnu_live_abt_pc      =0x2be1e1a0        (dyld __TEXT — NOTE the pc moved from 1011's
+                                              0x2be511a0; same shared-cache region, new fault site)
+    xnu_live_abt_far     =0x0002e000        (the faulting VA; 1011 read 0x61000)
+    xnu_live_abt_fsr     =0x0000080f        (WnR=1 a WRITE; FS=0xf level-2 permission fault)
+    xnu_live_abt_abtcpsr =0x60000030        (USER, IRQ-off)
+    xnu_live_abt_pcn     max reached 0x00100000 (1,048,576) — a storm; 1009 reached 0x00200000
+                          (2,097,152).  Same silent-retry shape: no trap.c exception line, no
+                          kern_sig panic (checker [CFFIX] [OBS]).
+Console tail before the freeze:
+    IOS7SHREG slide_enter slide=0x1e7e000 src=0x3e02a000 n=0x89000 | slide_init kr=0 |
+    slide_copyin kr=0 | map_slide ret=0 | CODE SIGNING: cs_invalid_page(0x2de7e000):
+    p=1[launchd] clearing CS_VALID | No errors detected
+
+RESULT 1 — THE APEX CELL IS READ AT THE STORM.  NEW, DECISIVE.
+---------------------------------------------------------------
+The apex ladder (`xnu_live_abt_pmpn`) has x22 rows; every TAIL row (ordinal >= 0x400) is the SAME
+tuple (read by value from the TAIL ROWS' OWN value, NEVER a whole-run max/first — the 1008/1009
+measurement defect, not repeated here).  The LAST four tail rows, e.g.:
+
+    @:31612  pmpn=0x00020000
+    @:31658  pmpn=0x00040000
+    @:31704  pmpn=0x00080000
+    @:31743  pmpn=0x00100000
+    each with:
+    xnu_live_abt_pmpprot  = 0x00000003   = READ|WRITE         <-- THE DISCRIMINATOR
+    xnu_live_abt_pmppa    = 0x0008421a   (the physical page written into the leaf)
+    xnu_live_abt_pmppmap  = 0x81a86000   (the pmap's own pm_l1_phys — struct pmap offset 0)
+    xnu_live_abt_pmpttbr  = 0x81a8605b   (the LIVE TTBR0; low byte 0x5b = the cpufunc-v7 attr)
+
+All 22 `xnu_live_abt_pmpprot` records are `0x00000003` (no other value appears — verified by
+`sort | uniq -c` → `22 x xnu_live_abt_pmpprot=0x00000003`).
+
+The wrap surface is SOUND (not a claim in a comment):
+  * `__wrap_pmap_enter_options` is a PURE PASS-THROUGH that calls `__real_...` into a NAMED result
+    and records AFTER the call (`entry_trace.c`), so the disassembly is a real `bl`, not a tail `b`.
+  * `pm_l1_phys` is offset 0 of `struct pmap` — VERIFIED: `pmap.h:99` `paddr_t pm_l1_phys;` is the
+    first field.
+  * the apex base compare uses `& 0xFFFFFF00` (the attribute byte); the 1010c/1011 walk's
+    `0xffffc000` is PROHIBITED here (checker `[PASS]`).
+
+**THE VERDICT ([PMP]):** the tail `_pmpprot`=0x3 CARRIES write, AND
+`_pmppmap & 0xFFFFFF00` (0x81a86000) == `_pmpttbr & 0xFFFFFF00` (0x81a86000) — the pmap writes the
+SAME L1 table the MMU walks.  Therefore:
+
+    *** THE WRITE ARRIVES AT THE APEX AND THE TABLE IS THE ONE THE MMU WALKS. ***
+    strip-above-the-apex (the last F1a candidate) is REFUTED BY MEASUREMENT.
+
+RESULT 2 — THE BY-VALUE READING AGREES WITH THE APEX: THE LEAF PATH LOOKS CORRECT.
+----------------------------------------------------------------------------------
+Read by value after the verdict:
+  * `pmap_enter_options` (arm/pmap.c:3181) under BOARD_CONFIG_QSD8250_LEO is
+    `return leo_enter(pmap,va,pa,prot,wired);` — a PURE PASSTHROUGH (no strip, no guard).
+  * `leo_enter` (pmap.c:1640-1682) rewrites `*pte = leo_pte_build(map,va,pn,prot,wired)` on EVERY
+    path (boot, same-pn, new-mapping).  No path skips the leaf write.
+  * `leo_pte_build` (pmap.c:1646) → `pmap_vm_prot_to_page_flags` (pmap.c:1095): `if (prot &
+    VM_PROT_WRITE) pte &= ~(L2_ACCESS_APX);`  L2_ACCESS_APX = (1<<9) = AP[2]; CLEARING it ⇒ the
+    page is PL0-WRITABLE.  So `prot=0x3` MUST yield a writable leaf.
+  * `pmap_flush_tlbs` (pmap.c:1274) DOES flush: `armreg_ttbr_read()` compiles to an INLINED
+    `mrc p15,0,r5,cr2,cr0,{0}` (disassembled `osfmk_arm_pmap.o` @0x4bc), and `pmap_asid_ncpus=0`
+    (`pmap_asid.c:121`) so it takes the full `arm_tlb_flushID()` branch.
+  ⇒ so the TLB-staleness explanation is ALSO refuted by value.
+
+**THIS IS A CONTRADICTION.**  leaf path correct + same table + prot has write + TLB flushed, yet
+the store permission-faults FS=15/level-2 at far=0x2e000 forever.  Two shapes survive, and 1012
+cannot distinguish them (this is the honest reading, not a conclusion):
+
+  (c1) THE APEX VA IS NOT THE STORM'S VA — the probe keys the apex record on `g_abtpte_pmpva`; if
+       that key is the FIRST abort's far (latched once) or a different source than the published
+       `xnu_live_abt_far`, then the apex rows are a COINCIDENTAL match and the real storm VA never
+       reached `leo_enter`.  A MEASUREMENT defect — must be verified before the verdict is trusted.
+  (c2) THE LOSS IS BELOW THE APEX IN A WAY THE BY-VALUE READ MISSED — a SECOND writer re-ROs the
+       leaf between the enter and the retry, OR the PTE pmap_pte returns is not the slot the MMU
+       walks (a pm_l1_virt vs TTBR0 pm_l1_phys table-identity issue for the VA's L2), OR the
+       shared-cache / codesign path re-maps the page read-only.
+
+RESULT 3 — THE (A) L2 WALK IS STILL BROKEN (measurement defect, NOT a new finding).
+---------------------------------------------------------------------------------
+The checker's HARD ANOMALY stands: x11 tail records carry `_ptel2=0` (NO L2 leaf) for a FS=15
+LEVEL-2 PERMISSION fault — IMPOSSIBLE for a correct walk (an absent L2 gives FS=5/6/7).  The tail
+`_ptel1`=0x81bb1001 is a COARSE L1 descriptor (bits[1:0]=0b01) pointing at L2 table PA 0x81bb1000
+— the 1010c wrong-table read is GONE, but the walk's L2 deref still returns 0, so (A)'s APX cell
+is UNREADABLE and the L2-descriptor regression gate is NOT CERTIFIED.  DO NOT read the (A) tail as
+a PTE verdict.  (probe-keying agent is verifying whether this is a mask/deref artifact.)
+
+ANCILLARY — THE WATCHDOG DID NOT BITE (see docs/1012-watchdog-non-bite.md).
+--------------------------------------------------------------------------------
+The runner claims "hardware watchdog: ARMED"; the SoC's 25 s/3 s watchdog did NOT reset the
+machine across ~40 min dark.  The recovery-net's own reading: `xnu_live_wdt_pets=0x00000061` feeds
+landed by pass 0x0000a8ab — i.e. the watchdog was PETTED through the idle loop on the WORKING boot
+path, but the STALL (whole-interrupt-path freeze) stopped the pet.  A resident rung that froze was
+never bitten; every such rung needs the operator's power press.  This is the high-value workflow
+defect the wdt-forensics agent is sizing.
+
+NEXT
+----
+  1. probe-keying: is the apex VA provably the storm's far?  If NO ⇒ the 1012 verdict is a
+     measurement artifact and the frontier STAYS at "somewhere above/at the apex".
+  2. leaf-writer: is there a REACHABLE second-RO-writer (or a CS/shared-cache re-map) for the
+     leaf of a low dyld VA?  If YES ⇒ that is the F1a site, and a WRSTRIP arm at that writer
+     names it in one press.
+  3. f1a-static: reconcile the all-correct by-value read with the apex measurement.
+  1009/1010/1011 regression gates: 1012 preserves the ABORT-FAULT-IDENTITY / FAULTING-PC-AND-FSR /
+  CADENCE gates (CERTIFIED) and the (E') F1a verdict (the entry grants write); the L2-descriptor
+  and FREEZE gates are NOT CERTIFIED (same walk defect; capture cut before the 24.4 s freeze).
+
+Arm: armed-d13-ffdc8ba1.  Checker: tools/check_1012_capture.py, EXIT=0 (2 soft findings, 2 HARD
+anomalies, both named above).
