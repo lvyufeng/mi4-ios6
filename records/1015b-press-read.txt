@@ -1,0 +1,33 @@
+1015b PRESS — RAN; RESIDENT NON-RETURN (exit 2); LOG NOT YET RECOVERED
+2026-10-15
+
+WHAT HAPPENED (scripts/press_1015b.sh, second run, full log /tmp/press_1015b.log)
+  * (0g) pool census PASSED after the clause fix: kernel_pmap materializations x3
+    (@0x440 init, @0x560 inserted test, @0x608 terminal panic) - the H-G fix IS in the pool.
+  * the whole entry-side witness census (0)..(0i) PASSED to the end.
+  * 2a/2b: the 896 MiB HFSX card image was written to userdata's head AGAIN this run
+    (896+0 records out, 939524096 B, 62.5 s) and the read-back sha256 matched head -c 8388608.
+  * 3: USB console reader armed -> usb-console-1015-20261015-160000.txt (EMPTY, as expected:
+    a resident kernel never idles, so the ladder never fires).
+  * run_and_capture.sh entered XNU, then reported:
+        bounded wait expired after 180s. adb: serial 4a2fe00b not listed;
+        host log 33 -> 33 enumerations of SerialNumber: 4a2fe00b (NO new enumeration)
+        -> "The device did not come back: no adb entry, and no new enumeration."
+        runner exit 2 - a resident rung not returning, which for 1015b is the EXPECTED shape.
+  * 4: recovery could not run - the device is still dark (adb AND fastboot both absent), so
+    /proc/last_kmsg is not reachable. /tmp/cancro-last_kmsg.txt does NOT exist.
+
+VERDICT CELL: **UNREAD**. The G-CONFIRMED / G-REFUTED adjudication
+  (python3 tools/check_1015b_capture.py <capture>)
+CANNOT be computed without the run's log. No G cell may be claimed from this run yet.
+
+DEVICE: DARK (no adb, no fastboot, no phone-class USB). Needs the operator's power press:
+  hold Power ~10-15 s, release, press Power normally.
+THEN, to recover the log (the carrier is the FLASHED ROM, not fastboot boot):
+  VolDown+Power -> fastboot -> fastboot boot <stock boot.img> -> adb -> /proc/last_kmsg
+  i.e. scripts/recover_last_kmsg.sh --read-only once Android is up.
+  ~28 s watchdog may also return the device on its own (1015's run self-reported wdt_pets).
+
+CORRECTION of the earlier record (records/1015b-press-blocked.txt): that file says the press
+"never ran" - TRUE of the FIRST run (refused pre-device by the (0g) census defect, which was
+then fixed) but FALSE of the second run, which executed the full press. This file supersedes it.
