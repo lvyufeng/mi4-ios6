@@ -758,7 +758,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_PTE_WITNESS
                 STAGE90_XNU_FLUSH_WITNESS
                 STAGE90_XNU_PERM_WITNESS
-                STAGE90_XNU_UNDEF_DIRECT)
+                STAGE90_XNU_UNDEF_DIRECT
+                STAGE90_XNU_UNDEF_RAISE)
 # **1015: `STAGE90_XNU_PERM_WITNESS`, the permission-inputs witness (the passive half of rung 1015).**
 # It went in at the tail beside `STAGE90_XNU_FLUSH_WITNESS`, and the "variant subset / pair of counts"
 # arithmetic the 882/683/686 notes above describe was **already retired by 1005** - the counts they name

@@ -383,7 +383,17 @@ CHUNKS = ((BLOCK_ANCHOR, BLOCK, "witness block"), (CALL_ANCHOR, CALL, "witness c
 # The identifiers trap.c's own conditional directives evaluate.  The placeholder-include OFF proof is
 # faithful to the real build ONLY while this set holds (a macro invented by a header and tested in a
 # directive would be invisible to a placeholder), so the proof refuses if it ever grows.
-ALLOWED_IF_IDENTIFIERS = {"BOARD_CONFIG_QSD8250_LEO", "BOARD_CONFIG_ARMPBA8", SWITCH}
+# **`STAGE90_XNU_UNDEF_RAISE` (1020) is allow-listed here for the SAME reason `STAGE90_XNU_DYLD_WITNESS`
+# is allow-listed in `patch_d13_undef_raise.py`'s counterpart set: the two patches edit the SAME pool file
+# (`osfmk/arm/trap.c`) and either must compose over the other's already-staged chunk, in EITHER order and
+# on a RE-RUN (the tree keeps whatever each patch staged).  This is faithful - not a loosened proof -
+# because the switch is a BUILD switch (a command-line `-D`, never a header macro), the exact class the
+# allow-list exists to accept: in all three OFF preprocessor runs (`head`, `staged_undefined`,
+# `staged_zero`) it is UNDEFINED, so the 1020 block's `defined()`-first `#if` is false and its `#else`
+# (the file's pre-existing bytes) is emitted, leaving the OFF byte-identity this proof certifies intact.
+# An identifier a HEADER could invent would still be caught, because such a name is not in this set.
+ALLOWED_IF_IDENTIFIERS = {"BOARD_CONFIG_QSD8250_LEO", "BOARD_CONFIG_ARMPBA8", SWITCH,
+                          "STAGE90_XNU_UNDEF_RAISE"}
 _DIRECTIVE = re.compile(r"^[ \t]*#[ \t]*(?:if|elif|ifdef|ifndef)\b(.*)$", re.M)
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _WORDS = {"defined", "if", "elif", "ifdef", "ifndef"}

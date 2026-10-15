@@ -1,0 +1,91 @@
+1020 CAPTURE CHECKER — tools/check_1020_capture.py
+==================================================
+
+NEW FILE.  No build, no press, no source edit, no write to out/stage90 was made.  The 1018 capture
+was READ only.
+
+WHAT IT READS
+-------------
+The 1020 rung (`STAGE90_XNU_UNDEF_RAISE`, docs/1020-design.md) moves `sleh_undef`'s user-mode
+`return;` INSIDE the `if (!thread->machine.vfp_enable)` block, so the FIRST trip is the lazy-VFP
+enable (a real VFP/NEON instruction re-executes and advances) and a SECOND trip — VFP already on and
+the instruction STILL undefined — falls through to the handler's own kernel printf
+`usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x%08x` (osfmk/arm/trap.c:1137) and
+`exception_type = EXC_BAD_INSTRUCTION` + `doexception(...)`.
+
+The witness keys already exist and ride the DIRECT channel (the 1018 arm's
+`STAGE90_XNU_UNDEF_DIRECT=1`, carried by this arm): `xnu_live_undef_seq`, `xnu_live_undef_user_seq`,
+`xnu_live_undef_pc`, `xnu_live_undef_lr`, `xnu_live_undef_spsr`, `xnu_live_undef_user` (written by
+`__wrap_sleh_undef`, entry_trace.c:5537).  The handler's own `usermode undefined instruction` printf
+and any `panic` are read from the raw text (they carry no `xnu_live_` key).
+
+FRAMEWORK
+---------
+Cloned from tools/check_1018_capture.py: a capture path argument, `--selftest`, the `verdict(...)`
+helper, and the token/row parsing of the RAM-console capture.  The row parser is REUSED BY IDENTITY
+(imported by path from tools/check_1015_capture.py — its `Capture`/`toks`/`all`/`first`/`to_int`/
+`fmt`), never cloned, per [[mi4-one-value-two-definitions]].  This is a NEW file with its own
+self-test; the existing 1018 checker and its self-test are untouched and still PASS.
+
+VERDICT CELLS (disjoint; decided in this order — CONTROL first)
+--------------------------------------------------------------
+R-CTL (WITHHOLD): the control is NOT live.  Control = the boot self-test row
+  `stage90_xnu_arm_vm_init_high_va_undef_handler_undef_handled=0x1` IS present AND at least one
+  `xnu_live_undef_seq` row is present.  If the self-test row is absent (or reads != 1) OR no
+  `xnu_live_undef_seq` row exists -> R-CTL, withhold (the witness was not live; nothing else may be
+  read).  [[mi4-a-claim-in-a-comment-is-not-a-check]]; the 1000 lesson (an absent effect whose
+  channel was wrong is not a falsification).  The boot row lives OUTSIDE the `xnu_live_*` namespace
+  the shared parser tokenizes, so it is read from the RAW TEXT.
+
+R-RAISES-ONCE: `_seq` reaches >= 2 at a SINGLE invariant pc AND does NOT climb beyond a small bound
+  (UNDEF_LOOP_MAX = 100) AND the `usermode undefined instruction` printf appears >= 1 time.
+  -> FIXED (the udf raised after the lazy-VFP first trip).
+
+R-RAISES-CLEAN: `_seq` max == 1 (VFP was already on for this thread, so the very first trip fell
+  through) AND the printf appears >= 1 time AND no loop. -> FIXED (even cleaner).
+
+R-STILL-LOOPS: `_seq` climbs PAST UNDEF_LOOP_MAX at a single invariant `_pc` AND the printf appears
+  0 times. -> NOT FIXED (the move did not take effect — check the pool `-D`).
+
+R-VFP-CONTINUES: no undef loop (`_seq` bounded) AND the printf appears 0 times AND `_seq` is 0 or
+  absent-after-control (the boot advanced past the udf to a different frontier without raising).
+  -> MOVED.
+
+Every cell's tokens are read from the capture BY VALUE (the `=0x...` hex is parsed); the udf pc is
+derived from `xnu_live_undef_pc`'s own distinct values and NO literal is held (the self-test proves
+it: two different pcs yield the same cell).  The pc is INVARIANT iff every distinct
+`xnu_live_undef_pc` value is the same single value.
+
+SELF-TEST
+---------
+Builds SYNTHETIC capture fragments (short inline strings, NOT the real file) driving each cell
+EXACTLY.  Run as `python3 -I tools/check_1020_capture.py --selftest`.  Cases:
+  R-CTL-noselftest  the DIRECT witness fired but the boot self-test row is ABSENT
+  R-CTL-noseq       the boot self-test row present but NO `_seq` row (the pre-arm / capped shape)
+  R-CTL-bootbad     the boot self-test row present but reads 0
+  R-RAISES-ONCE     seq 1..5 at one pc + a printf line
+  R-RAISES-ONCE-noliteral  the SAME shape at a DIFFERENT pc (no literal held)
+  R-RAISES-CLEAN    seq == 1 + printf
+  R-STILL-LOOPS     seq 1..200 at one pc, no printf
+  R-VFP-CONTINUES   seq 1..3 at one pc, no printf, bounded
+  R-VFP-CONTINUES-single  a single bounded entry, no printf
+  boundary-max-once  _seq == UNDEF_LOOP_MAX + printf (R-RAISES-ONCE)
+  boundary-over-loops  _seq == UNDEF_LOOP_MAX + 1, no printf (R-STILL-LOOPS)
+  two-pc-not-once   a climbing `_seq` over a NON-invariant pc -> R-VFP-CONTINUES
+Each asserts the EXACT cell string; PASS/FAIL is printed and the run exits nonzero on any mismatch.
+
+RESULT
+------
+  * `python3 -I tools/check_1020_capture.py --selftest`  => PASS (exit 0).
+  * `python3 -I tools/check_1018_capture.py --selftest`  => PASS (exit 0; untouched).
+  * On the REAL 1018 capture
+    `out/stage90/captures/recovered-unknown-arm-20261015-184618-last_kmsg.txt`:
+      CTL  boot row = 0x1 at :3480; DIRECT witness x8183 `_seq` rows, max `_seq` = 8183
+      WITNESS  pc 0x39cdfa54 (INVARIANT); printf x0; panic-string x0
+      VERDICT  R-STILL-LOOPS
+    This is the PRE-1020 loop (8183 undef entries at one invariant pc, 0 printfs) and R-STILL-LOOPS
+    is the expected end-to-end validation of the loop detector.  The check was NOT weakened to
+    produce it.
+
+`git add` was not performed.  No file outside the two written (this record and
+tools/check_1020_capture.py) was touched.

@@ -1,0 +1,187 @@
+1020 - reference implementation of sleh_undef (BY VALUE)
+=========================================================
+Read-only recon. No build, no press, no source edit. This file is the only artifact.
+
+COMMANDS / URLS USED
+--------------------
+  curl -sL https://raw.githubusercontent.com/HTC-Leo-Revival-Project/xnu/gary_codeunfuckery/osfmk/arm/trap.c -o /tmp/ref_trap_gary.c   # 974 lines, OK
+  # sibling repo https://github.com/Garysss123/xnu-hd2 : tried master/main/darwin13,
+  #   every fetch returned a 404 page (no branch resolved to osfmk/arm/trap.c). NOT FOUND.
+  # local trees (Read/grep):
+  #   external/xnu-2050.18.24/osfmk/arm/trap.c        -> MISSING
+  #   external/apple-xnu-rel-2050/osfmk/arm/trap.c    -> MISSING
+  #   external/xnu-upstream/osfmk/arm/trap.c          -> MISSING
+  #   external/xnu-4570.1.46/osfmk/arm/trap.c         -> PRESENT (generic upstream)
+  #   external/xnu-hd2-darwin13/xnu/osfmk/arm/trap.c  -> PRESENT (our tree)
+
+THE HEADLINE RESULT
+-------------------
+The canonical port repo (HTC-Leo-Revival-Project/xnu, branch gary_codeunfuckery) carries
+the SAME loop-prone logic as our tree. There is NO "reference" that does it differently in
+that repo. I diffed the two `sleh_undef` bodies by value:
+
+  sed -n '821,975p'  /tmp/ref_trap_gary.c > /tmp/gary_body.txt
+  sed -n '1033,1191p' external/xnu-hd2-darwin13/xnu/osfmk/arm/trap.c > /tmp/local_body.txt
+  diff /tmp/gary_body.txt /tmp/local_body.txt
+  -> ONE difference only: our tree adds the STAGE90_XNU_DYLD_WITNESS block (5 lines,
+     ios7wit_dyld_message). Everything else, including the buggy `return`, is byte-identical.
+
+So the "correct" implementation of the CONTINUE-vs-RAISE decision is NOT in the port repo.
+The correct GENERAL upstream (Apple, via xnu-4570.1.46) classifies by a real VFP bitmask and
+never loops. Both are quoted below.
+
+========================================================
+(A) THE CLASSIFICATION CONDITION
+========================================================
+
+PORT REPO (gary_codeunfuckery) / OUR TREE -- /tmp/ref_trap_gary.c:890-914
+(and external/xnu-hd2-darwin13/xnu/osfmk/arm/trap.c:1102-1126, identical):
+
+        instruction = OSSwapInt32(instruction);
+        ...
+        if(instruction != 0xfedeffe7)
+        {
+            /*
+             * NEON instruction.
+             */
+            thread->machine.vfp_dirty = 0;
+            if (!thread->machine.vfp_enable) {
+                vfp_enable_exception(TRUE);
+                vfp_context_load(&thread->machine.vfp_regs);
+                thread->machine.vfp_enable = TRUE;
+            }
+            return;
+        }
+
+The condition is the MAGIC `instruction != 0xfedeffe7`, NOT a bitmask. There is NO
+`(instruction & 0x0c000000) == 0x0c000000` test anywhere in this darwin13 handler.
+Consequence: EVERY undefined opcode EXCEPT the single magic 0xfedeffe7 is classified as
+"a NEON/coprocessor instruction that just needs VFP enabled" -> resumed at the same PC.
+A genuine `udf` (any other encoding) is therefore misrouted into the NEON path forever.
+
+GENERIC UPSTREAM (Apple) -- external/xnu-4570.1.46/osfmk/arm/trap.c:207-226:
+This is the proper classification. It uses the encoding-bitmask macros IS_ARM_VFP /
+IS_THUMB_VFP (defined external/xnu-4570.1.46/osfmk/arm/trap.h:196-240):
+
+  #define ARM_SIMD_MASK0    0xFE000000 / ARM_SIMD_CODE0    0xF2000000
+  #define ARM_VFP_MASK0     0x0F000E10 / ARM_VFP_CODE0     0x0E000A00
+  #define ARM_SIMD_VFP_MASK0 0x0E000E00 / ARM_SIMD_VFP_CODE0 0x0C000A00
+  #define ARM_SIMD_VFP_MASK1 0xFF100000 / ARM_SIMD_VFP_CODE1 0xF9000000
+  #define ARM_SIMD_VFP_MASK2 0x0F000E10 / ARM_SIMD_VFP_CODE2 0x0E000A10
+  #define ARM_SIMD_VFP_MASK3 0x0FE00E00 / ARM_SIMD_VFP_CODE3 0x0C400A00
+  (IS_THUMB_VFP analogous, THUMB_SIMD/THUMB_VFP_* )
+
+        	if(COPYIN((user_addr_t)(regs->pc), (char *)&instr,(vm_size_t)(sizeof(uint32_t))) != KERN_SUCCESS)
+        		goto exit;
+        	code[1] = instr;
+  #if	__ARM_VFP__
+        	if (IS_ARM_VFP(instr)) {
+        		/* We no longer manage FPEXC beyond bootstrap, so verify that VFP is still enabled. */
+        		if (!get_vfp_enabled())
+        			panic("VFP was disabled (arm); VFP should always be enabled");
+        	}
+  #endif
+        	if (IS_ARM_GDB_TRAP(instr)) { exception = EXC_BREAKPOINT; code[0] = EXC_ARM_BREAKPOINT; }
+
+The upstream bug-relevant difference: upstream treats VFP as ALWAYS-ON post-bootstrap
+(FPEXC managed in locore). It does NOT re-enable VFP lazily. If an instruction traps and VFP
+is on (the normal case), the IS_ARM_VFP test is *only a sanity check* that panics if VFP was
+somehow off -- and then execution runs straight on to line 244 `panic_context(...)` for a
+kernel trap or line 259 `exception_triage(EXC_BAD_INSTRUCTION)` for a user trap. There is no
+"return and re-execute" path at all -> no loop. (Our port enabled lazy VFP-enable because the
+D13 arm-extra path does not pre-enable FPEXC, which is why the port added the return.)
+
+========================================================
+(B) WHERE THE `return` IS PLACED  (the actual defect)
+========================================================
+
+In BOTH the port repo and our tree (/tmp/ref_trap_gary.c:913 ; our file line 1125) the
+`return;` is OUTSIDE the `if (!thread->machine.vfp_enable) { ... }` block and INSIDE the
+`if(instruction != 0xfedeffe7) { ... }` block. It is UNCONDITIONAL for that branch:
+
+    if(instruction != 0xfedeffe7)          // line 1108 (ours)
+    {
+        thread->machine.vfp_dirty = 0;
+        if (!thread->machine.vfp_enable) {  // line 1114 (ours)
+            vfp_enable_exception(TRUE);
+            vfp_context_load(&thread->machine.vfp_regs);
+            thread->machine.vfp_enable = TRUE;
+        }
+        return;                             // line 1125 (ours) -- OUTSIDE the if, ALWAYS taken
+    }
+
+So a re-trap (VFP already enabled, instruction STILL undefined) returns again -> the CPU
+re-executes the same PC -> infinite loop. Exactly the pid-1 `udf #254` at
+`__os_alloc_slow+0x108` observed at 1018.
+
+========================================================
+(C) RE-TRAP / "ALREADY ENABLED BUT STILL UNDEFINED" GUARD
+========================================================
+
+NONE. The port handler carries no such guard. The ONLY way to leave the NEON branch and reach
+the exception path is `instruction == 0xfedeffe7`. There is no `if (vfp_enable &&
+instruction_not_vfp) -> raise` fallback.
+
+(Gary's `ios7leo_dyld_matches` helper, /tmp/ref_trap_gary.c:95-115, is NOT a re-trap guard:
+it only *gates the diagnostic dump*, and per line 102 it explicitly requires
+`instruction!=0xfedeffe7U` to return FALSE, i.e. it can never match inside the loop branch.)
+
+========================================================
+(D) IS 0xfedeffe7 PRESENT, AND WHAT IS IT?
+========================================================
+
+Yes -- it is the single special-cased magic in both the port repo and our tree (grep: 2 hits
+in external/xnu-hd2-darwin13/.../trap.c, at lines 84 and 1108). It is the byte-swapped
+(OSSwapInt32) value of one specific undefined instruction encoding -- the "dyld's faulting
+one" (comment at trap.c:1104-1107). It is NOT a NEON instruction and NOT the dtrace
+fasttrap. As it sits in memory (little-endian, before the swap) the word is 0xE7FFDEFE, an
+ARM unconditional-space undefined opcode in the same family as the DTrace fasttrap constant
+FASTTRAP_ARM_INSTR 0xe7ffdefc (xnu-4570 trap.c:78). It is a bare "undefined" (udf-like)
+encoding that the port author hard-coded so that ONE dyld fault could be told apart from
+everything else. It is the ONLY value allowed to reach the raise path.
+
+========================================================
+MINIMAL DIFF for external/xnu-hd2-darwin13/xnu/osfmk/arm/trap.c
+========================================================
+
+Goal: a genuine `udf` with VFP ALREADY enabled must fall through to EXC_BAD_INSTRUCTION
+instead of returning to re-execute.
+
+Minimal change = MOVE the `return;` INSIDE the `if (!thread->machine.vfp_enable)` block.
+Delete line 1125 and add a `return;` immediately after line 1123
+(`thread->machine.vfp_enable = TRUE;`):
+
+        if(instruction != 0xfedeffe7)
+        {
+            thread->machine.vfp_dirty = 0;
+            if (!thread->machine.vfp_enable) {
+                vfp_enable_exception(TRUE);
+                vfp_context_load(&thread->machine.vfp_regs);
+                thread->machine.vfp_enable = TRUE;
++               return;            // first trap: enable VFP, retry same instruction
+            }
+-           return;                // (delete this line)
+        }
+
+Resulting control flow:
+  * First trap, VFP off  -> enable + context-load + return -> PC unchanged -> CPU retries with
+    VFP now on. A real NEON/VFP instruction then executes. (behaviour preserved)
+  * Re-trap, VFP already on, still undefined -> the `if` body is skipped, NO return -> falls
+    through to the existing `#if defined(BOARD_CONFIG_QSD8250_LEO)` dyld block, the existing
+    printf fires (logs the EXC_BAD_INSTRUCTION with pc/map), then line 1167
+    `exception_type = EXC_BAD_INSTRUCTION;` and line 1184 `doexception(...)`. No loop.
+
+Why this is safe w.r.t. the leo guard: `ios7leo_dyld_matches` requires
+`instruction==0xfedeffe7` (line 84), so for any non-magic instruction `leo_dyld_match` is
+FALSE -> `leo_dyld_skip_dump` is FALSE -> the dump is printed (the diagnostic we WANT) and the
+exception is delivered. No extra editing of the LEO block is required.
+
+OPTIONAL (not needed for the loop fix; more faithful to Apple): replace the `!= 0xfedeffe7`
+NEON classification with the real bitmask test IS_ARM_VFP/IS_THUMB_VFP from trap.h, so only
+actual coprocessor encodings take the VFP-enable path and everything else raises immediately.
+The one-line `return` move alone is sufficient to break the loop.
+
+ESTABLISHED LOCAL FACT THIS CONFIRMS: the handler's printf only fires on the == 0xfedeffe7
+path, so it logged 0 times and no panic occurred (1018). That is consistent with everything
+above: the pid-1 `udf #254` (value 0xfefefefe-class, never 0xfedeffe7) hit the != branch and
+returned 8183x.

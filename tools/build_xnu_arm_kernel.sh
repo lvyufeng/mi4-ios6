@@ -857,6 +857,20 @@ DEFINES=(
 # compiles trap.c's original bytes).
 [[ ${STAGE90_XNU_DYLD_WITNESS:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_DYLD_WITNESS=1)
 
+# 1020's undefined-instruction RAISE (`osfmk/arm/trap.c`: `sleh_undef`'s user-mode arm moves its
+# `return;` INSIDE the `if (!thread->machine.vfp_enable)` block, so a genuine `udf` with VFP already
+# enabled falls through to the printf + `EXC_BAD_INSTRUCTION` instead of returning with the PC still on
+# the `udf` and re-trapping forever). The defect is `records/1019-rootcause.txt`: pid 1's `udf #254`
+# at `__os_alloc_slow+0x108` looped 8183x in USER mode because the tree classifies EVERY undefined
+# instruction as a lazy VFP/NEON enable and returns without advancing PC; the port's own LEO machinery
+# (`ios7leo_dyld_repeat`, `trap.c:105`) already assumes the two-trip shape this switch restores.
+# `trap.c` is a kernel-pool file, so the switch goes to the SAME array as the kext guard / alignment /
+# witness / wire switches, not to `EXTRA_DEFINES` - and the linked image only LINKS
+# `out/xnu_kernel_obj_d13/osfmk_arm_trap.o`, so without this `-D` the raise is silently absent
+# (`tools/stage_d13_undef_raise.sh` stages the tree; its gate is `defined()`-first, so switch OFF
+# compiles trap.c's original bytes).
+[[ ${STAGE90_XNU_UNDEF_RAISE:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_UNDEF_RAISE=1)
+
 # 996's shared-region syscall probe (`bsd/vm/vm_unix.c`: bounded, fail-soft `IOS7SHREG` lines at the
 # entry and every return of `shared_region_check_np` (294) and `shared_region_map_and_slide_np` (438),
 # plus the kr immediately after `vm_shared_region_map_file()` inside `_shared_region_map`). 995's press

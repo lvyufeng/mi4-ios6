@@ -1,0 +1,38 @@
+1020 BUILD-DEFECTS — TWO TOOL DEFECTS THE BUILD SURFACED (both fixed before the build succeeded)
+No device action; a build was refused twice, each time for a REAL reason, and each reason was fixed in
+the TOOL, not worked around.  This is the record of what the two refusals actually were.
+
+## DEFECT 1 — `tools/patch_d13_dyld_witness.py`: the sibling switch is not in the allow-list
+SYMPTOM (build run 1, driver 6 `stage_d13_dyld_witness.sh`):
+  "patch_d13_dyld_witness: FAIL: osfmk/arm/trap.c's directives also evaluate STAGE90_XNU_UNDEF_RAISE ...
+   the OFF equality is NOT certified" -> REFUSING to write.
+CAUSE.  Both `patch_d13_dyld_witness.py` (995) and `patch_d13_undef_raise.py` (1020) edit the SAME pool
+file `osfmk/arm/trap.c`.  Each patch's OFF byte-identity proof scans the file's `#if` identifiers and
+REFUSES if the set GROWS past an allow-list (a name a HEADER could invent would be invisible to the
+placeholder-include proof).  `patch_d13_undef_raise.py`'s allow-list ALREADY named `STAGE90_XNU_DYLD_WITNESS`
+(the symmetric case); `patch_d13_dyld_witness.py`'s did NOT name `STAGE90_XNU_UNDEF_RAISE`.  Once 1020's
+chunk was in the tree, the 995 patch refused - so `scripts/build_1020.sh`'s claim that "either order
+COMPOSES" was FALSE as measured.
+FIX.  Added `STAGE90_XNU_UNDEF_RAISE` to `ALLOWED_IF_IDENTIFIERS` in `tools/patch_d13_dyld_witness.py`,
+with the argument stated: the switch is a BUILD switch (a command-line `-D`, never a header macro) - the
+exact class the allow-list exists to accept - and in all three OFF preprocessor runs it is UNDEFINED, so
+the 1020 block's `defined()`-first `#if` is false and its `#else` (the pre-existing bytes) is emitted,
+leaving the certified OFF byte-identity intact.
+
+## DEFECT 2 — `tools/patch_d13_undef_raise.py`'s `unstaged()` is not the inverse of `stage()`
+SYMPTOM (build run 2, driver 15 `stage_d13_undef_raise.sh`):
+  "OFF (STAGE90_XNU_UNDEF_RAISE undefined): preprocessed output is DIFFERENT FROM HEAD (18021 chars)"
+  and "an OFF text carries the ON shape" -> OFF byte-identity proof FAIL.
+CAUSE.  `stage()` replaces `ORIG_BLOCK` with `CHUNK`; `CHUNK` EMBEDS `ORIG_BLOCK` verbatim (its `#else`
+arm is the file's pre-existing bytes).  But `unstaged()` - the function the proof uses to reconstruct
+HEAD from a staged file (HEAD is gone once the tree is staged) - did `text.replace(CHUNK, "")`, i.e. it
+DELETED the whole chunk.  That drops the ORIGINAL block too, so the reconstructed "HEAD" had a HOLE where
+`if (!thread->machine.vfp_enable) { ... vfp_enable = TRUE; } return;` used to be.  The proof then read
+that hole as "HEAD does not have the OFF shape" and refused.  MEASURED: reconstructed HEAD was 237 chars
+shorter and the first differing byte was exactly the missing block.
+NOTE.  This is why `stage()`'s own `--dry-run` PASSED on an UNSTAGED tree (head = the real file, taken
+directly) but the proof FAILED on the STAGED tree (head = `unstaged()`, the broken reconstruction): the
+`unstaged()` path is taken only when markers are already present.  The manual staging done earlier in
+this session put the tree in exactly that state.
+FIX.  `unstaged()` now does `text.replace(CHUNK, ORIG_BLOCK, 1)` - the true inverse - with the argument
+stated in the function's docstring.

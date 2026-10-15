@@ -1632,6 +1632,25 @@ case "$DYLD_WITNESS" in
     *) echo "REFUSING: STAGE90_XNU_DYLD_WITNESS='$DYLD_WITNESS' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **1020: the undefined-instruction RAISE, recorded the same way and for the same reason.** With
+# `STAGE90_XNU_UNDEF_RAISE=1`, the D13 tree's `osfmk/arm/trap.c` moves `sleh_undef`'s user-mode
+# `return;` INSIDE its `if (!thread->machine.vfp_enable)` block, so a genuine `udf` with VFP already
+# enabled falls through to the existing printf + `exception_type = EXC_BAD_INSTRUCTION` + `doexception`
+# instead of returning with the PC still on the `udf`. The defect: the tree's `!= 0xfedeffe7` test is a
+# stand-in for "is this a coprocessor instruction" (the code's own comment says so) and mis-classifies
+# EVERY other undefined instruction as NEON, so pid 1's `udf #254` re-executed forever - 8183x in USER
+# mode, `records/1019-rootcause.txt`. `trap.c` is a kernel-pool file, so the switch is compiled by
+# `tools/build_xnu_arm_kernel.sh` (DEFINES, from the same-named environment variable) - the two
+# spellings must carry the SAME value (`mi4-one-value-two-definitions`) - and the linked image only
+# LINKS `out/xnu_kernel_obj_d13/osfmk_arm_trap.o`, so a stale pool hides the raise. The tree patch is
+# staged by `tools/stage_d13_undef_raise.sh`; the by-value clause at the 1020 link site below refuses a
+# link whose `sleh_undef` still returns before the raise.
+UNDEF_RAISE=${STAGE90_XNU_UNDEF_RAISE:-0}
+case "$UNDEF_RAISE" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_UNDEF_RAISE='$UNDEF_RAISE' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **996: the shared-region syscall probe, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_SHREG_PROBE=1`, the D13 tree's `bsd/vm/vm_unix.c` grows bounded, fail-soft `IOS7SHREG`
 # printfs at the entry and every return of `shared_region_check_np` (294) and
@@ -2085,6 +2104,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_FLUSH_WITNESS
                 STAGE90_XNU_PERM_WITNESS
                 STAGE90_XNU_UNDEF_DIRECT
+                STAGE90_XNU_UNDEF_RAISE
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -2267,6 +2287,13 @@ do
         # below reads the linked image's own `locore_fleh_swi` and refuses a link whose -3 wire is
         # absent (the pool's wire adapters are what the build script's own object dumps carry).
         STAGE90_XNU_IOS7_TRAPS)       _v=$IOS7_TRAPS ;;
+        # 1020: whether the tree's undefined-instruction RAISE (`tools/stage_d13_undef_raise.sh`) was
+        # compiled into this image's pool. Read from `$UNDEF_RAISE`, validated 0/1 at its own assignment
+        # far above this loop, so the record and the pool's `DEFINES` cannot be built from two spellings
+        # of this switch (`mi4-one-value-two-definitions`). `trap.c` is a POOL file: the linked image
+        # only LINKS `out/xnu_kernel_obj_d13/osfmk_arm_trap.o`, which is why the 1020 clause at the link
+        # site below reads the linked image's own `sleh_undef` and refuses a link whose raise is absent.
+        STAGE90_XNU_UNDEF_RAISE)      _v=$UNDEF_RAISE ;;
         # 995: whether the tree's dyld halt-message witness (`tools/stage_d13_dyld_witness.sh`) was
         # compiled into this image's pool. Read from `$DYLD_WITNESS`, validated 0/1 at its own
         # assignment far above this loop, so the record and the pool's `DEFINES` cannot be built from
@@ -31302,6 +31329,36 @@ verify_trace_symbols() {
         fi
         say "  xnu_entry_1018: __wrap_sleh_undef writes its keys through ${ud_kv} entr(y|ies) to the DIRECT channel and ${ud_lw} to the counted one with STAGE90_XNU_UNDEF_DIRECT=$UNDEF_DIRECT (read out of out/stage90/xnu_arm_entry_trace.o, the object this build compiled; the linked image at $ud_elf_a..$ud_elf_b agrees: $ud_elf_kv direct / $ud_elf_lw counted) - so the witness that 1015b's capture could not read past xnu_live_capped (:29963) is either direct or provably still on the channel it was on"
     fi
+    # **1020: the tree's undefined-instruction RAISE must be read BY VALUE off the LINKED image, not
+    # trusted to the source text.** `records/1019-rootcause.txt` names the defect: `sleh_undef`'s
+    # user-mode arm (`osfmk/arm/trap.c`) returns WITHOUT advancing PC for every undefined instruction
+    # whose byte-swapped value is not the one hard-coded magic `0xfedeffe7`, so pid 1's Thumb
+    # `udf #254` at `__os_alloc_slow+0x108` re-executed 8183x in USER mode. The fix moves that `return;`
+    # INSIDE the `if (!thread->machine.vfp_enable)` block, so a genuine `udf` with VFP already enabled
+    # falls through to the printf + `EXC_BAD_INSTRUCTION`. `trap.c` is a POOL file, so a stale
+    # `out/xnu_kernel_obj_d13/osfmk_arm_trap.o` is invisible to the link - and the entry build would be
+    # green while the pool is still the looping one. The property is read BY VALUE by
+    # `tools/check_d13_undef_raise.py --expect on`, which DECODES the linked `sleh_undef`'s control flow
+    # (the OFF shape's fall-through after the vfp_enable test returns immediately; the ON shape's
+    # fall-through reaches the `bl printf` with the EXC_BAD_INSTRUCTION literal). Gated on the switch:
+    # with UNDEF_RAISE=0 the tree's original text is compiled on purpose and there is nothing to assert.
+    if [[ $UNDEF_RAISE -eq 1 ]]; then
+        if ! ur_out=$(python3 "$REPO_ROOT/tools/check_d13_undef_raise.py" "$OUT/xnu_arm_entry.elf" --expect on 2>&1); then
+            printf '%s\n' "$ur_out" >&2
+            say "REFUSING: STAGE90_XNU_UNDEF_RAISE=1 but the linked image's sleh_undef still returns before" >&2
+            say "          the EXC_BAD_INSTRUCTION raise for a non-magic undefined instruction - the FAIL" >&2
+            say "          lines above name the missing piece. A pool object that was not rebuilt keeps trap.c's" >&2
+            say "          looping bytes: trap.c is compiled by tools/build_xnu_arm_kernel.sh and build_entry.sh" >&2
+            say "          only LINKS out/xnu_kernel_obj_d13/osfmk_arm_trap.o. Stage the tree, rebuild the pool" >&2
+            say "          with the SAME value, then relink:" >&2
+            say "            tools/stage_d13_undef_raise.sh" >&2
+            say "            XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+            say "            XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_UNDEF_RAISE=$UNDEF_RAISE' \\\\" >&2
+            say "            ./tools/build_xnu_arm_kernel.sh" >&2
+            layout_fail "STAGE90_XNU_UNDEF_RAISE=1 did not reach the linked image: stage the tree first (tools/stage_d13_undef_raise.sh) and rebuild the pool with -DSTAGE90_XNU_UNDEF_RAISE=1 - trap.c is a kernel-pool file and a stale osfmk_arm_trap.o links a sleh_undef that returns without advancing PC, which is exactly the loop records/1019-rootcause.txt measured (pid 1's udf #254 at __os_alloc_slow+0x108, 8183x in USER mode)"
+        fi
+        say "  xnu_entry_1020: the linked image's sleh_undef reaches the EXC_BAD_INSTRUCTION raise on the non-magic undefined-instruction path (the vfp_enable block's return is conditional; the fall-through reaches the printf) - $ur_out"
+    fi
     # **990: the tree must hand C 8-byte-aligned stacks at its two measured gates.** 989's pid-1 exec
     # ran every C frame from `thread_return_join`'s `blx ast_taken` and every continuation off
     # `Call_continuation`'s `ldr sp, [thread, TH_PCB_ISS]` at sp = 4 (mod 8) - `iss = stack_top - 68` and
@@ -40186,6 +40243,12 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # reached the compiler and the arm-key list but not this line would be a run whose arm nobody read.
     # Written as the RESOLVED `$UNDEF_DIRECT`.
     echo "STAGE90_XNU_UNDEF_DIRECT=$UNDEF_DIRECT"
+    # **1020: the undefined-instruction RAISE's switch, written here for 882's and 678's reason**: this
+    # writer is the one site a name-keyed diff does not visit and the only site the gate ever reads, so a
+    # switch that reached the compiler and the arm-key list but not this line would be a run whose arm
+    # nobody read. Written as the RESOLVED `$UNDEF_RAISE`. `trap.c` is a POOL file, so the pool's
+    # `-D` rides the caller's `XNU_KERNEL_EXTRA_DEFINES`; this record is the gate's only reading of it.
+    echo "STAGE90_XNU_UNDEF_RAISE=$UNDEF_RAISE"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

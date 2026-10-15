@@ -1,0 +1,158 @@
+1020 — TRAP DISPATCH, BY VALUE: `mvn ip,#14` is trap 15, NOT 14 — and pid 1 never issued it
+Method: READ-ONLY. No build, no press, no device action, no write to out/stage90. One file written.
+Inputs: /tmp/dyld-extract/dyld_shared_cache_armv7 (base 0x2c000000, map0 fileoff=va-0x2c000000);
+        out/stage90/xnu_arm_entry.elf (the LINKED image, .text base 0x80000000 fileoff 0x010000);
+        out/xnu_kernel_obj_d13/osfmk_kern_syscall_sw.o (the compiled object);
+        out/stage90/captures/recovered-unknown-arm-20261015-184618-last_kmsg.txt (the 1018 capture).
+
+== 0. RESULT IN ONE LINE ==
+`mvn ip,#14` yields ip = ~14 = 0xFFFFFFF1 = **-15**; the kernel's `swi_mach` turns it into table
+index **15** (claim 2 is RIGHT; `docs/1019-design.md` §0's "trap 14" is an off-by-one misread).
+`mach_trap_table[15]` in the LINKED D13 image is `kern_invalid` BY VALUE, so a -15 svc would PANIC
+at `swi_mach_error` — yet the live capture shows NO panic and NEVER a -15: the last-recorded user
+SVC is -3 (`ios7lab_timebase`). So trap 15 is NOT on pid 1's observed path; whether the mach_vm_map
+call took the fast-trap svc at all is UNMEASURED (the guard's fields were not read live).
+
+== 1. THE DISPATCH ARITHMETIC (traps_lo.s, `fleh_swi`) ==
+`EnterARM(fleh_swi)` is the SWI vector (`exctramps.s:65 .long _fleh_swi`). r11 = r12 = the user's
+SVC number (traps_lo.s:177 `mov r11, r12`). Then:
+
+  :186  cmn     r11, #3            ; r11 == -3 ?  (the only special case)
+  :187  beq     ios7lab_timebase   ; -- see §5
+  :190  cmp     r11, #0x80000000
+  :191  beq     swi_trap           ; -- the cache/thread 0x80000000 traps
+  :194  rsbs    r5, r11, #0        ; r5 = 0 - r11  (= -r11); flags set
+  :195  ble     swi_unix           ; r5 <= 0 (signed) -> not a mach trap
+  :197  swi_mach:
+  :201  cmp     r5, #0x80          ; r5 >= 128 -> out of range
+  :205  add     r11, r5, r5, lsl#1 ; r11 = r5 * 3
+  :206  add     r1, r1, r11, lsl#2 ; r1 = table + r5*3*4 = table + r5*12
+  :208  ldr     r1, [r1, #4]       ; r1 = entry.fn  (fn is the 2nd word of the entry)
+  :209  LOAD_ADDR(r2, kern_invalid)
+  :213  beq     swi_mach_error      ; entry.fn == kern_invalid -> PANIC
+  :214  bx      r1                  ; else call the handler
+
+The entry stride is confirmed BY VALUE: `mach_trap_t` is 12 bytes (`syscall_sw.h:71-78` =
+`{ int mach_trap_arg_count; kern_return_t (*mach_trap_function)(void *); const char *name; }`,
+3 words). `r5*12 + 4` = the fn slot of entry r5. So the **table index IS r5 = -r11.**
+
+**For r11 = ~14 = 0xFFFFFFF1 (i.e. `mvn ip,#14`):**
+    r5 = 0 - 0xFFFFFFF1 = 15         (`rsbs r5, r11, #0`)
+    ble not taken (15 > 0)
+    cmp r5,#0x80 -> 15 < 128, in range
+    add r1, table, 15*12 ; ldr r1,[r1,#4]
+**FINAL TABLE INDEX = 15.**  (Integer stated: **15**.)
+
+== 2. CROSS-CHECK WITH A DIFFERENT KNOWN STUB ==
+From the cache (`arm-none-eabi-objdump -D -b binary -m arm`):
+    0x381c5918  e3e0c009  mvn ip, #9        ; ~9 = 0xFFFFFFF6 = -10
+    0x381c591c  ef000080  svc 0x80
+    0x381c5934  e3e0c00b  mvn ip, #11       ; ~11 = 0xFFFFFFF4 = -12
+    0x381c5950  e3e0c00d  mvn ip, #13       ; ~13 = 0xFFFFFFF2 = -14
+    0x381c596c  e3e0c00e  mvn ip, #14       ; ~14 = 0xFFFFFFF1 = -15
+  mvn ip,#9  -> r5 = 0-0xFFFFFFF6 = **10** -> index 10 = `_kernelrpc_mach_vm_allocate_trap`  ✓
+  mvn ip,#11 -> r5 = **12**               -> index 12 = `_kernelrpc_mach_vm_deallocate_trap` ✓
+  mvn ip,#13 -> r5 = **14**               -> index 14 = `_kernelrpc_mach_vm_protect_trap`    ✓
+Confirmed against the LINKED image's own names (read from .rodata):
+  idx 10 name='_kernelrpc_mach_vm_allocate_trap'  idx 12 name='_kernelrpc_mach_vm_deallocate_trap'
+  idx 14 name='_kernelrpc_mach_vm_protect_trap'
+**Therefore `mvn ip,#14` == index 15.** The `kernel_trap(name, -N, nargs)` macro pads 64-bit args,
+which is why the *source* numbers are -10/-12/-14 (`syscall_sw.h:86-88`) but the *wire* numbers are
+-11/-13/-15. Both 1019 documents quoted the source numbers; `-15` is the wire value of trap 15.
+
+== 3. IS `svc #0x80` FROM `_mach_vm_map` ACTUALLY REACHED? (full shim, by value) ==
+`_mach_vm_map` = libsystem_kernel.dylib 0x381c6618, **Thumb** (entry pic slot bit0=1, 1019 §1;
+force-thumb disasm coherent). Full body:
+
+    0x381c6618  push {r4,r5,r6,r7,lr}; add r7,sp,#12; stmdb sp!,{r8,sl,fp}; sub sp,#48
+    0x381c6624  ldr r6,[r7,#12]  0x381c6628  mov fp,r0 (task) ...
+    0x381c663c  ldr r0,[r7,#20]; cmp r0,#0; bne 0x381c668c        <-  GUARD, leg 1
+    0x381c6640  cmp.w lr,#7   ([r7,#40]); it eq
+    0x381c6646  cmpeq.w r9,#1 ([r7,#44]); bne.n 0x381c668c        <-  GUARD, legs 2 & 3
+    0x381c664c  stmia.w sp,{r1,r6} ... (builds the fast-trap register frame) ...
+    0x381c666a  blx 0x381c5960                                    <-  FAST TRAP
+    0x381c666e..0x381c6688  restore regs; movs r0,#3; movt r0,#4096 (sentinel 0x10000003)
+    0x381c6688  cmp r4,r0; bne.n 0x381c66ba                       <-  MIG fallback if != sentinel
+    0x381c66b4  bl 0x381c7f74                                     <-  MIG/slow demux (libsyscall)
+    0x381c66ba  movw/movt r0; add r0,pc; ldr r6,[r0]              <-  r6 = *(0x39f38086)
+    0x381c66c6  cbz r6, 0x381c66e2
+    0x381c66e0  blx r6                                            <-  INDIRECT HOOK (runtime ptr)
+    0x381c66e2  mov r0,r4; epilogue
+
+**YES** — the fast path reaches `blx 0x381c5960`, and 0x381c5960 (ARM) really is
+`mov ip,sp; ...; mvn ip,#14; svc #0x80; ...; bx lr`, i.e. ip = 0xFFFFFFF1 = -15. So *when the fast
+guard passes*, this shim issues svc with the mach-trap number **-15 == index 15.** The guard is only
+for three specific low-level field values; if it fails the shim falls to `bl 0x381c7f74` (the MIG
+demux on the 0x381c7f74..region, whose own body issues NO svc — only `mvn.w`/`blx` calls) and/or
+`blx r6` (an indirect runtime hook, pointer at 0x39f38086). Which leg pid 1 took is UNMEASURED.
+
+== 4. THE `-15` NEVER APPEARS; `-3` DOES — and `mach_trap_table[15]` IS `kern_invalid` ==
+(a) LINKED IMAGE, BY VALUE (`xnu_arm_entry.elf`, mach_trap_table @ 0x8055d4b4, .text-relative
+    fileoff 0x56d4b4, stride 12):
+      idx  0 fn=0x80486408 name='kern_invalid'
+      idx 10 fn=0x8047aa34 name='_kernelrpc_mach_vm_allocate_trap'
+      idx 12 fn=0x8047ab5c name='_kernelrpc_mach_vm_deallocate_trap'
+      idx 14 fn=0x8047ac10 name='_kernelrpc_mach_vm_protect_trap'
+      **idx 15 fn=0x80486408 name='kern_invalid'**        <- trap 15 is kern_invalid, BY VALUE
+      idx 26 fn=0x8008cf7c name='mach_reply_port'
+      idx 31 fn=0x8047b720 name='mach_msg_trap'
+    Compiler object `osfmk_kern_syscall_sw.o` agrees: `nm` shows NO `ios7lab_mach_vm_map_trap`
+    symbol; the .rodata reloc at offset 0xB8 (= 15*12+4, entry 15's fn slot) is `kern_invalid`.
+    `ios7lab_mach_vm_map_trap` strings appear ONLY in `out/stage90/ios7_team/check_d13_ios7_abi_staged.sh`,
+    never in a linked object. (`IOS7_COMPAT_PLATFORM` = ARMPBA8||QSD8250_LEO, ios7_compat.h:5; the
+    board is MSM8974_CANCRO, build_xnu_arm_kernel.sh:202, so the gate is CLOSED. ~~STAGE90_XNU_IOS7_TRAPS~~
+    opens only the traps_lo.s -3/-15 *assembly* branches, NOT this table row.) For contrast Apple's
+    own iOS-6 line `xnu-2050.18.24/osfmk/kern/syscall_sw.c` also has `/* 15 */ kern_invalid`.
+    **Consequence:** a -15 svc reaching `fleh_swi` => `teq/beq kern_invalid` => `swi_mach_error`
+    (`swi_mach_error:` @:252) => `_doexception` => PANIC.
+(b) THE CAPTURE, BY VALUE (`usvc_num` = the saved-state r12 = the SVC number; entry_stubs.c:7341;
+    STAGE90_SS_R12 = 48, entry_saved_state.h:97/138). Distinct values:
+      0xfffffffd (-3)   x43        <- the ONLY mach negative that recurs
+      0xffffffe4 (-28) / e5 (-27) / e6 (-26)  x1 each   (task_self / thread_self / mach_reply_port)
+      0x80000000        x1         (the cmp r11,#0x80000000 trap)
+      small BSD positives: 0,3,5,6,0x5c,0x147,0x152,0x153,0x174
+    **`0xfffffff1` (-15) NEVER appears. `0xffffffe1` (-31, mach_msg_trap) NEVER appears.**
+    Panic/doexception/`mach_syscall` grep: **0 hits** in the whole 50,614-line capture.
+    `-3` IS identified: traps_lo.s:186-187 `cmn r11,#3; beq ios7lab_timebase` -> `:285 blx
+    _mach_absolute_time; b swi_exit64`. It is Apple ARMv7's `_mach_absolute_time` fast trap; the
+    cache has its stub at **0x381c57e4 `mvn ip,#2; svc 0x80`** (ip = ~2 = 0xFFFFFFFD = -3). So -3
+    comes from the **timebase** trap, NOT from mach_vm_map and NOT from mach_msg.
+
+== 5. RESOLVING THE CONTRADICTION ==
+* The arithmetic is settled: `mvn ip,#14` => index **15** (claim 2 right; `docs/1019-design.md` §0's
+  "trap 14" and `records/1019-osalloc-extract.txt` §2's "-14" caption are BOTH off by one — they
+  read the literal `14` from `mvn ip,#14` instead of computing `~14`. extract's §2 *conclusion*
+  ("trap 15") is right; its *label* "-14" is wrong.)
+* The two readings are NOT actually inconsistent on the dispatch; they differ on the *label* only.
+* `xnu_live_usvc_num = 0xfffffffd` is **-3 = the `ios7lab_timebase` (mach_absolute_time) special
+  case** — NOT mach_msg (-31), and not mach_vm_map (-15). So -3 does NOT mean "mach_vm_map is a MIG
+  message"; it means the last SVC the witness recorded was a timebase call.
+* Whether `svc #0x80` in the shim is on pid 1's path: the capture's usvc trace covers every svc that
+  entered `fleh_swi` (the FIRST thing the vector does, before any dispatch). It shows NO -15. So on
+  the observed run the -15 fast-trap svc was **not issued** — either the shim's fast guard failed and
+  the call took the `bl 0x381c7f74` / `blx r6` fallback, or the frontier (`udf`) fired before any
+  mach_vm_map was attempted. Which one is **UNMEASURED** (the guard's live field values were not
+  recorded). If it HAD issued -15, the kern_invalid row would have panicked, and no panic is present.
+
+== 6. VERDICT ==
+The integer trap number pid 1's `mach_vm_map` call carries — **provided it takes the
+libsystem_kernel fast-trap shim** (0x381c6618 -> guard passes -> blx 0x381c5960) — is **15**:
+`mvn ip,#14` sets ip = 0xFFFFFFF1 = -15, `rsbs r5,r11,#0` -> 15, and the 12-byte `mach_trap_t` stride
+gives fn at table+184 = 15*12+4. Claim 2 is correct by value; the "trap 14" in `docs/1019-design.md`
+§0 is a misread of `mvn` (it is a bitwise NOT: ~14=15, not 14). BUT that trap number is **NOT
+observed on pid 1's path**: the live capture's `xnu_live_usvc_num` shows -3 (timebase) and never -15
+and never -31, and there is no panic. And `mach_trap_table[15]` in the LINKED D13 image is
+`kern_invalid` **by value** (xnu_arm_entry.elf @0x8055d4b4 entry 15 = 0x80486408; the io7lab row is
+not compiled in). So `mach_trap_table[15]=kern_invalid` is a REAL wall **only if** a -15 svc is
+issued — which would `swi_mach_error` -> panic, which did NOT happen. Therefore either (a) the
+mach_vm_map call did not go through the fast-trap svc at all (fell to the `bl 0x381c7f74` MIG demux
+or the `blx r6` runtime hook), or (b) it was never reached before the `udf` loop. **UNMEASURED:**
+which of (a)/(b); the exact identity of the `blx r6` hook target at 0x39f38086; whether pid 1's
+specific `_mach_vm_map` call satisfied the 0x381c663c guard on that run.
+
+== 7. WHAT THIS DOES AND DOES NOT CLAIM ==
+* CONFIRMS: `mvn ip,#14` == table index 15 (claim 2), by two independent stubs (-9->10, -11->12) and
+  the 12-byte stride; -3 == the `ios7lab_timebase` (mach_absolute_time) trap, with its own cache stub
+  at 0x381c57e4; the LINKED table[15] is kern_invalid by value.
+* FALSIFIES: `docs/1019-design.md` §0's "trap 14" label (arithmetic).
+* does NOT claim which userspace leg pid 1 took; does NOT claim trap 15 is the frontier.
