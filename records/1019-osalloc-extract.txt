@@ -1,0 +1,88 @@
+1019 — BY-VALUE EXTRACTION: what libsystem_platform `__os_alloc_slow` does with `_mach_vm_map`
+Method: read-only. No build, no press, no device action, no write to out/stage90. One file written.
+Input: /tmp/dyld-extract/dyld_shared_cache_armv7 sha256
+cad2df775e122c660238f341e74c163a2ea0ed261e85bfd3190de750cd9c0d2c (VERIFIED, == 1017 §1.1).
+Cache base 0x2c000000; map0 fileoff=va-0x2c000000 for [0x2c000000,0x38e266000); map1 base
+0x38268000 fileoff 0xc266000 for VAs in the pointer tables. objdump: arm-none-eabi 2.38.
+
+== 0. RESULT ==
+The two calls that can reach the udf at 0x3823aa54 are mach_vm_map (mach TRAP 15), invoked through
+the lazy stub 0x3823e6e4 -> libsystem_kernel.dylib `mach_vm_map` wrapper 0x381c6618 -> fast trap stub
+0x381c5960 (`mvn ip,#14; svc #0x80`). kern_return_t is r0; both guarding branches test r0.
+The udf at 0x3823aa54 is reached on r0 != KERN_SUCCESS (0). # 1017 "two blx 0x3823e6e4" CONFIRMED.
+
+== 1. STUB MECHANISM (libsystem_platform lazy stubs) ==
+Stub 0x3823e6e4 bytes: 04c09fe5 0cc08fe0 00f09ce5 8c0bd0 01  => ARM (BLX switches to ARM):
+  ldr ip,[pc,#4] ; add ip,pc,ip ; ldr pc,[ip]  with literal @0x3823e6f0 = 0x01d00b8c
+  tbl = (0x3823e6f0)+0x01d00b8c = 0x39f3f27c ; entry @0x39f3f27c = 0x381c6619  (thumb bit set)
+  => 0x381c6618, image /usr/lib/system/libsystem_kernel.dylib. # NOT a PLT that loads a trap directly;
+     it is a shared-cache __got/__nl_symbol_ptr slot holding the final resolved address.
+Caller blx 0x3823e6e4 is Thumb -> BLX to ARM; the target 0x381c6618 is Thumb (bit0 of entry = 1).
+
+== 2. THE MACH_VM_MAP WRAPPER (libsystem_kernel 0x381c6618, Thumb) ==
+0x381c663c..0x381c664a: fast-trap guard — if [r7,#20]==0 && [r7,#40]==7 && [r7,#44]==1
+   -> 0x381c666a blx 0x381c5960   (fast trap)
+0x381c6688: cmp r4, r0  (r0 = 3 | 0x1000<<16 = 0x10000003, MIG sentinel); bne 0x381c66ba => slow path
+0x381c66b4: bl 0x381c7f74        (libsyscall general/MIG fallback path)
+FAST TRAP STUB 0x381c5960 bytes: 0dc0a0e1 70012de9 70019ce8 0ec0e0e3 800000ef 7001bde8 1eff2fe1
+   e1a0c00d mov ip,sp
+   e92d0170 push {r4,r5,r6,r8}
+   e89c0170 ldm ip,{r4,r5,r6,r8}     (SIX words: r0-r5 args then r6,r8 = args 7,8)
+   e3e0c00e mvn ip,#14               ; ip = ~14 -> r11 in kernel
+   ef000080 svc #0x80
+   e8bd0170 pop  {r4,r5,r6,r8}
+   e12fff1e bx lr
+Trap decode (kernel traps_lo.s:194 `rsbs r5,r11,#0`): r5 = -(~14) = 14 -> 0-based? see §4. The
+`mvn ip,#N` idiom yields table index N+1 (cross-checked: mvn ip,#9 -> stubs with `svc` at 0x381c591c
+= mach trap 10 = _kernelrpc_mach_vm_allocate_trap, and mvn ip,#11 -> trap 12 = deallocate, both
+named in syscall_sw.c). So `mvn ip,#14` == **MACH TRAP 15 = mach_vm_map**.
+
+== 3. THE `__os_alloc_slow` CALL SITES (libsystem_platform 0x3823a94c..0x3823aa52) ==
+FULL DISASM: /tmp/osalloc.bin (extracted 0x3823a8e8..0x3823ac00). Two mach_vm_map call sites:
+  (a) 0x3823a9aa  blx 0x3823e6e4   ; bytes 03f09cee
+      0x3823a9ae  cmp r0,#0
+      0x3823a9b0  bne 0x3823aa54    <- r0 != 0  => udf #254   (BRANCH THAT LEADS TO THE UDF)
+  (b) 0x3823aa1e  blx 0x3823e6e4   ; bytes 03f062ee  (retry loop head 0x3823a9bc)
+      0x3823aa22  cmp r0,#0
+      0x3823aa24  beq 0x3823a9bc    ; r0 == 0 -> retry
+      0x3823aa26  b   0x3823aa54    <- r0 != 0  => udf #254
+  (c) 0x3823aa36  blx 0x3823e6d4   ; = mach_vm_deallocate (cleanup, NOT the frontier call).
+      stub 0x3823e6d4 -> 0x39f3f278 -> 0x381c5c0c -> trap 12 (_kernelrpc_mach_vm_deallocate_trap).
+udf: 0x3823aa54 = bytes fe de (Thumb `udf #254`) — matches 1017 §0.
+Return register: **r0** (kern_return_t). Both `cmp r0,#0` sites read r0.
+
+== 4. ARGS set up for call (a) at 0x3823a950..0x3823a9a8 ==
+  r0 = task port   (ldr.w r0,[sl]; sl = *g  — the os_alloc context's task port)
+  r1 = &address    (add r1,sp,#40 ; the slot [sp+0x28] was stored 0x1000 — a by-ref mach_vm_address)
+  r2 = size = 0x1000 (4096 = one page)      ; movw r2,#0x1000 @0x3823a98e
+  r3 = mask = 0                              ; movs r3,#0 @0x3823a98a
+  [sp+0x00]=0 [sp+0x04]=0                    ; object = IPC_PORT_NULL, offset = 0
+  [sp+0x08]=0x49000001                       ; movw r8,#1 / movt r8,#0x4900  (flags word)
+  [sp+0x0c]=0 [sp+0x10]=0 [sp+0x14]=0
+  [sp+0x1c]=3 (r1) [sp+0x20]=7 (r2) [sp+0x24]=1 [sp+0x28]=0x1000 [sp+0x2c]=0
+# UNMEASURED: the exact mach_vm_map C-arg mapping of the [sp+0x1c..0x2c] words (the wrapper re-frames
+them). Read by value if needed in a follow-up: 0x381c6618.
+   Flags note: 0x49000001 = 1 (VM_FLAGS_ANYWHERE) | 0x09000000 | 0x40000000 (high bits). Values
+   quoted literally; semantic decode # UNMEASURED.
+
+== 5. KERNEL SIDE (repo) ==
+Trap 15 in table: external/xnu-hd2-darwin13/xnu/osfmk/kern/syscall_sw.c:127
+  `/* 15 */ MACH_TRAP(ios7lab_mach_vm_map_trap, 8, NULL, NULL),`  (gated IOS7_COMPAT_PLATFORM)
+Table size: syscall_sw.h:80 `#define MACH_TRAP_TABLE_COUNT 128`; dispatch bounds check in traps_lo.s:200
+  (`cmp r5,#0x80; bge swi_mach_error`).
+Handler: external/xnu-hd2-darwin13/xnu/osfmk/ipc/mach_kernelrpc.c:208 `int ios7lab_mach_vm_map_trap(void *saved_registers)`
+  - :222 copyin regs[1] (address, 64-bit); :225 guards regs[3]/regs[5]/high-32 -> KERN_INVALID_ARGUMENT
+  - :229 `rv = mach_vm_map(task->map, &address32, regs[2], regs[4], regs[6], IPC_PORT_NULL, 0,
+          FALSE, regs[8], VM_PROT_ALL, VM_INHERIT_DEFAULT);`
+  - :239 printf "IOS7LAB vm_map64 size=... result=%d address=%08x"
+Gate: external/xnu-hd2-darwin13/xnu/osfmk/arm/ios7_compat.h:5 `IOS7_COMPAT_PLATFORM (BOARD_CONFIG_ARMPBA8 || BOARD_CONFIG_QSD8250_LEO)`.
+Dispatcher: external/xnu-hd2-darwin13/xnu/osfmk/arm/traps_lo.s:197-214 `swi_mach` (LOAD_ADDR mach_trap_table,
+  r5 = -r11 index, `bx r1` to handler with r0 = saved-reg frame r8).
+
+== 6. INSTRUMENTATION TARGET FOR THE NEXT RUNG ==
+At the udf, the failing value is r0 from the mach_vm_map wrapper = return of `ios7lab_mach_vm_map_trap`.
+Its printf at mach_kernelrpc.c:239 already emits `result=%d address=%08x` (logged first 12 times).
+MEASURED: records/1018-press.log (1605 lines) contains ZERO `IOS7LAB` markers and zero `vm_map64`
+lines — the trap-15 adapter never logged in that run, so no args are available from it. Two reads:
+either the run never reached the trap (it did not return; 1018 stopped earlier), or trap 15 was not
+used on that path. # UNMEASURED which. A 1019 probe must capture `IOS7LAB vm_map64` at the handler.

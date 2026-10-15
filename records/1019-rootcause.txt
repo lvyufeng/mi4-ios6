@@ -1,0 +1,136 @@
+1019 ROOT CAUSE — WHY pid 1's `udf #254` LOOPS FOREVER: `sleh_undef`'s "NEON" FALSE POSITIVE
+A RE-READ of the 1018 capture by value (no build, no press, no device action, no write to out/stage90).
+Capture: out/stage90/captures/recovered-unknown-arm-20261015-184618-last_kmsg.txt (50,614 lines).
+
+This supersedes the "why does the undef re-trap" sub-question 1018 §6 left open, and it corrects the
+premise of docs/1019-design.md (see §6 below): the loop is NOT upstream of the udf, it IS the udf —
+re-executed because the handler never advances PC.
+
+--------------------------------------------------------------------------------
+## 0. THE FINDING IN ONE LINE
+
+The Thumb word at the frontier is `udf #254; nop` (halfwords `defe c046`). `sleh_undef`'s user-mode
+arm (osfmk/arm/trap.c) treats EVERY undefined instruction as a VFP/NEON lazy-enable and RETURNS
+WITHOUT ADVANCING PC. It only raises `EXC_BAD_INSTRUCTION` on the one Apple-dyld spike it hard-codes
+(`0xfedeffe7`), and this word is not that. So CPU re-executes the same `udf`, re-traps, and the two
+records climb in lockstep — exactly the 8183-line loop 1018 measured.
+
+--------------------------------------------------------------------------------
+## 1. THE INSTRUCTION, BY VALUE (three independent reads agree)
+
+  1017's static naming:   file off 0x0c23aa54 of the dyld cache = `__os_alloc_slow`+0x108
+  capture's own pc:       0x39cdfa54 = cache base 0x2daa5000 + 0x0c23aa54        (1018 §2)
+  THE BYTES (this step):  xxd -s 0x0c23aa54 -l 32 /tmp/dyld-extract/dyld_shared_cache_armv7
+                              fede c046 44f2c050 44f22102 ...
+  disassembly (this step): arm-none-eabi-objdump -D -b binary -m arm -M force-thumb \
+                              --adjust-vma=0x0c23aa44 /tmp/udslice.bin
+                              c23aa52: bdf0       pop {r4,r5,r6,r7,pc}
+                              c23aa54: defe       udf #254              <-- the frontier
+                              c23aa56: 46c0       nop  (mov r8,r8)
+                              c23aa58: f24450c0   movw r0, #0x45c0
+  ⇒ the word at the udf is halfwords `defe c046`. Two encodings are possible for the next word
+    (pc+2 = `46c0 44f2` vs pc+1 = `c046 44f2`); §4 proves which one sleh_undef reads.
+
+## 2. THE HANDLER'S OWN BRANCH (osfmk/arm/trap.c, `sleh_undef`)
+
+User mode (cpsr 0x10) does:
+    copyin((uint8_t *)(arm_ctx->pc + thumb_offset), &instruction, 4);   /* thumb_offset = 1 (T bit) */
+    instruction = OSSwapInt32(instruction);
+    if (instruction != 0xfedeffe7) {
+        thread->machine.vfp_dirty = 0;
+        if (!thread->machine.vfp_enable) {
+            vfp_enable_exception(TRUE);
+            vfp_context_load(&thread->machine.vfp_regs);
+            thread->machine.vfp_enable = TRUE;
+        }
+        return;                      /* <-- NO PC ADVANCE: the SAME udf executes again */
+    }
+    printf("...[%d]: usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x%08x ...");
+    ...
+    exception_type = EXC_BAD_INSTRUCTION;
+    ...
+    if (exception_type) { ml_set_interrupts_enabled(TRUE); doexception(...); }
+
+The comment above the branch says it out loud: "Check the instruction encoding to see if it's a
+coprocessor instruction" / "dyld's faulting one. I really just need to redo all of the VFP detection
+code" — the `!= 0xfedeffe7` test is a STAND-IN for a real coprocessor-encoding test, and it is wrong
+for every other undefined instruction.
+
+## 3. THE TWO MEASURED READINGS THAT PROVE THE BRANCH WAS TAKEN
+
+  (a) THE HANDLER'S OWN printf FIRED 0 TIMES.
+        grep -ac 'usermode undefined instruction' CAPTURE  ->  0
+        That printf is INSIDE the `== 0xfedeffe7` block. Zero occurrences ⇒ instruction != 0xfedeffe7
+        ⇒ the "NEON" branch (and its PC-less `return`) was taken every one of 8183 times.
+  (b) NO PANIC, and the loop is in USER mode.
+        grep -aE 'panic|EXC_BAD|doexception' CAPTURE -> 0 hits
+        xnu_live_undef_user=0x1, `_spsr=0x20000030` (USR) on all 64 detail rows.
+        (Had the loop been reached via `swi_mach_error` on mach-trap 15, it would PANIC — see §6.)
+
+  A kernel printf is provably live in this same capture (3,930 `MI4IOS6`/`stage90_` lines), so (a) is
+  an ABSENCE about the branch, not about the console.
+
+## 4. WHICH WORD THE HANDLER READS (pc+1, per the code)
+
+`sleh_undef` copies from `pc + thumb_offset` with thumb_offset = 1 (T bit set: cpsr 0x30 & 0x20).
+  pc+1 bytes = de c0 46 44  ->  OSSwapInt32 = 0xdec04644  != 0xfedeffe7
+(The pc+2 reading, bytes `46 c0 44 f2` -> 0x46c044f2, also != 0xfedeffe7.) **Either way the test is
+false**; the identification does not depend on which offset the handler uses, only on the bytes not
+being `e7 ff de fe` in the swapped order.
+
+## 5. THE STORM THAT PRECEDES THE LOOP (the environment the udf is reached in)
+
+  xnu_live_abt_seq   1,2,3,0x10,0x20,0x40,0x80,0x100,0x200   (a powers-of-two ladder)
+  xnu_live_abt_n     0x200                                   (512 data aborts total)
+  xnu_live_abt_type  alternating 4 (T_DATA_ABT) and 3 (T_PREFETCH_ABT)
+  xnu_live_abt_far   0x2be8f018, 0x2be7ffe8, 0x3dc69000, 0x3dca9000, 0x2f72584c, 0x345873c8 ...
+  xnu_live_abt_pc    0x2be70400, 0x2be7ffe8, 0x804975c0, 0x2be85fe4 ...
+  xnu_live_abt_maxfar=0x2dc9a5e8  abt_maxgap=0x15715e9d
+  `far` values scatter across the whole cache and stack; the `pc` values sit on libsystem_kernel
+  (`0x2be7xxxx`, `0x2be8xxxx`) and on our kernel (`0x804975c0`). This is the SAME multi-pid abort storm
+  of 1015b/1013c (stale-GLOBAL-TLB / data-NX seam), now running WHILE the allocator faults. It is the
+  reason `__os_alloc_slow` reaches its udf at all — the addresses it walks are the ones aborting.
+
+## 6. CORRECTION OF RECORD: the mach-vm-map trap number (supersedes 1019-design §0)
+
+  * `ios7lab_mach_vm_map_trap` is NOT in the linked image (nm: 0 hits; grep of the linked `.map`: 0).
+    Trap 15 in `mach_trap_table` is `kern_invalid`, confirmed BY VALUE by
+    `tools/check_d13_ios7_vmwire.py` check 6 ("traps 15/24/25/41/42 are kern_invalid ... by value").
+  * `osfmk/arm/traps_lo.s`'s `swi_mach` branches to `swi_mach_error` when an entry == `kern_invalid`,
+    and `swi_mach_error` does `mov r0,#7; ...; mov r0,#0x81; b irqvec_panic` — IT PANICS. A user
+    mach-trap that hit a `kern_invalid` slot could not produce the observed 8183-line no-panic loop.
+  * THEREFORE `mach_vm_map` on iOS 7 is NOT reached through `mach_trap_table[15]` on this path: it is a
+    MACH MESSAGE (`mach_msg`), consistent with Apple's own iOS-6 line
+    (`external/xnu-2050.18.24/osfmk/kern/syscall_sw.c`: `/* 15 */ MACH_TRAP(kern_invalid, 0, NULL, NULL)`)
+    and with the capture's `xnu_live_usvc_num` never showing 15 (it shows `0xfffffffd` = -3).
+  * ⚠ OPEN (agent reconciling): whether the shim's `mvn ip,#14; svc #0x80` means table index 15 (then
+    the path is contradictory and something else intercepts) or a different index. This does NOT
+    change §0-§3: those rest on the bytes, the handler source, and the 0-count printf, not on the trap
+    number.
+  * `docs/1019-design.md`'s INSTRUMENT choice (`--wrap=mach_vm_map` on the kernel MIG demux) remains
+    valid and useful REGARDLESS — it witnesses the allocator's map request. But the design's
+    PREMISE ("the failure/branch is reached upstream or by a path other than the udf") is what §0-§3
+    overturns.
+
+## 7. THE FIX (design in progress; reference impl being read by value)
+
+The one-line truth: **a genuine `udf` (VFP already enabled, no coprocessor encoding) must reach
+`exception_type = EXC_BAD_INSTRUCTION`, not the PC-less `return`.** Two candidate shapes, decided by
+the reference `gary_codeunfuckery`/`xnu-hd2` implementation (agent, records/1020-ref-sleh-undef.txt):
+  (i)  move the `return` INSIDE the `if (!vfp_enable) { ... }` block, so a re-trap with VFP already on
+       falls through to the exception (the minimal, historically-likely fix), and/or
+  (ii) replace the `!= 0xfedeffe7` magic with a REAL coprocessor-encoding test
+       (`(instruction & 0x0c000000) == 0x0c000000`), so a `udf` is never mis-classified as NEON.
+Whichever the reference uses, the rung is a small, well-scoped `osfmk/arm/trap.c` change — and it is
+reachable with the SAME evidence already in hand, because `EXC_BAD_INSTRUCTION` for a `udf` in pid 1
+is the architecturally correct outcome and the goal's next step (pid 1 must be able to die or be
+handled, not spin).
+
+## 8. WHAT THIS DOES AND DOES NOT CLAIM
+
+- **CONFIRMS:** the loop is the classic VFP-false-positive; the handler never advances PC; the
+  re-trap is in USER mode; there is no panic; the abort storm is the same stale-TLB class as 1013c.
+- **does NOT claim:** that fixing sleh_undef alone boots iOS 7. `EXC_BAD_INSTRUCTION` from pid 1 will
+  terminate launchd or trip the kernel's exception delivery — which is a DIFFERENT frontier, to be
+  measured. It also does not yet close whether the allocator's map is refused (§6, agent).
+- The trap-number question (§6) is stated as open, with the agent that resolves it named.
