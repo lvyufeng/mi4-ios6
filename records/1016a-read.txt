@@ -44,14 +44,22 @@ The 1010→1015 defect was a SINGLE-ADDRESS retry storm: ONE `far` re-executed ~
 
 The usvc ladder's terminal row is `num = -3` (mach_absolute_time) at `pc = 0x2beef328`, and 999/1003's
 frozen triple is `num = -3` at `pc = 0x2be97328`. Those pcs differ by **`0x58000`** — which is NOT
-progress: it is exactly the **dyld slide delta** of this run.
+progress: the two runs are the **same link address under two DIFFERENT dyld slides**.
 
-  - 1003: dyld entrypoint `xnu_live_entrypt_entry = 0x2be7d028` (`records/1003 §6`).
-  - 1016-A: `xnu_live_entrypt_entry = 0x2bed5028` (this capture, :~22200).
-  - `0x2bed5028 - 0x2be7d028 = 0x58000`. And `0x2beef328 - 0x2be97328 = 0x58000`. Same delta.
+  - **This run's dyld exe slide = `0xd4000`**: `xnu_live_entrypt_entry = 0x2bed5028` (this capture)
+    minus `__dyld_start`'s **link** vmaddr `0x2be01028` (the LC_UNIXTHREAD entry, `records/1003 §6`).
+  - **1003's dyld slide = `0x7c000`** (`records/1003-stall-forensics-preliminary.txt` §6).
+  - `0x2bed5028 - 0x2be7d028 = 0x58000` is the **difference between the two runs' slides**
+    (`0xd4000 - 0x7c000`), and it happens to equal the raw pc difference `0x2beef328 - 0x2be97328`.
+  - De-sliding each by its OWN run's slide gives the **same link address**:
+    `0x2beef328 - 0xd4000 = 0x2be1b328` **and** `0x2be97328 - 0x7c000 = 0x2be1b328` = `_mach_absolute_time+0x68`.
 
-  So `0x2beef328` and `0x2be97328` are the **same link address** (`_mach_absolute_time+0x68`) at two
-  slides. Read naively as a `_pc` change this looks like A-PROGRESS; read BY VALUE it is a
+  ⚠ **CORRECTION (this file, 2026-10-15, from `docs/1017-timebase-poll-terminus.md` §2):** an earlier
+  wording of this section called `0x58000` "the dyld slide delta of this run". That is **wrong**: the
+  run's slide is `0xd4000`; `0x58000` is the **two-run slide difference**. The **conclusion is
+  unchanged and now better grounded** — `0x2beef328` and `0x2be97328` ARE the same link address
+  (`_mach_absolute_time+0x68`) at two different slides, verified by de-sliding each by its own run's
+  slide. Read naively as a `_pc` change this looks like A-PROGRESS; read BY VALUE it is a
   **rebased identity** — a measurement artefact, the class this project keeps paying for
   ([[mi4-measurement-defects]]). **No progress may be claimed from the `_pc` difference.**
 
@@ -164,7 +172,7 @@ sampler (`xnu_live_stall_*`), gated on the tick's own powers-of-two ladder
 
   | trap | how it would have bitten here | how it was avoided |
   |---|---|---|
-  | a `_pc` change read as progress | `0x2beef328` vs `0x2be97328` differ by 0x58000 | §2: resolved as the **slide delta** (entrypoints match it exactly) ⇒ identity, not progress |
+  | a `_pc` change read as progress | `0x2beef328` vs `0x2be97328` differ by 0x58000 | §2 (CORRECTED): de-slide each by its OWN run's slide (`0xd4000` here, `0x7c000` in 1003) ⇒ **same link addr** `0x2be1b328` ⇒ identity, not progress |
   | a span cap read as a wall | `usvc_n` stops at exactly `0x40` | §3: `USVC_FULL_N=64` is the recorder's window; A-NO-LADDER **withholds** |
   | an absent band read as a stop | checker's G-WITHHOLD (no_tail) | §1: read BY VALUE (11/11 distinct `far`, 959 aborts) ⇒ storm genuinely absent; the WITHHOLD is reported, not overridden |
   | an address matched by coincidence | `0x3b01f800` occurs once | §4 NULL CONTROL: it is a **storage data word**, not the stall pc |

@@ -156,7 +156,7 @@ instruction as the pre-registered "what".
 | **a slid address read as un-slid** | `0x3b04aa54` is a **slid** VA; using it as a file offset names the WRONG instruction | §1.1 subtracts the run's own slide (`0x2e10000`, from the capture's mapping row) before indexing the artifact |
 | **two addresses in two images conflated** | `0x2be…` (dyld) vs `0x3b0…` (cache) are different files | §1.2 keeps W1/W2 **separate** and gives the discriminator (the sampler's pc region) |
 | **the ladder's end read as a stop** | `usvc_n` stops at `USVC_FULL_N = 64` (`entry_stubs.c:7313`) ⇒ powers of two past it | §0/§2.3 never treat the ladder's end as the frontier; the stall sampler is the instrument |
-| **a memory of 1003 used as a check** | the `0x2be1b328` identification is a *prior run's* reading | §1.2 cites it as an identification and re-derives the this-run link address by slide (1016-A §2) |
+| **a memory of 1003 used as a check** | the `0x2be1b328` identification is a *prior run's* reading | §1.2 cites it as an identification and re-derives the this-run link address by **this run's own slide** (`0xd4000` = `entrypt_entry 0x2bed5028 - __dyld_start link 0x2be01028`; 1003's was `0x7c000`) — the raw `0x58000` pc delta is the **two-run slide difference**, NOT a slide (1016-A §2, corrected) |
 | **a criterion that cannot pass** | a clause keyed on a symbol that may not exist (the cache has no ELF symtab) | §2.2's C-CTL withholds on absence; §0.1's question is answerable **without** a symbol (the disassembly IS the answer) |
 | **an instrument with no control** | the first-N pcs might all be cache pcs by construction | §2.3 requires a non-cache user pc in the same capture |
 
