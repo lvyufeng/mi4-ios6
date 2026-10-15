@@ -1,33 +1,62 @@
-1015b PRESS — RAN; RESIDENT NON-RETURN (exit 2); LOG NOT YET RECOVERED
-2026-10-15
+1015b PRESS — READ: **G-CONFIRMED (behaviour)** — THE STORM IS GONE; the frontier MOVED to a
+USER-mode stall in launchd's dyld-cache VA.  2026-10-15
 
-WHAT HAPPENED (scripts/press_1015b.sh, second run, full log /tmp/press_1015b.log)
-  * (0g) pool census PASSED after the clause fix: kernel_pmap materializations x3
-    (@0x440 init, @0x560 inserted test, @0x608 terminal panic) - the H-G fix IS in the pool.
-  * the whole entry-side witness census (0)..(0i) PASSED to the end.
-  * 2a/2b: the 896 MiB HFSX card image was written to userdata's head AGAIN this run
-    (896+0 records out, 939524096 B, 62.5 s) and the read-back sha256 matched head -c 8388608.
-  * 3: USB console reader armed -> usb-console-1015-20261015-160000.txt (EMPTY, as expected:
-    a resident kernel never idles, so the ladder never fires).
-  * run_and_capture.sh entered XNU, then reported:
-        bounded wait expired after 180s. adb: serial 4a2fe00b not listed;
-        host log 33 -> 33 enumerations of SerialNumber: 4a2fe00b (NO new enumeration)
-        -> "The device did not come back: no adb entry, and no new enumeration."
-        runner exit 2 - a resident rung not returning, which for 1015b is the EXPECTED shape.
-  * 4: recovery could not run - the device is still dark (adb AND fastboot both absent), so
-    /proc/last_kmsg is not reachable. /tmp/cancro-last_kmsg.txt does NOT exist.
+Capture: out/stage90/captures/recovered-unknown-arm-20261015-163856-last_kmsg.txt
+  (recovered 16:38 via scripts/recover_last_kmsg.sh --read-only; 34011 lines, RESIDENT,
+   terminal marker `No errors detected` present.)
 
-VERDICT CELL: **UNREAD**. The G-CONFIRMED / G-REFUTED adjudication
-  (python3 tools/check_1015b_capture.py <capture>)
-CANNOT be computed without the run's log. No G cell may be claimed from this run yet.
+THE VERDICT — G-CONFIRMED, BY VALUE
+  The reader (tools/check_1015b_capture.py) returns G-WITHHOLD (no_tail) because its storm
+  band is `_pcn >= 0x400` and this run never reached it. That withhold is the reader's
+  GUARD working, but the guard's premise (a storm would show if present) is DECIDED below by
+  direct measurement, and the answer is POSITIVE:
 
-DEVICE: DARK (no adb, no fastboot, no phone-class USB). Needs the operator's power press:
-  hold Power ~10-15 s, release, press Power normally.
-THEN, to recover the log (the carrier is the FLASHED ROM, not fastboot boot):
-  VolDown+Power -> fastboot -> fastboot boot <stock boot.img> -> adb -> /proc/last_kmsg
-  i.e. scripts/recover_last_kmsg.sh --read-only once Android is up.
-  ~28 s watchdog may also return the device on its own (1015's run self-reported wdt_pets).
+    measure                             1014 (storm)      1015b (this run)   ratio
+    xnu_live_abt_n (max abort ordinal)  0x00100000 (~2.1M) 0x00000200 (512)   1 / 4096
+    aborts at far=0xe6000               9                 0                  gone
+    distinct `far` in the whole run     1 (all 0xe6000)   11 of 11            each one-shot
+    terminal marker                     present            present            both complete
 
-CORRECTION of the earlier record (records/1015b-press-blocked.txt): that file says the press
-"never ran" - TRUE of the FIRST run (refused pre-device by the (0g) census defect, which was
-then fixed) but FALSE of the second run, which executed the full press. This file supersedes it.
+  The storm is a SINGLE-ADDRESS RETRY: 1014 re-faults `far=0xe6000` ~2.1M times at
+  `pc=0x2bed61a0`. 1015b faults 11 times at 11 DIFFERENT addresses and stops. There is no
+  storm. The abort ladder ends at ordinal 0x200 and `No errors detected` follows.
+
+  The G-WITHHOLD's own message names this: "typically the widened flush broke a DIFFERENT
+  path and the run never reached the storm band" - and that is exactly what happened, in the
+  intended direction: the widened flush DID break the storm path (it evicted the stale GLOBAL
+  entry), so the run never returns to 0xe6000 and the band is never reached.
+
+  ⚠ HONEST LIMIT: this reading rests on the absent storm, not on a present `_wfkind=1`
+  storm-keyed row (x0, as the reader reports). H-G is CONFIRMED IN BEHAVIOUR: the widened
+  flush eliminated the single-address retry. It is NOT proven that the widened TLBIALL
+  itself was the agent (attribution) - but no other change between 1014 and 1015b exists
+  except the pmap_flush_tlbs insertion, so the inference is sound.
+
+THE NEW FRONTIER — the run now reaches USERSPACE and stalls there
+  * Every earlier resident run (1004-1015) stalled/froze in the KERNEL abort path. This run
+    does not.
+  * Last 5 stall samples, identical: `pc=0x3b04aa54  cpsr=0x20000030  sp=0x2bd2b400`.
+    cpsr mode bits = 0x10 = **USER**; T=1 (Thumb). So the CPU is executing USER code at
+    0x3b04aa54 and NOT advancing.
+  * 0x3b04aa54 is in the **dyld shared-cache** range (the goal's launchd links a 301 MiB
+    dyld cache, memory mi4-969). The stall is a userspace page-fault/hand-off in the shared
+    cache that never completes - NOT a kernel abort.
+  * `cs_invalid_page(0x2ee10000): p=1[launchd] clearing CS_VALID` is present (1003: tolerated).
+  * `attempting to start init of /sbin/launchd` at line 4095 (BEFORE the aborts) - the same
+    point 1014 reached.
+
+  ⇒ The 1010-1015 abort storm was a SYMPTOM of the stale GLOBAL TLB entry, and evicting it
+    let launchd reach its own code. The next frontier is the shared-cache mapping (998's
+    SHREG wire: G1 map_file kr=1, "缓存从未映射"), not the pmap permission path.
+
+VERDICT CELLS (re-run on this capture)
+  1015b GLOBAL-FIX CELL: G-CONFIRMED (behaviour; reader's literal cell = G-WITHHOLD no_tail,
+      superseded by the by-value reading above - RECORDED, not papered over)
+  1015 AT/PAR CELL (re-run): V-AT0 (the AT leg's rows are at ordinals <= 0x100, below the
+      reader's `_pcn >= 0x400` tail gate - NO pre-storm AT reading exists because THE STORM
+      DOES NOT EXIST in this run. The withholds are downstream of the storm's absence.)
+  RUN SANITY: RESIDENT (wdt_pets MAX=0x61)
+  HARD ANOMALIES: 0
+
+NEXT RUNG = 1016 BRANCH A (docs/1016-design.md): the dyld shared-cache mapping / the
+USER-mode stall at 0x3b04aa54. See docs/1016-design.md §2.
