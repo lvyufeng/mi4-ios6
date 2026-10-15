@@ -1,0 +1,109 @@
+1013 press-read — THE LEAF-VALUE WITNESS: the PRESS RAN, and it reads MEASUREMENT DEFECT.
+The control (W-SYNC) is BROKEN on hardware and the W-WALK leaf is unprovable — fixes owed (1013b).
+
+ARM `armed-d13-9cf2f15e` (commit f73e026).  Capture:
+`out/stage90/captures/1013-press-armed-d13-9cf2f15e-20261015-044036-last_kmsg.txt`
+(= `recovered-unknown-arm-20261015-044036-last_kmsg.txt`, recovered read-only 2026-10-15 04:40 via
+`scripts/recover_last_kmsg.sh --read-only`, device already in Android: `4a2fe00b device`).
+
+================================================================================
+1. THE RUN IS REAL, AND THE DEVICE DID NOT DIE
+================================================================================
+All 33 `xnu_live_abt_w*` witness keys are PRESENT; 22 W-SYNC rows, 20 W-APEX rows, 22 W-WALK rows.
+The 1013 image therefore ran and reached the storm.  `wdt_pets>0` (RESIDENT: the pet landed by pass
+0x0000a8ab) → the watchdog did NOT bite; the machine was alive in XNU's idle loop.  No panic.  The
+frozen 1012 negative control held (the checker run against the 1012 capture still says NO WITNESS
+INSTRUMENT, exit 1).
+
+================================================================================
+2. W-SYNC (THE CONTROL) IS BROKEN — THE AUDIT'S DEFECT, CONFIRMED ON HARDWARE
+================================================================================
+Every W-SYNC row (all 22, ladder ordinals 0x400..0x100000) reads:
+
+    wcva = 0x80080000   wck = 0   wcl1 = 0   wcl2pa = 0   wcleaf = 0   wcapx = 0   wcoow = 0
+
+`wcva = gPhysBase(0x80000000) + ABTWS_WINDOW_OFF(0x80000) = 0x80080000` is **ABOVE the TTBCR.N=2
+split `0x40000000`** — TTBR1 territory.  The reused walker `stage90_read_l2_pte`
+(`src/entry/entry_stubs.c:2255`) selects its table by TTBCR.N and at `:2280` does `else return 0u;`
+for any VA at/above the split, BEFORE touching a table.  So `wck=0`, and `wcoow` is NOT set (only
+the window-refusal paths `:2311`/`:2339` set it — a PUBLISHED NULL would have read `wcoow=1`; this
+reads neither, which is the signature of the split-refusal).
+
+**The storm runs N=2** (settled by value, not by the early latch): `_ptettbr=0x81a8605b` and
+`_ptethr=0x81a86000`; only the N=2 mask `0xfffff000` maps `0x81a8605b`→`0x81a86000` (the N=0 mask
+`0xffffc000` gives `0x81a84000`).  `src/entry/entry_stubs.c:2118-2123` states it verbatim: the
+console's `xnu_live_ttbcr=0` is the EARLY `entry_live_init` latch, right THEN (16 KB boot table
+`0x80a00000`) and wrong at the storm.
+
+⇒ `tools/check_1013_capture.py` fires WITNESS_METHOD_BROKEN (`:4902`/`:5010`) and WITHHOLDS V1–V3.
+**The 1013 press, as built, cannot produce a leaf verdict.**  (An independent static audit,
+`docs/1013-probe-static-audit.md` Q1, reached the same conclusion from source alone.)
+
+================================================================================
+3. W-APEX READ A WRITABLE LEAF AT THE ENTER — BUT WITH wwnoproof=1
+================================================================================
+Tail W-APEX rows (@32858, @32928, @33005):
+
+    wwn=0x8000/0x10000/0x20000  wwl1=0x81bb1001  wwl2pa=0x81bb1000
+    wwleaf=0x841e61bb  wwapx=0  wwnoproof=1  wwva=0x00024000  wwft=3  wwpa=0x000841e6
+    wwpatbl=0  wwpaok=1
+
+`wwapx=0` ⇒ the leaf the pmap ACTUALLY wrote at the enter has the APX (AP[2]) bit CLEAR ⇒
+**USER-WRITABLE**.  Leaf value `0x841e61bb`, L2 table `0x81bb1000`, VA `0x24000`.  This is a
+nonzero causal reading of the ONE unmeasured cell — the pmap's write DOES carry a writable leaf.
+
+BUT `wwnoproof=1`: W-APEX's L1-identity proof (its `pm_l1_phys` == the live TTBR0 base) FAILED here.
+The storm's `_pmpttbr=0x81a8605b`→`0x81a86000` while W-APEX's walked table is `0x81bb1000` — they
+are the pmap's CURRENT leaf tables vs the storm's, and may legitimately differ across
+`pmap_expand_ttb` (the L1 MOVES).  So the checker will not credit the reading as proof, and the
+1012 verdict in the same log is its stale (c) APEX-AGREES line.  **The reading exists; the proof
+gate must be re-examined** (is a non-identical pmap L1 a defect of the witness or a real device
+fact the checker must classify as a published cell?).
+
+================================================================================
+4. W-WALK READ THE SAME TABLE BUT A ZERO LEAF — AND PUBLISHES NO VA (NEW DEFECT)
+================================================================================
+Tail W-WALK rows (@32976, @33074, @33564, @33626, and HARD @16166/@17625/@23376/@23727):
+
+    wkl1=0x81bb1001  wkl2pa=0x81bb1000  wkleaf=0  wkleaf2=0  wkstable=1  wk=0
+    wkapx=0  wkoow=0  wkfsr=0x80f
+
+Same L1/L2 table W-APEX read (`0x81bb1001`/`0x81bb1000`) — but the leaf reads 0 while W-APEX read
+`0x841e61bb`.  The double-read is stable (`wkleaf2=wkleaf=0`, `wkstable=1`), so it is not a torn
+read.  Two hypotheses, and the log CANNOT distinguish them because **W-WALK publishes no VA**:
+
+  (H1) The SAME L2 slot: the leaf at VA 0x24000 was `0x841e61bb` at the enter and 0 at the storm
+       ⇒ the leaf genuinely VANISHED (a real, dramatic reading — a page unmapped between the enter
+       and the re-abort).
+  (H2) A DIFFERENT slot in the same 1 MB section: no contradiction at all.
+
+The checker flags V6 "stale 0" HARD ("FIX THE RECORDER") because a COARSE L1 points at a nonzero L2
+base while the leaf/location tag reads 0.  But a COARSE L1 whose L2 slot legitimately holds an
+absent (type-0) descriptor also yields leaf=0 — the V6 shape rule cannot tell a real absent page
+from a stale variable.  **FIX: publish `xnu_live_abt_wkva` (= W-WALK's own VA, the abort's `far`,
+as W-APEX already publishes `wwva`) and have the checker PAIR W-APEX↔W-WALK by (va, l1, l2pa) before
+comparing the leaf word.**
+
+`wkapex=0` in the W-WALK tail rows is the SAME confluence: W-WALK's second walker reads the same
+table and its APX bit reads 0 too — consistent with the tabulated leaf being genuinely present-and-
+writable there and absent at the abort, OR simply a different slot.
+
+================================================================================
+5. ALSO DUMPED (incidental)
+================================================================================
+The 1013 walker-set rows also HARD-flag the pre-existing 1010 `_ptel2=0` for FS=15
+(the 1010 TTBR0-base-mask family) and an ABSENT `_pmpnx` change-count site — both already known,
+neither new.
+
+================================================================================
+6. OWED (1013b)
+================================================================================
+1. Move/rewrite W-SYNC's control so it is TTBR0-readable (or reclassify a genuine split/out-of-scope
+   refusal as a published NULL that does NOT withhold the verdict) — the constraint set is in
+   `docs/1013-probe-static-audit.md` §Q1 / the coordinator's agent brief.
+2. Publish `xnu_live_abt_wkva`; pair W-APEX↔W-WALK by (va, l1, l2pa) in the checker; make V6 a
+   pairing check, not a shape check.
+3. Re-examine the `wwnoproof` gate: the W-APEX reading is a real nonzero writable leaf; decide
+   whether a non-identical pmap L1 is a witness defect or a cell.
+Re-build, re-park, re-press.  The 1012-style `(c) APEX-AGREES` line in this log is STALE for the
+same reason (the apex L1 identity now varies).
