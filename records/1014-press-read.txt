@@ -6,7 +6,8 @@ ARM `armed-d13-29ec9e48` (commits ad01a89 + d312229). Capture:
 `out/stage90/captures/recovered-unknown-arm-20261015-092217-last_kmsg.txt` (1553071 B, 34379 lines), recovered
 2026-10-15 09:22 by the watcher via `scripts/recover_last_kmsg.sh --read-only` after the operator's power press.
 Device `4a2fe00b device`; no panic; `xnu_live_wdt_pets=0x61` => RESIDENT (the goal's 「保持在 xnu 里」).
-Same run, same storm: abort pcn runs to 0x00100000 (1048576 ~ 2^20 re-faults), tail `pc=0x2bed61a0`,
+Same run, same storm: abort pcn runs to 0x00100000 (the run's TOTAL abort count); the constant-far tail is
+`pcn 0x400…0x40000` (the run's LAST two samples, `pcn 0x80000`/`0x100000`, are different faults — see §2), tail `pc=0x2bed61a0`,
 `far=0x000e6000`, `fsr=0x0000080f` (FS=15, permission/level-2, USER), `xnu_live_abt_type=4`.
 
 ================================================================================
@@ -20,17 +21,32 @@ Same run, same storm: abort pcn runs to 0x00100000 (1048576 ~ 2^20 re-faults), t
     (ctx rows: wctxn=0x20000..0x100000  wctx=0x02  wctxva=0x000e6000..)
 
 `wfkind=2` = `arm_tlb_flushID_ASID` (the ASID-scoped invalidate), `wfself=1` = the `pmap.c:1298` gate
-(`ttb == ttbr_pmap`) was TRUE, `wfasid=2` == the CONTEXTIDR `wctx=2` at the same abort => F2
-FLUSH_RAN_ASID_MATCH. **1013c's H-FF hypothesis (the flush never ran because `pm_l1_phys` != TTBR0) is
+(`ttb == ttbr_pmap`) was TRUE, `wfasid=2` == the CONTEXTIDR `wctx=2` on every tail row => F2
+FLUSH_RAN_ASID_MATCH. ⚠**Pairing caveat (verify1014, CLAIM 1):** the checker pairs `wf*`↔`wctx*` by a
+monotone `pcn`-bucket, NOT by "the same abort ordinal" — for the LAST tail row it pairs
+`wf@33740 (va 0xe6000)` to `ctx@34246 (va 0x3a1141e8)`, a row whose `wctxva != wfva`. F2's conclusion
+still holds **by value** (`wctx=2` on every tail row, and a genuine same-VA ctx row `wctxn=0x40000`
+precedes the last wf row), but not for the reason the pairing alone suggests.
+**1013c's H-FF hypothesis (the flush never ran because `pm_l1_phys` != TTBR0) is
 REFUTED by value:** on every tail row `wfttb == wflive == 0x81a86000` — the pmap's own L1 table IS the live
-TTBR0 table at flush time, and the ASID-matching invalidate ran. The stale-TLB explanation (F1) is dead.
+TTBR0 table at flush time, and the ASID-matching invalidate ran.
+
+**CORRECTION (perm-forensics, `docs/1015-perm-static.md` Item 6) — the earlier claim "the stale-TLB
+explanation (F1) is dead" was WRONG.** F2 proves a flush RAN; it does NOT prove a *global* entry was
+invalidated. TLBIASID evicts only ASID-tagged (nG=1) entries; this port installs EVERY leaf global
+(bit11=0; `L2_NG_BIT` is never ORed — §7), so TLBIASID cannot evict them. F1 is **narrowed, not
+eliminated** — and §7's stale-GLOBAL-TLB hypothesis survives F2 untouched. (The §7 mechanism chain,
+below, closes it further.)
 
 ================================================================================
-2. THE LEAF CELL — V1: LEAF_WRITABLE_STILL_FAULTS (three independent probes agree)
+2. THE LEAF CELL — V1: LEAF_WRITABLE_STILL_FAULTS (three probes agree; only W-APEX is independent)
 ================================================================================
 The 1014 arm carries the 1013c walker fix, so the walker now READS XN (data) pages. Three probes read the
 SAME cell — VA 0x000e6000, L1 descriptor 0x81bb2001, L2 table 0x81bb2000 — and all three read the SAME word
-0x841e91bb:
+0x841e91bb. ⚠**Independence caveat (verify1014, CLAIM 2):** W-WALK and A-walk are NOT independent walkers —
+both call the one routine `stage90_read_l2_pte` (`entry_stubs.c:2528`/`:3091`); only W-APEX walks
+independently (from the apex's own `pm_l1_phys`). The 3-way agreement is still strong (an independent table +
+the live TTBR0 table), but "three independent probes" overcounts:
 
     W-APEX @:33750  wwn=0x40000  wwl1=0x81bb2001 wwl2pa=0x81bb2000 wwleaf=0x841e91bb wwapx=0  (the pmap's table, after the enter)
     W-WALK @:33707  wkn=0x40000  wkl1=0x81bb2001 wkl2pa=0x81bb2000 wkleaf=0x841e91bb wkleaf2=0x841e91bb
@@ -42,8 +58,15 @@ SAME cell — VA 0x000e6000, L1 descriptor 0x81bb2001, L2 table 0x81bb2000 — a
 `wkstable=1` double-read stable, `wkoow=0` in-window) is a REAL reading — 1013b's `_wkva` publish did its job.
 
 **V1 LEAF_WRITABLE_STILL_FAULTS holds:** the leaf the MMU walks is present and writable, and the CPU still
-takes FS=15 permission faults on it, ~2^20 times, at a constant far/pc. Not V2 (the leaf is not RO), not V3
+takes FS=15 permission faults on it ~2.6e5 times (through ordinal 0x40000 — the run's last two samples are a
+different VA/pc; verify1014 CLAIM 5), at a constant far/pc. Not V2 (the leaf is not RO), not V3
 (same L2 table both sides), not F1 (the flush ran, §1).
+
+**The tail is NOT uniform (design1015 §0.5; verify1014 CLAIM 5).** The `pcn >= 0x400` rows are three
+different faults: nine at `far=0xe6000`/`pc=0x2bed61a0` (the storm), then two INSIDE dyld's own image —
+`pcn=0x80000 far=0x3a1141e8 pc=0x38413ad0` and `pcn=0x100000 far=0x3a0138e0 pc=0x3840ea3e` (a different
+dyld: base ≈0x38400000, not the 1013-era 0x2be…). All FS=15 write/user, but they are NOT the storm's
+`far=0xe6000`. Any verdict is about `far=0xe6000` and the nine-row tail, never a whole-run aggregate.
 
 The V0 per-row provenance gate PASSES on the tail rows (`wwva=0x000e6000 == far`; `wwft=3` = READ|WRITE;
 `wwpatbl=0` = the enter named the faulting page, not a table page; `wwpaok=1`). Only the `wwnoproof` cell
@@ -76,6 +99,13 @@ V0 provenance gate PASSES by value** (table == live TTBR0, `wwva==far`, `wwft==3
 V1 stands without the caveat the checker printed. (A second, smaller probe note applies only to the NON-tail
 rows: those are where the post-enter re-read of `pm_l1_phys` could move the table.)
 
+**Independently CONFIRMED by verify1014 (CLAIM 4), with two refinements:** (i) the polarity inversion is the
+valid reading — the earlier "post-call read hazard" is the WEAKER one, because it would require
+`pmap_expand_ttb` to have moved `pm_l1_phys` inside this enter, which would make the apex's `wwl1` disagree
+with the walk's `wkl1`; they are IDENTICAL (`0x81bb2001`) on every tail row, so no table moved. (ii) The
+record's earlier "owed" fix (publish both pre AND post) is therefore MOOT for the tail — pre == post
+(`pmppmap=0x81a86000` on all 20 pmp rows) — the real fix is to INVERT the published value or RENAME the key.
+
 Consequence: the leaf PAIRING is still valid, because W-WALK read the leaf through the LIVE TTBR0
 (`wktb=0x81a8605b`) — the ground-truth walk does not depend on the apex provenance gate at all.
 
@@ -86,7 +116,7 @@ FAULTING THREAD's own map names, 1011 (A)), and it EQUALS both the live TTBR0 ba
 one table: the thrower, the walk, the enter and the faulting thread all name 0x81a86000.
 
 LEAF DECODE AUDIT (`0x841e91bb` against the tree's own `arm_l2_entry_t`, `pmap.h:132`): bit0 nx=1, bit1
-valid=1, bit2 B=0, bit3 C=1, bits[5:4] ap=0b11, bits[8:6] tex=0b011, bit9 apx=0, bit11 nG=0 (GLOBAL; see §7). Under
+valid=1, bit2 B=0, bit3 C=1, bits[5:4] ap=0b11, bits[8:6] tex=0b110, bit9 apx=0, bit11 nG=0 (GLOBAL; see §7). Under
 `L2_ACCESS_USER (1<<5)` set and client domain, **AP[2:0]=0b011 = privileged RW + user RW** — fully writable
 for the USR-mode access that faults. The L1 descriptor `0x81bb2001`: bits[8:5] domain = 0, and DACR=0x1
 makes domain 0 a client, so the AP bits ARE enforced (a manager domain would bypass them). No bit in either
@@ -96,8 +126,8 @@ descriptor denies this write.
 4. HARD #2 — the 7 `_wfself=1` "disagreeing bases" rows are all `wfkind=1` (FULL flush of a NON-current pmap)
 ================================================================================
 The checker FAILs any `_wfself=1` row whose `wfttb != wflive` (masked 0xFFFFFF00). All 7 such rows are
-`wfkind=1` (the FULL `arm_tlb_flushID()`), at early ordinals 4/8/0x10/0x20/0x40/0x80/0x100, e.g.
-`wfttb=0x80a04000 wflive=0x81a6e000 wfasid=0`. A full flush is called for a pmap that is NOT the running pmap
+`wfkind=1` (the FULL `arm_tlb_flushID()`), at early ordinals 3/4/8/0x10/0x20/0x40/0x80 (all with
+`wfshared=1`), e.g. `wfttb=0x80a04000 wflive=0x81a6e000 wfasid=0`. A full flush is called for a pmap that is NOT the running pmap
 (bootstrap, other maps), so `ttb != live` is the CORRECT shape, not a defect. Every `wfkind=2` (ASID) row —
 including all 9 tail rows, which are the storm's — has `wfttb == wflive`. **The rule needs to apply only to
 `wfkind=2`** (an ASID invalidate must target the current pmap's ASID by construction). Probe/rule defect; the
@@ -120,7 +150,8 @@ SETTLED (measured, this device, this run):
   * The write REACHES the apex (`pmpprot=0x3`, 1012 regression, holds).
   * The apex leaf IS written WRITABLE and the MMU walks that same leaf (`0x841e91bb`, APX=0).
   * The flush for the storm's address RAN and ran under the matching ASID (F2).
-  * The fault PERSISTS deterministically at far=0xe6000, pc=0x2bed61a0, fsr=0x80f, ~2^20 times.
+  * The fault PERSISTS deterministically at far=0xe6000, pc=0x2bed61a0, fsr=0x80f, ~2.6e5 times (through
+    ordinal 0x40000; the run's last two samples are a different VA/pc).
 
 => The fault is NEITHER a lost write (V2), NOR a table-identity divergence (V3), NOR stale-TLB (F1). A
 writable leaf in the walked table + a completed ASID-matching flush + a recurring FS=15 permission fault means
@@ -173,7 +204,7 @@ MECHANISM CHAIN, CLOSED BY VALUE (this session, post-read; three links, each cit
   ⇒ Chain: a COW leaf first mapped read-only leaves a GLOBAL RO TLB entry; the write fault upgrades the leaf
     to user-RW, but `pmap_enter`'s ASID flush cannot evict the global RO entry; the CPU re-walks the same VA in
     the same pmap (no context switch ⇒ no TLBIALL) and keeps the stale RO translation ⇒ the constant
-    `far=0xe6000`/`pc=0x2bed61a0` FS=15 write re-faults (~2^20 = the 1010 CS-retry re-execution shape).
+    `far=0xe6000`/`pc=0x2bed61a0` FS=15 write re-faults (~2.6e5; the 1010 CS-retry re-execution shape).
   **This predicts rung 1015's decisive test (design1015's primary): full TLBIALL for non-kernel pmaps STOPS the
     storm (H-G CONFIRMED); if the storm persists, H-G is REFUTED and the permission-inputs fallback (C1/C2) runs.**
 
