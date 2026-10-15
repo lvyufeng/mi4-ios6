@@ -16,3 +16,7 @@ NEXT: after the power press, recover with `scripts/recover_last_kmsg.sh --read-o
   F-cell: wfkind 0=>F1 STALE_TLB_NO_FLUSH; 2&asid==ctx=>F2; 2&asid!=ctx=>F3; 1=>F4; all wfseen0=>F5;
   no tail row=>F6.
 NOTHING WAS FLASHED. No brick. the arm still sits in out/stage90 as 29ec9e48.
+
+---
+2026-10-15 09:34: THE PRESS READ IS DONE. See records/1014-press-read.txt:
+F2 (flush RAN, ASID matched) + V1 LEAF_WRITABLE_STILL_FAULTS. This file is now HISTORY.

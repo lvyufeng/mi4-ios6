@@ -1,0 +1,118 @@
+1014 (V1) press-read — the TLB-FLUSH WITNESS + the inherited 1013 leaf, from the SAME capture.
+F2 (flush RAN, ASID matched) and V1 (LEAF_WRITABLE_STILL_FAULTS) — the two cells the arm was built to read,
+now MEASURED. Two checker HARDs are PROBE/RULE defects, adjudicated below; neither is a device fact.
+
+ARM `armed-d13-29ec9e48` (commits ad01a89 + d312229). Capture:
+`out/stage90/captures/recovered-unknown-arm-20261015-092217-last_kmsg.txt` (1553071 B, 34379 lines), recovered
+2026-10-15 09:22 by the watcher via `scripts/recover_last_kmsg.sh --read-only` after the operator's power press.
+Device `4a2fe00b device`; no panic; `xnu_live_wdt_pets=0x61` => RESIDENT (the goal's 「保持在 xnu 里」).
+Same run, same storm: abort pcn runs to 0x00100000 (1048576 ~ 2^20 re-faults), tail `pc=0x2bed61a0`,
+`far=0x000e6000`, `fsr=0x0000080f` (FS=15, permission/level-2, USER), `xnu_live_abt_type=4`.
+
+================================================================================
+1. THE FLUSH CELL — F2: THE FLUSH RAN, UNDER THE FAULTING ASID
+================================================================================
+`tools/check_1014_capture.py` => `1014 FLUSH CELL: F2`. 20 F-witness rows, 22 CTX-witness rows. The TAIL rows
+(ordinal >= 0x400) carry, at the storm's own VA 0xe6000:
+
+    wfn=0x2000..0x40000  wfkind=0x02  wfself=1  wfseen=1  wfva=0x000e6000
+    wfttb=0x81a86000  wflive=0x81a86000  wfncpus=1  wfasid=0x02   | paired wctx=0x02
+    (ctx rows: wctxn=0x20000..0x100000  wctx=0x02  wctxva=0x000e6000..)
+
+`wfkind=2` = `arm_tlb_flushID_ASID` (the ASID-scoped invalidate), `wfself=1` = the `pmap.c:1298` gate
+(`ttb == ttbr_pmap`) was TRUE, `wfasid=2` == the CONTEXTIDR `wctx=2` at the same abort => F2
+FLUSH_RAN_ASID_MATCH. **1013c's H-FF hypothesis (the flush never ran because `pm_l1_phys` != TTBR0) is
+REFUTED by value:** on every tail row `wfttb == wflive == 0x81a86000` — the pmap's own L1 table IS the live
+TTBR0 table at flush time, and the ASID-matching invalidate ran. The stale-TLB explanation (F1) is dead.
+
+================================================================================
+2. THE LEAF CELL — V1: LEAF_WRITABLE_STILL_FAULTS (three independent probes agree)
+================================================================================
+The 1014 arm carries the 1013c walker fix, so the walker now READS XN (data) pages. Three probes read the
+SAME cell — VA 0x000e6000, L1 descriptor 0x81bb2001, L2 table 0x81bb2000 — and all three read the SAME word
+0x841e91bb:
+
+    W-APEX @:33750  wwn=0x40000  wwl1=0x81bb2001 wwl2pa=0x81bb2000 wwleaf=0x841e91bb wwapx=0  (the pmap's table, after the enter)
+    W-WALK @:33707  wkn=0x40000  wkl1=0x81bb2001 wkl2pa=0x81bb2000 wkleaf=0x841e91bb wkleaf2=0x841e91bb
+                                  wkstable=1 wkapx=0 wktb=0x81a8605b wkoow=0  (the LIVE TTBR0 walk, at re-abort)
+    A-walk (1010 ladder) ptel2=0x841e91bb  ptel1=0x81bb2001  ptettbr=0x81a8605b  (9 tail rows, same VA)
+
+`0x841e91bb` decode: bits[1:0]=0b11 => PRESENT small page (bit1=type, bit0=XN set); bit4 (PRW)=1; bit9
+(APX)=0 => **USER-WRITABLE**; PA=0x841e9000. The PAIRED cell (`(va,l1,l2pa)` identical on both sides,
+`wkstable=1` double-read stable, `wkoow=0` in-window) is a REAL reading — 1013b's `_wkva` publish did its job.
+
+**V1 LEAF_WRITABLE_STILL_FAULTS holds:** the leaf the MMU walks is present and writable, and the CPU still
+takes FS=15 permission faults on it, ~2^20 times, at a constant far/pc. Not V2 (the leaf is not RO), not V3
+(same L2 table both sides), not F1 (the flush ran, §1).
+
+The V0 per-row provenance gate PASSES on the tail rows (`wwva=0x000e6000 == far`; `wwft=3` = READ|WRITE;
+`wwpatbl=0` = the enter named the faulting page, not a table page; `wwpaok=1`). Only the `wwnoproof` cell
+blocked the checker — and that cell contradicts the SAME row's own pmp cells (§3).
+
+================================================================================
+3. HARD #1 — `_wwnoproof=1` is a PROBE DEFECT, contradicted by the row's own cells
+================================================================================
+Every tail apex row carries `wwnoproof=1`, which the design reads as "the pmap's own `pm_l1_phys` is NOT the
+base the live TTBR0 walks". But the SAME rows carry the 1012 apex cells:
+
+    pmppmap=0x81a86000   pmpttbr=0x81a8605b   pmpprot=0x03
+
+`pmppmap (=pm_l1_phys, read BEFORE the enter) & 0xFFFFFF00 == 0x81a86000 == pmpttbr & 0xFFFFFF00` — the pmap
+table EQUALS the live TTBR0 base, which is 1012's own identity cell. And the tail flush rows independently read
+`wfttb == wflive == 0x81a86000`. So the row's OWN evidence says `pm_l1_phys` IS the live table, while
+`_wwnoproof` says it is not. **The two cells disagree and the pmp/flush cells are the corroborated ones.**
+
+Cause (by value): `entry_note_abt_wleaf` (`src/entry/entry_stubs.c:2928`) re-reads
+`pm_l1_phys = *(uint32_t*)pmap` AFTER `__real_pmap_enter_options` — deliberately, for the pmap_expand hazard.
+`entry_note_abt_pmp` reads it BEFORE (the `__wrap` local). If `pmap_expand_ttb` fires inside the enter the two
+differ; the `proof` comparison `entry_ttbr_base(pm_l1_phys, n) == entry_ttbr_base(ttbr, n)` then fails on the
+NEW table. The pmp cell preserved the PRE-enter value and matches TTBR0. **This is the documented
+post-call-read hazard reproducing itself as a false negative** — the cell is a NULL CONTROL outcome, and the
+checker correctly refuses to pair across it. It is REPORTED, not concluded from (design §3 V4).
+
+Consequence: the leaf PAIRING is still valid, because W-WALK read the leaf through the LIVE TTBR0
+(`wktb=0x81a8605b`) — the ground-truth walk does not depend on the apex provenance gate at all.
+
+================================================================================
+4. HARD #2 — the 7 `_wfself=1` "disagreeing bases" rows are all `wfkind=1` (FULL flush of a NON-current pmap)
+================================================================================
+The checker FAILs any `_wfself=1` row whose `wfttb != wflive` (masked 0xFFFFFF00). All 7 such rows are
+`wfkind=1` (the FULL `arm_tlb_flushID()`), at early ordinals 4/8/0x10/0x20/0x40/0x80/0x100, e.g.
+`wfttb=0x80a04000 wflive=0x81a6e000 wfasid=0`. A full flush is called for a pmap that is NOT the running pmap
+(bootstrap, other maps), so `ttb != live` is the CORRECT shape, not a defect. Every `wfkind=2` (ASID) row —
+including all 9 tail rows, which are the storm's — has `wfttb == wflive`. **The rule needs to apply only to
+`wfkind=2`** (an ASID invalidate must target the current pmap's ASID by construction). Probe/rule defect; the
+tail (decision) rows are clean.
+
+================================================================================
+5. INHERITED 1013 CHECKER — the remaining HARDs are pre-existing, not 1014's
+================================================================================
+`tools/check_1013_capture.py` on the same capture exits 1 with: (a) `xnu_live_abt_pmpnx` ABSENT while the apex
+ladder is present — the 1012 change-count site never fired (an INSTRUMENT defect, design §4; unrelated to the
+leaf); (b) the 1010 (A) pte-walk base-mask regression, pre-existing since 1010; (c) `(E')` `vmeva` vs pte/vmf VA
+mismatch, x2 tail rows. The FREEZE regression gate is NOT CERTIFIED (no freeze window in this log — the run was
+RESIDENT, not frozen at 24.4 s; this is the first 1014-class run to read the storm without the freeze shape).
+None of these touch the flush cell or the leaf pairing.
+
+================================================================================
+6. WHAT 1014 SETTLES, AND WHAT IT NAMES AS THE NEXT RUNG
+================================================================================
+SETTLED (measured, this device, this run):
+  * The write REACHES the apex (`pmpprot=0x3`, 1012 regression, holds).
+  * The apex leaf IS written WRITABLE and the MMU walks that same leaf (`0x841e91bb`, APX=0).
+  * The flush for the storm's address RAN and ran under the matching ASID (F2).
+  * The fault PERSISTS deterministically at far=0xe6000, pc=0x2bed61a0, fsr=0x80f, ~2^20 times.
+
+=> The fault is NEITHER a lost write (V2), NOR a table-identity divergence (V3), NOR stale-TLB (F1). A
+writable leaf in the walked table + a completed ASID-matching flush + a recurring FS=15 permission fault means
+the **permission decision the CPU is making is not the leaf's AP bits** — the next rung reads the OTHER
+permission inputs: the L1 descriptor's DOMAIN + the DACR, and TTBCR.N's routing of this VA (is 0xe6000 resolved
+through TTBR0 at all, or through TTBR1 with N=2?), plus the leaf's TEX/CB and nG. **Rung 1015 = the permission
+INPUTS witness** (L1 domain field, DACR, TTBCR.N, and the leaf's full AP/TEX/nG decode at the SAME cell), not
+another leaf-value probe.
+
+OWED (probe/rule, for the next arm — not device facts):
+  * `entry_note_abt_wleaf` publishes `_wwnoproof` from a POST-enter `pm_l1_phys`; publish BOTH (pre and post)
+    and let the reader see which table moved, so `wwnoproof` is never a bare 1.
+  * `check_1014_capture.py`: scope the `wfttb != wflive` FAIL to `wfkind=2` only.
+  * `xnu_live_abt_pmpnx` is absent — the 1012 change-count site never fires; fix or drop it.
