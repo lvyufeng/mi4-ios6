@@ -5526,7 +5526,48 @@ void *__wrap__ZN9IOService22waitForMatchingServiceEP12OSDictionaryy(void *matchi
  * user `udf`s the kernel was asked to handle"). A number climbing without the detail keys reappearing
  * is a program re-executing an undefined instruction, which is a reading and not a missing one.
  */
+/*
+ * **1018: THE UNDEF WITNESS WAS ON THE CAPPED CHANNEL, AND THAT IS WHY IT SAID NOTHING.**
+ *
+ * `records/1018-recon.txt` (`a7bafd7`) measured it on the recovered 1015b capture: the live channel
+ * hit `ENTRY_LIVE_CAP` (24576u, `entry_stubs.c:4254`) and published `xnu_live_capped` at capture
+ * `:29963` - and **every `entry_live_write` record after that line was dropped**, while the frontier
+ * this recorder is about sits at capture `:33977`, ~4000 records LATER. So `xnu_live_undef_seq` is
+ * ZERO in that capture not because no `udf` happened but because this function's channel was
+ * exhausted before pid 1 reached the `udf #254` at `__os_alloc_slow+0x108` (`docs/1017-shared-cache-
+ * naming.md`). The handler itself is proven working - the boot self-test
+ * `stage90_xnu_arm_vm_init_high_va_undef_handler_undef_handled=0x1` (capture `:3480`).
+ *
+ * **The 1000 lesson, and why the fix is a CHANNEL and not a bigger number.** *A record whose ABSENCE
+ * is read as evidence must be cap-exempt and direct* (`records/999-press-read.txt` §5). Raising
+ * `ENTRY_LIVE_CAP` again would only move the cliff - 1015b's own cap was already raised to 24576u and
+ * was still crossed - and the run's record volume is not known in advance. So this switch routes the
+ * undef witness through `entry_write_kv` (the DIRECT channel, `entry_stubs.c:4476`), the same one
+ * `entry_note_stall_sample` uses - which is the ONLY reason the stall sampler is the whole of
+ * `records/1016a-read.txt`'s verdict while this recorder was silent.
+ *
+ * **`STAGE90_XNU_UNDEF_DIRECT` is OFF by default and OFF is byte-identical.** With it 0 the two
+ * macros below expand to the exact `entry_live_write` calls and `4u` this file carried before, so the
+ * preprocessor output and the linked image do not move ([[mi4-off-option-two-spellings]] - the guard
+ * is spelled as a `#if` around the definitions, never as a widened constant). With it 1 the six keys
+ * go direct and the band widens to `UNDEF_DIRECT_MAX`, bounded only by the console's own
+ * `max = 0x00200000u - 12u` (`entry_stubs.c:4019`).
+ *
+ * **SCOPE, stated so it cannot creep:** this adds NO field. An undefined instruction has no cp15
+ * fault pair - `IFSR`/`DFSR` are whatever the last abort left (the comment above) - so a `_far` here
+ * could only label a stale register and would be read as this undef's address
+ * ([[mi4-a-claim-in-a-comment-is-not-a-check]]). The re-trap-vs-retry question needs no such field:
+ * `_seq` climbing with an invariant `_pc` is a re-trap loop, and `_seq == 1` followed by a moving
+ * sampler pc is a transition, and both are already readable from these six keys.
+ */
+#if defined(STAGE90_XNU_UNDEF_DIRECT) && STAGE90_XNU_UNDEF_DIRECT
+#define UNDEF_LIVE_MAX 64u
+extern void entry_write_kv(const char *key, uint32_t value);
+#define UNDEF_PUT(key, value) entry_write_kv((key), (value))
+#else
 #define UNDEF_LIVE_MAX 4u
+#define UNDEF_PUT(key, value) entry_live_write((key), (value))
+#endif
 
 static uint32_t g_undef_seq;
 static uint32_t g_undef_user_seq_trace;
@@ -5540,7 +5581,7 @@ void __wrap_sleh_undef(void *regs, void *vfp_ss)
     uint32_t pc = 0u, lr = 0u, cpsr = 0u;
 
     g_undef_seq++;
-    entry_live_write("xnu_live_undef_seq", g_undef_seq);
+    UNDEF_PUT("xnu_live_undef_seq", g_undef_seq);
 
     if (frame != 0) {
         pc = frame[STAGE90_SS_PC / 4];
@@ -5549,13 +5590,13 @@ void __wrap_sleh_undef(void *regs, void *vfp_ss)
     }
     if ((cpsr & STAGE90_PSR_MODE_MASK) == STAGE90_PSR_USER_MODE) {
         g_undef_user_seq_trace++;
-        entry_live_write("xnu_live_undef_user_seq", g_undef_user_seq_trace);
+        UNDEF_PUT("xnu_live_undef_user_seq", g_undef_user_seq_trace);
     }
     if (g_undef_seq <= UNDEF_LIVE_MAX) {
-        entry_live_write("xnu_live_undef_pc", pc);
-        entry_live_write("xnu_live_undef_lr", lr);
-        entry_live_write("xnu_live_undef_spsr", cpsr);
-        entry_live_write("xnu_live_undef_user", (cpsr & STAGE90_PSR_MODE_MASK) == STAGE90_PSR_USER_MODE
+        UNDEF_PUT("xnu_live_undef_pc", pc);
+        UNDEF_PUT("xnu_live_undef_lr", lr);
+        UNDEF_PUT("xnu_live_undef_spsr", cpsr);
+        UNDEF_PUT("xnu_live_undef_user", (cpsr & STAGE90_PSR_MODE_MASK) == STAGE90_PSR_USER_MODE
                                                      ? 1u : 0u);
     }
 

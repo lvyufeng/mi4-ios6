@@ -1508,6 +1508,54 @@ if [[ $PERMWIT -eq 1 && -z ${FLWIT_INCLUDES[*]} ]]; then
         exit 1
     fi
 fi
+# **1018: THE UNDEF WITNESS'S CHANNEL (`STAGE90_XNU_UNDEF_DIRECT`), AND WHY IT IS NOT A WIDENED CAP.**
+# `records/1018-recon.txt` (`a7bafd7`) measured the defect this switch closes: on the recovered 1015b
+# capture the live channel hit `ENTRY_LIVE_CAP` (24576u, `entry_stubs.c:4254`), published
+# `xnu_live_capped` at capture `:29963`, and **dropped every `entry_live_write` record after that line** -
+# while the frontier `__wrap_sleh_undef` exists to name (`udf #254` at `__os_alloc_slow+0x108`,
+# `docs/1017-shared-cache-naming.md`) sits ~4000 records later. So the recorder's keys read ZERO not
+# because no `udf` happened but because its channel was exhausted first. Raising the cap would only move
+# the cliff (1015b's own cap had already been raised to 24576u and was still crossed) and the run's
+# record volume is not known in advance, so the fix is a CHANNEL: with the switch on, `entry_trace.c`'s
+# `__wrap_sleh_undef` routes its six keys through `entry_write_kv` (the DIRECT writer,
+# `entry_stubs.c:4476`, the one `entry_note_stall_sample` uses) instead of `entry_live_write`.
+#
+# **ENTRY-TOOLCHAIN ONLY, unlike FLUSH_WITNESS.** The recorder and its ONE call site are both in
+# `entry_trace.c`, which this script compiles in the `ENTRY_TRACE` block below, so there is no pool file,
+# no `--wrap` change and no `external/` edit - hence no `tools/stage_d13_*` script and no
+# `XNU_KERNEL_EXTRA_DEFINES` half. The switch reaches that file through `STUB_DEFINES_TRACE` (the array
+# appended at `:334`, above), NOT `STUB_DEFINES`: that is the array `entry_trace.c`'s own compile line
+# reads, and putting the `-D` in the other one would leave the recorder on the capped channel while the
+# build reported the switch on - the `mi4-off-option-two-spellings` defect with a green build.
+#
+# **OFF IS BYTE-IDENTICAL.** `entry_trace.c:5563` guards the definitions with a `#if`/`#else`, so at 0 the
+# two macros expand to the exact `entry_live_write` calls and `4u` this file carried before
+# ([[mi4-off-option-two-spellings]]: never a widened constant), and `UNDEF_DIRECT=0` is what the record
+# carries. This switch has no precondition - it moves a writer, not a guard - so it has no cross-refusals.
+UNDEF_DIRECT=${STAGE90_XNU_UNDEF_DIRECT:-0}
+case "$UNDEF_DIRECT" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_UNDEF_DIRECT='$UNDEF_DIRECT' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+# **`+=` at its own validated site, the exact FLUSH_WITNESS `+=$FLWIT` shape (`:1434`), with ONE
+# mechanical difference stated rather than hidden, because reading it the wrong way is a silent wrong
+# build:** FLUSH_WITNESS appends to `STUB_DEFINES`, and that is correct for it because its recorders live
+# in `entry_stubs.c`, whose compile line carries BOTH arrays (`:2521-2522`). THIS switch's recorder is
+# `entry_trace.c`, whose compile line (`:2816-2821`) carries `STUB_DEFINES_TRACE` and NOT
+# `STUB_DEFINES` - so `-DSTAGE90_XNU_UNDEF_DIRECT` appended to `STUB_DEFINES` would leave
+# `entry_trace.c` on the capped channel while the record named the switch as on. `STUB_DEFINES_TRACE` is
+# therefore the array this append targets, and it is the same array the earlier switches' `-D`s are
+# ALREADY threaded through for exactly this reason (`:330-334`). `entry_stubs.c` receiving the `-D` as
+# well is inert: it carries no `#if defined(STAGE90_XNU_UNDEF_DIRECT)` - the recorder is one file.
+#
+# **There is no `$ENTRY_TRACE` guard on this append, and there must not be one.** `STUB_DEFINES_TRACE` is
+# only populated inside the `D13_TRACE` arm of its own assignment, so on an untraced or 4570 build the
+# append makes a one-element array that the linker never reads. A `[[ $ENTRY_TRACE -eq 1 ]] &&` here (the
+# `+=$FLWIT` shape, copied literally) would instead SKIP the append on every untraced build - and an
+# untraced build is exactly the one where the 1018 clause below must still REFUSE `UNDEF_DIRECT=1` rather
+# than quietly drop it. The condition belongs to the clause, and it is there (`:31229`).
+STUB_DEFINES_TRACE+=(-DSTAGE90_XNU_UNDEF_DIRECT="$UNDEF_DIRECT")
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
 # commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
@@ -2036,6 +2084,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_PTE_WITNESS
                 STAGE90_XNU_FLUSH_WITNESS
                 STAGE90_XNU_PERM_WITNESS
+                STAGE90_XNU_UNDEF_DIRECT
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -2313,6 +2362,14 @@ do
         # validated 0/1 (and cross-refused against ABT_FAR/ABT_PC/ABT_PTE/PMP_ENTER/PTE_WITNESS) at its
         # own assignment above this loop.
         STAGE90_XNU_PERM_WITNESS)     _v=$PERMWIT ;;
+        # 1018: the undef witness's channel. Its one consumer is `entry_trace.c` (via
+        # `STUB_DEFINES_TRACE`, appended at its own assignment above), compiled here, so the record and
+        # the object cannot be built from two spellings. Read from `$UNDEF_DIRECT`, validated 0/1 at its
+        # own assignment above this loop. Unlike FLUSH_WITNESS / DYLD_WITNESS this switch is
+        # entry-toolchain only - there is no pool file and no `tools/stage_d13_*` script for it - so the
+        # by-value clause at the 1018 link site below reads `entry_trace.c`'s own object
+        # (`out/stage90/xnu_arm_entry_trace.o`) rather than the linked image's pool objects.
+        STAGE90_XNU_UNDEF_DIRECT)     _v=$UNDEF_DIRECT ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -2754,6 +2811,11 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_USB_ENUM="$USB_ENUM" \
         -DSTAGE90_XNU_USB_STREAM="$USB_STREAM" \
         -DSTAGE90_XNU_SMEM_PROBE="$SMEM_PROBE" \
+        # **1018 (`STAGE90_XNU_UNDEF_DIRECT`): this is the compile line the switch must reach, and the
+        # reason the `-D` is not here.** The array on the next line is `STUB_DEFINES_TRACE`, which already
+        # carries the resolved value from the `+=` at the switch's own validated site above - the switch is
+        # appended there rather than spelled a second time here, so `entry_trace.c`'s view and the record's
+        # view are one value and not two (`mi4-one-value-two-definitions`).
         ${FLWIT_INCLUDES[@]+"${FLWIT_INCLUDES[@]}"} \
         ${STUB_DEFINES_TRACE[@]+"${STUB_DEFINES_TRACE[@]}"} \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
@@ -31168,6 +31230,68 @@ verify_trace_symbols() {
             layout_fail "entry_dt_recorded_walk's first call is [$gcr_pubfirst] and not <entry_note_dtref>: the guard must PUBLISH the recorded address' first word, the word it had while alive, and whether they match, BEFORE it walks anything, so a run that stops in the walk still says which address it was about and whether the guard passed. Publish first, walk second"
         say "  xnu_entry_989: the census' recorded address is identity-checked before it is walked - entry_probe_dt_children walks only the tree root (2 getChildSetReference calls), entry_dt_recorded_walk carries the recorded address' pair behind a comparison against $gcr_how, and it publishes the reading first, so a freed address is named and not dispatched through"
     fi
+    # **1018: the undef witness's channel, read BY VALUE off the object this build just compiled.**
+    # `records/1018-recon.txt` measured the defect: on the recovered 1015b capture the counted channel hit
+    # `ENTRY_LIVE_CAP` and published `xnu_live_capped` at capture `:29963`, and every `entry_live_write`
+    # record after that line was dropped - while the `udf #254` the recorder exists to name sits ~4000
+    # records LATER. So `__wrap_sleh_undef`'s six keys reading zero in that capture is a statement about
+    # the cap and not about the `udf`. With `STAGE90_XNU_UNDEF_DIRECT=1` the recorder writes through
+    # `entry_write_kv` instead; the property is which writer's address the wrapper materializes, and it is
+    # read here from the disassembly of `$OUT/xnu_arm_entry_trace.o` - the object THIS script compiled,
+    # ten lines after the `-D` was threaded into `STUB_DEFINES_TRACE`. (This switch is entry-toolchain
+    # only - recorder and call site are both in `entry_trace.c` - so there is no pool object and no
+    # `tools/stage_d13_*` script, and this object, not `xnu_arm_entry.elf`, is the artifact the property
+    # lives in: the linked image would show the same branches and cannot say which file they came from.)
+    # Both directions are asserted, so a switch that did not reach the file it names is a refusal rather
+    # than a green build naming an arm nobody built ([[mi4-off-option-two-spellings]]).
+    if [[ $UNDEF_DIRECT -eq 1 && $ENTRY_TRACE -ne 1 ]]; then
+        layout_fail "STAGE90_XNU_UNDEF_DIRECT=1 requires STAGE90_ENTRY_TRACE=1 - the recorder IS entry_trace.c (the wrapper and the two macros are one file), and an untraced build does not compile it, so the switch would name a channel in an image that has no such recorder"
+    fi
+    if [[ $ENTRY_TRACE -eq 1 && -r $OUT/xnu_arm_entry_trace.o ]]; then
+        arm-none-eabi-nm "$OUT/xnu_arm_entry_trace.o" | grep -q ' T __wrap_sleh_undef$' ||
+            layout_fail "__wrap_sleh_undef is not defined in out/stage90/xnu_arm_entry_trace.o - the object this build compiled carries no such symbol, so 1018's clause has nothing to read the channel out of and its silence would be read as a pass"
+        ud_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry_trace.o" |
+            awk '/<__wrap_sleh_undef>:/ { f = 1; next } f && /^[0-9a-f]+ </ { f = 0 } f { print }')
+        [[ -n $ud_body ]] ||
+            layout_fail "objdump found no instruction stream under <__wrap_sleh_undef> in out/stage90/xnu_arm_entry_trace.o - the label moved, and a clause that greps an empty stream counts 0 branches and would pass"
+        ud_kv=$(grep -c '<entry_write_kv>' <<<"$ud_body" || true)
+        ud_lw=$(grep -c '<entry_live_write>' <<<"$ud_body" || true)
+        if [[ $UNDEF_DIRECT -eq 1 ]]; then
+            [[ $ud_kv -ge 6 && $ud_lw -eq 0 ]] ||
+                layout_fail "__wrap_sleh_undef in out/stage90/xnu_arm_entry_trace.o de-references entry_write_kv $ud_kv time(s) and entry_live_write $ud_lw time(s) with STAGE90_XNU_UNDEF_DIRECT=1: the six keys must ALL go through the direct writer (>=6 branches, 0 to the counted one). A branch to the counted writer left in means the switch did not reach the file - and that is exactly the silence records/1018-recon.txt measured (the recorder's keys zero not because no udf happened but because xnu_live_capped had already been published ~4000 records earlier at capture :29963)"
+        else
+            [[ $ud_kv -eq 0 ]] ||
+                layout_fail "__wrap_sleh_undef in out/stage90/xnu_arm_entry_trace.o de-references entry_write_kv $ud_kv time(s) with STAGE90_XNU_UNDEF_DIRECT=0: OFF must be the exact pre-1018 object (the macros expand to the entry_live_write calls, the guard is a #if/#else and never a widened constant), and a direct branch here means the switch is a constant that is 1 somewhere in the source. Rebuild from a clean entry_trace.c and check the two macros at entry_trace.c:5563"
+            [[ $ud_lw -ge 6 ]] ||
+                layout_fail "__wrap_sleh_undef in out/stage90/xnu_arm_entry_trace.o de-references entry_live_write $ud_lw time(s) (want >=6) with STAGE90_XNU_UNDEF_DIRECT=0: the recorder's keys did not compile in at all, so this clause would accept an image whose undef witness is absent rather than counted (the 9 measured at 1018's landing: six keys, the user gate taken both ways)"
+        fi
+        # **And the same property in the LINKED image, which is the artifact the 995/1014 clauses read -
+        # and it is not a duplicate of the object half above.** That half says the OBJECT this run compiled
+        # has the right channel; it says nothing about whether the object is IN the image. `$OUT/
+        # xnu_arm_entry.elf` is read through the wrapper's own symbol range (nm for the address, nm -n for
+        # the next symbol - the 514 clause's shape), so an object that was compiled and then left out of
+        # the link is a refusal here rather than a run whose undef witness is absent from the image the
+        # payload boots.
+        ud_elf_a=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
+            awk '$3 == "__wrap_sleh_undef" { print "0x" $1; n++ } END { exit(n == 1 ? 0 : 1) }') ||
+            layout_fail "__wrap_sleh_undef is not in the linked image (or is defined more than once): entry_trace.c's wrapper is what routes the undef witness, and an image without it has no recorder for the keys 1018 is about - either STAGE90_ENTRY_TRACE=1 did not put out/xnu_arm_entry_trace.o in LINK_OBJS, or --wrap=sleh_undef was lost from TRACE_LDFLAGS"
+        ud_elf_b=$(arm-none-eabi-nm -n "$OUT/xnu_arm_entry.elf" |
+            awk -v s="${ud_elf_a#0x}" 'BEGIN { sv = strtonum("0x" s) } { a = strtonum("0x" $1) } a > sv { if (!d) { print "0x" $1; d = 1 } }') &&
+            [[ -n $ud_elf_b ]] ||
+            layout_fail "no symbol follows __wrap_sleh_undef ($ud_elf_a) in the linked image, so its instruction range cannot be read and 1018's linked-image half would count branches in somebody else's code"
+        ud_elf_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" \
+            --start-address="$ud_elf_a" --stop-address="$ud_elf_b")
+        ud_elf_kv=$(grep -c '<entry_write_kv>' <<<"$ud_elf_body" || true)
+        ud_elf_lw=$(grep -c '<entry_live_write>' <<<"$ud_elf_body" || true)
+        if [[ $UNDEF_DIRECT -eq 1 ]]; then
+            [[ $ud_elf_kv -ge 6 && $ud_elf_lw -eq 0 ]] ||
+                layout_fail "__wrap_sleh_undef in the linked image ($ud_elf_a..$ud_elf_b) branches to entry_write_kv $ud_elf_kv time(s) and to entry_live_write $ud_elf_lw time(s) with STAGE90_XNU_UNDEF_DIRECT=1: the image the payload boots still writes the undef witness through the counted channel, so the -D reached entry_trace.c and then the image was linked from a different object - the exact state 1015b's capture was in when xnu_live_capped (:29963) silenced the recorder that names the udf #254"
+        else
+            [[ $ud_elf_kv -eq 0 ]] ||
+                layout_fail "__wrap_sleh_undef in the linked image ($ud_elf_a..$ud_elf_b) branches to entry_write_kv $ud_elf_kv time(s) with STAGE90_XNU_UNDEF_DIRECT=0: OFF is documented as byte-identical, and a direct channel in the linked wrapper means the image on disk was built with the switch on while this record says 0 - one value, two definitions, and the record is the one the gate reads"
+        fi
+        say "  xnu_entry_1018: __wrap_sleh_undef writes its keys through ${ud_kv} entr(y|ies) to the DIRECT channel and ${ud_lw} to the counted one with STAGE90_XNU_UNDEF_DIRECT=$UNDEF_DIRECT (read out of out/stage90/xnu_arm_entry_trace.o, the object this build compiled; the linked image at $ud_elf_a..$ud_elf_b agrees: $ud_elf_kv direct / $ud_elf_lw counted) - so the witness that 1015b's capture could not read past xnu_live_capped (:29963) is either direct or provably still on the channel it was on"
+    fi
     # **990: the tree must hand C 8-byte-aligned stacks at its two measured gates.** 989's pid-1 exec
     # ran every C frame from `thread_return_join`'s `blx ast_taken` and every continuation off
     # `Call_continuation`'s `ldr sp, [thread, TH_PCB_ISS]` at sp = 4 (mod 8) - `iss = stack_top - 68` and
@@ -40047,6 +40171,11 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # reads, so a switch that reached the compiler and the arm-key list but not this line would be a
     # run whose arm nobody read. Written as the RESOLVED `$PERMWIT`.
     echo "STAGE90_XNU_PERM_WITNESS=$PERMWIT"
+    # **1018: the undef witness's channel, written here for 882's and 678's reason**: this writer is the
+    # one site a name-keyed diff does not visit and the only site the gate ever reads, so a switch that
+    # reached the compiler and the arm-key list but not this line would be a run whose arm nobody read.
+    # Written as the RESOLVED `$UNDEF_DIRECT`.
+    echo "STAGE90_XNU_UNDEF_DIRECT=$UNDEF_DIRECT"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

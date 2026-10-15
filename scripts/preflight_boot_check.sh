@@ -757,7 +757,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_WRSTRIP
                 STAGE90_XNU_PTE_WITNESS
                 STAGE90_XNU_FLUSH_WITNESS
-                STAGE90_XNU_PERM_WITNESS)
+                STAGE90_XNU_PERM_WITNESS
+                STAGE90_XNU_UNDEF_DIRECT)
 # **1015: `STAGE90_XNU_PERM_WITNESS`, the permission-inputs witness (the passive half of rung 1015).**
 # It went in at the tail beside `STAGE90_XNU_FLUSH_WITNESS`, and the "variant subset / pair of counts"
 # arithmetic the 882/683/686 notes above describe was **already retired by 1005** - the counts they name
@@ -771,6 +772,18 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
 # those arms are retired and a build at this HEAD always writes the line. The 882/594/1003/1004 `-z`
 # grace branches above exist only for records the ladder still owes a press.) The value is printed by the
 # loop below like every other name in this list, and an off value (0) is a valid arm.
+# **1018: `STAGE90_XNU_UNDEF_DIRECT`, the undefined-instruction witness's CHANNEL.** It goes in at the
+# tail beside the other two witnesses, and it is the same unconditional key they are: `build_entry.sh`
+# validates it at its own assignment (0/1 only) and the writer emits the line unconditionally, so every
+# record produced by a build at this HEAD carries it and the 1017/1018-era parks do not (an arm parked
+# before 1018 is refused here, which is intended - those arms are retired). What the key buys the gate's
+# reader is the one thing the run's own cells cannot say for themselves: with it at 1 the
+# `xnu_live_undef_*` keys ride `entry_write_kv`, the UNCAPPED channel, so their absence after
+# `xnu_live_capped` means the `udf` did not happen; with it at 0 they ride `entry_live_write` and the cap
+# can drop them - which is exactly how `records/1018-recon.txt` read a real `udf #254` as no `udf` at
+# all (capture `:29963` published `xnu_live_capped`, the recorder writes nothing after, and the frontier
+# sits ~4000 records later). The converse check below is a set difference and moves no count, so this
+# addition moves no number either.
 # **`STAGE90_XNU_HFS_ROOT_MEDIA` IS A REQUIRED KEY ONLY FOR THE ENTRY IMAGE THAT CARRIES THAT ARM.** 882
 # added it above as an unconditional requirement, and that made every arm parked BEFORE 882's build
 # UNPRESSABLE: their records were written when the key did not exist, so `awk` returns empty and this
