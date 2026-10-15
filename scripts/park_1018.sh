@@ -59,8 +59,12 @@ ARM=armed-d13-$(sha256sum "$LIVE/xnu_arm_entry.bin" | cut -c1-8)
 grep -q '^STAGE90_XNU_UNDEF_DIRECT=1$' "$LIVE/xnu_arm_entry-config.txt" || {
   echo "REFUSING: the record does not carry STAGE90_XNU_UNDEF_DIRECT=1 - 1018's direct channel was not recorded this run"; exit 1; }
 # 1015b's GLOBAL_FIX stays on as a REGRESSION (it is why the storm is gone and the frontier is the udf).
-grep -q '^STAGE90_XNU_GLOBAL_FIX=1$' "$LIVE/xnu_arm_entry-config.txt" || {
-  echo "REFUSING: the record does not carry STAGE90_XNU_GLOBAL_FIX=1 - 1015b's fix must stay on, or the single-address retry storm would be re-litigated"; exit 1; }
+# **IT IS NOT IN THE RECORD AND CANNOT BE** (press_1015b.sh (0g), MEASURED): STAGE90_XNU_GLOBAL_FIX is a
+# POOL switch (osfmk/arm/pmap.c:1357) that NO writer in src/entry/ echoes, so the config record cannot
+# carry it and preflight_boot_check.sh's ENTRY_CFG_KEYS set-difference would refuse any press that named
+# it there. Its ONE declaration is the drop-in line scripts/park_1015b.sh writes at the freeze point.
+grep -qx 'STAGE90_XNU_GLOBAL_FIX=1 role=1015b-globalfix' "$LIVE/xnu_arm_entry-arm-extra.txt" || {
+  echo "REFUSING: out/stage90/xnu_arm_entry-arm-extra.txt does not carry 'STAGE90_XNU_GLOBAL_FIX=1 role=1015b-globalfix' - 1015b's fix must stay on, or the single-address retry storm would be re-litigated"; exit 1; }
 
 # BY VALUE, at the freeze point: 1018's change is that `__wrap_sleh_undef` in the LINKED image branches
 # to the DIRECT writer.  Read it off the wrapper's own symbol range ([[mi4-linked-code-order-is-not-

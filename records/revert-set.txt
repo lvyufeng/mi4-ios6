@@ -15478,7 +15478,8 @@ set=armed-d13-124cd528 sha256=2769b08b0bbc968333385f78dbd8ab891019cdb69f81763408
 set=armed-d13-124cd528 sha256=e650cd0264cb61b118f2d12bb7b22e54955005c689de0f14854d9d15a1f37711 bytes=9371648 file=stage90-qcdt.img role=1013-ptewitness;stage90-qcdt.img
 set=armed-d13-124cd528 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1013-ptewitness;stage90_fixture.macho
 set=armed-d13-124cd528 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1013-ptewitness;stage90-build-config.txt
-set=armed-d13-124cd528 sha256=ad3d030a0f7f660fd76c20c62719e62b98742331c28c29b36c0034bcffd0a640 bytes=560 file=SHA256SUMS.txt role=1013-ptewitness;SHA256SUMS.txt# armed-d13-9bf25f8f  -  1013: THE LEAF-VALUE WITNESS - the leaf the pmap ACTUALLY writes, and the location
+set=armed-d13-124cd528 sha256=ad3d030a0f7f660fd76c20c62719e62b98742331c28c29b36c0034bcffd0a640 bytes=560 file=SHA256SUMS.txt role=1013-ptewitness;SHA256SUMS.txt
+# armed-d13-9bf25f8f  -  1013: THE LEAF-VALUE WITNESS - the leaf the pmap ACTUALLY writes, and the location
 # the MMU-s own walk finds it at (design docs/1013-design.md)
 # Switch set is 1012-s VERBATIM plus STAGE90_XNU_PTE_WITNESS=1 (PMP_ENTER, VME_PROT, ABT_PTE,
 # ABT_PC, ABT_FAR, ABT_SPAN, FREEZE_WITNESS, CADENCE, STALL, ABORT_TRACE, DYLD_WITNESS,
@@ -16129,3 +16130,42 @@ set=armed-d13-16fe8885 sha256=11818d716e8a5400198900700aa08a1c25aa5617327a9968de
 set=armed-d13-16fe8885 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1015b-globalfix;stage90_fixture.macho
 set=armed-d13-16fe8885 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1015b-globalfix;stage90-build-config.txt
 set=armed-d13-16fe8885 sha256=c935428e7183ee2f7c9de47fa5cdd31287423dd0a75b9233c7983217663fa550 bytes=560 file=SHA256SUMS.txt role=1015b-globalfix;SHA256SUMS.txt
+# armed-d13-c2168632  -  1018: THE CAP-EXEMPT UNDEF WITNESS (the udf #254 at __os_alloc_slow+0x108 was named
+# by 1017 but the recorder that would confirm it DYNAMICALLY rode the CAPPED channel and fired zero).
+# Switch set is 1015b-s VERBATIM (GLOBAL_FIX and all 11 of its members stay 1) plus
+# STAGE90_XNU_UNDEF_DIRECT=1.  ENTRY-TOOLCHAIN ONLY: no tree edit, no pool move, no --wrap change.
+# The TREE does not move; the ENTRY BIN moves (16fe8885 -> c2168632) and the PAYLOAD moves.
+#
+# WHAT IT MEASURES (docs/1018-design.md; records/1018-recon.txt a7bafd7): 1017 named the
+# instruction pid 1 sits on - un-slid VA 0x3823aa54 = libsystem_platform.dylib __os_alloc_slow
+# +0x108 = the Thumb udf #254 - and wrote # UNMEASURED for the mechanism. The 1015b capture could
+# not answer it because __wrap_sleh_undef (entry_trace.c:5537) writes entry_live_write, CAPPED at
+# 24576u (entry_stubs.c:4254): the cap published xnu_live_capped at :29963 and every capped record
+# after it was dropped, while the frontier sits ~4000 records later at :33977. With the switch on
+# the six keys ride entry_write_kv (the DIRECT channel entry_note_stall_sample uses), so their
+# absence after xnu_live_capped means the udf did not happen.
+#
+# THE 1018 CELLS (tools/check_1018_capture.py): U-FIRES-DIES (the trap terminated pid 1) /
+# U-FIRES-LOOPS (the handler returns and re-traps) / U-FIRES-ONCE (the trap is a transition) /
+# U-SILENT (witness live but fires at no sampled pc: 1017-s static id CONTRADICTED) / U-CTL
+# (withhold). The reader REQUIRES BOTH control halves - the boot self-test row AND a _seq row -
+# so a pre-arm capture with the witness still capped WITHHOLDS rather than reading as U-SILENT.
+#
+# VERIFIED BY VALUE (scripts/build_1018.sh + this park): __wrap_sleh_undef in xnu_arm_entry_trace.o
+# AND in the linked image branches to entry_write_kv (>=6) and not entry_live_write (0), both
+# switch directions.
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-c2168632 sha256=c2168632ea6cd82bb7b44b2a0a6407d496d6ac31617b05e36206e4ee4ed9f6cc bytes=6356052 file=xnu_arm_entry.bin role=1018-cap-exempt-undef-witness;xnu_arm_entry.bin
+set=armed-d13-c2168632 sha256=3c9299a27cf08d8d0fe4142ee36e57952493e1fa504fd92a940fe9cb73b8b40e bytes=7400472 file=xnu_arm_entry.elf role=1018-cap-exempt-undef-witness;xnu_arm_entry.elf
+set=armed-d13-c2168632 sha256=04c45b9e7c146f9a6e20051abd8d36980a46025cf3f867e261f8f20ed17d7b0e bytes=1912 file=xnu_arm_entry.h role=1018-cap-exempt-undef-witness;xnu_arm_entry.h
+set=armed-d13-c2168632 sha256=1ecf20bdb0f8dd3773159514b2c56fc21d967f634feec51b84078590533450bd bytes=2054 file=xnu_arm_entry-config.txt role=1018-cap-exempt-undef-witness;xnu_arm_entry-config.txt
+set=armed-d13-c2168632 sha256=1e2d8bcdcc8c2f3c022a95ccd785b5d5ef57c2e6927af052b0770c71163465d0 bytes=3149 file=xnu_arm_entry-sources.txt role=1018-cap-exempt-undef-witness;xnu_arm_entry-sources.txt
+set=armed-d13-c2168632 sha256=c534f415497e5e1c1bf83a55c2c965dbd7f4e65acf427000ebae3bd5d722f054 bytes=6851460 file=stage90.bin role=1018-cap-exempt-undef-witness;stage90.bin
+set=armed-d13-c2168632 sha256=a3e4395b022415596aee2c4138f023c7dcc3f4cba80852283c56c2b669b1eb9c bytes=6913532 file=stage90.elf role=1018-cap-exempt-undef-witness;stage90.elf
+set=armed-d13-c2168632 sha256=5b928e4fbe47da0d1a196acba8e2c1c5d70c845715886b0be35881a3fdf1599c bytes=6854656 file=stage90.img role=1018-cap-exempt-undef-witness;stage90.img
+set=armed-d13-c2168632 sha256=11818d716e8a5400198900700aa08a1c25aa5617327a9968decc7d393d878ba2 bytes=9375744 file=stage90-qcdt.img role=1018-cap-exempt-undef-witness;stage90-qcdt.img
+set=armed-d13-c2168632 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1018-cap-exempt-undef-witness;stage90_fixture.macho
+set=armed-d13-c2168632 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1018-cap-exempt-undef-witness;stage90-build-config.txt
+set=armed-d13-c2168632 sha256=c935428e7183ee2f7c9de47fa5cdd31287423dd0a75b9233c7983217663fa550 bytes=560 file=SHA256SUMS.txt role=1018-cap-exempt-undef-witness;SHA256SUMS.txt

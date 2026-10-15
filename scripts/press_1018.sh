@@ -44,8 +44,12 @@ REC=$LIVE/xnu_arm_entry-config.txt
 echo "== 0. the record must be 1018's arm =="
 grep -q '^STAGE90_XNU_UNDEF_DIRECT=1$' "$REC" || {
   echo "REFUSING: the record does not carry STAGE90_XNU_UNDEF_DIRECT=1 - this is not 1018's arm (build it with scripts/build_1018.sh first)"; exit 1; }
-grep -q '^STAGE90_XNU_GLOBAL_FIX=1$' "$REC" || {
-  echo "REFUSING: the record does not carry STAGE90_XNU_GLOBAL_FIX=1 - 1015b's fix must stay on, or the single-address retry storm would come back and the udf would never be reached"; exit 1; }
+# **GLOBAL_FIX IS NOT IN THE RECORD AND CANNOT BE** (press_1015b.sh (0g), MEASURED): it is a POOL switch
+# (osfmk/arm/pmap.c:1357) that no writer in src/entry/ echoes, and preflight_boot_check.sh's
+# ENTRY_CFG_KEYS is a set difference against the record, so naming it there would make the gate refuse
+# every press. Its ONE declaration is the drop-in file park_1015b.sh wrote at the freeze point.
+grep -qx 'STAGE90_XNU_GLOBAL_FIX=1 role=1015b-globalfix' "$LIVE/xnu_arm_entry-arm-extra.txt" || {
+  echo "REFUSING: out/stage90/xnu_arm_entry-arm-extra.txt does not carry 'STAGE90_XNU_GLOBAL_FIX=1 role=1015b-globalfix' - the pool fix that keeps the retry storm gone is not declared, so the udf this arm's witness exists to name would never be reached"; exit 1; }
 EXPECT_ARM=armed-d13-$(sha256sum "$LIVE/xnu_arm_entry.bin" | cut -c1-8)
 echo "   arm = $EXPECT_ARM"
 
