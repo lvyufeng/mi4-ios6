@@ -23,8 +23,10 @@ allow it, so this tool **imports** `tools/check_1015_capture.py` as a module and
   * `KV_RE`, `to_int`, `fmt`, `say`, `Capture` (its `newline=""` read, its KV regex, its `@:line`
     numbering, its ordered token list, `pcn_by_line`/`per_line`),
   * `aborts()` - the abort-ladder reader the STORM CLASSIFIER runs on,
-  * `classify_storm()` - **the storm-identification rule** (see below),
-  * the constants (`TAIL_MIN_N`, `STORM_MIN_ROWS`, `STORM_MIN_ORD`, `STORM_VA`, `STORM_FSR`),
+  * `classify_storm()` - **the storm-identification rule** (see below).  It COMPUTES the storm VA by
+    value and returns it as `storm["va"]`; THAT is the only storm key this reader uses,
+  * the constants (`TAIL_MIN_N`, `STORM_MIN_ROWS`, `STORM_MIN_ORD`, `STORM_FSR`) - and explicitly
+    **NOT `STORM_VA`**, which is no longer read from anywhere (see the rule section below),
   * `s_secondary()` (the [1015 P] ladder) and `s_at()` / `s_at_cross()` (the §3c AT/PAR cell).
 
 THE REASON IS NOT CONVENIENCE - IT IS `[[mi4-one-value-two-definitions]]`.  If this reader CLONED the
@@ -40,34 +42,56 @@ it does not run its reader** - verified: `main()` only runs under `__main__`.
 ------------------------------------------------------------------------------
 THE STORM-IDENTIFICATION RULE (the SAME rule as 1014/1015 - identified BY VALUE, not by position)
 ------------------------------------------------------------------------------
-`check_1015_capture.py:461` (`classify_storm`):
+**The storm's VA IS NOT A CONSTANT, AND THIS FILE HOLDS NO LITERAL FOR IT.**  The storm is the tail
+fault that RECURS, and its `far` MOVES every run - 1011 `0x61000` -> 1012 `0x2e000` -> 1014 `0xe6000`
+-> 1015 `0x27000` - because it is the page the COW/CS retry picks.  `tools/check_1015_capture.py`
+used to hold `STORM_VA = 0x000E6000` as a module constant; that literal turned the COMPLETE 1015
+verdict into V-AT0 + a vacuous "STOPPED" - a measurement defect, the number having been an artifact
+of how it was taken ([[mi4-measurement-defects]]).  The lead fixed 1015 on 2026-10-15: `classify_storm
+()` now COMPUTES the storm VA **by value** and returns it as `storm["va"]`.
 
-    storm_tail = [r for r in tail if r["far"] == STORM_VA]          # STORM_VA == 0x000e6000
-    storm_high = [r for r in storm_tail if r["pcn"] >= STORM_MIN_ORD]  # STORM_MIN_ORD == 0x4000
+`check_1015_capture.py` (`classify_storm`, the current revision):
+
+    tail = [r for r in abt_rows if r["pcn"] is not None and r["pcn"] >= tail_min]
+    # MOST tail rows wins; then EARLIEST first appearance (a storm RECURS from low ordinals up, so a
+    # lone row that first appears at a high ordinal is NOT the storm - it is the V-G4 "moved" sibling);
+    # then the HIGHEST ordinal reached.
+    va = max(counts, key=lambda f: (counts[f], -minord[f], maxord[f]))
+    storm_tail = [r for r in tail if r["far"] == va]
+    storm_high = [r for r in storm_tail if r["pcn"] >= STORM_MIN_ORD]      # STORM_MIN_ORD == 0x4000
 
 where `tail` = the abort rows whose own `_pcn >= TAIL_MIN_N` (0x400).  The storm is therefore defined
-**by the row's OWN `_pcfar == 0x000e6000`**, never by "the last N rows": 1014's tail is NOT uniform -
-its last two samples (`_pcn=0x80000`, `0x100000`) are dyld's own faults at `far≈0x3a0xxxxx` and are a
-DIFFERENT fault (`records/1014-press-read.txt` §2, design §0.4), so a positional rule would silently
-merge them into the storm count.  `classify_storm` classifies them SEPARATELY (`other_high`) and the
-reader never averages the two.  This file cites that line rather than restating the rule.
+**by the row's OWN `_pcfar`, the value the classifier RECOVERED** - never by "the last N rows", and
+never by a literal.  1014's tail is NOT uniform - its last two samples (`_pcn=0x80000`, `0x100000`)
+are dyld's own faults at `far≈0x3a0xxxxx` and are a DIFFERENT fault
+(`records/1014-press-read.txt` §2, design §0.4), so a positional rule would silently merge them into
+the storm count; `classify_storm` classifies them SEPARATELY (`other_high`) and the reader never
+averages the two.
+
+**THIS READER READS `storm["va"]` AND NOTHING ELSE.**  In `b_g_verdict()` (and its helpers) the storm
+key is a LOCAL `storm_va = storm["va"]`; the module has no storm-VA literal -
+`STORM_VA_LAST_RESORT = 0x000E6000` exists solely as a LABEL for the withhold text in the one case
+where no tail row was published at all (so there is no value to compute the storm from).  Reading
+`C15.STORM_VA` would re-import the very defect this file is being fixed for.  Likewise the storm's
+`pc` moves with the VA (1014 `0x2bed61a0` -> 1015 `0x2be171a0`), so it is COMPUTED (the modal `pc` of
+the storm's own rows) and reported as corroboration beside the 1014 value - never a gate.
 
 ------------------------------------------------------------------------------
 THE 1015b CELLS (`[1015b] VERDICT:`) - the pre-registered decisive test
 ------------------------------------------------------------------------------
   * **G-CONFIRMED (storm stopped)** - the STOP DEFINITION holds: **fewer than `STORM_MIN_ROWS` (=3)
-    tail rows carry `far=0xe6000`, AND no `far=0xe6000` row appears at `_pcn >= 0x4000`** - AND the run
-    is otherwise SANE.  The verdict NAMES which sane shape it is (see "sanity" below).  H-G CONFIRMED:
-    the widened TLBIALL evicted the stale GLOBAL translation and the current user-RW leaf served the
-    store.
-  * **G-REFUTED (storm persists)** - the constant `far=0xe6000` / `pc=0x2bed61a0` / `fsr=0x0000080f`
-    storm REAPPEARS: `>= STORM_MIN_ROWS` storm rows in the tail, OR any storm row at `_pcn >= 0x4000`.
-    A full TLBIALL ran for this pmap and the store still faults ⇒ the stale entry is not (or is not the
-    only) cause ⇒ fall to §3b's P-X1 / H-X.
+    tail rows carry the storm VA (`storm["va"]`, the value the classifier RECOVERED), AND no such row
+    appears at `_pcn >= 0x4000`** - AND the run is otherwise SANE.  The verdict NAMES which sane shape
+    it is (see "sanity" below).  H-G CONFIRMED: the widened TLBIALL evicted the stale GLOBAL
+    translation and the current user-RW leaf served the store.
+  * **G-REFUTED (storm persists)** - the storm the classifier recovered (its own VA, at the `fsr` the
+    rows publish) REAPPEARS: `>= STORM_MIN_ROWS` storm rows in the tail, OR any storm row at
+    `_pcn >= 0x4000`.  A full TLBIALL ran for this pmap and the store still faults ⇒ the stale entry
+    is not (or is not the only) cause ⇒ fall to §3b's P-X1 / H-X.
   * **G-WITHHOLD** - a truncated / absent capture, or the guard keys are missing/contradictory.  This
     reader **refuses to emit a verdict** and NAMES the exact missing or contradictory key.  The
-    WITHHOLD reasons are enumerated in `b_g_verdict()`; there are SEVEN, and every one of them is a
-    sentence about the EVIDENCE, never about H-G.
+    WITHHOLD reasons are enumerated in `b_g_verdict()`; there are FOUR structural guards, and every
+    one of them is a sentence about the EVIDENCE, never about H-G.
 
 ### WITHHOLD vs REFUTED - THE DISTINCTION THE TASK ASKS FOR
 The two are separated by ONE question: **is there a storm-shaped reading to refute, or is there
@@ -197,9 +221,32 @@ C15, _IMPORT_NOTE = _load_1015()
 TAIL_MIN_N = C15.TAIL_MIN_N if C15 else 0x400          # tail = abort rows with `_pcn >= 0x400`
 STORM_MIN_ROWS = C15.STORM_MIN_ROWS if C15 else 3      # < 3 storm rows in the tail == stopped
 STORM_MIN_ORD = C15.STORM_MIN_ORD if C15 else 0x4000   # no storm row at `_pcn >= 0x4000`
-STORM_VA = C15.STORM_VA if C15 else 0x000E6000         # the storm's constant `far`
+# **THE STORM VA IS *NOT* A CONSTANT - AND THIS FILE MUST NOT CARRY ONE.**
+# `STORM_VA_LAST_RESORT` exists for the ONE case where no tail row was published at all (so there is
+# no value to compute the storm from): it is a LABEL for the withhold text, never a decision input.
+# The storm's `far` MOVES per run - 1011 0x61000 -> 1012 0x2e000 -> 1014 0xe6000 -> 1015 0x27000 -
+# because it is the page the COW/CS retry picks.  Hardcoding it turned the COMPLETE 1015 verdict into
+# V-AT0 + a vacuous "STOPPED" ([[mi4-measurement-defects]]: the number was an artifact of how it was
+# taken).  1015's `classify_storm` now COMPUTES it and returns it as `storm["va"]`; **this reader
+# reads THAT, never a module literal** - `b_g_verdict()` binds a local `storm_va = storm["va"]`.
+# The 1015 constant is deliberately NOT read here: doing so would re-import the defect.
+STORM_VA_LAST_RESORT = 0x000E6000                      # label only (no tail => no value to compute)
+# THE SELF-TEST'S OWN STORM VA - DELIBERATELY **NOT** 0xe6000.  The 1015 run's storm is `0x27000`,
+# and the whole defect being fixed was a literal that stayed at 0xe6000; a self-test whose synthetic
+# storm used the literal could not fail on it.  So the synthetic storm is 0x27000 and a DIFFERENT VA
+# (`SYN_OTHER_VA`, the dyld value 1014 §0.4 shows) is placed AFTER it at a higher ordinal, proving
+# the reader follows the RECURRING fault and not a literal or a position.
+SYN_STORM_VA = 0x00027000
+SYN_STORM_PC = 0x2BE171A0                              # the 1015 run's `pc` (a NON-1014 value)
+SYN_OTHER_VA = 0x3A1141E8                              # 1014 §0.4's dyld VA (a NON-storm tail fault)
 STORM_FSR = C15.STORM_FSR if C15 else 0x0000080F       # FS=15 (permission/level-2), WnR=1, USER
-STORM_PC = 0x2BED61A0                                  # §0: the storm's constant `pc` (1014 record §2)
+STORM_FSR_WNR_MASK = 0x00000F0F                        # the FS/WnR bits of `_fsr` (1015's own mask)
+# The storm's `pc` MOVES per run TOO (1014 0x2bed61a0 -> 1015 0x2be171a0: the retrying CALLER moves
+# with the page).  So it is likewise NOT a decision input: `b_g_verdict()` computes the MODAL `pc` of
+# the storm's own rows and reports it beside the 1014 value as CORROBORATION - never as a gate.  A
+# row-count/ordinal test on a by-value storm VA does not need the `pc` to agree, and requiring it
+# would silently turn a real persisting storm into a withhold on the next run.
+STORM_PC_1014 = 0x2BED61A0                             # the 1014 run's `pc` - CORROBORATION ONLY
 STORM_ORD_SEEN = 0x40000                               # §3a: "the 1014 storm's own rows run to 0x40000"
 
 WDT_PETS_KEY = "xnu_live_wdt_pets"                     # the RESIDENT cell (1014 baseline: 0x61)
@@ -359,8 +406,9 @@ def b_g_verdict(cap, storm, struct, sanity):
           (c) no abort row at `_pcn >= TAIL_MIN_N` (1015's `storm["reached"] == False`);
           (d) the terminal marker is absent while `TRUNC_MARKER_IS_REQUIRED`.
       G2. WITHHOLD-vs-REFUTED is the storm's OBSERVABILITY, and it is not a judgement call:
-          **G-REFUTED requires a storm ROW to point at.**  `storm_high` non-empty (a `far=0xe6000`
-          row at `_pcn >= 0x4000`) is the 1014 shape exactly and is the ONLY refutation input.
+          **G-REFUTED requires a storm ROW to point at.**  `storm_high` non-empty (a storm-VA row at
+          `_pcn >= 0x4000`) is the 1014 shape exactly, and the row count / `storm_high` are the ONLY
+          refutation inputs - both keyed on `storm["va"]`, the RECOVERED value.
       G3. G-CONFIRMED requires the STOP DEFINITION (`< STORM_MIN_ROWS` storm rows in the tail AND no
           `storm_high`) AND a sane run (PANICKED or RESIDENT; UNKNOWN is named and reported).
 
@@ -368,6 +416,32 @@ def b_g_verdict(cap, storm, struct, sanity):
     """
     print("\n== [1015b] THE GLOBAL-FIX CELL - DID THE WIDENED FLUSH STOP THE STORM? ==")
     storm_tail, storm_high = storm["storm_tail"], storm["storm_high"]
+    # **THE STORM VA, FROM THE CLASSIFIER, BY VALUE.**  `storm["va"]` is what `classify_storm`
+    # RECOVERED from the run's own tail (the recurring `far`), and it MOVES every run (1011 0x61000 ->
+    # 1012 0x2e000 -> 1014 0xe6000 -> 1015 0x27000).  Every `far`-keyed test below uses THIS local.
+    # The module holds NO storm-VA literal for a decision: `STORM_VA_LAST_RESORT` is a label for the
+    # withhold text only, and it is used ONLY in the guard branches where no tail row exists (so
+    # there is no value to compute).  Reading `C15.STORM_VA` here would re-import the exact defect
+    # that made the 1015 reader call a complete verdict V-AT0.
+    storm_va = storm["va"] if storm.get("va") is not None else STORM_VA_LAST_RESORT
+    # The storm's `pc` ALSO moves with its VA (1014 0x2bed61a0 -> 1015 0x2be171a0: the retrying caller
+    # moves with the page), so it is COMPUTED from the storm's own rows - the MODAL `pc` - and
+    # reported as corroboration.  It is NEVER a gate: a real persisting storm must not become a
+    # withhold because the caller moved (that would be the same class of defect in the other
+    # direction).  `STORM_PC_1014` is printed beside it only as a reference point.
+    storm_pc = None
+    if storm_tail:
+        pcs = {}
+        for r in storm_tail:
+            if r["pc"] is not None:
+                pcs[r["pc"]] = pcs.get(r["pc"], 0) + 1
+        storm_pc = max(pcs, key=lambda p: (pcs[p], -p)) if pcs else None
+    say("OBS", "THE STORM BY VALUE (recovered by the classifier, never a literal): `far`=%s "
+               "(%d tail row(s)); its modal `pc`=%s (%s); for reference, 1014's run was "
+               "`far`=%s/`pc`=%s - BOTH MOVED, and neither is a decision input here" % (
+                   fmt(storm_va), len(storm_tail), fmt(storm_pc),
+                   "the storm's OWN calling site this run" if storm_pc is not None else "no pc row",
+                   fmt(STORM_VA_LAST_RESORT), fmt(STORM_PC_1014)))
 
     say("OBS", "capture structure: terminal marker `%s` %s; `%s*` tokens x%d; `%s` samples x%d "
                "(MAX=%s @:%s); published `_wfkind` {%s}" % (
@@ -390,12 +464,12 @@ def b_g_verdict(cap, storm, struct, sanity):
     wf_storm_full = [r for r in C15.wf_records(cap)
                      if r["wfn"] is not None and r["wfn"] >= TAIL_MIN_N
                      and r["wfkind"] == 1
-                     and (r["wfva"] == STORM_VA or r["pcfar"] == STORM_VA)]
+                     and (r["wfva"] == storm_va or r["pcfar"] == storm_va)]
     say("PASS" if wf_storm_full else "OBS",
         "the widened TLBIALL (`_wfkind=1`) on the STORM'S OWN row(s): x%d - %s" % (
             len(wf_storm_full),
             "ATTRIBUTABLE: a full flush ran keyed to `far=%s`, so a stop here IS a statement about "
-            "the widened arm" % fmt(STORM_VA) if wf_storm_full else
+            "the widened arm" % fmt(storm_va) if wf_storm_full else
             "NOT attributable%s - and this is the trap the 1014 capture already exercises: "
             "`_wfkind=1` is published for FULL flushes of NON-CURRENT pmaps at low ordinals "
             "(1014 record §4), so its mere presence is NOT the widened arm.  A STOP without an "
@@ -405,13 +479,13 @@ def b_g_verdict(cap, storm, struct, sanity):
                 " (the vocabulary carries `1`, but on no storm-keyed row)")))
     say("OBS", "TAIL (abort `_pcn` >= %s): x%d abort ordinal(s); of them `far=%s` x%d (THE STORM), "
                "`far != %s` x%d; at `_pcn >= %s`: storm x%d, other x%d" % (
-                   fmt(TAIL_MIN_N), len(storm["tail"]), fmt(STORM_VA), len(storm_tail),
-                   fmt(STORM_VA), len(storm["tail"]) - len(storm_tail), fmt(STORM_MIN_ORD),
+                   fmt(TAIL_MIN_N), len(storm["tail"]), fmt(storm_va), len(storm_tail),
+                   fmt(storm_va), len(storm["tail"]) - len(storm_tail), fmt(STORM_MIN_ORD),
                    len(storm_high), len(storm["other_high"])))
     say("OBS", "the STOP DEFINITION (design §3c / 1015 §3a, identified BY VALUE - a row's own "
                "`_pcfar == %s`, never a position): fewer than %d storm tail row(s) AND none at "
                "`_pcn >= %s` - MEASURED: %d row(s), %d at/above %s  =>  %s" % (
-                   fmt(STORM_VA), STORM_MIN_ROWS, fmt(STORM_MIN_ORD), len(storm_tail),
+                   fmt(storm_va), STORM_MIN_ROWS, fmt(STORM_MIN_ORD), len(storm_tail),
                    len(storm_high), fmt(STORM_MIN_ORD),
                    "STOPPED" if (len(storm_tail) < STORM_MIN_ROWS and not storm_high)
                    else "PERSISTS"))
@@ -462,32 +536,36 @@ def b_g_verdict(cap, storm, struct, sanity):
                              "written.  G-CONFIRMED is WITHHELD on this capture BY DESIGN; recover "
                              "the full `last_kmsg` (scripts/recover_last_kmsg.sh) and re-run." % (
                                  len(storm["tail"]), fmt(TAIL_MIN_N), fmt(struct["pcn_max"]),
-                                 TRUNC_MARKER, fmt(STORM_VA)))
+                                 TRUNC_MARKER, fmt(storm_va)))
         return "G-WITHHOLD", None, "no_terminal_marker"
 
     # ---- G2. G-REFUTED IS THE POSITIVE MEASUREMENT: it needs a storm ROW.  Nothing below can be
     # reached without one, which is why WITHHOLD and REFUTED can never be confused here.
     if not stopped:
-        verdict_pc = storm_tail[-1]["pc"] if storm_tail else None
-        const_tail = [r for r in storm_tail
-                      if r["pc"] == STORM_PC and r["fsr"] == STORM_FSR]
-        report("G-REFUTED", "STORM PERSISTS - H-G REFUTED IN BEHAVIOUR (design §3c V-G2).  The "
-                            "constant `far=%s` storm REAPPEARS: x%d storm tail row(s) (>= %d) "
-                            "and/or x%d at `_pcn >= %s` (the 1014 storm's own band, which ran to "
-                            "`_pcn=%s`).  LAST storm row @:%d: pcn=%s far=%s fsr=%s pc=%s; x%d of "
-                            "x%d storm rows carry the 1014 constant triple (pc=%s, fsr=%s).  A FULL "
-                            "`arm_tlb_flushID()` (TLBIALL) ran for this pmap and the store STILL "
-                            "faults => the stale GLOBAL entry is not the cause (or not the only "
-                            "one): go to 1015's §3b ladder (P-X1) and then to H-X - the CPU's own "
-                            "state (SCTLR/PRRR), not another table read.  Run sanity: %s." % (
-                                fmt(STORM_VA), len(storm_tail), STORM_MIN_ROWS, len(storm_high),
+        last = storm_tail[-1] if storm_tail else None
+        # The rows that carry THIS storm's own modal `pc` - CORROBORATION that the recurrence is the
+        # same calling site, computed and reported, never a gate (the caller's `pc` moves with the VA).
+        same_pc = [r for r in storm_tail if storm_pc is not None and r["pc"] == storm_pc]
+        report("G-REFUTED", "STORM PERSISTS - H-G REFUTED IN BEHAVIOUR (design §3c V-G2).  The storm "
+                            "the CLASSIFIER RECOVERED BY VALUE (`far=%s`) REAPPEARS: x%d storm tail "
+                            "row(s) (>= %d) and/or x%d at `_pcn >= %s` (the 1014 storm's own band, "
+                            "which ran to `_pcn=%s`).  LAST storm row @:%d: pcn=%s far=%s fsr=%s "
+                            "pc=%s; x%d of x%d storm rows recur at its own modal `pc`=%s (this "
+                            "run's calling site - 1014's was pc=%s: BOTH the VA and the `pc` move "
+                            "per run, so neither is a literal here).  A FULL `arm_tlb_flushID()` "
+                            "(TLBIALL) ran for this pmap and the store STILL faults => the stale "
+                            "GLOBAL entry is not the cause (or not the only one): go to 1015's §3b "
+                            "ladder (P-X1) and then to H-X - the CPU's own state (SCTLR/PRRR), not "
+                            "another table read.  Run sanity: %s." % (
+                                fmt(storm_va), len(storm_tail), STORM_MIN_ROWS, len(storm_high),
                                 fmt(STORM_MIN_ORD), fmt(STORM_ORD_SEEN),
-                                storm_tail[-1]["ln"] if storm_tail else -1,
-                                fmt(storm_tail[-1]["pcn"]) if storm_tail else "?",
-                                fmt(storm_tail[-1]["far"]) if storm_tail else "?",
-                                fmt(storm_tail[-1]["fsr"]) if storm_tail else "?",
-                                fmt(verdict_pc), len(const_tail), len(storm_tail), fmt(STORM_PC),
-                                fmt(STORM_FSR), sanity[0]))
+                                last["ln"] if last else -1,
+                                fmt(last["pcn"]) if last else "?",
+                                fmt(last["far"]) if last else "?",
+                                fmt(last["fsr"]) if last else "?",
+                                fmt(last["pc"]) if last else "?",
+                                len(same_pc), len(storm_tail), fmt(storm_pc), fmt(STORM_PC_1014),
+                                sanity[0]))
         return "G-REFUTED", stopped, "storm_persists"
 
     # ---- G3. THE STORM IS GONE.  The stop definition holds AND the capture is structurally
@@ -512,7 +590,7 @@ def b_g_verdict(cap, storm, struct, sanity):
              "1015 §3a's V-G3 is the guard - 'the flush was refused, so of course it stopped' is "
              "no more a confirmation than 'the flush was refused, so of course it still faults'.  "
              "Confirm the widened arm fired for this pmap before taking §7(b)." % (
-                 STORM_VA,
+                 storm_va,
                  " (the capture's `_wfkind` vocabulary is {%s}, but on no storm-keyed row)" % (
                      ",".join(str(k) for k in struct["wf_kinds"])) if struct["wf_kinds"] else
                  " (the capture publishes no `_wfkind` at all)"))
@@ -528,7 +606,7 @@ def b_g_verdict(cap, storm, struct, sanity):
                           "follow-on.\n      CAVEAT CARRIED WITH THIS CELL: %s" % (
                               len(storm_tail), STORM_MIN_ROWS, len(storm_high),
                               fmt(STORM_MIN_ORD), fmt(STORM_ORD_SEEN), fmt(struct["pcn_max"]),
-                              TRUNC_MARKER, fmt(STORM_VA), sane_txt,
+                              TRUNC_MARKER, fmt(storm_va), sane_txt,
                               "x%d `_wfkind=1` row(s) ARE keyed to the storm, so the widened arm "
                               "was measured FOR THIS PMAP" % len(wf_storm_full)
                               if wf_storm_full else
@@ -548,11 +626,13 @@ def _mk(tmpdir, name, lines):
     return path
 
 
-def _abort_row(n, far, pc=STORM_PC, fsr=STORM_FSR, wfkind=None):
+def _abort_row(n, far, pc=STORM_PC_1014, fsr=STORM_FSR, wfkind=None):
     """One synthetic abort at ordinal `n`, with a flush row (if `wfkind` is not None) beside it.
 
     The row is written in the recorder's OWN one-write order (`_pcn` then the abort's state) - the
-    order 1015's `aborts()` binds to."""
+    order 1015's `aborts()` binds to.  `pc` defaults to 1014's value only because a synthetic row
+    needs SOME pc; the self-tests override it freely, since the reader COMPUTES the storm's pc and
+    never compares it to a literal."""
     out = ["xnu_live_abt_pcn=0x%08x" % n,
            "xnu_live_abt_pcfar=0x%08x" % far,
            "xnu_live_abt_fsr=0x%08x" % fsr,
@@ -633,43 +713,76 @@ def self_test(capture_arg=None):
         print("  [%s] %s: got %s, want %s%s" % ("ok" if ok else "FAIL", desc, got, want,
                                                 (" - " + extra) if extra else ""))
 
-    # ---- 0. THE IMPORT ITSELF IS THE FIRST CASE: the storm rule is REUSED, by identity.
+    # ---- 0. THE IMPORT ITSELF IS THE FIRST CASE: the storm rule is REUSED, by identity - and the
+    #        storm VA is NO LONGER taken from a module literal (the defect being fixed).
     check("the storm-identification rule is 1015's OWN object (reused, never cloned)",
           "yes" if (storm_on.__globals__["C15"] is not None
-                    and C15.classify_storm is C15.classify_storm
                     and TAIL_MIN_N == C15.TAIL_MIN_N
                     and STORM_MIN_ROWS == C15.STORM_MIN_ROWS
                     and STORM_MIN_ORD == C15.STORM_MIN_ORD
-                    and STORM_VA == C15.STORM_VA) else "no", "yes",
-          "TAIL_MIN_N=%s STORM_MIN_ROWS=%d STORM_MIN_ORD=%s STORM_VA=%s (all from %s)" % (
-              fmt(TAIL_MIN_N), STORM_MIN_ROWS, fmt(STORM_MIN_ORD), fmt(STORM_VA), CHECK_1015_NAME))
+                    and STORM_FSR == C15.STORM_FSR) else "no", "yes",
+          "TAIL_MIN_N=%s STORM_MIN_ROWS=%d STORM_MIN_ORD=%s (all from %s)" % (
+              fmt(TAIL_MIN_N), STORM_MIN_ROWS, fmt(STORM_MIN_ORD), CHECK_1015_NAME))
+    # 0b. THE DEFECT GUARD, ASSERTED ON THE CLASSIFIER ITSELF: this reader holds NO storm-VA literal
+    #     for a decision, and the classifier COMPUTES the VA from the tail rather than returning 1015's
+    #     old constant.  Proven by FEEDING IT a synthetic tail whose recurring VA is 0x27000 and
+    #     checking it returns THAT - not 0xe6000.  A regression to the literal fails here.
+    import tempfile as _tf
+    _d = _tf.mkdtemp(prefix="check1015b-va-")
+    _p = _mk(_d, "va.txt", _abort_row(0x400, SYN_STORM_VA) + _abort_row(0x800, SYN_STORM_VA) +
+              _abort_row(0x4000, SYN_OTHER_VA, pc=0x38413AD0))
+    _st = storm_on(C15.Capture(_p))
+    check("the classifier COMPUTES the storm VA by value (0x27000, NOT the 0xe6000 literal)",
+          "yes" if _st["va"] == SYN_STORM_VA else "no", "yes",
+          "storm[\"va\"]=%s (SYN_STORM_VA=%s, the old literal was 0x000e6000)" % (
+              fmt(_st["va"]), fmt(SYN_STORM_VA)))
+    check("  ...and this module holds NO storm-VA literal used as a decision input "
+          "(`STORM_VA_LAST_RESORT` is a label, not read by `classify_storm`)",
+          "yes" if ("STORM_VA" not in [n for n in globals() if n == "STORM_VA"]
+                    and STORM_VA_LAST_RESORT != SYN_STORM_VA) else "no", "yes")
 
-    # ---- 1. G-CONFIRMED: the storm is GONE (no `far=0xe6000` row at all in the tail) while the
-    #        capture reaches the storm's own ordinal band and is structurally complete.  RESIDENT.
-    body = _abort_row(0x400, 0x3A1141E8, pc=0x38413AD0) + _abort_row(0x4000, 0x3A0138E0,
-                                                                   pc=0x3840EA3E) + \
-        _abort_row(0x40000, 0x3A1141E8, pc=0x38413AD0)
+    # ---- 1. G-CONFIRMED: the storm (SYN_STORM_VA = 0x27000) appears ONCE at low ordinal and does NOT
+    #        recur; a DIFFERENT VA appears LATER and does not recur either; the capture reaches high
+    #        ordinal and is complete.  RESIDENT.  NOTE: every VA here occurs ONCE - so the classifier
+    #        can only pick the storm by the EARLIEST FIRST APPEARANCE, and with one row it is STOPPED.
+    body = _abort_row(0x400, SYN_STORM_VA, pc=SYN_STORM_PC) + \
+        _abort_row(0x4000, 0x3A0138E0, pc=0x3840EA3E) + \
+        _abort_row(0x40000, SYN_OTHER_VA, pc=0x38413AD0)
     g, stopped, out, pcell, at = _run(tmpdir, "gconfirm.txt", body)
-    check("G-CONFIRMED: tail reaches 0x40000 with ZERO `far=0xe6000` rows, RESIDENT, marker present",
-          g, "G-CONFIRMED", "stopped=%s sanity=RESIDENT" % stopped)
+    check("G-CONFIRMED: the non-0xe6000 storm (%s) appears once, does not recur, no high-ordinal "
+          "storm row; RESIDENT, marker present" % fmt(SYN_STORM_VA), g, "G-CONFIRMED",
+          "stopped=%s sanity=RESIDENT" % stopped)
     check("  ...and its verdict text NAMES the run RESIDENT (the task: 'say which')",
           "yes" if "the run is RESIDENT" in out else "no", "yes")
+    check("  ...and the RECOVERED storm VA is named BY VALUE (0x27000), never the 0xe6000 literal",
+          "yes" if ("0x00027000" in out
+                    and "control_VAs 0x000e6000" not in out
+                    and "storm key 0x000e6000" not in out) else "no", "yes")
 
     # ---- 1b. G-CONFIRMED with a PANIC: a sane 1015b outcome, NAMED as PANICKED, not as a clean run.
     panic_line = "panic(cpu 0 caller 0x80012345): the widened flush broke a path"
-    body = _abort_row(0x400, 0x3A1141E8, pc=0x38413AD0) + [panic_line]
+    body = _abort_row(0x400, SYN_STORM_VA, pc=SYN_STORM_PC) + [panic_line]
     g, stopped, out, pcell, at = _run(tmpdir, "gconfirm-panic.txt", body)
     check("G-CONFIRMED + a panic stanza: still a SANE stop, NAMED PANICKED (not a clean fix)",
           "yes" if (g == "G-CONFIRMED" and "the run is PANICKED" in out) else "no", "yes",
           "cell=%s" % g)
 
-    # ---- 2. G-REFUTED: the 1014 storm shape reproduces EXACTLY (nine rows 0x400..0x40000).
+    # ---- 2. G-REFUTED: the storm (SYN_STORM_VA = 0x27000, a NON-0xe6000 value) RECURS across the
+    #        1014 ordinal shape (nine rows 0x400..0x40000), and a DIFFERENT VA (SYN_OTHER_VA, 1014
+    #        §0.4's dyld value) appears AFTER it at the highest ordinals.  The reader MUST pick
+    #        0x27000 (the recurring fault) over the later, rarer dyld VA - this is the case a
+    #        positional or literal rule would get wrong.
     body = []
     for n in STORM_NS_1014:
-        body += _abort_row(n, STORM_VA, wfkind=1)
+        body += _abort_row(n, SYN_STORM_VA, pc=SYN_STORM_PC, wfkind=1)
+    body += _abort_row(0x80000, SYN_OTHER_VA, pc=0x38413AD0)
+    body += _abort_row(0x100000, SYN_OTHER_VA, pc=0x3840EA3E)
     g, stopped, out, pcell, at = _run(tmpdir, "grefuted.txt", body)
-    check("G-REFUTED: the constant far/pc/fsr storm reappears at `_pcn >= 0x4000` (the 1014 shape)",
-          g, "G-REFUTED", "stopped=%s" % stopped)
+    check("G-REFUTED: the RECURRING non-0xe6000 storm (%s) reappears at `_pcn >= 0x4000`, with a "
+          "DIFFERENT VA appearing after it" % fmt(SYN_STORM_VA), g, "G-REFUTED",
+          "stopped=%s" % stopped)
+    check("  ...and the reader followed the RECURRING VA (0x27000), not the later one (0x3a1141e8)",
+          "yes" if ("0x00027000" in out.split("LAST storm row")[0]) else "no", "yes")
     check("  ...and the refutation is POSITIVE: it points at a storm row (not an absence)",
           "yes" if ("LAST storm row @:" in out and "PERSISTS" in out) else "no", "yes")
 
@@ -677,29 +790,42 @@ def self_test(capture_arg=None):
     #         (so `storm_high` is empty and only the COUNT refutes - `not stopped` for the row count).
     body = []
     for n in (0x400, 0x800, 0x1000):
-        body += _abort_row(n, STORM_VA, wfkind=1)
+        body += _abort_row(n, SYN_STORM_VA, pc=SYN_STORM_PC, wfkind=1)
     g, stopped, out, pcell, at = _run(tmpdir, "grefuted-count.txt", body)
     check("G-REFUTED by the ROW COUNT alone (3 storm rows, none at `_pcn >= 0x4000`)", g, "G-REFUTED",
           "stopped=%s" % stopped)
 
-    # ---- 3. G-REFUTED, the boundary that must NOT be a stop: TWO storm rows at LOW ordinal is
-    #        `stopped` by the definition (< 3) - so this case is G-CONFIRMED, and the reader must
-    #        say so rather than inventing a third state.  (A boundary case, asserted explicitly
-    #        because 3 - 1 is where an off-by-one would hide.)
+    # ---- 3. THE STOP BOUNDARY: TWO storm rows at LOW ordinal is `stopped` by the definition (< 3) -
+    #        so this case is G-CONFIRMED, and the reader must say so rather than inventing a third
+    #        state.  (Asserted explicitly because 3 - 1 is where an off-by-one would hide.)
     body = []
     for n in (0x400, 0x800):
-        body += _abort_row(n, STORM_VA, wfkind=1)
+        body += _abort_row(n, SYN_STORM_VA, pc=SYN_STORM_PC, wfkind=1)
     g, stopped, out, pcell, at = _run(tmpdir, "gboundary2.txt", body)
     check("the STOP boundary: 2 storm rows (< 3) at low ordinal => STOPPED (G-CONFIRMED)",
           "yes" if (g == "G-CONFIRMED" and stopped) else "no", "yes", "cell=%s stopped=%s" % (g, stopped))
     # ...and the case one row LATER is the opposite: 3 rows is NOT stopped.
     body = []
     for n in (0x400, 0x800, 0x1000):
-        body += _abort_row(n, STORM_VA, wfkind=1)
+        body += _abort_row(n, SYN_STORM_VA, pc=SYN_STORM_PC, wfkind=1)
     g, stopped, out, pcell, at = _run(tmpdir, "gboundary3.txt", body)
     check("the STOP boundary: 3 storm rows is NOT stopped => G-REFUTED",
           "yes" if (g == "G-REFUTED" and not stopped) else "no", "yes",
           "cell=%s stopped=%s" % (g, stopped))
+
+    # ---- 3b. THE VA-MOVES-WITH-THE-RUN CASE (the exact defect): the SAME tail shape as case 1
+    #         (G-CONFIRMED) but with a DIFFERENT single storm VA (0x27000 vs 0xe6000).  Both must
+    #         read G-CONFIRMED - a reader keyed on the 0xe6000 literal would read one of them as a
+    #         persist/vacuous.  This is the regression test for the fix.
+    for va, tag in ((0x000E6000, "old-literal"), (SYN_STORM_VA, "1015-value"),
+                    (0x00061000, "1011-value"), (0x0002E000, "1012-value")):
+        body = _abort_row(0x400, va, pc=SYN_STORM_PC) + \
+            _abort_row(0x40000, SYN_OTHER_VA, pc=0x38413AD0)
+        g, stopped, out, pcell, at = _run(tmpdir, "vamove-%s.txt" % tag, body)
+        cases.append(("storm VA %s (%s) is followed BY VALUE" % (fmt(va), tag), g, "G-CONFIRMED",
+                      g == "G-CONFIRMED", "stopped=%s" % stopped))
+        print("  [%s] storm VA %s (%s) is followed BY VALUE: got %s" % (
+            "ok" if g == "G-CONFIRMED" else "FAIL", fmt(va), tag, g))
 
     # ---- 4. G-WITHHOLD: a TRUNCATED log that LOOKS stopped.  The tail carries NO storm row and
     #        reaches high ordinal, but the terminal marker is ABSENT - the one shape that
@@ -748,23 +874,19 @@ def self_test(capture_arg=None):
     # paired walker row V-AT1 requires (`_wdap=0b11`/`_wdapx=0`/`_leafng=0`/`_wddom=0`) is present.
     # WITHOUT that pairing 1015's own reader withholds V-AT0 (its self-test case 12h), which is the
     # correct behaviour and is why this case pairs them.
-    at_body = C15._row(0x4000, STORM_VA, wfkind=2, atok=1, atpar=0x00000001, atpr=0x841E9000)
+    at_body = C15._row(0x4000, SYN_STORM_VA, wfkind=2, atok=1, atpar=0x00000001, atpr=0x841E9000)
     g, stopped, out, pcell, at = _run(tmpdir, "at1015.txt", at_body)
     check("the 1015 AT/PAR cell is re-run over the SAME capture (V-AT1 => H-G at the hardware)",
           at, "V-AT1", "1015b cell=%s" % g)
     check("  ...and the 1015b cell is INDEPENDENT of it (a persisting storm is still REFUTED)",
           g, "G-REFUTED", "stopped=%s" % stopped)
     # ...and the CONSISTENT pair the design calls "the strongest cell in the family" (design §3d):
-    # V-AT1 + a STOPPED storm.  Built by hand (a stopped tail has no storm row for `_row` to
-    # anchor the AT row's ordinal to), so the AT keys are written beside a NON-storm tail row.
-    # NOTE: `_row`'s `_wdva` is the STORM VA, and 1015's §3b/§3c read the storm rows BY `_wdva` OR
-    # the abort's `pcfar` - here the abort's own `pcfar` is dyld's (a stop), while the paired wd row
-    # still names the storm VA, which is exactly the "the walk says what it says at this abort" pair.
-    at_stop = ["xnu_live_abt_pcn=0x00040000", "xnu_live_abt_pcfar=0x3a1141e8",
-               "xnu_live_abt_fsr=0x0000080f", "xnu_live_abt_pc=0x38413ad0"] + [
-        ln for ln in C15._row(0x40000, STORM_VA, atok=1, atpar=0x00000001, atpr=0x841E9000)
-        if "xnu_live_abt_pcn" not in ln and "xnu_live_abt_pcfar" not in ln
-        and "xnu_live_abt_fsr" not in ln and "xnu_live_abt_pc=" not in ln]
+    # V-AT1 + a STOPPED storm.  The tail is ONE aborted row carrying the storm's own VA at the
+    # lowest ordinal (so the classifier recovers THAT VA and the storm does not recur - `>`= the
+    # STOP definition), and the SAME row publishes the AT keys, so `_wdva == storm["va"]` pairs the
+    # AT row to the storm by value and 1015's `s_at` reads the storm's own hardware answer.
+    at_stop = C15._row(0x400, SYN_STORM_VA, pc=SYN_STORM_PC, wfkind=1, atok=1,
+                       atpar=0x00000001, atpr=0x841E9000)
     g2, stopped2, out2, pcell2, at2 = _run(tmpdir, "at-stop.txt", at_stop)
     check("§3d's strongest pair: V-AT1 (the hardware's translation is not the leaf) + a STOPPED "
           "storm => both halves agree", "yes" if (at2 == "V-AT1" and g2 == "G-CONFIRMED") else "no",
@@ -780,28 +902,23 @@ def self_test(capture_arg=None):
         _abort_row(0x4000, 0x3A0138E0, pc=0x3840EA3E, wfkind=1)
     g, stopped, out, pcell, at = _run(tmpdir, "attr-no.txt", body)
     check("ATTRIBUTION (i): a `_wfkind=1` row on a NON-storm VA does not attribute a stop to the "
-          "widened arm (`_wfva`/`_pcfar != 0xe6000`) - the 1014 capture's own trap",
+          "widened arm (`_wfva`/`_pcfar != the storm VA`) - the 1014 capture's own trap",
           "yes" if (g == "G-CONFIRMED" and "NOT attributed" in out) else "no", "yes",
           "cell=%s" % g)
-    # For (ii): a stopped tail whose ONE flush row is keyed to the storm VA (`_wfva=0xe6000`) while
-    # the ABORT it rides is dyld's - i.e. the widened flush ran for the storm's pmap and the storm
-    # did not re-fault.  `_abort_row` keys `_wfva` to its own `far`, so the wf row is written by
-    # hand here with `_wfva=0xe6000` beside a non-storm abort.
-    body = ["xnu_live_abt_pcn=0x00040000", "xnu_live_abt_pcfar=0x3a1141e8",
-            "xnu_live_abt_fsr=0x0000080f", "xnu_live_abt_pc=0x38413ad0",
-            "xnu_live_abt_wfn=0x00040000 xnu_live_abt_wfva=0x000e6000 "
-            "xnu_live_abt_wfttb=0x81a86000 xnu_live_abt_wflive=0x81a86000 "
-            "xnu_live_abt_wfself=1 xnu_live_abt_wfshared=0 xnu_live_abt_wfncpus=1 "
-            "xnu_live_abt_wfasid=0x02 xnu_live_abt_wfkind=1 xnu_live_abt_wfseen=1"]
+    # For (ii): a STOPPED tail whose ONE flush row is keyed to the storm VA (`_wfva == SYN_STORM_VA`) -
+    # i.e. the widened flush ran for the storm's pmap and the storm did not re-fault.  The storm VA
+    # appears ONCE at the tail's lowest ordinal (so the classifier recovers it and the definition
+    # reads STOPPED), and that row's own `_wfva` is keyed to it.
+    body = _abort_row(0x400, SYN_STORM_VA, pc=SYN_STORM_PC, wfkind=1)
     g, stopped, out, pcell, at = _run(tmpdir, "attr-yes.txt", body)
-    check("ATTRIBUTION (ii): a `_wfkind=1` row keyed to the STORM (`_wfva=0xe6000`) DOES attribute "
-          "the stop - and the verdict text says so",
+    check("ATTRIBUTION (ii): a `_wfkind=1` row keyed to the STORM (`_wfva == %s`) DOES attribute "
+          "the stop - and the verdict text says so" % fmt(SYN_STORM_VA),
           "yes" if (g == "G-CONFIRMED" and "keyed to the storm" in out) else "no", "yes",
           "cell=%s" % g)
 
     # ---- 7. A capture with NO AT keys at all (the 1015b arm may not carry PERM_WITNESS): the AT
     #        cell is ABSENT (None), never a withhold, and the 1015b cell still decides.
-    body = _abort_row(0x4000, STORM_VA, wfkind=1)
+    body = _abort_row(0x4000, SYN_STORM_VA, wfkind=1)
     g, stopped, out, pcell, at = _run(tmpdir, "noat.txt", body)
     check("no AT keys => NO AT cell (None), and the 1015b cell still decides", at, None,
           "1015b cell=%s" % g)
@@ -842,9 +959,13 @@ def main():
           "ASID-scoped TLBIASID.  Its pre-registered decisive test: H-G CONFIRMED = the storm "
           "STOPS; H-G REFUTED = the storm persists at the same far/pc/fsr.  This reader decides "
           "that cell AND re-runs 1015's AT/PAR cell and permission ladder over the same capture.")
-    print("the storm-identification rule is REUSED from tools/%s by import (not cloned): the storm "
-          "is a row whose OWN `_pcfar == %s` at `_pcn >= %s`, never a position." % (
-              CHECK_1015_NAME, fmt(STORM_VA), fmt(TAIL_MIN_N)))
+    print("the storm-identification rule is REUSED from tools/%s by import (not cloned), and it "
+          "COMPUTES the storm VA **BY VALUE**: the tail `far` with the most rows (ties -> earliest "
+          "first appearance, then the highest ordinal reached). The storm VA MOVES every run "
+          "(1011 0x00061000 -> 1012 0x0002e000 -> 1014 0x000e6000 -> 1015 0x00027000) because it "
+          "is the page the COW/CS retry picks, so NO literal VA is used as a decision input here "
+          "(the hardcoded 0xe6000 read 1015's COMPLETE verdict as a vacuous 'STOPPED')." % (
+              CHECK_1015_NAME,))
 
     storm = storm_on(cap)
     struct = structure(cap)
