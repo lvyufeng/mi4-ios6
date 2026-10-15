@@ -30,8 +30,14 @@ The 1010→1015 defect was a SINGLE-ADDRESS retry storm: ONE `far` re-executed ~
   The `far` ladder (11 rows, `n<=4` or powers of two): `0x00001000`, `0xcfdbd000`, `0xcfdfe000`,
   `0x2bd2bf7c`, `0x2bf1e004`, `0x2bee7fe8`, `0x2bef7018`, `0x30a9084c`, `0x358f23c8`, `0x3efd4000`,
   `0x3f014000` — **all distinct**. A retry storm is by definition ONE address repeated; there is no
-  such address in this capture. Total aborts (`xnu_live_abt_farn` max) = `0x3bf` = **959**, down from
-  ~2.1 M — a 2,200x collapse.
+  such address in this capture. Total aborts = `0x3bf` = **959**, down from ~2.1 M — a 2,200x collapse.
+
+  ⚠ **KEY-NAME CORRECTION (2026-10-15, from `records/1018-recon.txt` §2):** this file first wrote
+  "Total aborts (`xnu_live_abt_farn` max) = `0x3bf`". The value `0x3bf` is **`xnu_live_abt_nfar`**
+  — the count of CHANGES in `far` (`entry_stubs.c:2079`), not the abort count. `xnu_live_abt_farn`
+  is a powers-of-two ladder whose top published row is `0x200` = 512. The substantive claim (959
+  aborts, from the ~959 distinct faulting addresses) is unchanged and is confirmed by the
+  reconciliation in `records/1018-recon.txt` §2.1; only the key name was wrong.
 
   **The reader's G-WITHHOLD is CORRECT and its cause is not truncation.** The structural guards pass
   (terminal marker present, `xnu_live_abt_*` tokens x4414, `_pcn` ladder present to 0x200). The storm
@@ -175,6 +181,7 @@ sampler (`xnu_live_stall_*`), gated on the tick's own powers-of-two ladder
   | a `_pc` change read as progress | `0x2beef328` vs `0x2be97328` differ by 0x58000 | §2 (CORRECTED): de-slide each by its OWN run's slide (`0xd4000` here, `0x7c000` in 1003) ⇒ **same link addr** `0x2be1b328` ⇒ identity, not progress |
   | a span cap read as a wall | `usvc_n` stops at exactly `0x40` | §3: `USVC_FULL_N=64` is the recorder's window; A-NO-LADDER **withholds** |
   | an absent band read as a stop | checker's G-WITHHOLD (no_tail) | §1: read BY VALUE (11/11 distinct `far`, 959 aborts) ⇒ storm genuinely absent; the WITHHOLD is reported, not overridden |
+  | a key name trusted, not read | "`xnu_live_abt_farn` max = 0x3bf" | §1 CORRECTION: `0x3bf` is `_nfar` (distinct-`far` changes), not `_farn` (a powers-of-two ladder, top `0x200`) — read from the recorder at `entry_stubs.c:1997-2019`, verified against the capture |
   | an address matched by coincidence | `0x3b01f800` occurs once | §4 NULL CONTROL: it is a **storage data word**, not the stall pc |
   | a stop that is a stall | the storm is gone BUT a 24.4 s freeze persists | §5.2 kept, not hidden; §6 does not call the rung a success |
 

@@ -1,0 +1,165 @@
+1018 RECON — the LIVE CHANNEL CAP is why the undef witness is absent, and what that hides
+2026-10-15  (a READ of the already-recovered 1015b capture; no build, no press, no device action)
+
+CAPTURE
+  out/stage90/captures/recovered-unknown-arm-20261015-163856-last_kmsg.txt  (34011 lines,
+  1,541,529 bytes; recovered 16:38; terminal marker `No errors detected` PRESENT)
+
+--------------------------------------------------------------------------------
+## 0. THE FINDING IN ONE LINE
+
+**The live channel hit its cap. `__wrap_sleh_undef` — the recorder that would have named the
+`udf #254` — writes through the CAPPED channel and therefore wrote NOTHING, while the frontier
+it records happened ~4000 records later on the DIRECT channel.** 1017 named the instruction
+statically; this is why the capture could not name it dynamically.
+
+--------------------------------------------------------------------------------
+## 1. THE TWO CHANNELS, AND WHICH RECORDS SURVIVE THE CAP
+
+`src/entry/entry_stubs.c` carries two writers against the same 2 MB RAM console:
+
+  entry_live_write(key, value)   :4441  — CAPPED. Drops every record once
+                                          `g_live_records >= ENTRY_LIVE_CAP` (:4254, **24576u**),
+                                          one `xnu_live_capped` marker then silence.
+  entry_write_kv(key, value)     :4476  — DIRECT. No record-count gate; the only bound is the
+                                          console's own `max = 0x00200000u - 12u` (:4019).
+
+The capture says exactly one thing about the cap (`grep -n xnu_live_capped`):
+
+  :29963   xnu_live_capped=0x00006000        (0x6000 = 24576 = ENTRY_LIVE_CAP)
+
+**So: every `entry_live_write` record AFTER line 29963 was silently dropped.**
+
+Which records are on which channel — read from the SOURCE, not assumed:
+
+  | recorder                          | writer            | survives past :29963? |
+  |-----------------------------------|-------------------|-----------------------|
+  | `xnu_live_sleh_*`  (`entry_note_sleh`)   | `entry_live_write` | NO  |
+  | `xnu_live_undef_*` (`__wrap_sleh_undef`) | `entry_live_write` | NO  |
+  | `xnu_live_abt_nfar/_pcn/_wknx/...`       | `entry_write_kv`   | YES |
+  | `xnu_live_stall_*` (`entry_note_stall_sample`) | `entry_write_kv` | YES |
+  | `xnu_live_usvc_*`                        | `entry_write_kv`   | YES |
+  | `xnu_live_wdt_*`, `xnu_live_cadence_*`, `xnu_live_tick_sum_*` | `entry_write_kv` | YES |
+
+Evidence (the writers, by file:line):
+  entry_stubs.c:1822  entry_live_write("xnu_live_sleh_seq", ...)      <- CAPPED
+  entry_trace.c:5543  entry_live_write("xnu_live_undef_seq", ...)     <- CAPPED
+  entry_stubs.c:2013  entry_write_kv("xnu_live_abt_farn", ...)        <- DIRECT
+  entry_stubs.c:4657  entry_write_kv("xnu_live_stall_n", ...)         <- DIRECT
+  entry_stubs.c:7349  entry_write_kv("xnu_live_usvc_pc", ...)         <- DIRECT
+
+--------------------------------------------------------------------------------
+## 2. THE THREE RECORDS THAT PROVE IT — read after the cap, and they are the frontier
+
+  a. `xnu_live_sleh_seq` stops at **`0x00000028` = 40** (last at :28973/:28988), which is
+     BEFORE the cap. **This arm has `STAGE90_XNU_ABORT_TRACE=1`** (out/stage90/xnu_arm_entry-config.txt),
+     which sets `SLEH_LIVE_MAX`/`FRAMES`/`SEEN` all to **512** (entry_stubs.c:1728-1730) — so
+     the sleh band was 512, and the record stopped at 40 NOT because its band cut it. It
+     stopped because `entry_live_write` was already dropping.
+  b. `xnu_live_undef_seq` appears **zero** times in the whole capture (`grep -c` = 0).
+  c. `xnu_live_abt_nfar` reaches **`0x000003bf` = 959**, and **921 of its 959 records are
+     AFTER the cap line** (`awk 'NR>29963'`). The abort recorder kept writing; the abort
+     *detail* recorder (`sleh`) did not.
+
+  `xnu_live_abt_nfar` counts **CHANGES in `far`** (`entry_stubs.c:2079`), not aborts; the
+  abort count is `xnu_live_abt_pcn`/`_farn`'s ladder, whose max published row is `0x00000200`
+  = 512 (the same 512 `records/1016a-read.txt` §1 reads). **⚠ CORRECTION TO 1016a §1/§7:**
+  1016a cites "`xnu_live_abt_farn` max = `0x3bf` = 959" — that value belongs to `_nfar`
+  (distinct-`far` changes), not `_farn`. 1016a's stated meaning ("959 aborts, down from 2.1 M")
+  is right in substance; the key name it attributes it to is wrong. Non-load-bearing to its
+  verdict (the storm is absent by the 11/11 distinct-`far` argument either way).
+
+### 2.1 THE ARITHMETIC RECONCILES — the wrapper ran ~961 times, `sleh` logged 40
+
+  Both `entry_note_sleh` (:5829) and `entry_note_abt_far`/`_pc` (:5852/:5861) are called from
+  the SAME wrapper, `__wrap_sleh_abort` (entry_trace.c:5742-5895), so **the wrapper's entry
+  count bounds both**. Read by value:
+
+  - `_pcn` is a ladder over the CALL ordinal: `n <= 4 || n a power of two` (:2056). Its last
+    published row is `0x200 = 512`; the next would be `1024` and is **absent** ⇒ the wrapper
+    was entered in **`(512, 1024)`** times (the same window argument as `USVC_FULL_N`, and the
+    same trap: a ladder's top row is NOT a frontier).
+  - `_nfar` = **959** changes of `far` ⇒ ~959 distinct faulting addresses ⇒ ~961 entries.
+    **They agree**, and both are consistent with the ladder's missing `1024` row.
+  - `_sleh_seq` = **40** and monotone 1…40 ⇒ **only 40 `entry_note_sleh` records reached the
+    console**, out of ~961 calls.
+
+  **The gap is exactly the cap.** `sleh` writes on the capped channel; `abt` writes direct.
+  The 40th `sleh` is at :28988 and the cap marker at :29963 — every `sleh` write BEFORE the
+  cap survived, every one after was dropped, while `abt` kept writing (921 of its 959 `_nfar`
+  records are past the cap). **This is the whole defect: the same abort is recorded by two
+  recorders, one capped and one not, and the capped one is the one that carries the frame.**
+
+--------------------------------------------------------------------------------
+## 3. WHAT THE CAP HIDES — THE UNDEF WITNESS
+
+1017 (`docs/1017-shared-cache-naming.md`) named, statically from the cache artifact:
+
+  un-slid VA `0x3823aa54` = `libsystem_platform.dylib` `__os_alloc_slow` + 0x108
+                          = the Thumb `udf #254` (`bytes fede`) reached ONLY when
+                            `_mach_vm_map` returns non-zero.
+
+The DYNAMIC recorder for exactly that instruction already exists in this tree:
+`__wrap_sleh_undef` (entry_trace.c:5537), installed by `--wrap=sleh_undef`
+(build_entry.sh:197), reached from Apple's user undef vector
+`undef_from_user -> bl __wrap_sleh_undef` (linked image: `8001cf34`, verified by
+`arm-none-eabi-objdump -d out/stage90/xnu_arm_entry.elf`). It records `_pc`/`_lr`/`_spsr`/
+`_user` at the first four entries, plus `_seq`.
+
+**It fired zero times in the capture** — not because no `udf` happened, but because by then
+its channel was capped. The `udf` handler itself is proven working: the boot self-test
+`stage90_xnu_arm_vm_init_high_va_undef_handler_undef_handled=0x1` (capture :3480).
+
+**⇒ THIS IS THE MEASUREMENT DEFECT CLASS, AGAIN ([[mi4-measurement-defects]]): a record whose
+ABSENCE was read as evidence was capped.** 1017 §3.3 wrote `# UNMEASURED` for "why the pc
+never advances"; the capture cannot answer it because the instrument that would have was
+silenced by a counter, and the stall sampler (direct channel) is the only survivor.
+
+--------------------------------------------------------------------------------
+## 4. WHAT THE SURVIVING DIRECT CHANNEL SAYS AT THE FRONTIER
+
+The stall sampler is on the direct channel, so its reading is sound and is where 1016-A's
+verdict rests (re-confirmed here, not re-derived):
+
+  xnu_live_stall_n=0x0b..0x0f, pc=0x3b04aa54, cpsr=0x20000030 (USR/Thumb), sp=0x2bd2b400,
+  lr=0x00000007, nz=0x0f    (capture :33976-34009)  — five final samples, identical pc.
+
+The abort ladder's `far` is 11 distinct values (1016a §1) — no single-address retry storm.
+`xnu_live_abt_vmekr` takes `0x0` and `0x1`; `xnu_live_abt_vmfret` takes `0x0` and `0x1`
+(vm_fault's KERN_SUCCESS/KERN_FAILURE) — both channels direct, both readable at the frontier.
+
+--------------------------------------------------------------------------------
+## 5. THE RUNG-1018 HYPOTHESIS THIS SPAWNS
+
+If pid 1 is wedged at a `udf` that XNU's own undef path would triage into
+`EXC_BAD_INSTRUCTION`, then a **re-run with the cap lifted (or the undef witness moved to the
+DIRECT channel) converts the `# UNMEASURED` of 1017 §3.3 into a named mechanism**:
+
+  (A) the undef vector fires and `sleh_undef` takes the USER arm → the run should have died
+      (the user arm ends in `exception_triage`), but it did NOT die (resident, `wdt_pets`
+      climbing). That combination is itself the measurement: **the trap is reached but the
+      handler does not terminate the process** — consistent with the 1010–1015
+      "success reported, fault re-executes" shape, now in USER mode at a `udf`.
+  (B) the undef vector does NOT fire → the pc is not being executed as a `udf` at all, and
+      1017's static identification is contradicted by the dynamic one (the honest
+      falsification; a named-but-wrong instruction).
+
+**A and B are disjoint and jointly exhaustive.** Neither is decided by this capture; both need
+the cap lifted so the capped-channel witness can speak. This is 1018's arm design input.
+
+--------------------------------------------------------------------------------
+## 6. KEYS AND FILE:LINE THIS RECON STANDS ON
+
+  cap       : src/entry/entry_stubs.c:4254 (ENTRY_LIVE_CAP 24576u), :4441 entry_live_write
+              (drop at :4444), :4476 entry_write_kv, :4019 the console bound 0x00200000-12
+  bands     : src/entry/entry_stubs.c:1728-1734 (SLEH_LIVE_MAX/FRAMES/SEEN)
+  sleh      : src/entry/entry_stubs.c:1762 entry_note_sleh; entry_trace.c:5829 its ONE call
+  undef     : src/entry/entry_trace.c:5537 __wrap_sleh_undef; src/entry/build_entry.sh:197
+              --wrap=sleh_undef; linked at 8001cf34 (undef_from_user)
+  abt       : src/entry/entry_stubs.c:1997 entry_note_abt_far (:2013 _farn), :2058 entry_note_abt_pc
+              (:2079 the _nfar change-count), :2044 entry_note_abt_span
+  stall     : src/entry/entry_stubs.c:4635 entry_note_stall_sample (:4657 entry_write_kv)
+  capture   : :29963 the cap marker; :28973/:28988 the last sleh; :33976-34009 the stall block;
+              :3480 the undef self-test
+
+**No build, no press, and no device action was performed for this recon.**
