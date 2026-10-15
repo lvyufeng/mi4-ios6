@@ -1,0 +1,61 @@
+1013b press-read — the leaf-VALUE witness is now READABLE, and the PAIRING FIRED.
+The control reads through TTBR1 (wck=1 wctb=1) but its leaf reads APX-set (wcapx=1) so V1-V3 stay withheld
+on ONE remaining rule; the paired apex/walk cell is a real reading: writable at the enter, absent at the re-abort.
+
+ARM `armed-d13-9bf25f8f` (commit 02dfca2). Capture:
+`out/stage90/captures/recovered-unknown-arm-20261015-064725-last_kmsg.txt` (recovered read-only 2026-10-15
+06:47 via `scripts/recover_last_kmsg.sh --read-only`, after the operator's power press; device `4a2fe00b device`).
+
+================================================================================
+1. THE RUN IS REAL, THE DEVICE SURVIVED, THE FIX'S PRIMARY TARGET SUCCEEDED
+================================================================================
+All 35 `xnu_live_abt_w*` keys present (3640 tokens): W-APEX x20, W-WALK x22, W-SYNC x22 rows. `wdt_pets=0x61`
+(RESIDENT); no panic; `xnu_live_exec_done_seq=1` (the DEATH GATE is OPEN, absences count). The 1013b fix
+DID what it was built to do:
+
+    wcva=0x80080000  wck=1  wctb=1  wcl1=0x80a08001  wcl2pa=0x80a08000  wcleaf=0x8008021a  wcapx=1  wcoow=0
+
+The control now READS A REAL LEAF through TTBR1 (`wctb=1` = the high-window table answered, `wck=1`). In the
+1013-as-built press every control row was `wck=0` (split-refused). The TTBR1 read in `stage90_read_l2_pte`
+works on hardware.
+
+================================================================================
+2. THE REMAINING BLOCKER: the control leaf reads APX-set (wcapx=1)
+================================================================================
+`wcleaf=0x8008021a`, decoded: bits[1:0]=0b10 (L2 small page), bit4 (L2_ACCESS_PRW 0x10) set, bit5
+(L2_ACCESS_USER 0x20) clear, bit9 (L2_ACCESS_APX 0x200) SET. So AP[2:0] = (1,0,1) = user READ-ONLY,
+`L2_ACCESS_PRO 0x210` shape-with-APX. The design PREDICTED the control VA `0x80080000` would be `L2_ACCESS_PRW`
+(0x10, no APX) because `arm_vm_init.c:195/226` maps the identity range with `*ptv |= L2_ACCESS_PRW`. It does
+not: at the storm this page reads user-RO.
+
+The checker's control rule (`check_1013_capture.py`: `wck!=1 or wcapx!=0 or wcoow==1` => bad) fires on
+`wcapx!=0`, so `WIT_CLASS="WITNESS_METHOD_BROKEN"` and V1-V3 are WITHHELD. **The fix moved the failure from
+"the control cannot read at all" to "the control reads a real leaf whose access bits differ from the design's
+prediction."** Whether `wcapx=1` is a REAL device value (the page is kernel text, later mapped user-RO by
+`pmap_init`/`pmap_protect` — cf. 979's data-NX loop) or a PROBE defect is the open question (adjudication agent).
+
+================================================================================
+3. THE PAIRING FIRED — the 1013b `_wkva` cell gave a REAL paired reading (independent of the control)
+================================================================================
+The tail rows (ordinals 0x8000..0x100000) carry W-APEX and W-WALK rows naming the SAME cell:
+
+    W-APEX @:32928 wwn=0x8000  wwl1=0x81bb2001 wwl2pa=0x81bb2000 wwleaf=0x841e91bb wwapx=0 wwva=0x000ee000
+    W-WALK @:33050 wkn=0x20000 wkva=0x000ee000 wkl1=0x81bb2001 wkl2pa=0x81bb2000 wkleaf=0x00000000 wkapx=0
+
+SAME VA (0xee000), SAME L1 (0x81bb2001), SAME L2 table (0x81bb2000). Apex leaf `0x841e91bb` is a PRESENT,
+USER-WRITABLE small page (APX clear, `wwapx=0`); the walk leaf is 0 (`wkleaf=0`, stable double-read
+`wkleaf2=0`, `wkstable=1`). **This is the exact reading 1013b was built to make pairable** — and it is the
+V1 premise: a leaf the pmap wrote writable, and a walk at the same cell reading nothing.
+
+`wwnoproof=1` still holds on every apex row (the pmap's L1 0x81bb2000 vs the storm's TTBR0 base 0x81a86000),
+so the apex row is not certified as THE walked table — but the L1 it walked and the L1 W-WALK walked are the
+SAME (0x81bb2001), so W-APEX↔W-WALK pairing is by-value regardless of the TTBR0-identity caveat.
+
+================================================================================
+4. OWED (1013c): the control rule
+================================================================================
+The control VA 0x80080000 maps a page that is user-RO at the storm. Resolve it by value (adjudication): if the
+page is genuinely kernel/user-RO, the control rule must CERTIFY THE WALKER by a known GOOD (a leaf value read
+independently — e.g. compare `wcl2pa`/`wcleaf` against what `arm_vm_init` wrote, or move the control to a VA the
+boot maps user-RW and pin its expected AP), not by demanding `wcapx==0`. If instead the walker has a TTBR1
+mask/slot bug, fix the walker. Either way the paired apex/walk reading (§3) is already on paper.
