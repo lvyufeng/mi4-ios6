@@ -69,6 +69,14 @@ EXPORTS+=("XNU_TREE=$XNU_TREE")
 echo "   carrying $((${#EXPORTS[@]} - 3)) switch(es) from $REC, overriding STAGE90_XNU_UNDEF_DIRECT=1"
 ( cd src/entry && env -i PATH="$PATH" HOME="$HOME" "${EXPORTS[@]}" ./build_entry.sh )
 
+# **THE PAYLOAD MUST EMBED THE NEW ENTRY BLOB.** `build_entry.sh` writes `xnu_arm_entry.bin`; the
+# payload (`stage90.bin`) embeds it, and preflight_boot_check.sh REFUSES a payload carrying a different
+# entry image ("the two are told apart by the sha256 of the entry image").  Each rung's build script
+# rebuilds it ([[mi4-build-variant-comes-from-an-env-default]]: `STAGE90_EXTRA_CFLAGS` is the only
+# channel that reaches the entry blob's inclusion, and it must name the arm this script just built).
+echo "== step 1b: rebuild the payload so it EMBEDS this arm's entry blob =="
+XNU_TREE="$XNU_TREE" STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./scripts/build.sh
+
 echo "== step 2: the record must carry the switch (the gate reads THIS line) =="
 grep -E "^STAGE90_XNU_UNDEF_DIRECT=" "$REC" || {
   echo "FAIL: the arm record does not carry STAGE90_XNU_UNDEF_DIRECT -- build_entry.sh's echo is missing and the gate would read an arm nobody built"; exit 1; }

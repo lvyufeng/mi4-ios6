@@ -16162,10 +16162,10 @@ set=armed-d13-c2168632 sha256=3c9299a27cf08d8d0fe4142ee36e57952493e1fa504fd92a94
 set=armed-d13-c2168632 sha256=04c45b9e7c146f9a6e20051abd8d36980a46025cf3f867e261f8f20ed17d7b0e bytes=1912 file=xnu_arm_entry.h role=1018-cap-exempt-undef-witness;xnu_arm_entry.h
 set=armed-d13-c2168632 sha256=1ecf20bdb0f8dd3773159514b2c56fc21d967f634feec51b84078590533450bd bytes=2054 file=xnu_arm_entry-config.txt role=1018-cap-exempt-undef-witness;xnu_arm_entry-config.txt
 set=armed-d13-c2168632 sha256=1e2d8bcdcc8c2f3c022a95ccd785b5d5ef57c2e6927af052b0770c71163465d0 bytes=3149 file=xnu_arm_entry-sources.txt role=1018-cap-exempt-undef-witness;xnu_arm_entry-sources.txt
-set=armed-d13-c2168632 sha256=c534f415497e5e1c1bf83a55c2c965dbd7f4e65acf427000ebae3bd5d722f054 bytes=6851460 file=stage90.bin role=1018-cap-exempt-undef-witness;stage90.bin
-set=armed-d13-c2168632 sha256=a3e4395b022415596aee2c4138f023c7dcc3f4cba80852283c56c2b669b1eb9c bytes=6913532 file=stage90.elf role=1018-cap-exempt-undef-witness;stage90.elf
-set=armed-d13-c2168632 sha256=5b928e4fbe47da0d1a196acba8e2c1c5d70c845715886b0be35881a3fdf1599c bytes=6854656 file=stage90.img role=1018-cap-exempt-undef-witness;stage90.img
-set=armed-d13-c2168632 sha256=11818d716e8a5400198900700aa08a1c25aa5617327a9968decc7d393d878ba2 bytes=9375744 file=stage90-qcdt.img role=1018-cap-exempt-undef-witness;stage90-qcdt.img
+set=armed-d13-c2168632 sha256=6ea8fcbb427affe1257f096538a9352c78adb94a06bbaf457fc87f27d8db2a9b bytes=6851460 file=stage90.bin role=1018-cap-exempt-undef-witness;stage90.bin
+set=armed-d13-c2168632 sha256=6a6f4dcebc92120f3d92d504d8adfb896a5cc2be93678660f6cc5a06c497d09e bytes=6913532 file=stage90.elf role=1018-cap-exempt-undef-witness;stage90.elf
+set=armed-d13-c2168632 sha256=b9c9c91c06311153c1955bbb7b36e7f8e8824c9317f74fd72037ed01e68d2f01 bytes=6854656 file=stage90.img role=1018-cap-exempt-undef-witness;stage90.img
+set=armed-d13-c2168632 sha256=334edeb83d91b087c2f1c3a4987803f97486c410f9062d52099ed03dbc699549 bytes=9375744 file=stage90-qcdt.img role=1018-cap-exempt-undef-witness;stage90-qcdt.img
 set=armed-d13-c2168632 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1018-cap-exempt-undef-witness;stage90_fixture.macho
 set=armed-d13-c2168632 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1018-cap-exempt-undef-witness;stage90-build-config.txt
-set=armed-d13-c2168632 sha256=c935428e7183ee2f7c9de47fa5cdd31287423dd0a75b9233c7983217663fa550 bytes=560 file=SHA256SUMS.txt role=1018-cap-exempt-undef-witness;SHA256SUMS.txt
+set=armed-d13-c2168632 sha256=269a3399be1ec64ea0045ab58619467e711e9b435bc4a3502a45bc9a94c01ac1 bytes=560 file=SHA256SUMS.txt role=1018-cap-exempt-undef-witness;SHA256SUMS.txt
