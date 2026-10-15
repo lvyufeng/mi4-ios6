@@ -2787,6 +2787,13 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     # clause caught it (it reads the *wrapper's* call count and compares it against the flag), which is
     # the check earning its place: a switch that does not reach the file it names is `mi4-off-option-two-
     # spellings`' defect with a shorter fuse.
+    # **1018 (`STAGE90_XNU_UNDEF_DIRECT`): the switch reaches this file through `STUB_DEFINES_TRACE`,
+    # appended at its own validated assignment above - NOT spelled a second time on this compile line.**
+    # That array already carries the resolved value, so `entry_trace.c`'s view and the record's view are
+    # one value and not two ([[mi4-one-value-two-definitions]]).  (A `#` comment placed INSIDE the
+    # backslash-continued command below would start a comment that runs to the end of the LOGICAL line,
+    # swallowing `FLWIT_INCLUDES`, `STUB_DEFINES_TRACE` and `-c entry_trace.c` - the `no input files`
+    # defect this note replaces; comments on a continued command go ABOVE it.)
     run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
         -O2 -Wall -Wextra -Werror -std=gnu11 \
         -DSTAGE90_XNU_EXIT_POC_FLUSH="$EXIT_POC_FLUSH" \
@@ -2811,11 +2818,6 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_USB_ENUM="$USB_ENUM" \
         -DSTAGE90_XNU_USB_STREAM="$USB_STREAM" \
         -DSTAGE90_XNU_SMEM_PROBE="$SMEM_PROBE" \
-        # **1018 (`STAGE90_XNU_UNDEF_DIRECT`): this is the compile line the switch must reach, and the
-        # reason the `-D` is not here.** The array on the next line is `STUB_DEFINES_TRACE`, which already
-        # carries the resolved value from the `+=` at the switch's own validated site above - the switch is
-        # appended there rather than spelled a second time here, so `entry_trace.c`'s view and the record's
-        # view are one value and not two (`mi4-one-value-two-definitions`).
         ${FLWIT_INCLUDES[@]+"${FLWIT_INCLUDES[@]}"} \
         ${STUB_DEFINES_TRACE[@]+"${STUB_DEFINES_TRACE[@]}"} \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
@@ -31248,7 +31250,15 @@ verify_trace_symbols() {
         layout_fail "STAGE90_XNU_UNDEF_DIRECT=1 requires STAGE90_ENTRY_TRACE=1 - the recorder IS entry_trace.c (the wrapper and the two macros are one file), and an untraced build does not compile it, so the switch would name a channel in an image that has no such recorder"
     fi
     if [[ $ENTRY_TRACE -eq 1 && -r $OUT/xnu_arm_entry_trace.o ]]; then
-        arm-none-eabi-nm "$OUT/xnu_arm_entry_trace.o" | grep -q ' T __wrap_sleh_undef$' ||
+        # No pipe in the reader (938's defect, :31992): `arm-none-eabi-nm | grep -q` under `set -euo
+        # pipefail` reports a SUCCESSFUL match as exit 141 when nm dies of SIGPIPE the moment grep exits
+        # on its match - and *whether it fires is a race* on the producer/reader speeds. 1018's build hit
+        # it: this clause passed 200/200 by hand and by the standalone reader, then refused inside the
+        # loaded build against an object that on disk carries `00001fd4 T __wrap_sleh_undef`. Read the
+        # stream into a variable and grep it as a here-string, so the exit status is grep's and nothing
+        # else's.
+        ud_syms=$(arm-none-eabi-nm "$OUT/xnu_arm_entry_trace.o")
+        grep -q ' T __wrap_sleh_undef$' <<<"$ud_syms" ||
             layout_fail "__wrap_sleh_undef is not defined in out/stage90/xnu_arm_entry_trace.o - the object this build compiled carries no such symbol, so 1018's clause has nothing to read the channel out of and its silence would be read as a pass"
         ud_body=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry_trace.o" |
             awk '/<__wrap_sleh_undef>:/ { f = 1; next } f && /^[0-9a-f]+ </ { f = 0 } f { print }')

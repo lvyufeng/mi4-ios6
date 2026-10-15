@@ -72,7 +72,7 @@ echo "   carrying $((${#EXPORTS[@]} - 3)) switch(es) from $REC, overriding STAGE
 echo "== step 2: the record must carry the switch (the gate reads THIS line) =="
 grep -E "^STAGE90_XNU_UNDEF_DIRECT=" "$REC" || {
   echo "FAIL: the arm record does not carry STAGE90_XNU_UNDEF_DIRECT -- build_entry.sh's echo is missing and the gate would read an arm nobody built"; exit 1; }
-grep -qF '^STAGE90_XNU_UNDEF_DIRECT=1$' "$REC" || {
+grep -qxF 'STAGE90_XNU_UNDEF_DIRECT=1' "$REC" || {
   echo "FAIL: the record carries STAGE90_XNU_UNDEF_DIRECT but not =1 -- the record and the compile line disagree (mi4-one-value-two-definitions)"; exit 1; }
 
 echo "== step 3: the by-value link clause (build_entry.sh :31238) must have passed =="
