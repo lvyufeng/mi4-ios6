@@ -139,10 +139,10 @@ sampler (`xnu_live_stall_*`), gated on the tick's own powers-of-two ladder
      (`num=0xfffffffd` rows at n=0x14..0x40).
   2. **The ~24.4 s interrupt freeze PERSISTS.** `xnu_live_tick_sum_maxd = 0x1be9f52b` =
      468,237,613 / 19.2 MHz = **24.39 s** — the same magnitude `records/1005-press-read.txt` measured.
-  3. **A long kernel abort span persists**: `xnu_live_abt_maxcall = 0x1571b974` = 360,096,116 /
-     19.2 MHz = **18.75 s spent INSIDE ONE `sleh_abort` invocation** (`call = entry_counter()-t0`,
+  3. **A long kernel abort span persists**: `xnu_live_abt_maxcall = 0x1571b974` = 359,774,580 /
+     19.2 MHz = **18.74 s spent INSIDE ONE `sleh_abort` invocation** (`call = entry_counter()-t0`,
      `entry_trace.c:5849`). That the per-invocation abort ordinal `_pcn` only reached 512 while one
-     invocation ran 18.75 s says the residual is a NESTED path, not the old flat retry.
+     invocation ran 18.74 s says the residual is a NESTED path, not the old flat retry.
   4. **`cs_invalid_page` tolerance is unchanged** (1003, settled).
 
 --------------------------------------------------------------------------------

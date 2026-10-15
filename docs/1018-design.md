@@ -100,6 +100,15 @@ that can only ever read USR entries cannot show it is reading the vector at all.
 fires once at boot; the direct witness must match that with a `_seq >= 1` row. If it does not, the
 arm WITHHOLDS (C-CTL below) — it does not conclude (B).
 
+> **⚠ THE CONTROL IS BOTH HALVES, AND THE CHECKER ENFORCES THAT (`tools/check_1018_capture.py`).**
+> The boot self-test row (:3480) is present **even in the pre-arm 1015b capture**, where the witness
+> was still on the CAPPED channel and `_seq` was zero. A control that accepted the boot row alone
+> would read that OLD capture as **U-SILENT** — a falsification produced by the instrument not being
+> wired, which is the 1000 lesson exactly. So `ctl_live` requires **the boot row AND a `_seq` row**:
+> vector liveness AND channel liveness. With that, the pre-arm capture WITHHOLDS (U-CTL), and U-SILENT
+> can only be reached when the witness is proven live yet never fires at a sampled pc — the honest
+> falsification of §3. This is the difference between the two, and the checker makes it mechanical.
+
 ---
 
 ## 2. BRANCH U-FIRES — the vector fires at the frontier (expected if 1017 is right)

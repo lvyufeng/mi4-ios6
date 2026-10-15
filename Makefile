@@ -388,6 +388,15 @@ check:
 	@tools/check_memory_regions_walk.py --selftest >/dev/null
 	@tools/check_memory_regions_walk.py
 
+# **1018: the CAP-EXEMPT undef witness's reader.** `tools/check_1018_capture.py` adjudicates the rung's
+# five pre-registered cells (U-CTL / U-SILENT / U-FIRES-{DIES,LOOPS,ONCE}) on a recovered capture. Its
+# `--selftest` builds a synthetic capture per cell and asserts the EXACT cell string (asserting only
+# "refused" is what let an earlier broken control - the boot self-test row lives outside the
+# `xnu_live_*` namespace the shared parser tokenizes, so it was never seen - pass a wrong cell). It also
+# proves the reader holds NO literal for the frontier pc: two different pcs must yield the same cell.
+# Source half, no compiler, no device.
+	@python3 -I tools/check_1018_capture.py --selftest >/dev/null
+
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not
 # produce byte-identical output (experiment 408 measured that), so `out/stage90/stage90-qcdt.img` and
