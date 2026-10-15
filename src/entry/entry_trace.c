@@ -5881,6 +5881,60 @@ uint32_t __wrap_vm_map_lookup_locked(void *var_map, uint32_t vaddr, uint32_t fau
 }
 #endif
 
+/*
+ * ================================================================================================
+ * 1012: the PTE-BUILD APEX - `prot` at `pmap_enter_options`, the leaf's own input
+ * ================================================================================================
+ *
+ * `kern_return_t pmap_enter_options(pmap_t pmap, vm_map_offset_t va, ppnum_t pa, vm_prot_t prot,
+ * vm_prot_t fault_type, unsigned int flags, boolean_t wired, unsigned int options)`
+ * (`osfmk/vm/pmap.h`; on 32-bit every argument is a word). `vm_fault_enter` reaches it through the
+ * `PMAP_ENTER_OPTIONS` macro (`osfmk/vm/pmap.h:399`), which calls `pmap_enter_options` - so a
+ * `--wrap=pmap_enter_options` redirects EVERY non-intra-object caller. The recorder `entry_note_abt_pmp`
+ * (`entry_stubs.c`) publishes `prot`, the PA, the pmap's own `pm_l1_phys` (offset 0 of `struct pmap`,
+ * `pmap.c:1280`), and the LIVE TTBR0, behind the SAME latch chain `entry_note_abt_pte` arms - so only
+ * the storm's own enter publishes rows. On THIS tree `pmap_enter_options` dispatches to `leo_enter`
+ * (`pmap.c:3181`, `BOARD_CONFIG_QSD8250_LEO`), which rebuilds the leaf UNCONDITIONALLY from `prot` -
+ * so a write-bearing `prot` here MUST yield a writable leaf; a read-only `prot` here IS the loss.
+ *
+ * **THE SURFACE (docs/1010-design.md §8.1).** `--wrap` rewrites every linker-visible call in the
+ * image; the wrapper is a PURE PASS-THROUGH (it only records, gated by the latch). The `--wrap` is
+ * added to `TRACE_LDFLAGS` ONLY when `STAGE90_XNU_PMP_ENTER=1` (build_entry.sh), so the OFF image
+ * carries none. The call that matters - `vm_fault.c`'s `PMAP_ENTER_OPTIONS(...)` macro expanding to
+ * `pmap_enter_options(...)` - is a CROSS-object call (`pmap_enter_options` is DEFINED in `pmap.c`), so
+ * `--wrap` sees its `bl` and redirects it. (`pmap.c`'s own `pmap_enter` -> `pmap_enter_options` call
+ * is INTRA-object and is NOT wrapped - irrelevant here: the storm's fault path is `vm_fault` ->
+ * `PMAP_ENTER_OPTIONS`, cross-object.) A missing storm row is the honest reading "the enter did not
+ * reach the wrapper".
+ */
+#if defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER
+extern void entry_note_abt_pmp(uint32_t va, uint32_t prot, uint32_t pa, uint32_t pm_l1_phys);
+uint32_t __real_pmap_enter_options(void *pmap, uint32_t va, uint32_t pa, uint32_t prot,
+                                   uint32_t fault_type, uint32_t flags, uint32_t wired,
+                                   uint32_t options);
+
+uint32_t __wrap_pmap_enter_options(void *pmap, uint32_t va, uint32_t pa, uint32_t prot,
+                                   uint32_t fault_type, uint32_t flags, uint32_t wired,
+                                   uint32_t options)
+{
+    /* `pm_l1_phys` is offset 0 of `struct pmap` (pmap.c:1280 `pmap_paddr_t ttb = pmap->pm_l1_phys`). */
+    uint32_t pm_l1_phys = (pmap != 0) ? *(uint32_t *)pmap : 0u;
+
+    /* The pass-through FIRST, into a named result - the shape `__wrap_vm_fault` and
+     * `__wrap_vm_map_lookup_locked` use. A `return __real_(...)` as the final statement (or an
+     * `x = __real_(...); return x;` with nothing between) compiles to a TAIL call (`b <real>`), which
+     * the §8.1 linked check reads as "not a pass-through" (it looks for `bl <real>`); naming the
+     * result and acting on it AFTER the call keeps the real body a `bl` call. */
+    uint32_t kr = __real_pmap_enter_options(pmap, va, pa, prot, fault_type, flags, wired, options);
+
+    /* Record AFTER the enter: every argument is by value and `pm_l1_phys` was read from `*pmap`
+     * before the call, so this is the SAME apex reading (`prot` the leaf was built from) the design
+     * asks for - the recorder observes, it does not change what the enter did. */
+    entry_note_abt_pmp(va, prot, pa, pm_l1_phys);
+    return kr;
+}
+#endif
+
 /* ------------------------------------------------- what the exec said when it gave up (471) */
 /*
  * Experiment 470's run is the first that reaches `load_init_program`: the OS console reads

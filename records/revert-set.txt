@@ -15208,3 +15208,77 @@ set=armed-d13-fce83837 sha256=5170a985ff9e1300b11150221de379de20f0e047fef327bfd9
 set=armed-d13-fce83837 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1011-vmeprot;stage90_fixture.macho
 set=armed-d13-fce83837 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1011-vmeprot;stage90-build-config.txt
 set=armed-d13-fce83837 sha256=7bfc31312245d7a4bc5b2c0440600d546d4b4bcbef6f31cb8af652980ea827e1 bytes=560 file=SHA256SUMS.txt role=1011-vmeprot;SHA256SUMS.txt
+# armed-d13-ffdc8ba1  -  1012: THE PTE-BUILD APEX - the `prot` handed to pmap_enter_options
+# (publishes the leaf-s own INPUT via --wrap=pmap_enter_options: leo_enter REBUILDS the leaf from that
+# `prot` unconditionally, so a write-bearing `prot` here MUST yield a writable leaf and a read-only one
+# here IS the F1a loss; design docs/1012-design.md)
+# Switch set is 1011-s VERBATIM plus STAGE90_XNU_PMP_ENTER=1 (VME_PROT, ABT_PTE, ABT_PC, ABT_FAR,
+# ABT_SPAN, FREEZE_WITNESS, CADENCE, STALL, ABORT_TRACE, DYLD_WITNESS, SHREG_PROBE, SHREG_WIRE,
+# SHREG_GEOM, RESIDENT, USVC and SUBMAP_PMAP_SKIP all stay 1); the ENTRY BIN moved (fce83837 ->
+# ffdc8ba1); the PAYLOAD moves (it embeds the entry blob; the 29 s watchdog constant is 999-s,
+# unchanged); the TREE does NOT move - 1012 has NO tree edit and NO stage driver (the change is TWO
+# src/ files plus ONE conditional --wrap: entry_stubs.c the recorder `entry_note_abt_pmp` + the
+# shared OR-guard VA key, entry_trace.c the declaration + __wrap_pmap_enter_options,
+# build_entry.sh --wrap=pmap_enter_options only when PMP_ENTER=1).  The companion TREE probe
+# STAGE90_XNU_WRSTRIP (tools/patch_d13_wrstrip.py, the vm_fault.c strip sites) is SEPARATE and
+# optional - this arm does not require it.
+#
+# THE FRONTIER 1012 PROBES (records/1011-press-read.txt): 1011 DECIDED the fault class BY VALUE -
+# the (E-prime) tail rows carry vmeprot=0x3 (READ|WRITE) with vmekr=0 (KERN_SUCCESS), so the vm_map
+# ENTRY GRANTS write and F1b is REFUTED BY VALUE; F1a stands - the write is LOST between the entry
+# and the PTE.  What 1011 could NOT name is WHERE.  On this tree pmap_enter_options dispatches to
+# leo_enter (pmap.c:3181), which REBUILDS the leaf UNCONDITIONALLY from the `prot` it is handed
+# (leo_pte_build -> pmap_vm_prot_to_page_flags CLEARS APX iff prot & VM_PROT_WRITE), and every
+# leo_enter path ends in pmap_flush_tlbs.  PMAP_ENTER_OPTIONS (osfmk/vm/pmap.h:399) is a
+# CROSS-object call, so --wrap=pmap_enter_options redirects every linker-visible caller (pmap.c-s
+# own intra-object pmap_enter -> pmap_enter_options is NOT wrapped).
+#
+# THE 1012 PRESS PRE-REGISTRATION (frozen once embedded; deviations reported, not interpreted):
+# THE HEADLINE MUST be decided from the TAIL ROWS-OWN xnu_live_abt_pmpprot (ordinals >= 0x400 on the
+# powers-of-two ladder), NEVER on the whole-run change count (the 1009 measurement defect, not
+# repeated).  THE DECISION TREE (docs/1012-design.md §4):
+#   * tail xnu_live_abt_pmpprot & VM_PROT_WRITE (0x2) == 0 => (b) a STRIP SITE fired above the
+#     apex: `prot` LOST write.  Prime suspects: the RetryFault block vm_fault.c:3845 (`prot &=
+#     retry_prot`, whose verify re-lookup deliberately passes fault_type & ~VM_PROT_WRITE) and :3855
+#     (the ~VM_PROT_WRITE clear after a copy-object change) - both INVISIBLE to 1011-s single-shot
+#     (E-prime) latch.  The fix is at the strip site; the F4 retry-bound
+#     (tools/patch_d13_abt_retry_bound.py) is the safety net.
+#   * tail xnu_live_abt_pmpprot & 0x2 != 0 AND bits[31:12] of xnu_live_abt_pmppmap == bits[31:12] of
+#     xnu_live_abt_pmpttbr => (c) the apex AGREES with the MMU-walked base but the leaf is still
+#     read-only => the loss is INSIDE leo_enter/leo_pte_build (read pmap.c:1640-1682 by value with
+#     the measured `prot`).
+#   * tail xnu_live_abt_pmpprot & 0x2 != 0 AND bits[31:12] of pmppmap != bits[31:12] of pmpttbr =>
+#     (c) an IDENTITY FAULT: the pmap writes one L1, the MMU walks another (a pmap_expand_ttb hoist
+#     not followed by a TTBR0 load, or a stale pm_l1_phys).
+#   * NO tail row => the storm-s enter did NOT reach the wrapper (the intra-object blindness): fall
+#     back to the tree instrument.  xnu_live_abt_pmpnx is the DISTINCT-`prot` change count (an
+#     OBSERVATION on the whole run, not the headline).  The _pmppmap/_pmpttbr pair ALSO closes the
+#     1010c/1011 walk-mask question for good.
+#
+# VERIFIED BY VALUE (build_1012.sh): the linked image carries the 49 xnu_live_abt_ key literals
+# (1011-s 43 + the 6 pmp pmpn/pmpprot/pmppa/pmppmap/pmpttbr/pmpnx), entry_note_abt_pmp and
+# __wrap_pmap_enter_options DEFINED T/t, exactly ONE bl to entry_note_abt_pmp, the
+# __wrap_pmap_enter_options body calling <pmap_enter_options> (pass-through) AND entry_note_abt_pmp,
+# with the FROZEN 1011 elf (armed-d13-fce83837) as the NEGATIVE CONTROL (xnu_live_abt_ x43, the 1011
+# symbols present, but the 1012 symbols x0 and the 1012 literals x0 - the 1012 change is NOT in the
+# 1011 arm); the 1011 (E-prime)/(A) witness, the 1010/1009/1008/1007 witnesses, the 1006 freeze
+# witness, the 1005 cadence witness, the 1004 abort trace (xnu_live_sleh_upc x1), the 1003 stall
+# instrument and the 1002 six-word save set asserted present (regressions).  The
+# 996/997/998/999/1000/1001 checkers rerun ON the 1012 image - the probe checker-s ONE by-design
+# frozen 20 B clause is the only allowed FAIL.
+#
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-ffdc8ba1 sha256=ffdc8ba10af35204791fdd4d365cfb50cb1aea7081f9dd8c97423a0332293820 bytes=6347860 file=xnu_arm_entry.bin role=1012-pmpenter;xnu_arm_entry.bin
+set=armed-d13-ffdc8ba1 sha256=db3d189747ca80cddd8ec7e4526d12f682edfb9832646563e46e5d0a42d9a8b9 bytes=7391460 file=xnu_arm_entry.elf role=1012-pmpenter;xnu_arm_entry.elf
+set=armed-d13-ffdc8ba1 sha256=f74738517e9e674145b69bc0ac7459496127b8531499196e4ccb3c15992ca079 bytes=1912 file=xnu_arm_entry.h role=1012-pmpenter;xnu_arm_entry.h
+set=armed-d13-ffdc8ba1 sha256=84694bbdeea841edf1aea12b88103273c1d578cdf460d0fcfb3db1a6481781b5 bytes=1946 file=xnu_arm_entry-config.txt role=1012-pmpenter;xnu_arm_entry-config.txt
+set=armed-d13-ffdc8ba1 sha256=47f18c609fa4893c705251296f882c0a1cbb65317f7245ba6151d3aae54e3d6b bytes=3149 file=xnu_arm_entry-sources.txt role=1012-pmpenter;xnu_arm_entry-sources.txt
+set=armed-d13-ffdc8ba1 sha256=171f04a95f672628ecbc1cf9720f0873629d7da4e022a2c1f4bd18a32870f775 bytes=6843268 file=stage90.bin role=1012-pmpenter;stage90.bin
+set=armed-d13-ffdc8ba1 sha256=d043a4d541c3a727977d37c601296fc6ca637564ad83f5d4e6f0fabe7c951f22 bytes=6905340 file=stage90.elf role=1012-pmpenter;stage90.elf
+set=armed-d13-ffdc8ba1 sha256=54943b11f75f211cead99f9f6c995ab8cbc411ca0f7ef2d9d0b04869ef75ac9f bytes=6846464 file=stage90.img role=1012-pmpenter;stage90.img
+set=armed-d13-ffdc8ba1 sha256=3332cfa034da95c90b4dcbdba40412b90e3faf4744d403e36816aad351e8f134 bytes=9367552 file=stage90-qcdt.img role=1012-pmpenter;stage90-qcdt.img
+set=armed-d13-ffdc8ba1 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1012-pmpenter;stage90_fixture.macho
+set=armed-d13-ffdc8ba1 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1012-pmpenter;stage90-build-config.txt
+set=armed-d13-ffdc8ba1 sha256=a4af8f7b9d1bdc94e9e7d29291a6c463b8f2d4b0ab858ed1632b93e2c30b0d1f bytes=560 file=SHA256SUMS.txt role=1012-pmpenter;SHA256SUMS.txt

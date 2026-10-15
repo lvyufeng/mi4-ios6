@@ -2355,6 +2355,11 @@ stage90_read_l2_pte(uint32_t va, uint32_t *out_l1_desc, uint32_t *out_ttbr0_used
 static uint32_t g_abtpte_n;
 static uint32_t g_abtpte_lastl2;
 static uint32_t g_abtpte_ptenx;    /* DISTINCT raw L2 descriptors seen so far (monotone, bounded) */
+#if (defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER) || (defined(STAGE90_XNU_WRSTRIP) && STAGE90_XNU_WRSTRIP)
+/* Widened 1012: PMP_ENTER and WRSTRIP are SEPARATE switches, but both key on the SAME storm VA, so
+ * the cell exists (and is set by entry_note_abt_pte) whenever EITHER is on - not only PMP_ENTER. */
+static uint32_t g_abtpte_pmpva;    /* 1012: the storm's VA, set by entry_note_abt_pte (the abort's own far) */
+#endif
 
 /*
  * The latch (B) reads. `entry_note_abt_pte` is called ONLY from `__wrap_sleh_abort`, so it sets this
@@ -2442,6 +2447,9 @@ entry_note_abt_pte(uint32_t va)
 
     g_abtpte_latch = 1u;    /* arm the (B) recorder for the vm_fault this abort's handler will make */
     g_abtpte_vmelatch = 1u; /* arm 1011 (E') too - it fires INSIDE that vm_fault, before (B) returns */
+#if (defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER) || (defined(STAGE90_XNU_WRSTRIP) && STAGE90_XNU_WRSTRIP)
+    g_abtpte_pmpva = va;    /* 1012: the PMAP_ENTER/WRSTRIP cells key on the SAME VA the abort faulted on */
+#endif
 
     /*
      * The LADDER rows - 1008/1009's set VERBATIM (the tail is already sampled), so `_ptel2` at a
@@ -2580,6 +2588,138 @@ entry_note_abt_vme(uint32_t kr, uint32_t prot, uint32_t fault_type, uint32_t vad
 
     if (n == 1u) { g_abtpte_vmelastprot = prot; }
     if (prot != g_abtpte_vmelastprot) { g_abtpte_vmelastprot = prot; g_abtpte_vmenx++; entry_write_kv("xnu_live_abt_vmenx", g_abtpte_vmenx); }
+}
+#endif
+
+/*
+ * ================================================================================================
+ * 1012: the PTE-BUILD APEX - what `prot` reached `pmap_enter_options` for the storm's abort
+ * ================================================================================================
+ *
+ * WHY THIS IS THE BISECTOR (by value, from the two 1011 facts). 1011 MEASURED F1a: the vm_map_entry
+ * GRANTS write (`vmeprot=0x3`), `vm_fault` returns KERN_SUCCESS, and the store permission-faults
+ * ~1 M times anyway. This tree builds `BOARD_CONFIG_QSD8250_LEO`, so `pmap_enter_options` DISPATCHES
+ * to `leo_enter` (`osfmk/arm/pmap.c:3181`), and `leo_enter` rebuilds the leaf UNCONDITIONALLY from the
+ * `prot` it is handed (`*pte = leo_pte_build(map, va, pn, prot, wired)`, `pmap.c:1668/1680`;
+ * `leo_pte_build` -> `pmap_vm_prot_to_page_flags`, `pmap.c:1095`: `prot & VM_PROT_WRITE` clears the
+ * APX bit => a WRITABLE leaf). So a `prot` that CARRIES write at the PMAP_ENTER MUST produce a
+ * writable leaf; a `prot` that LACKS write produces the read-only leaf the store re-faults on. The
+ * cell below is therefore the apex of the bisection:
+ *
+ *   `_pmpprot & VM_PROT_WRITE`  => the leaf IS writable in `pmap_pte(pmap,0x61000)`, so the fault is
+ *                                  that the MMU walks a DIFFERENT table than the pmap writes
+ *                                  (`pm_l1_phys` vs the live TTBR0) - a pmap/table identity fault.
+ *   `!(_pmpprot & VM_PROT_WRITE)` => `prot` was STRIPPED above the PMAP_ENTER: one of the four strip
+ *                                  sites fired (`vm_fault.c:1881/1904` (vm_fault_page need-copy),
+ *                                  `:3845 prot &= retry_prot`, `:3855 ~VM_PROT_WRITE` after a copy
+ *                                  change), or the codesign gate `vm_fault.c:2421 return
+ *                                  KERN_CODESIGN_ERROR` fired (which does NOT strip, it SKIPS the
+ *                                  PMAP_ENTER entirely).
+ *
+ * `_pmppa` (the leaf PA page number) and the `_pmppmap`/`_pmpttbr` pair close the table-identity
+ * question: `_pmppmap` is the pmap's OWN `pm_l1_phys` (`pmap.c:0`), `_pmpttbr` the LIVE TTBR0 read
+ * HERE. By 1011's own numbers these AGREE once the TTBR attribute bits are masked: `0x81a86000`
+ * == `0x81a8605b & ~0xff` (the cpufunc-v7.s `0x5b`). So the mask to compare with is the ATTRIBUTE
+ * mask (`pmpttbr & 0xFFFFFF00`), NOT the base-alignment mask - a raw-unequal pair is EXPECTED and
+ * is not a fault. A table-identity fault would show MASKED-unequal.
+ *
+ * GATED ON `--wrap=pmap_enter_options`, which is ALSO the implementation. This works ONLY because the
+ * ENTRY image already carries the whole kernel: `entry_trace.c`'s `__wrap_pmap_enter_options` is
+ * `ld --wrap`'d against the kernel's own `pmap_enter_options` (the same rule the `--wrap=vm_fault` /
+ * `--wrap=vm_map_lookup_locked` cells use, docs/1010-design.md §8.1). `vm_fault_enter` calls it
+ * INTRA-object - `--wrap` sees no `bl pmap_enter_options` from inside `vm_fault.o` and does NOT
+ * intercept it. So this cell is only the NORMAL (non-intra-object) PMAP_ENTERs; the storm's own enter
+ * is intercepted ONLY IF it reached the wrapper. The tail rows are the measurement either way: a
+ * `_pmpprot` WITHOUT write at a row whose `_pmppmap != _pmpttbr` names the identity fault; NO row at
+ * the storm's far names the intra-object blindness (and then the fix is a tree edit at the strip/enter
+ * site, not here). `entry_note_abt_pmp` is armed by the SAME `g_abtpte_latch` chain (`entry_note_abt_pte`).
+ */
+#if defined(STAGE90_XNU_PMP_ENTER) && STAGE90_XNU_PMP_ENTER
+static uint32_t g_abtpte_pmpn;
+static uint32_t g_abtpte_pmplastprot;
+static uint32_t g_abtpte_pmpnx;    /* DISTINCT `prot` values at the PMAP_ENTER (monotone, bounded) */
+
+void
+entry_note_abt_pmp(uint32_t va, uint32_t prot, uint32_t pa, uint32_t pm_l1_phys)
+{
+    uint32_t n, ttbr;
+
+    if (g_abtpte_pmpva == 0u || va != g_abtpte_pmpva)
+        return;                 /* not the storm's VA - do not fill the channel */
+
+    n = ++g_abtpte_pmpn;
+
+    /*
+     * The ladder rule (`n <= 4 || power of two`) is the SAME one (A)/(B)/(E') use, so a `_pmpprot`
+     * row at ordinal k pairs with `_vmfret`/`_vmeprot`/`_ptel2` at the same k. The tail rows are
+     * what decide; the change-count below is an OBSERVATION on the whole run.
+     */
+    if (n <= 4u || (n & (n - 1u)) == 0u) {
+        entry_write_kv("xnu_live_abt_pmpn",    n);       /* the ordinal */
+        entry_write_kv("xnu_live_abt_pmpprot", prot);    /* the `prot` handed to pmap_enter_options */
+        entry_write_kv("xnu_live_abt_pmppa",   pa);      /* the PA page number entered */
+        entry_write_kv("xnu_live_abt_pmppmap", pm_l1_phys); /* the pmap's OWN L1 base (pm_l1_phys) */
+        __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr));
+        entry_write_kv("xnu_live_abt_pmpttbr", ttbr);    /* the LIVE TTBR0 the MMU walks with */
+    }
+
+    if (n == 1u) { g_abtpte_pmplastprot = prot; }
+    if (prot != g_abtpte_pmplastprot) { g_abtpte_pmplastprot = prot; g_abtpte_pmpnx++; entry_write_kv("xnu_live_abt_pmpnx", g_abtpte_pmpnx); }
+}
+#endif
+
+/*
+ * 1012 WRSTRIP - WHERE `prot` LOST WRITE between `vm_fault` and the PMAP_ENTER.
+ *
+ * 1011's (E') DECIDED the fault class: the vm_map entry GRANTS write (`vmeprot & VM_PROT_WRITE`),
+ * yet the store still faults (`fsr=0x80f`), and the codesign gate did not fire. So the question is
+ * no longer WHETHER: the PMP_ENTER cell (`_pmpprot`) already answers whether the `prot` handed to
+ * `pmap_enter_options` carries write (`pmap.c:1668` rebuilds the leaf from that `prot`
+ * UNCONDITIONALLY, so a write `prot` there MUST yield a writable leaf). *THIS* cell names WHICH
+ * strip site removed it, by value, on the storm's own VA.
+ *
+ * The tree half is `tools/patch_d13_wrstrip.py`: five `entry_note_abt_wr(<site>, <va>, <prot>)`
+ * calls inserted into `osfmk/vm/vm_fault.c` behind `#if STAGE90_XNU_WRSTRIP`. By value they split:
+ *   - sites 1/2 (`vm_fault.c:1888/1893`, vm_fault_page need-copy) and the parallel site 2 at
+ *     `:1920`: all three are inside `(fault_type & VM_PROT_WRITE) == 0` blocks. A WRITE fault does
+ *     NOT enter them - REFUTED for this storm, and they pass `va=0u` anyway (no vaddr in
+ *     vm_fault_page), so the `g_abtpte_pmpva` key would reject them in any case.
+ *   - site 3/4: the RetryFault block `vm_fault.c:3845 prot &= retry_prot` and `:3855` (the
+ *     `~VM_PROT_WRITE` clear after a copy change) - the LIVE candidates for a write fault.
+ *   - site 5 (`vm_fault.c:2585`): the PMAP_ENTER cross-check - the `prot` AT the enter, paired
+ *     against PMP_ENTER's `_pmpprot`. If site 5 shows write and the leaf is read-only, the strip is
+ *     below (a table-identity fault); if site 5 lacks write, sites 3/4 stripped it above.
+ * The `_wrnx` change-count is the OBSERVATION on the whole run (the same role `_pmpnx` plays); the
+ * ladder rows are what decide.
+ *
+ * Armed by the SAME `g_abtpte_latch`/`g_abtpte_pmpva` chain (`entry_note_abt_pte`), so it fires only
+ * on the storm's VA - the ~2.1 M retries do not fill the channel.
+ */
+#if defined(STAGE90_XNU_WRSTRIP) && STAGE90_XNU_WRSTRIP
+static uint32_t g_abtpte_wrn;
+static uint32_t g_abtpte_wrlastprot;
+static uint32_t g_abtpte_wrnx;
+
+void
+entry_note_abt_wr(uint32_t site, uint32_t va, uint32_t prot)
+{
+    uint32_t n;
+
+    /* Keyed on the storm's VA (set by entry_note_abt_pte into g_abtpte_pmpva). Sites 1/2 pass va=0u
+     * (vm_fault_page has no vaddr) and will NOT match - a KNOWN limitation, and harmless: those two
+     * sites sit in `(fault_type & VM_PROT_WRITE) == 0` blocks, already REFUTED for a write fault. */
+    if (g_abtpte_pmpva == 0u || va != g_abtpte_pmpva)
+        return;
+
+    n = ++g_abtpte_wrn;
+    if (n <= 4u || (n & (n - 1u)) == 0u) {
+        entry_write_kv("xnu_live_abt_wrn",    n);      /* the ordinal */
+        entry_write_kv("xnu_live_abt_wrsite", site);   /* WHICH strip site fired (1..5) */
+        entry_write_kv("xnu_live_abt_wrprot", prot);   /* the `prot` AT that site */
+        entry_write_kv("xnu_live_abt_wrva",   va);
+    }
+    if (n == 1u) { g_abtpte_wrlastprot = prot; }
+    if (prot != g_abtpte_wrlastprot) { g_abtpte_wrlastprot = prot; g_abtpte_wrnx++; entry_write_kv("xnu_live_abt_wrnx", g_abtpte_wrnx); }
 }
 #endif
 

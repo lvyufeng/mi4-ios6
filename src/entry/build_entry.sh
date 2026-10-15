@@ -237,6 +237,14 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     # switch name and value are read here for the wrap only; the refusal that `VME_PROT=1` requires the
     # full 1010 ladder (`ABT_FAR=1 && ABT_PC=1 && ABT_PTE=1`) is made at the switch's own assignment below.
     [[ ${STAGE90_XNU_VME_PROT:-0} -eq 1 ]] && TRACE_LDFLAGS+=(--wrap=vm_map_lookup_locked)
+    # **1012: the PTE-BUILD APEX.** `--wrap=pmap_enter_options` publishes the `prot` handed to the
+    # leaf's builder (the PTE apex). `vm_fault.c`'s `PMAP_ENTER_OPTIONS(...)` macro is a CROSS-object
+    # call to `pmap_enter_options` (defined in `pmap.c`), so `--wrap` sees its `bl` and redirects EVERY
+    # such call - a real surface, so the wrapper (`entry_trace.c`) is a PURE PASS-THROUGH (record
+    # gated by the latch only). Added ONLY when `STAGE90_XNU_PMP_ENTER=1`, so the OFF image carries no
+    # `--wrap=pmap_enter_options` at all. The refusal that the switch requires the full 1010 ladder is
+    # made at the switch's own assignment below.
+    [[ ${STAGE90_XNU_PMP_ENTER:-0} -eq 1 ]] && TRACE_LDFLAGS+=(--wrap=pmap_enter_options)
     # The last three are 481's, and all three are *in the traced build only*, which is a property of
     # the step rather than an oversight: the registration and the read-back **are** the instrument.
     # `setPop` records the kernel's own deadline arithmetic, `PE_init_platform` is the hook that
@@ -323,7 +331,7 @@ if [[ $D13_TRACE -eq 1 ]]; then
     # trace object compiles on its own command line, `:2332-2333`). Same env var and same 0 default as
     # the `$CADENCE` validated below, so the two spellings are one value; the append is here because
     # `entry_trace.c`'s compile reads this array, and the switch must be in it before the compile.
-    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}" -DSTAGE90_XNU_ABT_FAR="${STAGE90_XNU_ABT_FAR:-0}" -DSTAGE90_XNU_ABT_PC="${STAGE90_XNU_ABT_PC:-0}" -DSTAGE90_XNU_ABT_PTE="${STAGE90_XNU_ABT_PTE:-0}" -DSTAGE90_XNU_VME_PROT="${STAGE90_XNU_VME_PROT:-0}")
+    STUB_DEFINES_TRACE=(-DSTAGE90_ENTRY_D13=1 -DSTAGE90_XNU_CADENCE="${STAGE90_XNU_CADENCE:-0}" -DSTAGE90_XNU_FREEZE_WITNESS="${STAGE90_XNU_FREEZE_WITNESS:-0}" -DSTAGE90_XNU_ABT_SPAN="${STAGE90_XNU_ABT_SPAN:-0}" -DSTAGE90_XNU_ABT_FAR="${STAGE90_XNU_ABT_FAR:-0}" -DSTAGE90_XNU_ABT_PC="${STAGE90_XNU_ABT_PC:-0}" -DSTAGE90_XNU_ABT_PTE="${STAGE90_XNU_ABT_PTE:-0}" -DSTAGE90_XNU_VME_PROT="${STAGE90_XNU_VME_PROT:-0}" -DSTAGE90_XNU_PMP_ENTER="${STAGE90_XNU_PMP_ENTER:-0}" -DSTAGE90_XNU_WRSTRIP="${STAGE90_XNU_WRSTRIP:-0}")
 else
     # **946: 4570's list drops the one name D13's keeps.** `timer_call_enter1` is in the literal above so
     # `tools/check_timer_sources.py` can read the tree's wrap set out of the source; here the *other* tree
@@ -1296,6 +1304,60 @@ if [[ $VMEPROT -eq 1 && $ABTPTE -ne 1 ]]; then
     exit 1
 fi
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_VME_PROT="$VMEPROT")
+# **1012: the PTE-BUILD APEX (`STAGE90_XNU_PMP_ENTER`).** The recorder `entry_note_abt_pmp`
+# (entry_stubs.c) and its ONE call in the new `__wrap_pmap_enter_options` (entry_trace.c) are both
+# entry-toolchain objects, threaded through `STUB_DEFINES` (here) and `STUB_DEFINES_TRACE` (appended at
+# its own assignment above); OFF (PMP_ENTER=0), the guard deletes the recorder, the call and the
+# `--wrap`, and both files are the exact 1010 token set. The guard is the CONJUNCTION
+# `ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER` (it keys on the 1010 latch chain
+# `entry_note_abt_pte` arms), so the build REFUSES `PMP_ENTER=1` unless the full 1010 ladder is on.
+PMPENTER=${STAGE90_XNU_PMP_ENTER:-0}
+case "$PMPENTER" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_PMP_ENTER='$PMPENTER' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $PMPENTER -eq 1 && $ABTFAR -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_PMP_ENTER=1 requires STAGE90_XNU_ABT_FAR=1 - the 1012 recorder's guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER, so ABT_FAR=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $PMPENTER -eq 1 && $ABTPC -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_PMP_ENTER=1 requires STAGE90_XNU_ABT_PC=1 - the 1012 recorder's guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && PMP_ENTER, so ABT_PC=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $PMPENTER -eq 1 && $ABTPTE -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_PMP_ENTER=1 requires STAGE90_XNU_ABT_PTE=1 - the PMAP_ENTER cell keys on the latency chain entry_note_abt_pte (ABT_PTE) arms, so ABT_PTE=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_PMP_ENTER="$PMPENTER")
+# **1012: the STRIP-SITE TRACE (`STAGE90_XNU_WRSTRIP`).** The recorder `entry_note_abt_wr`
+# (entry_stubs.c) is an entry-toolchain object threaded through `STUB_DEFINES` (here) and
+# `STUB_DEFINES_TRACE` (appended at its own assignment above); OFF (WRSTRIP=0), the guard deletes the
+# recorder and both files are the exact 1010 token set. Unlike PMP_ENTER, the five probes live in a
+# KERNEL-POOL file (`osfmk/vm/vm_fault.c`), so the tree half is gated SEPARATELY - in
+# `tools/build_xnu_arm_kernel.sh`'s `DEFINES`, the pool object's own switch; here only the ENTRY
+# recorder rides `STUB_DEFINES`. The guard is the SAME CONJUNCTION `ABT_FAR && ABT_PC && ABT_PTE &&
+# WRSTRIP` PMP_ENTER uses (it keys on the SAME 1010 latch chain `entry_note_abt_pte` arms), so the
+# build REFUSES `WRSTRIP=1` unless the full 1010 ladder is on.
+WRSTRIP=${STAGE90_XNU_WRSTRIP:-0}
+case "$WRSTRIP" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_WRSTRIP='$WRSTRIP' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
+if [[ $WRSTRIP -eq 1 && $ABTFAR -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_WRSTRIP=1 requires STAGE90_XNU_ABT_FAR=1 - the 1012 recorder's guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && WRSTRIP, so ABT_FAR=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $WRSTRIP -eq 1 && $ABTPC -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_WRSTRIP=1 requires STAGE90_XNU_ABT_PC=1 - the 1012 recorder's guard is the conjunction ABT_FAR && ABT_PC && ABT_PTE && WRSTRIP, so ABT_PC=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+if [[ $WRSTRIP -eq 1 && $ABTPTE -ne 1 ]]; then
+    echo "REFUSING: STAGE90_XNU_WRSTRIP=1 requires STAGE90_XNU_ABT_PTE=1 - the WRSTRIP cell keys on the latency chain entry_note_abt_pte (ABT_PTE) arms, so ABT_PTE=0 would carry a switch that measures nothing" >&2
+    exit 1
+fi
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_WRSTRIP="$WRSTRIP")
 # **992: the iOS 7 commpage alias, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_COMMPAGE_ALIAS=1`, the D13 tree's dormant IOS7LAB blocks compile in: `pmap.c` maps the
 # commpage page a second time at 0xFFFF4000 in kernel_pmap (user read-only via
@@ -1819,6 +1881,8 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_ABT_PC
                 STAGE90_XNU_ABT_PTE
                 STAGE90_XNU_VME_PROT
+                STAGE90_XNU_PMP_ENTER
+                STAGE90_XNU_WRSTRIP
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -2081,6 +2145,13 @@ do
         # `$VMEPROT`, validated 0/1 (and cross-refused against ABT_FAR/ABT_PC/ABT_PTE) at its own
         # assignment above this loop.
         STAGE90_XNU_VME_PROT)        _v=$VMEPROT ;;
+        # 1012: the PTE-build apex (the `prot` at pmap_enter_options) and its companion strip-site trace.
+        # Their two consumers are `entry_stubs.c` (via `STUB_DEFINES`) and `entry_trace.c` (via
+        # `STUB_DEFINES_TRACE`), both compiled here, so the record and the objects cannot be built from
+        # two spellings. Read from `$PMPENTER` / `$WRSTRIP`, validated 0/1 (and cross-refused against
+        # ABT_FAR/ABT_PC/ABT_PTE) at their own assignments above this loop.
+        STAGE90_XNU_PMP_ENTER)        _v=$PMPENTER ;;
+        STAGE90_XNU_WRSTRIP)          _v=$WRSTRIP ;;
         # 954: which XNU tree this entry image is. It is a DELIBERATE change: the same switch
         # synthesized from a different tree links a different image (951's probe site, 952's entry
         # symbol), so a record that did not carry it would let a build notice nothing when the tree
@@ -39800,6 +39871,12 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # and the only site the gate ever reads, so a switch that reached the compiler and the arm-key list
     # but not this line would be a run whose arm nobody read.
     echo "STAGE90_XNU_VME_PROT=$VMEPROT"
+    # **1012's two switches (the PTE-build apex + the companion strip-site trace), written here for
+    # 678's reason**: this writer is the one site a name-keyed diff does not visit and the only site the
+    # gate ever reads, so a switch that reached the compiler and the arm-key list but not this line
+    # would be a run whose arm nobody read. Written as the RESOLVED `$PMPENTER`/`$WRSTRIP`.
+    echo "STAGE90_XNU_PMP_ENTER=$PMPENTER"
+    echo "STAGE90_XNU_WRSTRIP=$WRSTRIP"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

@@ -789,6 +789,17 @@ DEFINES=(
 # guard, not to `EXTRA_DEFINES` (`tools/stage_d13_submap_pmap_skip.sh`).
 [[ ${STAGE90_XNU_SUBMAP_PMAP_SKIP:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_SUBMAP_PMAP_SKIP=1)
 
+# 1012's strip-site trace (`osfmk/vm/vm_fault.c`: five `entry_note_abt_wr(<site>,<va>,<prot>)` calls
+# inserted by `tools/patch_d13_wrstrip.py`, each behind `#if defined(STAGE90_XNU_WRSTRIP) &&
+# STAGE90_XNU_WRSTRIP`). They name WHICH strip site removes `VM_PROT_WRITE` from `prot` on the storm's
+# VA, complementing the PMP_ENTER cell (`_pmpprot` says WHETHER write was lost at the enter). `vm_fault.c`
+# is a kernel-pool file (`out/xnu_kernel_obj_d13/osfmk_vm_vm_fault.o`), so the switch goes to the SAME
+# array as the kext/login guard, the alignment switch, the memq_hint guard and the submap-pmap skip,
+# NOT to `EXTRA_DEFINES`; the entry-side recorder `entry_note_abt_wr` is gated separately through
+# `STUB_DEFINES` in `src/entry/build_entry.sh`. OFF (WRSTRIP unset or 0) the `#if` excludes every
+# probe, so this object is the tree's ORIGINAL bytes - the define IS the patch.
+[[ ${STAGE90_XNU_WRSTRIP:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_WRSTRIP=1)
+
 # 992's iOS 7 commpage alias (`osfmk/arm/pmap.c` + `osfmk/arm/commpage/commpage.c`: the six dormant
 # IOS7LAB board gates open, so `pmap_create_sharedpage` maps the commpage page a second time at
 # 0xFFFF4000 - user read-only, XN - and `commpage_populate` fills the iOS 7 count bytes at
