@@ -167,3 +167,28 @@ timing artifact. "The walk still returns 0" (RESULT 3) is thereby OVER-STATED as
 Rung 1013 (docs/1013-design.md) is hardened to not inherit (1)/(2): W-APEX records
 unconditionally with its OWN va/pa/fault_type, and W-WALK double-reads. The decisive
 measurement — the leaf the pmap ACTUALLY wrote at the storm VA — is deferred to 1013.
+
+================================================================================
+SUPPLEMENT 2026-10-15 (after 1013's log was read) — A BY-VALUE ERROR IN THIS RECORD
+================================================================================
+The bullet above at line ~84 says:
+
+    "`pmap_asid_ncpus=0` (`pmap_asid.c:121`) so it takes the full `arm_tlb_flushID()` branch."
+
+**`pmap_asid.c:121` is a STATIC INITIALIZER (`uint32_t pmap_asid_ncpus = 0;`), not the runtime
+value.**  The runtime value is **1**: `pmap_asid_configure` (`pmap_asid.c:148-168`) does
+`OSIncrementAtomic(&pmap_asid_ncpus)` at `:157` and prints
+`All ASID/asids enabled: real_ncpus: 1, pmap_asid_ncpus: 1` — present in 25 capture files in
+`out/stage90/captures/` (e.g. recovered-...-020222-last_kmsg.txt:4003), and in the 1013 log.
+
+⇒ `pmap_flush_tlbs` takes the **ASID arm** (`pmap.c:1314-1319`):
+`pmap_asid_validate_cpu(...)` then `arm_tlb_flushID_ASID(pmap->pm_asid & 0xFF)` — **TLBIASID
+(c8,c7,2), an ASID-SCOPED invalidate**, NOT the full `arm_tlb_flushID()` this record asserts.
+
+**Therefore the conclusion "⇒ so the TLB-staleness explanation is ALSO refuted by value" is NOT
+supported.**  It read a stand-in and called it a value ([[mi4-stand-in-size-is-not-value]]).  The
+ASID-scoped flush at `pmap.c:1319` against CONTEXTIDR written at `pmap.c:2520` (and NOT rewritten
+when the same user pmap is re-dispatched, `pmap.c:2513`) is a **live, by-value, never-tested
+mechanism** for the V1 cell (`LEAF_WRITABLE_STILL_FAULTS`).  `docs/1012-f1a-static.md:271-274`
+got it right and named `(c2) ASID-limited flush`; this record contradicted it and the wrong
+statement was load-bearing.  Full analysis: `docs/1014-design.md` §8.
