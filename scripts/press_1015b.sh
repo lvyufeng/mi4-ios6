@@ -93,11 +93,15 @@ SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 # DROP-IN FILE `out/stage90/xnu_arm_entry-arm-extra.txt`, which must carry exactly:
 #       STAGE90_XNU_GLOBAL_FIX=1 role=1015b-globalfix
 # **AND THE BINARY SIDE IS THE POOL OBJECT, NOT THE ENTRY KEYS.**  `out/xnu_kernel_obj_d13/
-# osfmk_arm_pmap.o` must carry, inside `pmap_flush_tlbs`: ZERO `R_ARM_CALL arm_tlb_flushID_ASID`
-# (1015's object carried exactly one, at 0x58c) and TWO `R_ARM_CALL arm_tlb_flushID` at INCREASING
-# offsets (Apple's :1347 arm plus the widened non-kernel arm; 1015's object carried exactly one, at
-# 0x560).  THE PAIR IS DELIBERATE: a bare count cannot tell a SECOND call from a MOVED one.  The
-# inherited 1014 probe's ONE `U entry_note_abt_wf` relocation must be UNDISTURBED.
+# osfmk_arm_pmap.o` must carry, inside `pmap_flush_tlbs`, EXACTLY THREE `R_ARM_MOVW_ABS_NC
+# kernel_pmap` materializations.  THIS IS A MEASURED REPLACEMENT FOR A FIRST CLAUSE THAT COULD
+# NOT PASS: it asked for ZERO `arm_tlb_flushID_ASID` (the ASID arm REMAINS in the text by design -
+# only the non-kernel path changes, since `pmap_is_shared` is true for the kernel) and for TWO
+# `arm_tlb_flushID` calls (the compiler TAIL-MERGES the two identical call sites into ONE).  The
+# count that discriminates is the ADDRESS-MATERIALIZATION count: UNFIXED/Apple's object = 2
+# (`pmap_is_shared` init + terminal panic), 1015b's ON object = 3 (the inserted `pmap != kernel_pmap`
+# test is the third).  The inherited 1014 probe's ONE `U entry_note_abt_wf` relocation must stay
+# UNDISTURBED.
 #     **IF EITHER HALF IS ABSENT, STOP - NOTHING BELOW IS A TEST.**  An arm whose pool object is still
 #     1015's is a run of 1015's kernel with a script claiming a behaviour change: every G-* cell read
 #     off it would describe the WRONG KERNEL, and the reader's own answer (a persisting storm) would
@@ -342,10 +346,24 @@ _b_obj=out/xnu_kernel_obj_d13/osfmk_arm_pmap.o
 _b_lo=$(arm-none-eabi-nm "$_b_obj" 2>/dev/null | awk '$3=="pmap_flush_tlbs" && ($2=="T"||$2=="t"){print "0x" $1; exit}')
 _b_hi=$(arm-none-eabi-nm -n "$_b_obj" 2>/dev/null | awk -v s="${_b_lo#0x}" 'BEGIN{sv=strtonum("0x" s)}{a=strtonum("0x" $1)} a>sv && $2 ~ /^[Tt]$/ {if(!d){print "0x" $1; d=1}}')
 [[ -n "$_b_lo" && -n "$_b_hi" ]] || { echo "REFUSING: pmap_flush_tlbs's symbol range could not be computed in $_b_obj (lo='$_b_lo' hi='$_b_hi') - without it the census below measures nothing"; exit 1; }
-_b_asid=$(arm-none-eabi-objdump -r "$_b_obj" 2>/dev/null | awk -v lo="${_b_lo#0x}" -v hi="${_b_hi#0x}" 'BEGIN{l=strtonum("0x" lo); h=strtonum("0x" hi)} /R_ARM_CALL/ && /arm_tlb_flushID_ASID/ {a=strtonum("0x" $1); if (a>=l && a<h) n++} END{print n+0}')
-_b_full=$(arm-none-eabi-objdump -r "$_b_obj" 2>/dev/null | awk -v lo="${_b_lo#0x}" -v hi="${_b_hi#0x}" 'BEGIN{l=strtonum("0x" lo); h=strtonum("0x" hi)} /R_ARM_CALL/ && /arm_tlb_flushID$/ {a=strtonum("0x" $1); if (a>=l && a<h) n++} END{print n+0}')
-echo "   (0g) POOL $_b_obj: pmap_flush_tlbs $_b_lo..$_b_hi - arm_tlb_flushID_ASID x$_b_asid (want 0; 1015's object carries 1 @0x58c), arm_tlb_flushID x$_b_full (want >= 2; 1015's object carries 1 @0x560)"
-[[ "$_b_asid" == "0" && "$_b_full" -ge 2 ]] || { echo "REFUSING: the pool object is NOT 1015b's - the ASID-scoped call survives (x$_b_asid, want 0) or the widened arm is absent (x$_b_full, want >= 2). A press here would measure 1015's kernel under 1015b's adjudication, and a G-REFUTED read off it would refute nothing but the missing edit"; exit 1; }
+# **AND THE RIGHT FINGERPRINT IS THE `kernel_pmap` MATERIALIZATION COUNT, NOT THE CALL COUNTS.**
+# A first version of this clause asserted `arm_tlb_flushID_ASID == 0` and `arm_tlb_flushID >= 2`.
+# BOTH ARE IMPOSSIBLE AND THE CLAUSE COULD NEVER PASS (MEASURED, 1015b's own build):
+#   * the ASID arm REMAINS IN THE TEXT by design - the insertion is Tautologically TRUE for the
+#     kernel (`pmap_is_shared == pmap->pm_shared || pmap == kernel_pmap`), so only the non-kernel
+#     path changes; `arm_tlb_flushID_ASID` still has 1 relocation (MEASURED @0x630).  Wanting 0
+#     contradicts the design this script is testing.
+#   * the compiler TAIL-MERGES the two identical `arm_tlb_flushID()` call sites into ONE `bl`
+#     (MEASURED: x1 @0x574).  Wanting >= 2 asks for an artifact the toolchain does not emit.
+# THE COUNT THAT DOES DISCRIMINATE: the inserted test `pmap != kernel_pmap` materializes the
+# `kernel_pmap` ADDRESS one extra time.  MEASURED by value: OFF/Apple's object carries
+# `R_ARM_MOVW_ABS_NC kernel_pmap` x2 (@0x440 `pmap_is_shared` init, @0x604 terminal panic);
+# 1015b's ON object carries x3 (@0x440, @0x560 the inserted test, @0x608).  Same class as the
+# `_b_wf` clause below (a MOVED-vs-ADDED count cannot be faked by a count alone, so the build's
+# own linked census reads the same fingerprint at the resolved `movw` immediate).
+_b_kp=$(arm-none-eabi-objdump -r "$_b_obj" 2>/dev/null | awk -v lo="${_b_lo#0x}" -v hi="${_b_hi#0x}" 'BEGIN{l=strtonum("0x" lo); h=strtonum("0x" hi)} /R_ARM_MOVW_ABS_NC/ && /kernel_pmap/ {a=strtonum("0x" $1); if (a>=l && a<h) n++} END{print n+0}')
+echo "   (0g) POOL $_b_obj: pmap_flush_tlbs $_b_lo..$_b_hi - kernel_pmap materializations x$_b_kp (want EXACTLY 3; 1015's object carries 2)"
+[[ "$_b_kp" == "3" ]] || { echo "REFUSING: the pool object is NOT 1015b's - pmap_flush_tlbs materializes kernel_pmap x$_b_kp time(s) (want EXACTLY 3; UNFIXED carries 2: the pmap_is_shared init + the terminal panic). The inserted non-kernel arm IS that third materialization. A press here would measure 1015's kernel under 1015b's adjudication, and a G-REFUTED read off it would refute nothing but the missing edit"; exit 1; }
 _b_wf=$(arm-none-eabi-objdump -r "$_b_obj" 2>/dev/null | grep -c 'entry_note_abt_wf' || true)
 [[ "$_b_wf" == "1" ]] || { echo "REFUSING: $_b_obj carries $_b_wf relocation(s) to entry_note_abt_wf (want 1 - the inherited 1014 flush probe). 1015b inserts BETWEEN Apple's two lines, so a displaced probe means the insertion did not happen where the design says - and the reader's attribution guard (_wfkind=1 keyed to the storm) would have no producer"; exit 1; }
 

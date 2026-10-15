@@ -1,0 +1,36 @@
+1015b PRESS — BLOCKED (device dark), 2026-10-15
+
+BUILD/FIX SIDE: GREEN.
+  * pool object out/xnu_kernel_obj_d13/osfmk_arm_pmap.o, pmap_flush_tlbs 0x418..0x64c:
+      kernel_pmap materializations x3  (@0x440 init, @0x560 INSERTED TEST, @0x608 terminal panic)
+      arm_tlb_flushID x1 @0x574, arm_tlb_flushID_ASID x1 @0x630  (reported, codegen-invariant)
+    UNFIXED carries x2. The inserted `else if (pmap != kernel_pmap) arm_tlb_flushID();` is present.
+  * press_1015b.sh's (0g) clause FIRST REFUSED the correct arm: it asserted
+    `arm_tlb_flushID_ASID == 0` (IMPOSSIBLE - the ASID arm remains as text by design, since
+    pmap_is_shared is true for the kernel) and `arm_tlb_flushID >= 2` (IMPOSSIBLE - the compiler
+    TAIL-MERGES the two identical arm_tlb_flushID() sites into ONE `bl`).
+    SAME MEASUREMENT DEFECT as build_1015b.sh / park_1015b.sh carried; fixed in all three.
+    Replacement fingerprint = the kernel_pmap materialization count (2 -> 3).
+    The refusal was PRE-DEVICE (grep of the log for adb/fastboot/dd: empty) - no device action taken.
+  * re-run advanced past (0g) and through the whole entry-side witness census to (0i): PASSED.
+
+DEVICE SIDE: the card write SUCCEEDED, then the device went DARK before the press.
+  * `tools/build_root_volumes.sh --real` -> out/stage90/xnu_card_hfs.img
+      HFSX 0x4858 v5, 939524096 B (896.0 MiB), sha256 c9b9080d...
+  * write to userdata head: adb shell "dd of=/dev/block/mmcblk0p25 bs=1M conv=fsync"
+      896+0 records out, 939524096 bytes, 51.98 s, 17 MB/s, EXIT 0
+  * read-back (first 8 MiB) sha256 9bcef3ff... == head -c 8388608 of the built card. MATCH.
+  * the in-script 2b dd had returned rc=141 (SIGPIPE) on the FIRST run, so the write was redone
+    interactively; the read-back proves the medium, not the pipeline, holds the image.
+  * THEN: between the read-back and step 3, the device left adb AND fastboot AND USB.
+      adb devices: empty; fastboot devices: empty; no 05c6/18d1/2a70/2717 in lsusb.
+      (lsusb Bus003 0403:6010 = the FT2232 debug board, NOT the phone. /dev/ttyUSB0/1 are that board.)
+  * the press (step 3) NEVER RAN: run_and_capture.sh reported "serial 4a2fe00b not found".
+    So NO XNU ran, no 1015b capture exists, and the G-CONFIRMED/G-REFUTED cell is UNTOUCHED.
+
+NEEDED: a MANUAL POWER PRESS (hold Power ~10-15 s, release, then press Power normally),
+then VolDown+Power+USB to reach fastboot if it does not come back on its own.
+This is the ONE action reserved to the operator.
+
+AFTER RECOVERY: the card write is DONE and verified - rerun only step 3
+(preflight_boot_check.sh --allow-xnu-entry ; run_and_capture.sh --allow-xnu-entry --expect-arm).
