@@ -1,0 +1,137 @@
+1019 SHREG STATUS — read-only, by value, from the repo and the recovered 1015b capture
+2026-10-15  (no build, no press, no device action, nothing under out/stage90 written)
+
+CAPTURE
+  out/stage90/captures/recovered-unknown-arm-20261015-163856-last_kmsg.txt
+  34011 lines; arm armed-d13-16fe8885 (records/1015b-press-read.txt:4 names this file; the
+  arm's frozen config carries SHREG_* = 1 at out/stage90/frozen/armed-d13-16fe8885/...:21-23).
+
+================================================================================
+## Q1 — WHAT THE SHREG / CACHE-MAPPING ROWS REPORTED (1015b capture)
+
+grep -n 'IOS7LAB shared region\|IOS7SHREG\|IOS7LAB cache mapping' <capture>  => 12 rows, :4098-4113,
+verbatim:
+
+  :4098 IOS7LAB shared region 0x2c000000..0x40000000; stack below 0x2be00000
+  :4102 IOS7SHREG check_np pid=1 out=0x2bd299d0
+  :4103 IOS7SHREG check_np ret=12
+  :4104 IOS7SHREG map_slide pid=1 fd=0 count=4 mappings=0x2bd29848 slide=0x2e10000 slide_start=0x3efbc000 size=0x00089000
+  :4105 IOS7LAB cache mapping 0 va=2ee10000 size=0c266000 offset=00000000 max=5 init=5
+  :4106 IOS7LAB cache mapping 1 va=3b078000 size=01ce0000 offset=0c266000 max=23 init=23
+  :4107 IOS7LAB cache mapping 2 va=3cd58000 size=022ed000 offset=0df46000 max=1 init=1
+  :4108 IOS7LAB cache mapping 3 va=3f045000 size=00177000 offset=12bda000 max=1 init=1
+  :4109 IOS7SHREG map_file kr=0
+  :4110 IOS7SHREG slide_enter slide=0x2e10000 src=0x3efbc000 n=0x89000
+  :4111 IOS7SHREG slide_init kr=0 entry=0 n=0x89000
+  :4112 IOS7SHREG slide_copyin kr=0
+  :4113 IOS7SHREG map_slide ret=0
+
+Row counts (grep -c): map_file = 1, cache mapping = 4, shared region = 1.
+READING: dyld's 438 `shared_region_map_and_slide_np` REACHED ITS `done:` exit with ret=0;
+`_shared_region_map` -> `vm_shared_region_map_file` returned kr=0 (:4109), the slide half
+(:4110-4112) returned kr=0. The cache IS mapped (4 mappings, prot 5/23/1/1) — the 997 halt
+chain that 996's wire misparse caused is GONE, exactly as 998 recorded.
+
+================================================================================
+## Q2 — STAGE90_XNU_SHREG_* SWITCH SET IN out/stage90/xnu_arm_entry-config.txt
+
+$ grep SHREG out/stage90/xnu_arm_entry-config.txt
+  STAGE90_XNU_SHREG_PROBE=1      (:21)
+  STAGE90_XNU_SHREG_WIRE=1       (:22)
+  STAGE90_XNU_SHREG_GEOM=1       (:23)
+All three ON. They are the SAME trio in every arm 998 -> 1018 (verified frozen configs
+armed-d13-dee822b0:20-22, armed-d13-16fe8885:21-23, armed-d13-c2168632:21-23).
+Artifact identity in that same file: STAGE90_XNU_ENTRY_SHA256=c2168632... (the 1018 arm);
+config written Oct 15 18:06. UNMEASURED: which arm the config described when the 16fe8885
+press was built — measure with: git show <1018-commit>:out/stage90/xnu_arm_entry-config.txt
+or the frozen/<arm>/ copy (done for 16fe8885 above; all three agree).
+
+================================================================================
+## Q3 — IS 998's "map_file returns kr=0" STILL THE STATE? (wire implemented, cache mapped)
+
+For the 1015b run: YES, by value (Q1, :4109 — still the only `map_file` row). 998's G1 CONFIRMED
+holds: the wire now parses dyld's 32 B array, so map_file returns 0 and the region maps.
+
+WIRE IMPLEMENTATION (source, live tree):
+  external/xnu-hd2-darwin13/xnu/bsd/vm/vm_unix.c:1194  `#if IOS7_COMPAT_PLATFORM ||
+      (defined(STAGE90_XNU_SHREG_WIRE) && STAGE90_XNU_SHREG_WIRE)`
+  :1200  `typedef char ios7lab_mapping_wire_size[sizeof(wire[0]) == 32 ? 1 : -1];`
+  :1218  `printf("IOS7LAB cache mapping %u va=%08x size=%08x offset=%08x max=%x init=%x\n", ...)`
+  294 half: :1145-1146 (check_np copyout width), selector ios7lab_cache_abi() at :102-105.
+  geometry: external/xnu-hd2-darwin13/xnu/osfmk/vm/vm_shared_region.c:633 base_address=0x2C000000U,
+      :634 size=0x14000000U, :635 the printf; stack: osfmk/arm/status.c:67 0x2BE00000U.
+  (staging tools: tools/stage_d13_shreg_{wire,geom,probe}.sh + tools/patch_d13_shreg_*.py)
+
+LINKED-IMAGE STATE (re-verified the 1018 build, out/stage90/xnu_arm_entry.elf):
+  $ python3 -I tools/check_d13_shreg_wire.py out/stage90/xnu_arm_entry.elf --expect on
+  -> PASS. By value: `add ..., lsl #5` at 0x80422100 (bounds count*32) and 0x8042211c (copyin
+     count*32); `add rX, rX, #32` per-record stride at 0x804221c8; the 20 B pair
+     (`count * 5 << 2`) is ABSENT; 294's copyout writes 8 B (0x804220a8 r2=8).
+So the wire is not merely switched on — it is linked in and the 20 B parse is deleted.
+
+================================================================================
+## Q4 — WHAT THE DYLD SHARED CACHE NEEDS (size / alignment / address), BY VALUE
+
+The region is given a 64 MiB-aligned 0x2C000000 base and a 0x14000000 (320 MiB) extent
+(vm_shared_region.c:633-634). What is MAPPED, per Q1's own rows:
+
+  mapping 0  va=2ee10000  size=0c266000  voff=0          init=5  (r-x)  -> [0x2ee10000,0x3b076000)
+  mapping 1  va=3b078000  size=01ce0000  voff=0c266000   init=23 (r-x+rw) -> [0x3b078000,0x3cd58000)
+  mapping 2  va=3cd58000  size=022ed000  voff=0df46000   init=1  (r)    -> [0x3cd58000,0x3f045000)
+  mapping 3  va=3f045000  size=00177000  voff=12bda000   init=1  (r)    -> [0x3f045000,0x3f1bc000)
+
+Slid VA span = [0x2ee10000, 0x3f1bc000) = 0x1031b000 = 259.1 MiB.
+CACHE FILE (extracted, sha256-verified): /tmp/dyld-extract/dyld_shared_cache_armv7 =
+  315,952,666 B = 301.3 MiB = 0x12d50e1a (docs/1017-shared-cache-naming.md:31-38), at
+  rootfs.hfs raw offset 0x455d000; header `dyld_v1   armv7`, dyldBaseAddress 0x2be00000,
+  mappingCount 3, imagesCount 696, codeSignatureOffset 0x12bda000 (size 0).
+ARTIFACT vs CAPTURE: the artifact's 3 mappings (0x2c000000/0xc266000/off0; 0x38268000/0x1ce0000/
+  off0xc266000; 0x39f48000/0x22ed000/off0xdf46000 — docs/reference/d13-dyld-shared-cache-study.md:11)
+  match mappings 0-2 EXACTLY once the run's slide 0x2e10000 is added (0x2ee10000, 0x3b078000,
+  0x3cd58000; the study's "offset" cells for m1/m2 are the same numbers the capture prints).
+  ⇒ THE CACHE IS MAPPED AT ITS CORRECT SLID GEOMETRY. (The capture's 4th row is the
+  code-signature mapping; the ARTIFACT names it `0x12bda000` too, i.e. mapping 3 is the CS
+  blob at file offset 0x12bda000 — sd. rows :4107/:4108's `max=1 init=1` — not 1016-A's "301 MiB".)
+NOTE the 301 MiB figure is the cache FILE size; the VA span mapped from it is 259 MiB (m0+m1+m2).
+The 4th row's va 0x3f045000 is cache-file-offset 0x12bda000 + slide, file-backed — the LIVE
+capture reads va 0x3f045000 vs artifact 0x3f1c5000 (the 0x180000 delta is a measurement defect
+to re-measure; # UNMEASURED: python3 -I reading of /tmp/dyld-extract/dyld_shared_cache_armv7
+at 0x12bda000, compared against rootfs.hfs @0x455d000+0x12bda000, would settle it).
+
+================================================================================
+## Q5 — THE ONE NAMED BLOCKER
+
+**ENTRY_LIVE_CAP — the record channel's cap — is the blocker, not a window and not 915-B.**
+
+  src/entry/entry_stubs.c:4254   `#define ENTRY_LIVE_CAP 24576u`
+  src/entry/entry_stubs.c:4443   `if (g_live_records >= ENTRY_LIVE_CAP) {`
+  src/entry/entry_stubs.c:4445   `entry_write_kv("xnu_live_capped", g_live_records);`
+  captured at :29963 in this very capture: `xnu_live_capped=0x00006000` (0x6000 = 24576).
+
+The cache mapping is DONE (Q1/Q3/Q4): every SHREG row above sits at :4098-4113, BEFORE the cap
+is reached, and all four rows survive. What the cap eats is the frontier the cache mapping
+UNCOVERED: records/1018-recon.txt §0 (and memory mi4-1018-undef-cap-defect) measure that
+`__wrap_sleh_undef` (the recorder that would have NAMED the `udf #254` at 0x3b04aa54) writes
+through the CAPPED channel, while `entry_write_kv` (DIRECT, entry_stubs.c:4476) does not — so
+the frontier event ~4000 records later is invisible. Docs 1016-design §2.4 A-NO-LADDER and
+§2.5 already pre-register exactly this: `xnu_live_usvc_n` at its ladder window => WITHHOLD, not
+a wall; and 998 §"the ENTRY_LIVE_CAP ate the done records".
+
+NOT the blocker:
+  - ENTRY_WINDOW = 0x1e400000 (480 MiB, config :69; the 484 MiB window of mi4-975) is a PHYSICAL
+    mapping window for the payload, not the shared region. The shared region is 0x2c000000..0x40000000
+    (320 MiB) inside it — it fits (mi4-1016a §"484 MiB ENTRY_WINDOW" is the payload window, uncited
+    as a cache blocker by any 1016/1017 doc read here).
+  - the 915-B multi-bank region port is NOT on this path: the cache is file-backed demand paging
+    (docs/1005-contiguous-alloc-wall.md §0(a): "Large-contiguous physical allocation is NOT the real
+    next wall"), and the 998/1015b runs map it without the port.
+  - cs_invalid_page (1003) is TOLERATED, settled.
+
+================================================================================
+## ONE-LINE SUMMARY
+
+SHREG is fully ON and WORKING (wire=1/geom=1/probe=1; map_file kr=0, map_slide ret=0, 4 mappings
+= cache artifact geometry + slide 0x2e10000; cache file 301.3 MiB at dyldBaseAddress 0x2be00000,
+mapped as a 259.1 MiB slid span [0x2ee10000,0x3f1bc000)). The ONE named blocker is ENTRY_LIVE_CAP
+(entry_stubs.c:4254, 24576) eating the frontier record past :29963 — fix with the cap-exempt
+DIRECT channel (entry_write_kv, entry_stubs.c:4476), the 1018 `STAGE90_XNU_UNDEF_DIRECT` arm.
