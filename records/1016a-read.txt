@@ -1,0 +1,194 @@
+1016-A READ — the post-storm userspace frontier, read on the recovered 1015b capture
+2026-10-15  (a READ: no build, no press, no device action; read-only)
+
+CAPTURE
+  out/stage90/captures/recovered-unknown-arm-20261015-163856-last_kmsg.txt  (34011 lines,
+  recovered 16:38 after the operator's power press; terminal marker `No errors detected` PRESENT)
+
+  Official adjudicator (verbatim cells):
+    python3 -I tools/check_1015b_capture.py <capture>
+      [1015b] GLOBAL-FIX CELL : G-WITHHOLD (no_tail)
+      [1015]  AT/PAR CELL      : V-AT0
+      [1015]  PASSIVE CELL     : P-CTL
+      RUN SANITY               : RESIDENT
+      HARD ANOMALIES           : 0
+  Every one of those WITHHOLDS names the SAME cause: the abort PER-INVOCATION ordinal (`_pcn`)
+  never reached the tail band (`_pcn >= 0x400`). The reader is right and its cell stands; §1 below
+  shows WHY the band is never reached, and it is not a truncation.
+
+--------------------------------------------------------------------------------
+## 1. THE STORM IS GONE — and this time it is measured, not withheld
+
+The 1010→1015 defect was a SINGLE-ADDRESS retry storm: ONE `far` re-executed ~2^20 times.
+
+  | cell (by value)              | 1014 (storm)          | 1015b (this capture) |
+  |------------------------------|-----------------------|----------------------|
+  | distinct `far` on the ladder| **1** (all `0x000e6000`)| **11 of 11 distinct**|
+  | `xnu_live_abt_pcn` max       | `0x00040000` (262144), 2.1M retries | `0x00000200` (512) |
+  | the tail band `_pcn>=0x400`  | reached (storms live there) | **never reached** |
+
+  The `far` ladder (11 rows, `n<=4` or powers of two): `0x00001000`, `0xcfdbd000`, `0xcfdfe000`,
+  `0x2bd2bf7c`, `0x2bf1e004`, `0x2bee7fe8`, `0x2bef7018`, `0x30a9084c`, `0x358f23c8`, `0x3efd4000`,
+  `0x3f014000` — **all distinct**. A retry storm is by definition ONE address repeated; there is no
+  such address in this capture. Total aborts (`xnu_live_abt_farn` max) = `0x3bf` = **959**, down from
+  ~2.1 M — a 2,200x collapse.
+
+  **The reader's G-WITHHOLD is CORRECT and its cause is not truncation.** The structural guards pass
+  (terminal marker present, `xnu_live_abt_*` tokens x4414, `_pcn` ladder present to 0x200). The storm
+  band is empty because **the storm does not exist**. This is the `records/1015b-press-read.txt`
+  reading, reached independently here and confirmed by the abort SHAPE rather than by the abort count.
+  ⚠ Read as G-CONFIRMED **by value** (§2 of that record), never by the reader's literal cell.
+
+--------------------------------------------------------------------------------
+## 2. THE TRAP THIS READ HAD TO SURVIVE — the slide, not progress
+
+The usvc ladder's terminal row is `num = -3` (mach_absolute_time) at `pc = 0x2beef328`, and 999/1003's
+frozen triple is `num = -3` at `pc = 0x2be97328`. Those pcs differ by **`0x58000`** — which is NOT
+progress: it is exactly the **dyld slide delta** of this run.
+
+  - 1003: dyld entrypoint `xnu_live_entrypt_entry = 0x2be7d028` (`records/1003 §6`).
+  - 1016-A: `xnu_live_entrypt_entry = 0x2bed5028` (this capture, :~22200).
+  - `0x2bed5028 - 0x2be7d028 = 0x58000`. And `0x2beef328 - 0x2be97328 = 0x58000`. Same delta.
+
+  So `0x2beef328` and `0x2be97328` are the **same link address** (`_mach_absolute_time+0x68`) at two
+  slides. Read naively as a `_pc` change this looks like A-PROGRESS; read BY VALUE it is a
+  **rebased identity** — a measurement artefact, the class this project keeps paying for
+  ([[mi4-measurement-defects]]). **No progress may be claimed from the `_pc` difference.**
+
+--------------------------------------------------------------------------------
+## 3. THE usvc LADDER IS AT ITS OWN WINDOW CAP — A-NO-LADDER WITHHOLDS THE TOP ROW
+
+`xnu_live_usvc_n` runs 1…`0x40` and **stops at exactly 64**, with all 8 fields present on all 64 rows.
+That is not a frontier and not the channel cap:
+
+  src/entry/entry_stubs.c:7313  #define USVC_FULL_N 64u
+  src/entry/entry_stubs.c:7343  if (n <= USVC_FULL_N) { ...all 8 fields... }
+  src/entry/entry_stubs.c:7353  else if ((n & (n-1u)) == 0u) { ...`_n`/`_num` only... }
+
+  Past 64 the ladder publishes only on **powers of two**. `0x40` is a power of two, so it emits; the
+  next would be `0x80`=128 and it is **absent**. ⇒ total user SVCs in the whole run ∈ **[64, 127]`,
+  and the ladder's top row is CUT by the recorder's window, not by the run.
+  **This is A-NO-LADDER's withholding premise, not a wall.** Per docs/1016-design.md §2.4 A-NO-LADDER
+  WITHHOLDS. The ladder's top `(num,pc)` triple **cannot** be read as the frontier from this capture.
+
+--------------------------------------------------------------------------------
+## 4. THE REAL WITNESS — the stall sampler: pid 1 is SPINNING IN THE SHARED CACHE, IN USER MODE
+
+The capture carries a SECOND, independent instrument the 1015b checker does not read: the 1003 stall
+sampler (`xnu_live_stall_*`), gated on the tick's own powers-of-two ladder
+(`pe_msm8974.c:523-529`), 15 samples spanning ticks 1…16384 of the 19200-tick run.
+
+  sample   pc            cpsr        mode        sp            lr
+  n=1..7   0x8001cd5d … 0x60000113  SVC/kernel  (kernel sps)  kernel
+  n=8      0x2bef0420    0x00000010  USR/ARM      0x2bd298c8  0x2bed906d
+  n=9,10   0x8001cd5d    0x60000113  SVC/kernel
+  n=11..15 **0x3b04aa54** **0x20000030** **USR/Thumb** **0x2bd2b400** **0x00000007**
+
+  `cpsr & 0x1f = 0x10` = **User mode**; bit5 set = **Thumb**. Per the sampler's own reading rule
+  (`entry_stubs.c:4607-4623`): *"the sampled pcs are all the user pc AND IDENTICAL => pid 1 is wedged
+  at one user instruction"* — a **tight user-space loop**. Five consecutive samples across a doubling
+  span all read the SAME pc ⇒ **pid 1 is SPINNING**, not asleep, not in the kernel.
+
+  **`0x3b04aa54` is inside the DYLD SHARED CACHE.** The mapping geometry is in the same capture
+  (`IOS7LAB cache mapping` :4105-4108):
+
+    mapping 0  va=0x2ee10000  size=0x0c266000  => [0x2ee10000, 0x3b076000)
+    mapping 1  va=0x3b078000  size=0x01ce0000
+    ...
+  and the shared REGION is `0x2c000000..0x40000000` (:4098). `0x3b04aa54 ∈ [0x2ee10000,0x3b076000)`
+  ⇒ **mapping 0 = the dyld shared cache.**
+
+  ⚠ NULL CONTROL for this identification: `0x3b01f800` also occurs once in the capture
+  (:26124, `xnu_live_storage_drv_w1`) — a **disk data word**, not a code address. Only
+  `xnu_live_stall_pc` reads `0x3b04aa54` (x5). The identification rests on the stall sampler's pc,
+  nothing else.
+
+--------------------------------------------------------------------------------
+## 5. WHAT MOVED, AND WHAT DID NOT
+
+**MOVED (the qualitative change the 1015b fix bought).**
+
+  - 999/1003: pid 1 made ~22 SVCs, then **ZERO further user syscalls for ~23 min** while the kernel
+    ran. The stall samples of that era sat in the KERNEL (`enable_interrupts+0x5`, SVC mode) —
+    `records/1008-press-read.txt:86`, `records/1009-press-read.txt:65`.
+  - 1016-A: pid 1 makes **[64,127] SVCs** and is caught **executing shared-cache code in USER mode**.
+    The CPU is no longer in a kernel abort path at the stall — it is **running the shared cache**.
+
+  This is the first capture in the 999→1016 line in which the interrupted pid-1 frame at the frontier
+  is a **user pc inside the shared cache**. 999 concluded "dyld mapped the shared cache; the run
+  reached user mode" — but never *executed* there. 1016-A does.
+
+**DID NOT MOVE (stated plainly, per the brief — this is not a victory lap).**
+
+  1. **The terminal user syscall is still the `-3` timebase poll** (`mach_absolute_time`) — the same
+     call 999/1003 froze on, at the same link address (§2). The 64+ SVCs are dominated by it
+     (`num=0xfffffffd` rows at n=0x14..0x40).
+  2. **The ~24.4 s interrupt freeze PERSISTS.** `xnu_live_tick_sum_maxd = 0x1be9f52b` =
+     468,237,613 / 19.2 MHz = **24.39 s** — the same magnitude `records/1005-press-read.txt` measured.
+  3. **A long kernel abort span persists**: `xnu_live_abt_maxcall = 0x1571b974` = 360,096,116 /
+     19.2 MHz = **18.75 s spent INSIDE ONE `sleh_abort` invocation** (`call = entry_counter()-t0`,
+     `entry_trace.c:5849`). That the per-invocation abort ordinal `_pcn` only reached 512 while one
+     invocation ran 18.75 s says the residual is a NESTED path, not the old flat retry.
+  4. **`cs_invalid_page` tolerance is unchanged** (1003, settled).
+
+--------------------------------------------------------------------------------
+## 6. VERDICT
+
+  **[1016-A] VERDICT: A-NEW-WALL.**
+
+  - The pre-registered A-PROGRESS test (top usvc row NOT in 999/1003's frozen triple) **cannot be
+    applied**: the ladder is at its `USVC_FULL_N` window (§3, A-NO-LADDER ⇒ withhold) AND its terminal
+    `_pc` difference is a slide artefact (§2). **On the SVC evidence alone this would be
+    A-SAME-WALL — and that reading would be an artefact of both the cap and the slide.**
+  - The **stall sampler** (§4) is the DECISIVE instrument, and it is a measurement neither 999 nor
+    1003's design anticipated: it places pid 1's frame in the **dyld shared cache, USER mode, Thumb,
+    identical pc x5** = a **user-space spin**.
+  - ⇒ **THE FRONTIER MOVED**: from *"kernel abort storm / no user syscalls after ~22"* to *"user-space
+    spin inside the dyld shared cache"*. A **new, named wall** at `pc = 0x3b04aa54`.
+  - ⇒ The 1010–1015 single-address retry storm was a **SYMPTOM**, and evicting it (1015b) let pid 1
+    reach and *execute* its own shared-cache code.
+
+  **THE NEXT RUNG (1017)** must therefore be a **SHARED-CACHE-EXECUTION** rung, not another pmap read:
+  identify the instruction at `0x3b04aa54` (its offset within mapping 0 is `0x3b04aa54 - 0x2ee10000 =
+  0x0c23aa54`; name the shared-cache region/symbol there) and classify the spin — a self-referential
+  store (a lock stepping on itself), a bounded-but-huge countdown, or a compare that never satisfies
+  (`lr = 0x7` is the sampler's dummy, so the direction is `pc`-relative, not a return). This is
+  **998's `map_file kr=1` / SHREG wire** territory (`records/998-press-read.txt`) — the shared cache
+  is now the frontier, and it is now EXECUTING.
+
+  ⚠ **This read does NOT claim iOS 7 userspace is launched.** One wall moved; the shared-cache
+  spin, the 24.4 s freeze and the timebase-poll terminus all remain.
+
+--------------------------------------------------------------------------------
+## 7. THE MEASUREMENT-DEFECT SELF-CHECK (applied to THIS read)
+
+  | trap | how it would have bitten here | how it was avoided |
+  |---|---|---|
+  | a `_pc` change read as progress | `0x2beef328` vs `0x2be97328` differ by 0x58000 | §2: resolved as the **slide delta** (entrypoints match it exactly) ⇒ identity, not progress |
+  | a span cap read as a wall | `usvc_n` stops at exactly `0x40` | §3: `USVC_FULL_N=64` is the recorder's window; A-NO-LADDER **withholds** |
+  | an absent band read as a stop | checker's G-WITHHOLD (no_tail) | §1: read BY VALUE (11/11 distinct `far`, 959 aborts) ⇒ storm genuinely absent; the WITHHOLD is reported, not overridden |
+  | an address matched by coincidence | `0x3b01f800` occurs once | §4 NULL CONTROL: it is a **storage data word**, not the stall pc |
+  | a stop that is a stall | the storm is gone BUT a 24.4 s freeze persists | §5.2 kept, not hidden; §6 does not call the rung a success |
+
+  **A claim in a comment is not a check** ([[mi4-a-claim-in-a-comment-is-not-a-check]]): every number
+  above is taken from the capture by value, with the key named. The slide delta of §2 is arithmetic
+  on two published keys, not on a memory of 1003.
+
+--------------------------------------------------------------------------------
+## 8. KEYS AND FILE:LINE THIS READ STANDS ON
+
+  capture : out/stage90/captures/recovered-unknown-arm-20261015-163856-last_kmsg.txt
+  checker : tools/check_1015b_capture.py (G-WITHHOLD/G-CONFIRMED/G-REFUTED owner)
+  usvc    : src/entry/entry_stubs.c:7313 (USVC_FULL_N=64u), :7322 entry_note_user_svc, :7343/:7353
+  stall   : src/entry/entry_stubs.c:4607-4664 entry_note_stall_sample (the reading rule at :4607-4623);
+            src/platform/darwin13/pe_msm8974.c:523-529 (the powers-of-two tick gate)
+  abort   : src/entry/entry_stubs.c:1946 entry_note_abt_span (:1960 the maxcall latch),
+            :1997 entry_note_abt_far; src/entry/entry_trace.c:5849/:5852 the `call` argument
+  mapping : the capture's own `IOS7LAB cache mapping` rows (:4105-4108) and `IOS7LAB shared region`
+            (:4098) — the geometry is read from THIS run, never assumed
+  prior   : records/1015b-press-read.txt (G-CONFIRMED), records/999-press-read.txt §5 (rate collapse),
+            records/1003-stall-forensics-preliminary.txt §6 (0x2be97328 = link 0x2be1b328),
+            records/1005-press-read.txt (the 24.4 s freeze), records/1008/1009-press-read.txt
+            (the kernel-mode stall pcs), docs/1016-design.md §2 (the pre-registered cells)
+
+**No build, no press, and no device action was performed for this read.**
