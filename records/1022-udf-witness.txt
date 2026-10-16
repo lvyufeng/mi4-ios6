@@ -1,0 +1,52 @@
+1022 — THE udf WITNESS: pid 1's `__os_alloc_slow` udf WAS RAISED (by value)
+=================================================================================
+Author: lead. Read-only (this file is the only write). No build/press/device.
+
+WHY THIS RECORD. records/1021d-mmap-failure.txt §B.3 and records/1021d-udf-forensic.txt §9 left
+the SAME caveat open: no capture had witnessed a USER-mode `udf` at the `__os_alloc_slow`
+site, so "the failing call takes the fast trap leg" could not be tied to a live event. It can,
+partly.
+
+THE WITNESS (one line, verbatim, from the 1020b recovery)
+---------------------------------------------------------------------------------
+out/stage90/captures/recovered-unknown-arm-20261016-014316-last_kmsg.txt :4115
+
+    launchd[1]: usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x39605a54 in map 0xc00057b8 (pmap 0xc0ba3cc0)
+
+THE ARITHMETIC (slide-corrected; the capture's pcs are POST-slide)
+---------------------------------------------------------------------------------
+  slide            = 0x13cb000   (capture, the `map_slide pid=1 ... slide=0x13cb000` row)
+  0x39605a54 - 0x13cb000 = 0x3823aa54  ==  __os_alloc_slow + 0x108   EXACTLY
+                                          (`udf #254`, bytes `fe de`; libsystem_platform.dylib)
+
+  Cross-check: runtime __os_alloc_slow = 0x3823a94c + 0x13cb000 = 0x3960594c. The udf is the
+  function's +0x108. See records/1019-osalloc-extract.txt (the two `blx 0x3823e6e4` = mach_vm_map
+  call sites at 0x3823a9aa / 0x3823aa1e; 0x3823aa54 is their JOIN on r0!=0).
+
+CONFIRMATION KEYS IN THE SAME CAPTURE
+---------------------------------------------------------------------------------
+  :4115  launchd[1]: usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x39605a54   (printf, from trap.c)
+  :34016 xnu_live_undef_seq=0x00000001
+  :34017 xnu_live_undef_user_seq=0x00000001
+  :34018 xnu_live_undef_pc=0x39605a54          (user pc = the slide-corrected udf address)
+  :34021 xnu_live_undef_user=0x00000001        (USER mode, not kernel)
+  :34022 xnu_live_undef_seq=0x00000002         (1 -> 2: raised ONCE, then stopped -- not the 1019 loop)
+
+WHAT THIS SETTLES  =>  the udf at pid 1's mach_vm_map-failure site IS REAL, IS TAKEN, and IS RAISED.
+  pid 1's `__os_alloc_slow` really does fail its map, and the run dies there (the udf is a genuine
+  fatal trap on the allocator's failure path -- records/1021d-udf-forensic.txt §1, now live).
+
+WHAT THIS DOES **NOT** SETTLE (state it plainly, do not paper over)
+---------------------------------------------------------------------------------
+The udf is reached from EITHER failure branch (CALL1 @0x3823a9b0 `bne`, CALL2 @0x3823aa26). Both call
+the SAME shim `blx 0x3823e6e4`, so the pc does NOT say which one fired, hence NOT whether the failing
+call took the fast trap leg (a) or the slow leg (b). The trap-15 fix is decisive ONLY for leg (a).
+records/1021d-mmap-failure.txt §B.3 residue (i)/(ii) therefore REMAINS OPEN.
+
+To close it in one run, the next rung must record at the udf WHICH site led there (lr = 0x3823a9af
+for site (a) vs 0x3823aa23 for site (b)), and/or the live r12 at the shim's `svc` (or fleh_swi's r11)
+to tokenise the trap number rather than infer it.
+
+BOTTOM LINE FOR 1022. The blocker is a port defect (`mach_trap_table[15] = kern_invalid`) sitting
+directly on a LIVE user path: pid 1 is observed to die at `__os_alloc_slow+0x108` because its
+mach_vm_map failed. Installing the trap-15 row is warranted regardless of the leg question.

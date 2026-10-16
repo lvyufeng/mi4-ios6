@@ -1,0 +1,231 @@
+1022 rung: plumbing recipe for the mach trap-15 gate (READ-ONLY RECON, 2026-10-16)
+=================================================================================
+No build, no press, no device action was taken. Every claim below cites file:line or
+a by-value reading of the CURRENT linked image out/stage90/xnu_arm_entry.elf.
+
+Goal restated: make mach_trap_table[15] of the LINKED image point at
+ios7lab_mach_vm_map_trap (currently the row reads kern_invalid, which is what the
+1021d extra-decode found: mach_vm_map shim passes the guard, issues svc #0x80 ip=-15,
+and swi_mach_error panics because row 15 is kern_invalid).
+
+
+1. LINK SUFFICIENCY
+-------------------
+Objects (both exist, by value, in the pool dir out/xnu_kernel_obj_d13/):
+  out/xnu_kernel_obj_d13/osfmk_kern_syscall_sw.o   (9140 B, has T kern_invalid,
+                                                    R mach_trap_table)
+  out/xnu_kernel_obj_d13/osfmk_ipc_mach_kernelrpc.o (4344 B; defines the three
+                                                    _kernelrpc_mach_vm_*_trap now;
+                                                    does NOT define
+                                                    ios7lab_mach_vm_map_trap)
+
+Both are LINKED. The pool is globbed at src/entry/build_entry.sh:29686
+    for _o in "$XNU_KERNEL_OBJ_OUT"/*.o "$XNU_ASM_OBJ_OUT"/*.o; do
+which builds POOL_OBJS (the two files are not on the 436 refusal list, which is
+start.o/locore.o/traps_lo.o/iokit_KernelConfigTables.o + D13_EXTRA_REFUSE=
+"exctramps.o memcpy4.o" at src/entry/build_entry.sh:29361). POOL_OBJS is appended to
+the link list at src/entry/build_entry.sh:29735:
+    LINK_OBJS+=(${POOL_OBJS[@]+"${POOL_OBJS[@]}"})
+
+The final link (src/entry/build_entry.sh:29999-30005) is
+    arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" --defsym=ENTRY_BASE=$ENTRY_BASE \
+        -nostdlib -Map ... -o "$OUT/xnu_arm_entry.elf" "${LINK_OBJS[@]}" \
+        --start-group "$LIBGCC" --end-group
+i.e. plain .o members (NOT an archive) with NO --gc-sections (confirmed: the only hit
+for "gc-sections" in the repo is a comment at src/entry/build_entry.sh:28989 saying
+"no `--gc-sections`"). With no archive and no gc-sections, a defined symbol in a linked
+.o always resolves a reference from another linked .o.
+
+VERDICT: a reference from syscall_sw.o to a defined ios7lab_mach_vm_map_trap in
+mach_kernelrpc.o WILL resolve. Nothing additionally forces inclusion. mach_kernelrpc.o
+is already in the image today (its _kernelrpc_* bodies satisfy syscall_sw.o's current
+references); opening the handler gate merely grows that same object's .text.
+
+Two gates must BOTH open (this is the load-bearing part):
+  * external/xnu-hd2-darwin13/xnu/osfmk/ipc/mach_kernelrpc.c:59
+        #if IOS7_COMPAT_PLATFORM /* port/vm_map lab adapters: ARMPBA8/LEO only */
+    This is an INNER gate that is NARROWER than the file-wide gate at :39. The
+    file-wide gate at :39 already opens under the switch
+        #if IOS7_COMPAT_PLATFORM || (defined(STAGE90_XNU_IOS7_TRAPS) && STAGE90_XNU_IOS7_TRAPS)
+    but the port/vm_map lab adapters (:64 construct, :163 guard, :168 unguard, :173
+    destruct, :208 vm_map) sit behind the BARE :59 gate, so on CANCRO they are compiled
+    OUT today. By value on the current object: `arm-none-eabi-nm
+    out/xnu_kernel_obj_d13/osfmk_ipc_mach_kernelrpc.o | grep ios7lab` returns NOTHING
+    for the trap handlers (only the three `ios7lab_vm_*.logged` bss counters, which are
+    the :279-gated traps-12/14 adapters). So ios7lab_mach_vm_map_trap is an UNDEFINED
+    symbol right now, and opening ONLY syscall_sw.c:126 would leave it undefined ->
+    link error, not a silent pass.
+  * external/xnu-hd2-darwin13/xnu/osfmk/kern/syscall_sw.c:126
+        #if IOS7_COMPAT_PLATFORM
+    The row-15 gate (the `#else` at :128 is MACH_TRAP(kern_invalid, 0, NULL, NULL)).
+    The extern decls are at :102 under the same bare gate. syscall_sw.c is a POOL file
+    (out/xnu_kernel_obj_d13/osfmk_kern_syscall_sw.o), so the same -DSTAGE90_XNU_IOS7_TRAPS=1
+    that gates build_xnu_arm_kernel.sh's DEFINES reaches it.
+
+BY-VALUE CONFIRMATION of the current state (out/stage90/xnu_arm_entry.elf):
+  mach_trap_table = 0x805564e4 (nm, T). Entry stride = 12 (ENTRY_BYTES, struct
+  {int arg_count; fn; const char *name} on 32-bit; syscall_sw.h:72-78).
+  slot15 = 0x805564e4 + 15*12 = 0x80556598.
+    0x80556598  arg_count = 0
+    0x8055659c  fn        = 0x8047f5a4  == kern_invalid (nm: kern_invalid = 0x8047f5a4)
+    0x805565a0  name      = 0x805560b8  -> "kern_invalid"
+  Cross-check stride: 0x805565a4 (slot16 arg_count) = 3 (port_allocate carries 3),
+  0x805565a8 (slot16 fn) = 0x804743b8, 0x805565ac (slot16 name) = 0x80556129.
+  ios7lab_mach_vm_map_trap appears 0 times in the linked image's nm output.
+
+
+2. THE PRECEDENT RECIPE, AND WHETHER A NEW SWITCH IS NEEDED
+-----------------------------------------------------------
+The switch STAGE90_XNU_IOS7_TRAPS exists and is ALREADY 1 everywhere that matters:
+  * RECORD: out/stage90/xnu_arm_entry-config.txt:19  STAGE90_XNU_IOS7_TRAPS=1
+  * POOL DEFINES: tools/build_xnu_arm_kernel.sh:902
+        [[ ${STAGE90_XNU_IOS7_TRAPS:-0} -eq 1 ]] && DEFINES+=(-DSTAGE90_XNU_IOS7_TRAPS=1)
+    (this env-gated line is what feeds osfmk_kern_syscall_sw.o AND
+     osfmk_ipc_mach_kernelrpc.o's compiles)
+  * EXTRA (per-rung): scripts/build_1001.sh:70 and scripts/build_1012.sh:244
+        EXTRA="$EXTRA -DSTAGE90_XNU_IOS7_TRAPS=1"
+    and it is also swept from the record by the `for k in ... STAGE90_XNU_IOS7_TRAPS
+    STAGE90_XNU_DYLD_WITNESS STAGE90_XNU_SHREG_PROBE` loop at scripts/build_1001.sh:59 /
+    scripts/build_1012.sh:233.
+  * ASM ASFLAGS half: tools/assemble_arm_layer.sh:124
+        IOS7_TRAPS=${STAGE90_XNU_IOS7_TRAPS:-0}
+    validated 0/1 at :125-127, then consumed at tools/assemble_arm_layer.sh:228
+        ASFLAGS+=("-DSTAGE90_XNU_IOS7_TRAPS=$IOS7_TRAPS")
+    and handed to clang at tools/assemble_arm_layer.sh:366. This is the carrier that
+    puts -DSTAGE90_XNU_IOS7_TRAPS=$IOS7_TRAPS into traps_lo.o, whose :116/:182/:284
+    `#if ... (defined(STAGE90_XNU_IOS7_TRAPS) && STAGE90_XNU_IOS7_TRAPS)` gates the -3
+    SWI timebase (external/.../osfmk/arm/traps_lo.s).
+  * ENTRY EXPORTS: src/entry/build_entry.sh:1603-1606 (IOS7_TRAPS validated 0/1),
+    :2109 and :2312 list STAGE90_XNU_IOS7_TRAPS in ENTRY_ARM_KEYS / the read-back case,
+    :191 of build_1001.sh / :443 of build_1012.sh add EXPORTS+=("STAGE90_XNU_IOS7_TRAPS=1").
+  * The recipe a prior rung used to thread a switch (build_1012.sh): (a) EXTRA gets the
+    -D, swept from the record and pinned explicitly (:244); (b) pool DEFINES via the
+    env-gated line in build_xnu_arm_kernel.sh:902, driven by an `export
+    STAGE90_XNU_IOS7_TRAPS=1` BEFORE the asm layer runs (build_1001.sh:124 / build_1012.sh:360);
+    (c) ASFLAGS via assemble_arm_layer.sh:228 for the .s layer; (d) carried forward by
+    reading the record with `awk -F= -v k=... '$1==k{print $2}'` plus explicit pins, and
+    re-asserted at the tail (`[[ $(awk -F= '$1=="STAGE90_XNU_IOS7_TRAPS"...`-style checks,
+    e.g. build_1012.sh:713/819/853).
+  * xnu_arm_entry-arm-extra.txt is NOT the carrier for this switch. The file today holds
+    only `STAGE90_XNU_GLOBAL_FIX=1 role=1021d-general-regs` (out/stage90/xnu_arm_entry-arm-extra.txt).
+    GLOBAL_FIX is a POOL-only switch (pmap.c:1357) declared there because no record
+    carries it. STAGE90_XNU_IOS7_TRAPS IS in the record, so arm-extra is irrelevant here.
+
+VERDICT ON A NEW SWITCH: NONE is needed. STAGE90_XNU_IOS7_TRAPS is already in the record,
+in pool DEFINES, in ASFLAGS, and in the entry EXPORTS. The 1022 rung does NOT add a record
+key. What it must change is exactly TWO `#if` conditions in the tree, via a staging patch
+script:
+  (i)  syscall_sw.c:126 row-15 gate  -> `|| (defined(STAGE90_XNU_IOS7_TRAPS) && STAGE90_XNU_IOS7_TRAPS)`
+       (and, to match, the extern decl gate at :102 — optional for compilation since the
+        row references the name, but keep them consistent).
+  (ii) mach_kernelrpc.c:59 inner gate -> widen to the same `|| (defined(...) && ...)`
+       expression, so the :208 body compiles. NOTE this also compiles the four port
+       adapters (:64/:163/:168/:173) — harmless, since only a row that references them
+       pulls them into dispatch, and rows 24/25 stay kern_invalid unless opened too.
+  Model the script on tools/patch_d13_ios7_vmwire.py (its GATE_OLD/GATE_NEW at
+  :66-68, its plan_gate/plan_insert idempotence helpers at :250-269). OFF compiles the
+  tree byte-for-byte because every clause puts `defined(...)` FIRST
+  (mi4-off-option-two-spellings).
+Then: rebuild the pool with the SAME value (XNU_KERNEL_EXTRA_DEFINES +
+  export STAGE90_XNU_IOS7_TRAPS=1 for build_xnu_arm_kernel.sh:902), re-run the asm layer
+  only if traps_lo.s changes (it does NOT for trap 15), and relink. build_entry.sh only
+  LINKS the two .o files, so a stale pool hides the change — the same trap as 1020
+  (records/1020-build-defect.txt).
+
+WARNING the rung must handle (found by value, not asked for but load-bearing):
+  tools/check_d13_ios7_vmwire.py:81 DEFERRED_TRAPS=(15, 24, 25, 41, 42), and check 6 at
+  :380-403 asserts, IN BOTH MODES, that mach_trap_table rows 15/24/25/41/42 still read
+  {fn=kern_invalid, name="kern_invalid"} (keyed on entry 0's own words, no name trusted).
+  Opening row 15 makes trap 15 non-kern_invalid, so check_d13_ios7_vmwire.py will FAIL the
+  build. The 1022 rung MUST remove 15 from DEFERRED_TRAPS (leaving 24/25/41/42) in the
+  same commit, or the entry build refuses. This is the "one value, two definitions" class:
+  the checker still encodes the 994 deferral.
+
+
+3. THE BY-VALUE CLAUSE TO ADD
+-----------------------------
+Pattern to copy: the 1021d linked-image clause at src/entry/build_entry.sh:31404-31465
+(reads the LINKED image's mach_msg_send via `python3 tools/check_d13_no_neon.py
+"$OUT/xnu_arm_entry.elf" --symbol ... --expect ...`) and the 1020 clause at
+:31374-31394 (check_d13_undef_raise.py --expect on). Both are `if [[ <switch> -eq 1 ]]; then
+... layout_fail ... fi`. The existing IOS7_TRAPS clause that ALREADY exists at
+src/entry/build_entry.sh:31608-31623 is about the SWI TIMEBASE only (check_d13_ios7_traps.py
+on locore_fleh_swi); it does NOT read trap 15.
+
+Insert the NEW 1022 clause immediately AFTER that clause's closing `fi` at
+src/entry/build_entry.sh:31624 (i.e. between :31624 and the `# **995:` comment at :31625).
+It is gated on the SAME `if [[ $IOS7_TRAPS -eq 1 ]]` value already in scope.
+
+Shape (helper/pattern: nm + objdump -s on the linked ELF, exactly like
+check_d13_ios7_vmwire.py's read_u32):
+
+    # 1022: mach_trap_table[15] must point at the ios7lab_mach_vm_map_trap handler, read
+    # BY VALUE off the LINKED image (syscall_sw.c + mach_kernelrpc.c are POOL files, so a
+    # stale pool is invisible to the link — records/1020-build-defect.txt). The 994 clause
+    # above reads the SWI timebase only; this reads the DISPATCH row.
+    if [[ $IOS7_TRAPS -eq 1 ]]; then
+        _mtt=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="mach_trap_table"{print "0x"$1}')
+        layout_fail_if_empty _mtt ...        # empty value deletes the assertion (459's lesson, :30009)
+        _fn=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="ios7lab_mach_vm_map_trap"{print "0x"$1}')
+        # read word at (mach_trap_table + 15*12 + 4) and compare to _fn; also arg_count==8
+        # at +0 and name word -> "ios7lab_mach_vm_map_trap" at +8.
+    fi
+
+The by-value assertions (with today's readings as the negative control):
+  * mach_trap_table == 0x805564e4          # MEASURED now
+  * u32(0x805565e4 + 15*12 + 0) == 8       # arg_count; control: currently 0
+  * u32(0x805565e4 + 15*12 + 4) == &ios7lab_mach_vm_map_trap   # fn; control: 0x8047f5a4 = kern_invalid
+  * cstr(u32(+8)) == "ios7lab_mach_vm_map_trap"                # name; control: "kern_invalid"
+  Entry stride is 12 (check_d13_ios7_vmwire.py:77 ENTRY_BYTES = 12).
+
+A companion tool in the check_d13_no_neon.py idiom is the right home for this.
+tools/check_d13_no_neon.py exposes (tools/check_d13_no_neon.py:609-611 usage, :614-676
+parser):
+    check_d13_no_neon.py <elf-or-obj> --symbol <name> --expect none|any
+    check_d13_no_neon.py --pool <object-dir> --expect none|any [--min-objects N]
+    check_d13_no_neon.py --selftest
+It resolves the symbol with `nm -S` (nm_symbols:198, resolve_symbol:236 — and it REFUSES
+loudly on a missing symbol or one with no size) and reads a byte window with objdump
+(objdump_text:181). Its two idioms worth copying: (a) --symbol/--pool mutually exclusive
+(:661), (b) --selftest with a hard/soft/linked fixture matrix (:525-576).
+
+Minimal CLI for a companion tools/check_1022_trap15.py (DO NOT write it in this rung):
+    check_1022_trap15.py <elf> --expect on|off
+    check_1022_trap15.py --selftest
+  --expect on:  nm mach_trap_table + nm ios7lab_mach_vm_map_trap; assert u32(mtt+15*12+4)
+                == fn AND u32(mtt+15*12+0) == 8 AND cstr(u32(mtt+15*12+8)) ==
+                "ios7lab_mach_vm_map_trap". Refuse (exit!=0) if mach_trap_table or the
+                handler symbol is ABSENT — a missing symbol must FAIL, not pass
+                (resolve_symbol:236's rule).
+  --expect off: the mirror — row 15 reads kern_invalid keyed on entry 0's own {fn,name}
+                (the sha of check_d13_ios7_vmwire.py check 6). The two modes assert
+                disjoint values, so an ON arm fails OFF and vice versa.
+  --selftest:   the check_d13_no_neon.py:525-576 fixture-matrix shape (a synthetic ELF
+                with row 15 = kern_invalid must fail --expect on; one with row 15 =
+                handler must fail --expect off; a missing-symbol fixture must fail both).
+The clause in build_entry.sh should invoke it as
+    python3 "$REPO_ROOT/tools/check_1022_trap15.py" "$OUT/xnu_arm_entry.elf" --expect on
+and `layout_fail` on non-zero, exactly as the 1020/1021d clauses do.
+
+
+SUMMARY (three answers)
+-----------------------
+(1) LINK: sufficient. osfmk_kern_syscall_sw.o and osfmk_ipc_mach_kernelrpc.o are both in
+    POOL_OBJS (glob build_entry.sh:29686), appended to LINK_OBJS (:29735), linked as plain
+    .o members with no archive and no --gc-sections (final link :29999). A defined
+    ios7lab_mach_vm_map_trap in mach_kernelrpc.o resolves syscall_sw.o's row-15 reference;
+    nothing extra forces inclusion. But BOTH of mach_kernelrpc.c:59 (inner) AND
+    syscall_sw.c:126 must open — mach_kernelrpc.o is NARROWER than the file-wide :39 gate,
+    so the handler is undefined today (nm shows it absent).
+(2) PRECEDENT / NEW SWITCH: NO new switch. STAGE90_XNU_IOS7_TRAPS is already the record
+    key (config.txt:19), the pool DEFINE (build_xnu_arm_kernel.sh:902 + env export),
+    the ASFLAGS define (assemble_arm_layer.sh:228, consumed by traps_lo.s's :116/:182/:284),
+    and the entry EXPORTS pin. 1022 changes only the two `#if` conditions via a
+    patch_d13_ios7_vmwire.py-style staging script, rebuilds the pool, relinks. It MUST also
+    drop 15 from check_d13_ios7_vmwire.py:81 DEFERRED_TRAPS or the build refuses.
+(3) CLAUSE: insert after src/entry/build_entry.sh:31624, gated on `if [[ $IOS7_TRAPS -eq 1 ]]`,
+    reading nm mach_trap_table (0x805564e4 today) + nm ios7lab_mach_vm_map_trap and asserting
+    u32(mtt+15*12+4) == &handler (control: 0x8047f5a4 = kern_invalid), arg_count==8
+    (control: 0), name=="ios7lab_mach_vm_map_trap" (control: "kern_invalid"). Companion
+    tools/check_1022_trap15.py <elf> --expect on|off | --selftest, in the
+    check_d13_no_neon.py idiom (Refuse on missing symbol; --selftest fixture matrix).

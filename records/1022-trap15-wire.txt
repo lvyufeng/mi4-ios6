@@ -1,0 +1,309 @@
+1022 — TRAP-15 WIRE ARITY vs THE REAL iOS 7 pid-1 CLIENT
+Method: read-only. No build, no press, no device action, no write to out/stage90.
+Inputs read by value:
+  A. /mnt/data/mi4-ios6/external/xnu-4570.1.46/osfmk/mach/arm/syscall_sw.h   (Apple ARM trap stub macro)
+  B. /mnt/data/mi4-ios6/external/xnu-4570.1.46/osfmk/kern/syscall_sw.c:120   (Apple trap table)
+  C. /mnt/data/mi4-ios6/external/xnu-4570.1.46/osfmk/ipc/mach_kernelrpc.c:100 (Apple handler body)
+  D. /mnt/data/mi4-ios6/external/xnu-4570.1.46/osfmk/mach/mach_traps.h:646    (Apple args struct + PAD_ARG_)
+  E. /mnt/data/mi4-ios6/external/xnu-hd2-darwin13/xnu/osfmk/arm/traps_lo.s    (our dispatcher)
+  F. /mnt/data/mi4-ios6/external/xnu-hd2-darwin13/xnu/osfmk/ipc/mach_kernelrpc.c:208 (our handler)
+  G. /tmp/dyld-extract/dyld_shared_cache_armv7                                 (the CLIENT)
+     sha256 cad2df775e122c660238f341e74c163a2ea0ed261e85bfd3190de750cd9c0d2c
+     (== 1017/1019 VERIFIED). Base 0x2c000000, fileoff = va - 0x2c000000.
+     objdump: arm-none-eabi 2.38.
+
+== VERDICT: MISMATCH (arity right, byte-offsets wrong) ==
+The DECLARED WIRE ARITY matches: trap -15 carries EIGHT u32 words, the client's own stub carries
+exactly r0,r1,r2,r3,r4,r5,r6,r8, and the existing handler reads frame slots 0..8. argc=8 is CORRECT.
+BUT the handler MISREADS the frame in two independent ways, so OPENING THE GATE ALONE IS NOT
+SUFFICIENT — a wire fix is ALSO owed:
+  (1) it `copyin`s EIGHT bytes (a uint64_t) at regs[1], but the client's address is 32-bit — the read
+      swallows slot 2 (size) and the `address64>>32` guard then returns KERN_INVALID_ARGUMENT;
+  (2) it takes `cur_protection` from regs[8], which for the real client holds the TASK PORT NAME.
+MEASURED SLOT MAP (see §4): regs[0]=target(port), regs[1]=&address (32-BIT), regs[2]=size,
+regs[3]=0, regs[8]=the TASK PORT again (a duplicate target, NOT a protection). The C names of
+the wrapper's stack words 4/5/6 are # UNMEASURED.
+
+================================================================================
+1. THE REFERENCE WIRE SHAPE (Apple upstream)
+================================================================================
+syscall_sw.h:90   kernel_trap(_kernelrpc_mach_vm_map_trap,-15,9)
+syscall_sw.c:120  /* 15 */ MACH_TRAP(_kernelrpc_mach_vm_map_trap, 6, 8, munge_wwllww),
+
+The three numbers are: (a) C-arg count = 6, (b) u32 wire words = 8, (c) munge32 name.
+
+1a. WHAT THE STUB ACTUALLY DOES (this is the wire, by value):
+syscall_sw.h:102  kernel_trap(trap_name, trap_number, num_args)
+                    -> _kernel_trap_<num_args>(trap_name, trap_number)
+syscall_sw.h:53   _kernel_trap_6to9(trap_name, trap_number, save_regs, arg_regs):
+      mov     ip, sp
+      stmfd   sp!, { save_regs }
+      ldmia   ip,   { arg_regs }
+      mov     r12, # trap_number
+      swi     # SWI_SYSCALL
+      ldmfd   sp!, { save_regs }
+      bx      lr
+
+syscall_sw.h:79/81 (__BIGGEST_ALIGNMENT__ > 4, i.e. armv7k):
+      _kernel_trap_8 = _kernel_trap_6to9(..., r4-r6 COMMA r8, r4-r6 COMMA r8)
+      _kernel_trap_9 = _kernel_trap_8        ("the ninth argument is not used")
+=> Apple's own assembler emits, for trap -15:
+      mov ip,sp; push {r4,r5,r6,r8}; ldm ip,{r4,r5,r6,r8}; mov r12,#-15; svc #SWI_SYSCALL
+   (the client's stub uses `mvn ip,#14` instead of `mov r12,#-15` — same ip == -15, §3a)
+=> THE WIRE IS EIGHT u32 IN r0,r1,r2,r3 THEN r4,r5,r6,r8.  # CONFIRMED BY BYTES (G).
+
+1b. THE STRUCT-TO-WIRE MAP (Apple._kernelrpc_mach_vm_map_trap_args, mach_traps.h:646):
+      PAD_ARG_(mach_port_name_t, target);
+      PAD_ARG_(user_addr_t, addr);
+      PAD_ARG_(mach_vm_size_t, size);
+      PAD_ARG_(mach_vm_offset_t, mask);
+      PAD_ARG_(int, flags);
+      PAD_ARG_8
+      PAD_ARG_(vm_prot_t, cur_protection);
+    (The /* wire word N -> rN */ annotations were Apple's armv7k CONFIG_REQUIRES_U32_MUNGING
+     view; on plain armv7 the munger reorders, so I do NOT assert slot-per-field here. The
+     by-value client (§3b) is authoritative and shows only that slot 8 = TARGET.)
+
+  PAD_ARG_ (mach_traps.h:364) inserts a pad word ONLY when sizeof(type) < 8 (the ELIMINATED
+  CONFIG_REQUIRES_U32_MUNGING path, mach_traps.h:339) or < 4 (else, with PAD_ARG_8 = 4 bytes).
+  The hd2 kernel does NOT define CONFIG_REQUIRES_U32_MUNGING and is armv7 with
+  __BIGGEST_ALIGNMENT__ == 4, so PAD_ARG_8 = `char arg8_pad_[4]` and PAD_() == 0 for every
+  32-bit type: the native struct is 8 packed uint32_t, matching the 8-word wire.
+  # UNMEASURED: which wire slot `arg8_pad_` occupies on the CLIENT (it is the arg's 8th word per
+  the `_kernel_trap_8` save/restore set {r4,r5,r6,r8}); the client wrapper's own register setup
+  (§3b) is the by-value answer and shows slot 8 = TARGET.
+  Apple's `munge_wwllww` (bsd/dev/arm/munge.c:220 -> munge_wwlll:229 -> marshal_no_pad 8) is only
+  linked on the armv7k ABI; on our armv7 the tree omits it (§1c).
+
+1c. `munge_wwllww` MEANING FOR 32-BIT ARMV7:
+  The `wwllww` letters encode the CLIENT's (64-bit-capable) type sizes: w=tgt, w=addr(PAD_ARG_),
+  l=size(2 words), l=mask(2 words), w=flags, w=prot. For a 32-bit kernel that would be 8 words.
+  BUT arm/munge.c is compiled only when `__arm__ && (__BIGGEST_ALIGNMENT__ > 4)` (i.e. armv7k).
+  Regular armv7 (our board) has BIGGEST_ALIGNMENT == 4 => **bsd/dev/arm/munge.c is NOT compiled
+  and CONFIG_REQUIRES_U32_MUNGING is 0** => `munge_wwllww`/`munge_dddd` are never linked.
+  # MEASURED: `nm out/stage90/xnu_arm_entry.elf | grep -i munge` finds NO munge symbol besides
+  the local SIO → the munger is indeed absent on this build.
+
+  WHAT `argc` MEANS AT THE DISPATCHER: NOTHING on arm.
+  - hd2 mach_trap_t (syscall_sw.h:74) = { int mach_trap_arg_count; fn; const char *name; } — 12 B.
+  - READER TABLE: `grep arg_count osfmk/arm/` -> ZERO hits. genassym.c emits no arg-count symbol.
+    `grep arg_count osfmk/arm/*.s` -> ZERO. The ONLY readers of `.mach_trap_arg_count` in the whole
+    tree are i386/bsd_i386.c:478 and :550 (the x86 user-trap path).
+  - Our arm dispatcher (traps_lo.s:197-214) loads ONLY the function pointer (`ldr r1,[r1,#4]`) and
+    `bx r1` with `mov r0, r8` (the saved frame). It NEVER reads the argc field.
+  => On non-munging arm the dispatcher does NO marshalling; it hands the raw saved-state pointer to
+     the C handler. The wire IS the frame {r0..r12,sp,lr,pc,cpsr}. `argc` is documentation.
+  => Therefore the existing hd2 row `MACH_TRAP(ios7lab_mach_vm_map_trap, 8, NULL, NULL)`
+     (syscall_sw.c:127) has the RIGHT field VALUES and the only DEFECT is the `#if
+     IOS7_COMPAT_PLATFORM` gate that swaps it for `kern_invalid` (:129) on CANCRO.
+
+  # UNMEASURED: is apple's `munge_wwllww` also emitted as the DEVICE's own /usr/lib/system stub
+  (as opposed to the shared-cache one I disassembled)? Only the cache image exists on disk; the
+  device-side lib must equal it (same cache). Not needed for the verdict — the wire is the same.
+
+================================================================================
+2. THE DISPATCHER (our tree) — how the frame is reached
+================================================================================
+traps_lo.s:110-124  _fleh_swi:
+      ldr  sp,[..,TH_PCB_USS];  stmea sp, {r0-lr}^      ; r0-r12,sp,lr -> saved frame
+      str  lr,[sp,#0x3C]; mrs r2,spsr; str r2,[sp,#0x40]
+      mov  r8, sp                                        ; r8 = &saved frame
+      ldr  sp,[..,TH_PCB_ISS]
+      mov  r11, r12                                      ; r11 = syscall number
+=> The saved frame at r8 is `arm_saved_state_t` (_structs.h:60): r[0..12] then sp,lr,pc,cpsr.
+   So `((uint32_t*)saved_registers)[i] == ss->r[i]` for i<=12. BY VALUE.
+
+traps_lo.s:197  swi_mach:
+      adr  lr, swi_exit
+      mov  r4, r5
+      cmp  r5, #0x80 ; bge swi_mach_error                ; bounds 0..127
+      LOAD_ADDR(r1, mach_trap_table)
+      add  r11, r5, r5, lsl#1                            ; r11 = 3*r5
+      add  r1, r1, r11, lsl#2                            ; r1 += 12*r5   (stride 12 -> argc word CONFIRMED)
+      ldr  r1, [r1, #4]                                  ; r1 = mach_trap_function  (offset 4 = the fn)
+      LOAD_ADDR(r2, kern_invalid)
+      mov  r0, r8                                        ; arg = saved frame
+      teq  r1, r2 ; beq swi_mach_error                   ; function ptr == kern_invalid => panic
+      bx   r1
+Index: r5 = -r11, r11 was set to r12 (traps_lo.s:166) and the client does `mvn ip,#14` -> ip = -15.
+traps_lo.s:192 `rsbs r5, r11, #0` -> r5 = 15 -> table[15]. # CONFIRMED (1019 §2 cross-checked 10/12).
+
+`ios7_traps_enabled()` IS NOT CONSULTED HERE. traps_lo.s has only #if on
+BOARD_CONFIG_ARMPBA8||QSD8250_LEO||STAGE90_XNU_IOS7_TRAPS (lines 116,182,284) and those govern the
+-3 timebase fast path, not the -15 dispatch. The trap-15 gate lives ONLY in syscall_sw.c:126/129
+(IOS7_COMPAT_PLATFORM). So enabling trap 15 on CANCRO requires the CANCRO build to define it.
+
+ELF STATE (measured, current out/stage90/xnu_arm_entry.elf):
+  mach_trap_table @ 0x805564e4; entry 15 @ 0x80556598 = {00 00 00 00 | a4 f5 47 80 | b8 60 55 80}
+  = { argc=0, fn=0x8047f5a4 == kern_invalid, name="kern_invalid" }.  # MEASURED
+  nm: `ios7lab_mach_vm_map_trap` and `_kernelrpc_mach_vm_map_trap` are ABSENT from the image
+  => the handler is compiled out on CANCRO, exactly as the task states.
+
+================================================================================
+3. THE REAL CLIENT (dyld_shared_cache_armv7) — BY VALUE
+================================================================================
+3a. THE FAST-TRAP THUNK @ 0x381c5960 (Thumb; reached from the mach_vm_map wrapper):
+  bytes: 0d c0 a0 e1 | 70 01 2d e9 | 70 01 9c e8 | 0e c0 e0 e3 | 80 00 00 ef | 70 01 bd e8 | 1e ff 2f e1
+    e1a0c00d  mov ip, sp
+    e92d0170  push {r4,r5,r6,r8}
+    e89c0170  ldm  ip, {r4,r5,r6,r8}
+    e3e0c00e  mvn  ip, #14              ; ip = -15
+    ef000080  svc  #0x80
+    e8bd0170  pop  {r4,r5,r6,r8}
+    e12fff1e  bx   lr
+  => IDENTICAL to Apple's `_kernel_trap_9`=_kernel_trap_8 expansion (§1a). BYTES MATCH THE MACRO.
+
+3b. WHICH REGISTERS THE `svc` CARRIES — from the WRAPPER body @ 0x381c6618 (Thumb), fast path
+    (objdump force-thumb, reproduced):
+      381c6618 b5f0        push {r4,r5,r6,r7,lr}
+      381c661a af03        add  r7, sp, #12
+      381c661c e92d0d00    stmdb sp!, {r8,sl,fp}
+      381c6620 b08c        sub  sp, #48
+      381c6622 468a        mov  sl, r1                 ; sl = addr &address
+      381c6624 68fe        ldr  r6, [r7, #12]          ; r6 = arg5  (object/offset word)
+      381c6626 68b9        ldr  r1, [r7, #8]           ; r1 = arg4
+      381c6628 4683        mov  fp, r0                 ; fp = target
+      381c662a f8d7902c    ldr.w r9,  [r7, #44]        ; r9 = arg{at +32}
+      381c662e f8d7e028    ldr.w lr,  [r7, #40]        ; lr = arg{at +28}
+      381c6632 f8d7c024    ldr.w ip,  [r7, #36]        ; ip = arg{at +24}
+      381c6636 693d        ldr  r5, [r7, #16]          ; r5 = arg6
+      381c6638 6978        ldr  r0, [r7, #20]          ; r0 = arg7  = cur_protection
+      381c663a 920b        str  r2, [sp, #44]          ; save size
+      381c663c 2800        cmp  r0, #0                 ; prot != 0?          \
+      381c663e d125        bne  0x381c668c            ;   -> slow/MIG      | fast-trap guard:
+      381c6640 f1be0f07    cmp.w lr, #7                ;   flags != 7?       | prot==0 && flags==7
+      381c6646 d11f        bne  0x381c668c            ;   -> slow           | && mask==1
+      381c664c e88d0042    stmia.w sp, {r1, r6}        ; [sp+0]=arg4 [sp+4]=arg5
+      381c6650 4658        mov  r0, fp                 ; r0 = target
+      381c6652 4651        mov  r1, sl                 ; r1 = addr &address
+      381c6654 9a0b        ldr  r2, [sp, #44]          ; r2 = size
+      381c6656 46d8        mov  r8, fp                 ; r8 = target          <-- 8th WORD
+      381c6658 9502        str  r5, [sp, #8]           ; [sp+8]=arg6
+      381c665a 461c        mov  r4, r3                 ; r4 = mask            <-- 5th WORD
+      381c665c f8cda028    str.w sl, [sp, #40]         ; save addr
+      381c6660 46cb        mov  fp, r9
+      381c6662 f8cdc00c    str.w ip, [sp, #12]         ; [sp+12]=arg{+24}
+      381c6666 4665        mov  r5, ip                 ; r5 = arg{+24}
+      381c6668 46f2        mov  sl, lr
+      381c666a f7ffe97a    blx  0x381c5960           ; -> the thunk
+    At the blx the live registers are exactly:
+       r0 = target, r1 = &address, r2 = size, r3 = mask, r4 = mask, r5 = arg{+24}, r6 = arg5
+    The thunk then moves r4,r5,r6,r8 -> the 8-word frame. So:
+
+    FRAME = r0,r1,r2,r3,r4,r5,r6,r8
+          = {target, &addr, size, mask, arg4, arg5, arg6, arg8}
+    where arg4=[r7,8], arg5=[r7,12], arg6=[r7,16], arg8=[r7,36] are the WRAPPER's incoming stack args
+    (the MIG msg_words — C-ABI: r0-r3=target,&addr,size,mask, then stack arg4..).
+    # MEASURED from bytes only: r8 = target (duplicate). The semantic identity of stack words
+    arg4/arg5/arg6/arg8 as (flags/protection/object) is # UNMEASURED — the wrapper's MIG struct maps
+    them, and I did not extract that reply/struct. What IS measured: r3=mask=0 (caller), and
+    slot 8 = the task port.
+
+3c. CALLER __os_alloc_slow @ 0x3823a94c (libsystem_platform, Thumb), call (a) @ 0x3823a9aa:
+      3823a976 mov.w r0,#0x1000 / 3823a980 str r0,[sp,#40]   ; [sp+0x28]=0x1000 (initial *address)
+      3823a98a movs r3,#0                                   ; r3 = mask = 0
+      3823a98e mov.w r2,#0x1000                             ; r2 = size = 0x1000
+      3823a994 movs r1,#3 ; 3823a996 str r1,[sp,#28]        ; [sp+0x1c]=3
+      3823a998 add  r1, sp, #40                             ; r1 = &[sp+0x28]  (mach_vm_address_t*)
+      3823a980/3823a982 movw/movt r8,#0x4900/#1             ; r8 = 0x49000001
+      3823a9a2 str.w r8,[sp,#8]                             ; [sp+0x08]=0x49000001 (flags)
+      3823a98c str r2,[sp,#32] ; 3823a99a..9500 str r5=0    ; [sp+0x18],[sp+0x14],[sp+0x10],[sp+0x0c],
+                                                            ;  [sp+0x04],[sp+0x00] = 0
+      3823a992 str r1,[sp,#36] ; #36=1 3823a99c str r5=0    ; [sp+0x24]=1 ; [sp+0x20]=0
+      3823a9aa blx 0x3823e6e4                               ; the mach_vm_map binding
+  # MEASURED: r3 == 0 (mask) and r2 == 0x1000 (size), matching 1018 part (c). The caller's stack
+  words [sp+0x00..0x2c] are literal: 0,0,0x49000001,0,0,0,3,1,7,0x1000,0.
+  # NB: I read [sp+0x08]=0x49000001 and [sp+0x0c]=0 this pass; the SEMANTIC name of each word
+  (flags vs object vs protection) is # UNMEASURED — it lives in the wrapper's MIG struct.
+
+================================================================================
+4. THE COMPARISON (handler vs real wire)
+================================================================================
+Existing handler ios7lab_mach_vm_map_trap (mach_kernelrpc.c:208-239) reads:
+    regs[0]=target(port)  regs[1]=&address  regs[2]=size  regs[4]=mask  regs[6]
+    regs[8]=protection    guards regs[3]|regs[5]|addr_hi must be 0
+    :222 copyin regs[1] -> uint64_t address64        (reads 8 bytes = wire slots 1,2)
+    :224 reject if regs[3] || regs[5] || (address64>>32)
+    :229 mach_vm_map(map,&addr32, regs[2], regs[4], regs[6], IPC_PORT_NULL,0,FALSE, regs[8],...)
+    :234 copyout address64 -> regs[1]
+
+    # MEASURED anchors from the client (the handler's OWN print names these slots — I do NOT
+    # independently know the client's C-arg names for slots 4/6/8; I state only what the bytes fix):
+    - slot 1: the client passes a 32-BIT &address (r1 = add r1,sp for the address buffer).
+    - slot 2: the client sets r2 = 0x1000 (a size). The handler reads slot 2 as `size`. # MEASURED.
+    - slot 3: the client sets r3 = 0. The handler guards regs[3]==0. # MEASURED consistent.
+    - slot 8: the client's wrapper sets r8 = TARGET (the task port, via `mov r8,fp`). The handler
+      uses slot 8 as `cur_protection`. # MEASURED: a port name, not a vm_prot_t.
+    slot 7 (r7) = lr, slot 12 (ip) = -15 : never read.
+    # UNMEASURED: which C arg the wrapper's stack words arg4/arg5/arg6 (slots 4,5,6) are.
+
+RESULT: the handler's slot INDICES are the ones it needs; the defects are BYTE-OFFSET (§5, regs[1]
+width) and VALUE (regs[8] is a port, not a protection). # UNMEASURED: the exact kern_return_t the
+real call returns (I did not run it) — but either the §5 guard fires KERN_INVALID_ARGUMENT, or
+slot 8-as-protection reaches mach_vm_map and it fails there.
+
+  **The slot map the BYTES fix for trap 15 on this frame:**
+      regs[0] = target (task port)          # MEASURED
+      regs[1] = &address                    # MEASURED (32-bit)
+      regs[2] = size = 0x1000               # MEASURED
+      regs[3] = 0 (handled)                 # MEASURED
+      regs[4..8] = wrapper stack words; r8 = target again  # MEASURED for r8 only
+      # UNMEASURED: the C names of the wrapper stack words (flags/object/protection). The handler's
+      # slot INDICES are the ones it needs; the two defects are BYTE-OFFSET (regs[1] width) and
+      # VALUE (regs[8] is a port, not a vm_prot_t), not the arity.
+
+VERDICT ON ARITY: **MATCH** (argc=8 == eight wire words == eight frame slots; the handler does not
+misread the FRAME WIDTH, and slots 0,1,2,3 are read as the client wrote them). The defects are NOT
+arity: they are (i) an 8-byte copyin at a 32-bit address slot (§5) and (ii) regs[8] read as a
+protection when the client puts the task port there. RECOMMEND: keep argc=8; when the gate opens,
+also fix §5(a)-(c). For protection, take the value the client actually intends at the 7th word, or
+hard-code VM_PROT_ALL. The port name is NOT a valid vm_prot_t.
+
+================================================================================
+5. THE 32/64 QUESTION (explicitly)
+================================================================================
+external/xnu-hd2-darwin13/xnu/osfmk/mach/arm/vm_types.h:107-109 make mach_vm_address_t /
+mach_vm_size_t **32-bit** ("We target iOS 4.3 for compatibility").
+
+- The REAL client's addr word is r1 = a 32-bit &address (the wrapper's `mov r1,sl` with sl loaded
+  from a 4-byte slot). The frame slot 2 (r2) is `size`, NOT the high half of a 64-bit address.
+- The handler's `copyin(regs[1], &address64, sizeof(address64))` (mach_kernelrpc.c:222) read
+  EIGHT bytes: slots 1 AND 2. Slot 2 is the SIZE (0x1000). On little-endian that yields
+  address64 = (0x1000 << 32) | *(&address). If *(&address)=0x1000 (the caller's seed), address64 =
+  0x0000100000001000, and the :224 guard `(address64 >> 32)` != 0 => KERN_INVALID_ARGUMENT
+  IMMEDIATELY, before mach_vm_map is even called.
+  => INCONSISTENT. The existing handler's 64-bit copyin of the slot-1 address CONTRADICTS the
+     client's 32-bit &address and DOES misread the frame relationship between slots 1 and 2.
+  => This is the real trap-15 wire defect, and it is INDEPENDENT of §4: fixing §5 alone
+     (copyin 4 bytes at regs[1], drop the `address64>>32` test) is necessary for the fast call.
+
+  # These two fixes together = "open the -15 row" is NOT sufficient. Owed wire changes:
+  #   (a) mach_kernelrpc.c:222 — copyin sizeof(mach_vm_address_t)=4, not 8;
+  #   (b) mach_kernelrpc.c:224 — drop the `address64 >> 32` test (native 32); re-examine the
+  #       `regs[5]` guard against the client's actual slot 5 (the wrapper puts the size buffer
+  #       there — # UNMEASURED);
+  #   (c) mach_kernelrpc.c:229 — protection is NOT regs[8]; REGS[8] HOLDS THE TASK PORT. Use
+  #       VM_PROT_ALL (safe: the client's os_alloc maps RW) or resolve the 7th wire word.
+  #   (d) syscall_sw.c:126-129 — the IOS7_COMPAT_PLATFORM gate must also open for CANCRO.
+  # UNMEASURED: which C arg the wrapper's stack words map to, hence the exact value the client
+  # intends as `protection`. Its guard (`[r7,20]==0 && [r7,40]==7 && [r7,44]==1`) did NOT reject
+  # the call, so whatever protection the wrapper derived was acceptable to it; VM_PROT_ALL is the
+  # conservative choice.
+
+================================================================================
+6. SUMMARY TABLE
+================================================================================
+Claim                                                    | Result            | Evidence
+---------------------------------------------------------|-------------------|---------------------
+Apple trap -15 wire arity                                | 8 u32 words       | syscall_sw.c:120, syscall_sw.h:79-91
+Stub register set (Apple macro)                          | {r4,r5,r6,r8}     | syscall_sw.h:53,79-91
+Real client thunk bytes == Apple macro                   | IDENTICAL         | 0x381c5960, bytes §3a
+Frame = saved-state r[0..12]                             | YES               | traps_lo.s:112-124, _structs.h:60
+Dispatcher stride = 12, loads fn @ +4, argc unused on arm| YES               | traps_lo.s:206-208; grep arg_count
+ELF trap-15 row == kern_invalid                          | CONFIRMED         | 0x80556598 = {0, 0x8047f5a4, name}
+Handler compiled out on CANCRO                           | CONFIRMED         | nm: no symbol
+Existing handler slot INDICES (arity) vs client          | **MATCH**         | §4
+Existing handler 8-byte copyin vs 32-bit client &addr    | **MISMATCH**      | §5
+Existing handler regs[8] as protection                   | WRONG VALUE (port)| §4
+So: open the gate alone?                                 | INSUFFICIENT      | §5 (a)-(c) also owed
+Client's C-arg names for wire slots 4/6/8                | # UNMEASURED      | wrapper MIG struct not extracted

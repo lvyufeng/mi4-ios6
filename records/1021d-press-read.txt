@@ -1,0 +1,48 @@
+1021d PRESS READ — A-RETIRED (the -msoft-float fix STANDS); the frontier IS NOW the os_alloc udf
+==================================================================================================
+Author: lead. Capture recovered read-only 2026-10-16 (device came back on adb).
+Capture: out/stage90/captures/recovered-unknown-arm-20261016-042713-last_kmsg.txt (2097160 B, 52489 lines)
+Arm: armed-d13-ee2dd4fb (STAGE90_XNU_GENERAL_REGS=1).  Baseline: 1020b b5093f00.
+
+PART 1 — CELL A-RETIRED: the kernel-mode NEON undef is GONE  (the rung's own question, answered)
+--------------------------------------------------------------------------------------------------
+`python3 -I tools/check_1021d_capture.py <capture> --baseline <1020b capture>` prints
+    VERDICT: A-RETIRED
+* NO kernel-mode undefined instruction at 0x8047b0ac (2152181932) anywhere in the capture.  That was
+  1020b's frontier (`mach_msg_send`'s compiler-emitted `vld1.32`); `-msoft-float` retired it.
+* The ANCHOR holds on channel `printf`: the handler's own `usermode undefined instruction` printf
+  fired x233, i.e. the run reached the 1020b trigger point and moved past it.
+* Residency kept: `xnu_live_wdt_pets` max=0x00000061 (97).  Storm still gone:
+  `xnu_live_abt_seq` max=0x00000200 (512), 11 DISTINCT `xnu_live_abt_far` (the good 1015b shape).
+  `xnu_entry_args_memSize`=0x1e400000.  No `init died` / `task_terminate` / panic line.
+**So the 1021d rung's ONE question -- "does removing pool FP retire the 0x8047b0ac undef and move past
+mach_msg_send?" -- is answered YES.**  The build's by-value pool clause remains owed as a BUILD cell
+(705/0/0), not a device one.
+
+PART 2 — the frontier the fix UNCOVERED: pid 1's os_alloc udf  (the trap-15 wall, now un-masked)
+--------------------------------------------------------------------------------------------------
+The capture shows ONE invariant undef pc in USER mode:
+    xnu_live_undef_pc=0x39e38a54   (x64 rows),  xnu_live_undef_user=0x00000001,  xnu_live_undef_lr=0x00000007
+    launchd[1]: usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x39e38a54 in map 0xc00057b8
+    slide = 0x1bfe000  (`map_slide pid=1 ... slide=0x1bfe000`)
+ARITHMETIC (slide-corrected; the capture's pcs are POST-slide):
+    0x39e38a54 - 0x1bfe000 = 0x3823aa54  ==  __os_alloc_slow + 0x108   EXACTLY
+    (the `udf #254`, libsystem_platform.dylib; the map-failure join -- records/1019-osalloc-extract.txt)
+Cross-run identity: the SAME file offset as 1020b's `0x39605a54` (slide 0x13cb000), because
+0x39605a54 - 0x13cb000 == 0x39e38a54 - 0x1bfe000 == 0x3823aa54.  The udf is slide-invariant in file terms.
+
+READING.  With the kernel NEON undef retired, the run now reaches and stops at pid 1's
+`__os_alloc_slow` mach_vm_map-failure udf and stays resident there (7976 undef seq rows, upped from
+1020b's 2 -- so the raise fires repeatedly now that nothing else truncates the run).  This is exactly
+the wall docs/1022-mach-trap-15-design.md + records/1022-udf-witness.txt name:
+`mach_trap_table[15] = kern_invalid` (PORT DEFECT) on a live user path.
+
+NOT witnessed (unchanged caveats):
+* No `0xfffffff1` (-15) in the `xnu_live_usvc_num` sample (max negative recorded here: -28).  The usvc
+  window is capped/sampled, so the fast-trap leg is still inferred, not tokenised
+  (records/1021d-mmap-failure.txt §B.3).  The udf itself IS witnessed (above).
+* Whether the failing call takes the fast trap leg (a) vs the slow leg (b) remains OPEN -- both failure
+  branches call the same shim, so the udf pc cannot distinguish them.
+
+CONSEQUENCE: the next rung IS 1022 (install the trap-15 row + the runtime self-gate).  No re-press of
+1021d is warranted -- its question is answered.
