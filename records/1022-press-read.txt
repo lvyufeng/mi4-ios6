@@ -1,0 +1,131 @@
+1022 PRESS READ — T15-FIRES: THE mach_trap_table[15] ROW IS INSTALLED, USED, AND RETURNED 0; THE WALL MOVED
+=============================================================================================================
+Author: lead. Capture read 2026-10-16 (device returned on adb on its own; read --read-only).
+Capture: out/stage90/captures/recovered-unknown-arm-20261016-060342-last_kmsg.txt (2097160 B, 52545 lines)
+Arm: armed-d13-b47131c8 (--expect on; entry bin sha b47131c8, == the parked bytes). Baseline: 1021d ee2dd4fb.
+Checker: python3 -I tools/check_1022_capture.py <capture> --baseline <1021d capture>
+    => VERDICT: T15-FIRES (ROW INSTALLED, USED, SUCCESSFUL - THE WALL MOVED)
+Press: runner exit 2 (resident, as designed); USB console empty; log recovered from /proc/last_kmsg.
+
+PART 0 — THE PRECONDITION, ON THE RECORD
+-----------------------------------------
+docs/1022-mach-trap-15-design.md sec.5.1 forbids pressing a 1022 arm until 1021d's capture exists, so that a
+verdict cannot be attributed to the wrong edit. That condition was MET before this press:
+records/1021d-press-read.txt (capture ...-20261016-042713-last_kmsg.txt) reads A-RETIRED. The two rungs were
+NOT pressed together, and each one's edit has its own capture.
+
+PART 1 — CELL A: THE WALL IS GONE, BY MEASUREMENT  (the rung's own question)
+-----------------------------------------------------------------------------
+The 1021d frontier was pid 1's USER-MODE `udf #254` at `__os_alloc_slow+0x108`:
+    1021d  pc 0x39e38a54 - slide 0x01bfe000 = 0x3823aa54
+    1020b  pc 0x39605a54 - slide 0x013cb000 = 0x3823aa54   (slide-invariant in FILE terms)
+    1022   pc 0x3b404a54 - slide 0x031ca000 = 0x3823aa54   (this run's slide, from its own `map_slide` line)
+The checker's PROGRESS test: **the wall pc 0x3b404a54 appears in 0 live row(s) and 0 handler printf(s)** in this
+capture. The udf that 1021d stopped at DID NOT HAPPEN this run. So the row did not merely install; it retired
+the frontier that 1022 exists to retire.
+
+PART 2 — CELL: T15-FIRES — SEVEN SUCCESSFUL MACH TRAP CALLS, EVERY ONE result=0
+--------------------------------------------------------------------------------
+`IOS7LAB vm_map64` x6 and `IOS7LAB vm_allocate64` x3 + `vm_deallocate64` x3, all `result=0`, each with a
+NONZERO returned address:
+
+  :4115 frame r0=103 r1=2bda0428 r2=00001000 r3=0 r4=0 r5=0 r6=49000001 r8=3
+  :4116 vm_map64 size=00000000:00001000 mask=0:0 flags=49000001 prot=3 result=0 address=00088000
+  :4117 frame r1=2bda03d8 r2=00002000 r6=01000001 r8=3
+  :4118 vm_map64 size=00000000:00002000 mask=0:0 flags=1000001 prot=3 result=0 address=00089000
+  :4119 frame r2=0000d000 r6=01000001
+  :4120 vm_map64 size=00000000:0000d000 flags=1000001 prot=3 result=0 address=0008b000
+  :4121 frame r2=0000d000 r6=01000001
+  :4122 vm_map64 size=00000000:0000d000 flags=1000001 prot=3 result=0 address=00098000
+  :4123 vm_allocate64 size=00000000:00001000 flags=1000001 result=0 address=000a5000
+  :4124 frame r2=00100000 r4=000fffff r6=07000001 r8=3
+  :4125 vm_map64 size=00000000:00100000 mask=00000000:000fffff flags=7000001 prot=3 result=0 address=14500000
+  :4126 frame r2=00800000 r4=007fffff r6=02000001 r8=3
+  :4127 vm_map64 size=00000000:00800000 mask=00000000:007fffff flags=2000001 prot=3 result=0 address=14800000
+  :4128/:4129 vm_allocate64 0x1000 result=0 address=000a6000 / 000a7000
+  :4130/:4132 vm_deallocate64 000a7000 0x1000 result=0
+  :4131 vm_allocate64 result=0 address=000a7000
+  :4133 vm_deallocate64 000a6000 0x1000 result=0
+
+The whole chain is now measured end to end: `svc #0x80` with r12 = -15 -> `mach_trap_table[15]` -> the row
+-> the selector answered 1 -> the adapter's frame validation PASSED -> `mach_vm_map` returned KERN_SUCCESS ->
+**the allocator did NOT go on to trap**. 1 MiB and 8 MiB mappings succeed at 0x14500000 / 0x14800000.
+
+PART 3 — THE WIRE DISPUTE IS NOW SETTLED BY THE DEVICE (records/1022-trap15-wire.txt vs records/1022-trap15-adjudication.txt)
+------------------------------------------------------------------------------------------------------------------------------
+The frame dump was staged precisely for this. Measured, on live CANRCO, six times, identical in every slot that
+matters:
+    {r0=0x103 (the task port name), r1=&address, r2=size, r3=0, r4=mask_lo, r5=0, r6=flags, r8=cur_protection=3}
+So for the 1 MiB map: `r6=0x07000001` = flags, `r4=0xfffff` = mask, `r8=3` = VM_PROT_READ|WRITE.
+* The ADJUDICATION's slot map (records/1022-trap15-adjudication.txt: r4=0, r5=0, r6=flags, r8=3) is CORRECT.
+* The WIRE REPORT's claim that r8 is a duplicate task-port is REFUTED by the device: regs[8] reads 3, a
+  protection, exactly as `munge_wwllww`'s `cur_protection` name says. Its sec.5(a)-(c) "owed wire changes"
+  were correctly NOT applied -- applying them would have broken a working handler.
+* The design's `:222` 8-byte `copyin` and `:224` guards are confirmed safe: address64 = 0x1000 (size for the
+  first call, i.e. the caller's own `[sp,#40]` word), `address64>>32 == 0`, no refusal fired.
+
+PART 4 — THE SUPER-PAGE THEORY IS FALSIFIED BY MEASUREMENT (was the strongest static candidate)
+-------------------------------------------------------------------------------------------------
+records/1021d-mmap-failure.txt named KERN_INVALID_ARGUMENT from `VM_FLAGS_SUPERPAGE_SIZE_ANY` (flags
+`0x49000001`) as cause (A), on the by-value argument that armv7's `vm_map_enter` superpage cases are inside
+`#ifdef __x86_64__`. **The first trap-15 call this run carried EXACTLY `flags=0x49000001` and returned 0**
+(:4116). `mach_vm_map` ACCEPTED the superpage-ANY flag word on this build. Cause (A) is dead as an
+explanation of the frontier; a design built on it would have fixed the wrong thing.
+
+PART 5 — THE NEW FRONTIER (name, by value; the reader makes no claim beyond the name)
+-------------------------------------------------------------------------------------
+The run still stops, but somewhere ELSE:
+    xnu_live_undef_pc = 0x3b418022  (x64 rows), xnu_live_undef_user = 0x00000001, xnu_live_undef_lr = 0x3b40bced
+    launchd[1]: usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x3b418022 in map 0xc00057b8 -- x229
+    this run's slide = 0x031ca000  =>  FILE OFFSET 0x3b418022 - 0x031ca000 = **0x3824e022**
+Bytes at cache fileoff 0xc24e022 (`/tmp/dyld-extract/dyld_shared_cache_armv7`, base 0x2c000000, sha256 cad2df77):
+`fede` = `0xdefe` = **`udf #254`** -- the same idiom as the retired frontier.
+The local symbol table's nearest symbol <= 0x3824e022 is **0x3824dfc8** (libxpc.dylib, base 0x3824b000), i.e.
+**`__xpc_mach_port_allocate`-family + 0x5a** (name resolved from the cache's local-symbols string region:
+field-2 offset 0x02094ee9 from string base 0x10b405a4; the neighbouring names are
+`__xpc_connection_setup_reply_port`, `__xpc_connection_send_message_with_reply`).
+By value, the function at 0x3824dfc8 (`push {r4,r5,r6,r7,lr}`) is a thin wrapper:
+    3824e00e  blx 0x38260b60          ; a shared-cache ARM stub (ldr ip,[pc,#4]; add ip,pc,ip; ldr pc,[ip])
+    3824e012  cbz r0, 0x3824e024      ; KERN_SUCCESS -> return
+    3824e014  cmp r0,#3 ; cmpne r0,#6 ; beq.n 0x3824e002   ; NO_SPACE / 6 -> RETRY
+    3824e002  bl 0x3825b3e0           ; the retry path resolves to `__xpc_hopefully_temporary_resource_shortage`
+    3824e01c  movs r1,#0 ; blx 0x38260ee0 ; udf #254        ; ANY OTHER kern_return_t -> trap
+THE FAULT'S OWN REGISTER STATE (from the capture, this run):
+    r0: 0x14548ad0  r1: 0xe0f33713  r2: 0x00000002  r3: 0x00000000
+    r4: 0x14548920  r5: 0x3d102068  r6: 0x2bda0368  r7: 0x2bda037c
+    r8: 0x2bda0350  r9: 0  r10: 1  r11: 0x2be8339c  r12: 0x3b390b25
+    sp: 0x2bda0350  lr: 0x3b40bced  pc: 0x3b418022  cpsr: 0x60000030
+READING (bounded, hypotheses stated as hypotheses): the wrapper's call did NOT return 0, 3 or 6, so the
+wrapper took its own `udf`. r0 = 0x14548ad0 is inside the 1 MiB mapping the SAME run made at 0x14500000 --
+i.e. the ids the caller is juggling are live. r8 == sp == 0x2bda0350, the wrapper's own frame. **The next rung's
+question is what the stub at 0x38260b60 really resolves to and what kern_return_t came back** -- that is a
+kernel/port-namespace question, NOT a mach-trap-table one.
+
+PART 6 — WHAT THIS RUN STILL SHOWS HEALTHY
+-------------------------------------------
+* `xnu_live_wdt_pets` max = 0x00000061 (97) => the SoC watchdog never bit; RESIDENT, the goal's「保持在 xnu 里」.
+  This is the reading the host's darkness cannot give.
+* NO panic (`panic` x0), NO vector-panic, `xnu_entry_panic_entered` absent.
+* The boot got FURTHER, not shorter: pid 1 entered user mode, the 301 MiB shared cache mapped its four
+  regions (`IOS7LAB cache mapping 0..3`), the slide applied (`IOS7SHREG map_slide ret=0`,
+  `slide=0x31ca000`), `IOS7SHREG map_file kr=0`, `slide_copyin kr=0`, and the run proceeded into dyld
+  proper (the `IOS7WITNESS dyld` lines are dyld's own message path).
+* `xnu_live_undef_seq` x7651, `usermode undefined instruction` printf x229 -- the SAME pc every time, 0x3b418022.
+  One new, stable, resident frontier; not a storm (the 1015b shape).
+* STORM check: no abort storm; 1021d's kernel-mode NEON undef at 0x8047b0ac remains absent (`-msoft-float` holds).
+
+PART 7 — HONEST LIMITS OF THIS READING
+---------------------------------------
+* The live channel is CAPPED this run (`xnu_live_capped`), so every `xnu_live_*` value is the state AT THE CAP,
+  and an absent key is a record that was not published -- not an event that did not happen. The udf pc/seq
+  family rides the DIRECT channel (1018), so the frontier reading itself is not cap-limited; the counts are.
+* `xnu_live_usvc_num` was sampled 65 times and records no -15 (max negative seen: -3, -26, -27). That is
+  EXPECTED and is not a negative on the trap: the fast-trap leg is `svc #0x80` on the mach-trap vector, which
+  the usvc key does not sample. The POSITIVE evidence for the trap is PART 2's seven `result=0` lines.
+* The `IOS7LAB trap15 frame` producer is the WIRE's slot 0, not the shim's frame word (`xnu_live_undef_frame0`
+  was never staged -- that design item is still OWED and did not block this verdict). The T15-UNEXERCISED /
+  T15-OTHER-CALL cells are therefore keyed on a wire fact, as the checker's own caveat prints.
+* No re-press of 1022 is warranted; its question is answered.
+
+VERDICT: **T15-FIRES.** Rung 1022 is DONE and its wall is retired. The next rung is the new frontier:
+`udf #254` at 0x3824e022 in libxpc's port-allocation wrapper, whose kern_return_t was neither 0, 3 nor 6.
