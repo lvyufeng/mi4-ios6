@@ -1,0 +1,180 @@
+1021 — THE mach_vm_map SHIM'S GUARD: leg (a) vs (b), AS FAR AS THE CAPTURES ALLOW
+Method: READ-ONLY. No build, no press, no device action, no write to out/stage90. One file written.
+Inputs, all read BY VALUE (objdump on the extracted cache; python reads of the linked ELF):
+  /tmp/dyld-extract/dyld_shared_cache_armv7         (cache base 0x2c000000, map0 fileoff=va-0x2c000000)
+  out/stage90/xnu_arm_entry.elf                     (LINKED image; .text @ 0x80000000 fileoff 0x010000)
+  out/xnu_asm_obj_d13/translated/osfmk/arm/traps_lo.s (the STAGE90_XNU_IOS7_TRAPS dispatch actually staged)
+  out/stage90/captures/recovered-unknown-arm-20261015-184618-last_kmsg.txt (the 1018 capture, 50,614 lines)
+  out/stage90/captures/recovered-unknown-arm-20261015-201355-last_kmsg.txt (the 1020 capture, 35,074 lines)
+NOT available on disk: no 1020b capture (its press is still resident/dark; the recovery is owed).
+
+== 0. RESULT IN ONE LINE ==
+(a) CANNOT BE the leg pid 1 took: if the fast-trap guard had passed, the shim would have issued
+`svc #0x80` with ip = -15, and `mach_trap_table[15]` in the LINKED image is `kern_invalid`
+**by value** (idx 15 = idx 0 = fn 0x80486408, "kern_invalid", argc 0), which would `swi_mach_error`
+-> panic. TWO independent captures show ZERO panics and ZERO -15 (`0xfffffff1`) anywhere. So leg (a)
+is FALSIFIED for these two runs. What remains is leg (b) (guard failed -> MIG demux `bl 0x381c7f74`
+or the `blx r6` runtime hook at 0x39f38086) **or** the udf frontier being reached before any
+mach_vm_map was attempted at all. WHICH OF THOSE is UNMEASURED — the guard's three live field values
+were never recorded. §5 names the exact address a next rung must read.
+
+== 1. THE GUARD, BY VALUE — THREE CALLER SLOTS, NOT A LOCAL FRAME ==
+Shim disasm (arm-none-eabi-objdump -D -b binary -m arm -M force-thumb on
+/tmp/shim1021.bin, carved from the cache at fileoff 0xc1c6618). Prologue and loads:
+    0x381c6618  push {r4,r5,r6,r7,lr}
+    0x381c661a  add  r7, sp, #12          ; r7 = PRE-push sp  == the caller's incoming sp
+    0x381c661c  stmdb sp!, {r8,sl,fp}
+    0x381c6620  sub  sp, #48
+    0x381c6624  ldr  r6, [r7, #12]        ; caller sp+12  = 4th word-arg
+    0x381c6626  ldr  r1, [r7, #8]         ; caller sp+8   = 3rd word-arg
+    0x381c6628  mov  fp, r0               ; r0 = task (1st AAPCS arg)
+    0x381c662a  ldr.w r9, [r7, #44]       ; caller sp+44  <-- GUARD leg 3
+    0x381c662e  ldr.w lr, [r7, #40]       ; caller sp+40  <-- GUARD leg 2
+    0x381c6632  ldr.w ip, [r7, #36]       ; caller sp+36
+    0x381c6636  ldr  r5, [r7, #16]        ; caller sp+16
+    0x381c6638  ldr  r0, [r7, #20]        ; caller sp+20  <-- GUARD leg 1
+    0x381c663a  str  r2, [sp, #44]        ; spill our own 3rd AAPCS arg (address ptr)
+    0x381c663c  cmp  r0, #0               ; [caller_sp+20] == 0 ?
+    0x381c663e  bne.n 0x381c668c          ; nonzero -> leg 1 fails -> SLOW (b)
+    0x381c6640  cmp.w lr, #7              ; [caller_sp+40] == 7 ?
+    0x381c6644  it   eq
+    0x381c6646  cmpeq.w r9, #1            ; && [caller_sp+44] == 1 ?
+    0x381c664a  bne.n 0x381c668c          ; else -> SLOW (b)
+    0x381c664c  stmia.w sp, {r1, r6}      ; FAST levers into the fast-trap frame
+    ...
+    0x381c666a  blx  0x381c5960           ; FAST: issue the mach fast-trap svc   (leg a)
+    0x381c666e..0x381c6686  restore; r0 = 3 | (0x1000<<16) = 0x10000003 (MIG sentinel)
+    0x381c6688  cmp  r4, r0; bne.n 0x381c66ba
+    0x381c66b4  bl   0x381c7f74           ; SLOW: MIG/slow demux                 (leg b)
+    0x381c66ba  movw/movt r0; add r0,pc; ldr r6,[r0]   ; r6 = *(GOT 0x39f38096)
+    0x381c66e0  blx  r6                   ; INDIRECT runtime hook                (leg b)
+
+Softlink read is COLLAPSED: the shim uses r7 (= pre-push sp, set BEFORE any further push) as the
+frame pointer WITHOUT saving the old r7. Its `add r7, sp, #12` is a fixed +12 correction applied to
+the shim's OWN post-push sp, and the correction exactly cancels the 3-word push it just did — so
+r7 = the caller's sp, so that the shim's `[r7,#24..,#44]` reads land on the caller's 7th-8th
+argument words and `[r7,#8/#12/#16/#20]` on the caller's 3rd-6th arguments. (The disassembler's
+"lr"/"r9"/"ip" spellings at 0x381c662a-e are just the shim OVERWRITING those regs; the loads target
+the caller's stack.) Frame map:
+    [r7,#8]  = caller arg 3   [r7,#12] = arg 4    [r7,#16] = arg 5   [r7,#20] = arg 6  <-- GUARD 1
+    [r7,#24] = arg 7          [r7,#28] = arg 8    [r7,#32] = arg 9
+    [r7,#36] = arg 10         [r7,#40] = arg 11  <-- GUARD 2      [r7,#44] = arg 12 <-- GUARD 3
+
+== 2. WHAT THE GUARD'S VALUES ARE ON PID 1'S CALL (from the caller, by value) ==
+`__os_alloc_slow` (cache 0x3823a94c) is the ONLY in-cache caller. Its fast-trap arg slots are built
+and never re-stored before `blx 0x3823e6e4`:
+    0x3823a986  ldr.w r0, [sl]            ; r0 = caller's task port  (AAPCS arg 1)
+    0x3823a98a  movs  r3, #0              ; r3 = mask = 0           (AAPCS arg 4)
+    0x3823a98c  str   r2, [sp, #32]       ; slot 9  = 7
+    0x3823a98e  mov.w r2, #4096           ; r2 = size = 0x1000      (AAPCS arg 3)
+    0x3823a992  str   r1, [sp, #36]       ; slot 10 = 1
+    0x3823a996  str   r1, [sp, #28]       ; slot 8  = 3
+    0x3823a99a..9a8  stm sp,{0,...}        ; slots 1,2,3,4,6,7 = 0
+    0x3823a9a2  str.w r8, [sp, #8]        ; slot 3 = 0x49000001 (flags)
+    0x3823a9aa  blx   0x3823e6e4
+So the shim receives, at guard time (assuming the shim's arg-to-slot mapping is a plain 1:1 —
+see the UNMEASURED note below):
+    arg 6  [sp+20] = slot 6 = 0             -> guard leg 1 (==0)  PASSES
+    arg 11 [sp+40] = slot 11 = 0x1000       -> guard leg 2 (==7)  FAILS
+    arg 12 [sp+44] = slot 12 = 0            -> guard leg 3 (==1)  FAILS
+VERDICT BY VALUE: on this call the guard does NOT pass, so the shim takes the SLOW leg — `bl
+0x381c7f74` (MIG demux), and then, unless the GOT hook is null, `blx r6`. **That is leg (b), not (a).**
+This is a static read; the run that would confirm it live was not recorded. Reasonably robust: guard
+leg 2's slot is a HARD-CODED 0x1000 (size), and the only value leg 2 accepts is 7, a size no page
+allocation asks for. (The one soft spot is whether "arg N" == "caller slot N"; the initial 6 AAPCS
+args are unpadded, and the shim's three guard loads use three DIFFERENT offsets — 20, 40, 44 —
+rather than the 20/32/36 a plain slot-N reading predicts. That discrepancy is the residual.)
+
+== 3. THE FAST-TRAP STUB, BY VALUE (what leg (a) WOULD do) ==
+`blx 0x381c5960` (ARM, 32 bytes at cache fileoff 0xc1c5960):
+    e1a0c00d mov ip, sp        e92d0170 push {r4,r5,r6,r8}
+    e89c0170 ldm ip, {r4,r5,r6,r8}     (six words: r0-r5 then r6,r8)
+    e3e0c00e mvn ip, #14               ; ip = ~14 = 0xFFFFFFF1 = -15
+    ef000080 svc #0x80
+    e8bd0170 pop {r4,r5,r6,r8}   e12fff1e bx lr
+Neighbours: 0x381c597c `mvn ip,#15` (-16), 0x381c5988 `mvn ip,#16` (-17).
+The -3 stub (the value the capture DID see) is 0x381c57e4: `e3e0c002 mvn ip,#2` (-3) `svc #0x80`.
+So the fast-trap stub for mach_vm_map carries wire number -15.
+
+== 4. THE KERNEL DISPATCH AND THE WALL — CONFIRMED IN THE **STAGED** TREE ==
+out/xnu_asm_obj_d13/translated/osfmk/arm/traps_lo.s (this file HAS the IOS7_TRAPS gate ON — it is
+what was assembled):
+    :195  cmn  r11, #3 ; :196 beq ios7lab_timebase        ; -3 special case (the timebase trap)
+    :199  cmp  r11, #0x80000000 ; beq swi_trap
+    :203  rsbs r5, r11, #0 ; :204 ble swi_unix
+    :206  swi_mach:
+    :210  cmp  r5, #0x80 ; bge swi_mach_error
+    :212  LOAD_ADDR(r1, mach_trap_table)
+    :214  add  r11, r5, r5, lsl#1 ; :215 add r1, r1, r11, lsl#2     ; r5*12
+    :217  ldr  r1, [r1, #4]                                          ; entry.fn
+    :218  LOAD_ADDR(r2, kern_invalid)
+    :221  teq  r1, r2 ; :222 beq swi_mach_error
+    :223  bx   r1
+For r11 = -15: r5 = -(-15) = 15, in range; entry 15's fn is `kern_invalid`, so `beq swi_mach_error`
+fires and it PANICS. mach_trap_table entries, READ BY VALUE from the linked ELF @ 0x8055d4b4 (his
+lib 0x8… == xnu_arm_entry.elf base):
+    idx  0: argc=0 fn=0x80486408 name="kern_invalid"
+    idx 10: argc=5 fn=0x8047aa34 name="_kernelrpc_mach_vm_allocate_trap"
+    idx 15: argc=0 fn=0x80486408 name="kern_invalid"      <-- == idx 0, THE WALL
+(iOS7_COMPAT_PLATFORM is ARMPBA8||QSD8250_LEO; MSM8974_CANCRO, gate CLOSED — same as 1020 §4.)
+
+== 5. THE OBSERVABLES, AND WHAT THE TWO CAPTURES SHOW ==
+(a) would produce: a `0xfffffff1` (-15) usvc record and a panic/`swi_mach_error`/`doexception`.
+    PRESENT? NO. Both captures: `fffffff1` occurs 0 times; `panic|doexception|EXC_BAD` 0 hits.
+    The 1018/1019/1020 captures across all D13 runs show 0 panics.
+(b) would produce: NO -15 usvc (the MIG demux issues no `svc` — its body 0x381c7f74.. issues only
+    `bl 0x381c5cc0`/`blx`/`mvn.w`, no `svc`), and the call's result via the runtime hook; the udf
+    frontier at `__os_alloc_slow+0x108` if the map returns non-success.
+    PRESENT? CONSISTENT, but not decisive. The usvc trace shows the LAST recorded user SVC is -3
+    (`0xfffffffd`, the timebase trap) with `usvc_pid=0x1`, and NEVER -15. But the usvc window is
+    capped (USVC_FULL_N = 64, src/entry/entry_stubs.c:7313) and the last -3 record sits on the last
+    full-field row; the udf loop (8,183 records in 1018, via the DIRECT channel) is EXACTLY the
+    region the cap is designed to starve. So "no -15 at the tail" is evidence that -15 was not the
+    last thing, not proof it never happened — it is the 1018 CAP CAVEAT, not a clean reading.
+    The 1018 capture's `xnu_live_undef_*` (64 rows, seq 1..0x1ff7, all `user=0x1 spsr=0x20000030
+    pc=0x39cdfa54`) proves the udf frontier WAS reached and looped; 1017 named it `__os_alloc_slow`.
+    So the frontier is downstream of `__os_alloc_slow`'s mach_vm_map sites — the map ran and either
+    returned non-success or the udf is reached on the retry path. Neither says WHICH shim leg ran.
+
+== 6. VERDICT ==
+  * Leg (a) — fast-trap `blx 0x381c5960` — is FALSIFIED for the 1018 and 1020 runs: it is
+    incompatible with the observed no-panic + no-(-15) (a -15 svc would kern_invalid->panic). It is
+    ALSO refuted statically: the caller's guard field for the "arg 11 == 7" test is size = 0x1000,
+    so the guard cannot pass on a page-size mach_vm_map. **residual:** whether "arg 11" is
+    [r7,#40] given the shim's non-uniform offset pattern.
+  * Leg (b) — guard fails -> `bl 0x381c7f74` (MIG demux) and/or `blx r6` (hook at 0x39f38086;
+    note the shim's own GOT slot is 0x39f38096 — 1019 §3's "0x39f38086" is the wrong word by 16 B,
+    which changes nothing in the disasm). **This is the leg the evidence points to.** Not proven live.
+  * ALTERNATIVE not excluded: the udf frontier was reached before any `_mach_vm_map` shim ran at all
+    (1019-osalloc-extract §3: TWO call sites, 0x3823a9aa and 0x3823aa1e, both `blx` the SAME stub).
+
+== 7. EXPLICITLY UNMEASURED, AND WHAT A NEXT RUNG MUST RECORD ==
+  1. THE GUARD'S WORDS, LIVE. The one decisive observable. At the shim's entry
+     (0x381c6618, Thumb; or equivalently its caller `__os_alloc_slow` 0x3823a94c), record the
+     caller-SP*+20, +40 and +44 words — i.e. the shim-prologue values [r7,#20], [r7,#40], [r7,#44]
+     after `add r7, sp, #12`. If [r7,#40]==7 and [r7,#44]==1 and [r7,#20]==0 => guard PASSES =>
+     leg (a). Otherwise => leg (b). A `--wrap`/patch on the cache shim, or a kernel probe on the
+     fast-trap candidate, publishing these three words with the pid, closes it. This is the field of
+     the SHIM (caller's) frame at caller_sp+20/40/44 — NOT a kernel register.
+  2. THE `blx r6` HOOK IDENTITY: read *(0x39f38096) at runtime; static content is UNMEASURED.
+  3. THE MIG DEMUX REACH: whether `bl 0x381c7f74` (0x381c665e) executed — record the link register
+     there, or the pc at the MIG demux entry.
+  4. THE TWO CALL SITES: which of 0x3823a9aa / 0x3823aa1e reached the udf (a pc bit, or the `lr`
+     at 0x3823aa54 — currently the capture shows lr there, not the site).
+  Untestable from static reads alone: whether the `blx 0x3823e6e4` call site is the one the frontier
+  came from. The 1018/1020 captures did not carry any of items 1-4, so the fast/slow question is
+  resolved STATICALLY here (leg b by value) and left LIVE-UNMEASURED.
+
+== 8. WHAT THIS DOES AND DOES NOT CLAIM ==
+  * CONFIRMS (by value, cross-checked): the guard's three fields are caller-frame words at
+    caller_sp+20/+40/+44; the caller hard-codes 0x1000 (not 7) into the field guard-leg-2 tests, so
+    the guard FAILS on a page-size mach_vm_map; the fast stub carries -15; table[15] is kern_invalid
+    in the LINKED D13 image (idx15==idx0); traps_lo.s's staged `swi_mach` routes a kern_invalid entry
+    to `swi_mach_error` (a panic).
+  * FALSIFIES: leg (a) for the 1018/1020 runs (no panic, no -15). Also corrects 1019 §3's
+    "0x39f38086" hook pointer to the shim's actual GOT slot 0x39f38096 (a byte-level slip, no
+    consequence for the leg question).
+  * does NOT claim: that leg (b) was OBSERVED (it is inferred statically + by the absence of (a)'s
+    observable); nor that the udf frontier is downstream of the shim at all — the two call sites and
+    the udf could, on a run that took the WINDOW before any map, be reached without the shim. Item 1
+    of §7 is the missing measurement.
