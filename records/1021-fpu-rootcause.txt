@@ -1,0 +1,199 @@
+1021 — ROOT CAUSE OF THE KERNEL-MODE NEON UNDEF: FPEXC.EN is cleared on the first
+       context switch after pid 1's VFP trap and NOTHING ever restores it; the kernel's
+       own auto-vectorised NEON then executes undefined
+====================================================================================================
+Date: 2026-10-16. READ-ONLY. No build, no press, no device action, no write to out/stage90.
+Subject: 1020b's run (records/1020b-press-read.txt) raised pid 1's `udf` and the frontier MOVED to a
+kernel-mode undefined instruction at xnu_entry_undef_pc = 0x8047b0ac (spsr 0x40000093, _user=0).
+Capture re-read: out/stage90/captures/recovered-unknown-arm-20261016-014316-last_kmsg.txt
+  :34016/:34022  xnu_live_undef_seq=1 then 2, pc=0x39605a54, spsr=0x20000030, _user=1   (pid 1's udf)
+  :4115          launchd[1]: usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x39605a54
+  :4132          IOS7WITNESS r8=...   <- LAST real console line
+  :34893-:34896  trap record: undef_lr=0x8047b0b0 pc=0x8047b0ac spsr=0x40000093 user=0x00000000
+
+====================================================================================================
+0. VERDICT
+====================================================================================================
+**CONFIRMED WITH ONE REFINEMENT.** The instruction really is compiler-emitted NEON, the kernel really
+does run with FPEXC.EN off, and nothing in the kernel re-enables it — so a well-formed NEON
+instruction executing in kernel mode is genuinely UNDEFINED. But the framing "kernel threads never
+set machine.vfp_enable" is not the whole of it: the kernel BOOTS with FPEXC.EN set (the entry/boot
+path sets it) and NEON works through early boot. What kills it is 1020b's OWN success — reaching
+pid 1's VFP trap sets that thread's `machine.vfp_enable`, the next context switch then clears
+FPEXC.EN via `save_vfp_context`, and because `vfp_context_load` is called **only** from the user-mode
+`sleh_undef` path (never on switch-in), FPEXC.EN stays 0 for the rest of the run. The first kernel
+NEON instruction after that switch is a fatal undefined instruction.
+
+====================================================================================================
+1. THE FAULTING INSTRUCTION IS COMPILER-EMITTED, NOT INLINE ASM  (claim-by-value: CONFIRMED)
+====================================================================================================
+Object: out/xnu_kernel_obj_d13/osfmk_ipc_mach_msg.o (text of `arm-none-eabi-objdump -d`, section
+`.text`). `<mach_msg_send>`:
+    b4: e280005c  add  r0, r0, #92        ; 0x5c  -> task + sec_token/audit_token
+    b8: f4600a8d  vld1.32 {d16-d17}, [r0]!        <-- object offset 0xb8
+    bc: f4602a8f  vld1.32 {d18-d19}, [r0]
+    d4: f4400a8d  vst1.32 {d16-d17}, [r0]!
+    d8: f4402a8f  vst1.32 {d18-d19}, [r0]
+Placement reconciles EXACTLY: the linker put `mach_msg_send` at VA 0x8047aff4, so object offset 0xb8
+lands at 0x8047aff4 + 0xb8 = **0x8047b0ac** — the faulting pc, to the byte. The pair of `vld1.32
+{d16-d17}`/`vld1.32 {d18-d19}` is a 2-q-register (32-byte) block copy.
+
+Source: external/xnu-hd2-darwin13/xnu/osfmk/ipc/mach_msg.c, `mach_msg_send` (definition at :318-319):
+    :357  trailer->msgh_sender = current_thread()->task->sec_token;
+    :358  trailer->msgh_audit  = current_thread()->task->audit_token;
+`grep -n "asm\|__asm"` over mach_msg.c = **0 hits**: there is no inline assembly in the file. clang
+-O2 vectorised the trailer's security/audit-token struct copy into NEON (the `add r0,r0,#92` is the
+task-struct offset of that token block; the stores target the trailer at [kmsg->ikm_header +
+send_size]). So the NEON is emitted by `-O2` under `-mfpu=neon-vfpv4`, exactly as hypothesised.
+
+====================================================================================================
+2. THE VFP-OFF DISCIPLINE  (claim-by-value: CONFIRMED, and stronger than stated)
+====================================================================================================
+(a) save_vfp_context  — external/xnu-hd2-darwin13/xnu/osfmk/arm/pcb.c:298-307
+      static void save_vfp_context(thread_t thread) {
+          if (thread->machine.vfp_enable && !thread->machine.vfp_dirty) {
+              vfp_context_save(thread->machine.uvfp);
+              vfp_enable_exception(FALSE);          /* <- clears FPEXC.EN */
+              thread->machine.vfp_enable = FALSE;
+          }
+      }
+    Called from pcb.c:206 (`machine_switch_context`), :234 (`machine_stack_handoff`), :452
+    (`machine_thread_dup`) — i.e. on every context switch and every fork.
+
+(b) vfp_enable_exception(FALSE) — external/xnu-hd2-darwin13/xnu/osfmk/arm/armv/vfp.s:124-137:
+      vmrs r2, fpexc ; cmp r0,#0 ; mov r1,#0 ; orrne r1,r1,#VFP_ENABLE(1<<30) ; vmsr fpexc,r1
+    With r0=FALSE it writes a literal **0** into FPEXC, clearing bit 30 (VFP_ENABLE). Assembled
+    proof: out/xnu_asm_obj_d13/vfp.o `<vfp_enable_exception>` @0x80: `vmrs r2, fpexc` / `mov r1,#0` /
+    `orrne r1,r1,#0x40000000` / `vmsr fpexc, r1`.
+
+(c) NOTHING RESTORES IT ON SWITCH-IN. `grep -rn vfp_context_load` over the whole XNU tree returns
+    **only** trap.c:1122 and trap.c:1134 (the user-mode `sleh_undef` VFP false-positive path) plus the
+    declaration. cswitch.s (`Switch_context`, :65-70) contains **no** FP instructions at all
+    (`grep fpexc/vmsr/vmrs/vfp` on cswitch.s = 0 hits). So once `save_vfp_context` clears FPEXC.EN,
+    the next thread runs with FPEXC.EN = 0 and there is no load-side restore. This is the port's
+    defect in one line: **save-without-restore**.
+
+(d) `vfp_dirty` is only ever WRITTEN 0, never set to 1 (declared thread.h:76; written pcb.c:172 and
+    trap.c:1113 only). So `!vfp_dirty` is always true → the save-and-clear in (a) fires on the first
+    switch after `vfp_enable` becomes 1.
+
+(e) arm_init does NOT globally enable FPEXC. arm_init.c:231 calls `init_vfp()`; `init_vfp`
+    (vfp.s:43-54) sets CPACR's CP10/CP11 bits and does **not** touch FPEXC. The two CPACR probes at
+    arm_init.c:236-248 only *assert* CPACR is granted (panic "Leo VFP access unavailable CPACR=..."
+    otherwise). Confirmed: CPACR is granted; FPEXC.EN is a separate bit.
+
+====================================================================================================
+3. THE PRECISE CHAIN — and why 1020b created it
+====================================================================================================
+1. The kernel BOOTS with FPEXC.EN set. src/entry/build_entry.sh:4118-4125 documents the boot path's
+   `join_start_1` doing `vmrs r2,fpexc / orr r2,r2,#0x40000000 / vmsr fpexc,r2`, and experiments
+   225/227 measured NEON executing in vm_page_bootstrap / kernel_debug_string_early with
+   `abort_entries=0` (build_entry.sh:18540-18563). At this stage NO thread has `vfp_enable`=1, so
+   save_vfp_context is a no-op and FPEXC.EN survives every early switch. **The kernel's own NEON
+   works during early boot.**
+2. pid 1 (launchd) executes `udf #254` at 0x39605a54 → `sleh_undef` user branch (trap.c:1119-1123):
+   `vfp_enable_exception(TRUE); vfp_context_load(...); thread->machine.vfp_enable = TRUE;`.
+   `thread` here is the *current kernel thread* — launchd's. Under 1020b (STAGE90_XNU_UNDEF_RAISE)
+   the handler then falls through to the printf + EXC_BAD_INSTRUCTION at trap.c:1152-1156 instead of
+   returning (`xnu_live_undef_seq` 1→2 at the same pc; capture :4115/:34016-:34025). **But
+   `machine.vfp_enable` is left TRUE on launchd's thread.**
+3. Delivering that exception / the normal scheduler then takes a context switch. `machine_switch_context`
+   (pcb.c:188) → `save_vfp_context(old = launchd)` → `vfp_enable`(TRUE) && `!vfp_dirty`(always) →
+   `vfp_enable_exception(FALSE)` → **FPEXC := 0**. (`machine_thread_dup` on the fork path does the
+   same at pcb.c:452.)
+4. From here FPEXC.EN = 0 globally, and no switch-in path reloads it (§2c). The next kernel
+   instruction to touch a CP10 register is undefined. It is `mach_msg_send`'s `vld1.32 {d16-d17},
+   [r0]!` at 0x8047b0ac, reached on the kernel message-delivery path immediately after the printing
+   (the only console lines between :4115 and :4132 are printf/WITNESS text with no FP).
+5. The undefined instruction is taken in SVC/kernel mode → the entry image's kernel-mode
+   `fleh_undef` (entry_stubs.c:11726 `entry_epilogue("exception: undefined instruction")`), which is
+   a fatal stop; `xnu_entry_undef_user=0` (capture :34896) confirms the kernel-mode branch.
+
+Why this is NEW: before 1020, pid 1's `udf` re-executed in an infinite loop (1019) that never
+yielded, so no switch ever occurred, so FPEXC.EN was never cleared and the kernel's NEON kept
+working. 1020 converted the loop into a real `EXC_BAD_INSTRUCTION`; the resulting deschedule is what
+first clears FPEXC.EN. **1020b's fix exposed a latent defect rather than causing one** — the kernel's
+`-mfpu=neon-vfpv4` NEON has simply never been reachable past the first user VFP trap until now.
+
+====================================================================================================
+4. BLAST RADIUS — measured by value (re-derived)
+====================================================================================================
+Scanner: objdump `-d --section=.text` over every `.o`, keeping any mnemonic beginning `v`/`f` (VFP +
+NEON; `vmov`s etc.). Tool: /tmp/neonscan/scan.py (throwaway).
+    TOTAL_OBJECTS                                     705
+    OBJECTS WITH >=1 VFP/NEON INSTRUCTION              280   (39.7%)
+    by top-level:  bsd 195 · osfmk 47 · iokit 17 · libkern 15 · pexpert 2 · security 1
+                   (+3 mach-server objects named by absolute path)
+    top mnemonics: vst1 2965 · vld1 2109 · vmov 513 · vldr 187 · vstr 168 · vmovl 144 · vadd 139 …
+    — overwhelmingly struct-copy vectorisation, the same `-O2` pattern as mach_msg_send.
+Every one of these is a potential fatal stop the moment FPEXC.EN is off.
+
+osfmk objects carrying NEON (the boot/launchd path; these matter most):
+  ipc_mach_msg(4) ipc_kmsg(8) ipc_entry(22) ipc_pset(6) ipc_tt(3) kern_ipc_mig(4)
+  kern_task(80) kern_host(94) kern_sched_prim(51) kern_sched_grrr(88) kern_zalloc(42)
+  kern_locks(20) kern_exception(3) kern_thread(6) kern_bsd_kern(13) kern_kmod(24) kern_debug(4)
+  kern_affinity(5) kern_processor(6) kern_mk_timer(5) kern_task_policy(46) kern_thread_policy(4)
+  vm_map(82) vm_resident(60) vm_object(15) vm_fault(6) vm_user(4) vm32_user(18) vm_bsd_vm(6)
+  vm_device_vm(2) vm_pageout(16) vm_map_store_rb(2) vm_shared_region(2) vm_swapfile_pager(2)
+  default_pager_dp_backing_store(79) default_pager_dp_memory_object(11) device_subrs(13)
+  arm_vm_init(28) pmap_asid(17) trap(6) loose_ends(160) status(104) console_video_console(89)
+  kdp(4) kdp_udp(4) ml_arm_kdp_common(2) ml_arm_kdp_machdep(18)
+pexpert_arm_common_pe_init(4) pe_identify_machine(6).
+iokit (in the iOS device/launchd path): IOUserClient(123) IODMACommand(26) IOBlockStorageDriver(26)
+  IOHibernateIO(29) IONVRAM(20) IORangeAllocator(15) IOPMrootDomain(10) IOPlatformExpert(8)
+  WKdmCompress(61) WKdmDecompress(42) IOServicePM(2) IOStatistics(8) IODataQueue(4) leo_sdcc(25) …
+libkern: zlib_* · kxld_* · OSKext(9) · mkext(6) · md5/sha1(2 each) · stdio_scanf(5) — mostly not on
+  the launchd path, but linked if referenced.
+Net: this is essentially ALL of osfmk. Any post-trap kernel message/vm/task operation can trip it;
+`mach_msg_send` is simply the first one the run happened to execute.
+
+====================================================================================================
+5. THE REFERENCE / -mgeneral-regs-only
+====================================================================================================
+* `grep -rn "general-regs-only\|general_regs\|mno-implicit-float"` over all .sh/.py/.s/.c/.h in the
+  repo (excluding out/) = **0 hits**. Nothing in tools/ or the D13 tree carries
+  `BUILD_WITH_GENERAL_REGS_ONLY` or `-mgeneral-regs-only`.
+* tools/build_xnu_arm_kernel.sh:1228-1229 (C) and :1239-1240 (C++): `clang --target=... -mcpu=
+  cortex-a15 -marm -mfpu=neon-vfpv4 -mfloat-abi=softfp ... -O2`. This is the source of the NEON.
+* The reference: external/xnu-hd2-darwin13/ is **our build tree, not a reference** (memory
+  mi4-977/979). Its git remote is Garysss123/xnu-hd2. HTC-Leo-Revival-Project/xnu is not in this
+  checkout (reachability unverified) and ARM's own MakeInc/makedefs in this tree carry **no** FPU
+  flag for a target to copy (grep of makedefs/ config/ buildscripts/ for fpu/float-abi/local = 0).
+  **So what the reference HTC-Leo-Revival kernel actually used for `-mfpu`/`-mgeneral-regs-only`
+  cannot be confirmed from here — UNKNOWN.** What is claimable: our port alone added
+  `-mfpu=neon-vfpv4 ... -O2` with no `-mgeneral-regs-only`, and an ARMv7 kernel built that way is
+  not safe unless the FPEXC discipline is repaired.
+
+====================================================================================================
+6. FALSIFIERS — checked
+====================================================================================================
+F1 "some kernel object re-enables FPEXC, so NEON-off is fine." REFUTED BY MEASUREMENT. Of the 705
+   compiled C/C++ objects, **zero** contain `vmrs`/`vmsr`/`fmrx` (the objdump scan printed none). The
+   only writers of FPEXC are the asm-layered vfp.o (`vfp_context_save` @0x20, `vfp_context_load`
+   @0x50, `vfp_enable_exception` @0x80) and the boot path; `init_vfp` (vfp.o @0x0) writes CPACR only.
+   No kernel object grants FPEXC.EN on its own.
+F2 "the instruction is genuinely malformed." REFUTED. `f4600a8d` (and `f4602a8f`) decode as valid
+   AVS/NEON `vld1.32` encodings; they are in the boot-path object; the same pattern appears ~5,000
+   times across the tree. The CPU did not choke on a bad encoding.
+F3 "it is a NEON *alignment* fault, not an enable fault." REFUTED by the trap *kind*: an alignment
+   fault is a DATA ABORT; this is an UNDEFINED-instruction exception (`xnu_entry_undef_*`, spsr mode
+   0x13). The only way a well-formed NEON instruction raises UNDEF is the coprocessor-not-enabled
+   case (CPACR or FPEXC.EN off).
+F4 "CPACR is off, not FPEXC." REFUTED. arm_init.c:236-248 asserts CPACR has 0xF00000 and would
+   `panic("Leo VFP access unavailable CPACR=...")` otherwise; no such panic is in the capture. So
+   CPACR is granted; the missing bit is FPEXC.EN (bit 30) specifically.
+F5 (residual, honest) The exact *instant* FPEXC.EN was cleared (which switch) is NOT directly
+   witnessed — the run never recorded an FPEXC readback. The conclusion is a static deduction (§2-3)
+   plus the observed fault; the decisive live check is an FPEXC readback after pid 1's udf. A run that
+   read FPEXC.EN=1 at the same 0x8047b0ac would refute this.
+
+====================================================================================================
+7. WHAT THIS IMPLIES FOR 1021 (the fix direction — not performed here)
+====================================================================================================
+The minimal fix is the discipline the port lost, in ONE of two places:
+  (a) restore FPEXC.EN on switch-IN (a `vfp_context_load`/enable call on the switch path), or
+  (b) build the kernel objects with NEON/auto-vec disabled (`-mgeneral-regs-only` or
+      `-fno-vectorize -mfpu=vfpv3-d16` without NEON), which is the shape Apple's ARMv7 kernel has.
+(b) removes the hazard at the source for all 280 objects and needs no asm; (a) keeps NEON but must
+cover every switch/dup site (pcb.c:206/234/452). Either is a build/asm change and therefore out of
+scope for this read.
