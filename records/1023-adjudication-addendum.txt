@@ -1,0 +1,100 @@
+RUNG 1023 -- ADJUDICATION ADDENDUM (2026-10-16, AFTER the press, by value)
+=========================================================================
+
+WHY THIS EXISTS
+---------------
+  The main adjudication (records/1023-adjudication.txt) said the frontier udf at
+  0x3824e022 "is fed by the HELPER call at 3824e01e (0x3815bc38), whose rv the
+  wrapper finds not in {0,3,6} and treats as fatal."  That is WRONG in two ways,
+  both read BY VALUE from the card cache (out/stage90/xnu_card_hfs.img, dyld
+  header @0x455d000, map0 base 0x2c000000, slide 0x31ca000) with
+  arm-none-eabi-objdump -M force-thumb.  The corrected reading redefines the
+  frontier and the target of rung 1024.
+
+(1) THE OWNER OF 0x3815bc38 IS libsystem_c, NOT libxpc.
+      Slot 0x39f45254 (the wrapper's second veneer, blx 0x38260ee0) holds
+      0x3815bc39 = 0x3815bc38|thumb.  The 696-image table puts 0x3815bc38 in
+      /usr/lib/system/libsystem_c.dylib (image base 0x38140000), offset 0x1bc38.
+      The earlier "476-byte-frame libxpc routine" label was inference; the frame
+      SIZE was right (476 = 0x1dc, confirmed: `sub sp,#476`) but the dylib was
+      wrong.  (The peer doc docs/1023-port-allocate-design.md:100 additionally
+      claims the veneer target is 0x38145110 -- one hop WRONG; the slot does not
+      hold that. See §(4).)
+
+(2) THE udf AT 0x3824e022 IS **UNCONDITIONAL** FALL-THROUGH AFTER THE HELPER
+    CALL -- IT IS NOT "the else arm taken when r0 is refused".
+      The wrapper's inner block, by value:
+        3824e00e  blx 0x38260b60        ; shim 0x381c66ec (trap-24 fast path)
+        3824e012  cbz r0, 0x3824e024    ; r0 == 0  -> SUCCESS (done)
+        3824e014  cmp r0,#3 ; cmpne r0,#6 ; beq.n 0x3824e002   ; 3/6 -> retry
+        3824e01c  movs r1,#0
+        3824e01e  blx 0x38260ee0        ; -> libsystem_c helper 0x3815bc38
+        3824e022  udf #254              ; <<< UNCONDITIONAL, no branch guard
+        3824e024  ldr r0,[sp,#24] ; add sp,#28 ; ldr.w r8,[sp],#4 ; pop {..pc}
+      There is NO conditional branch at 3824e022: control reaches the udf iff it
+      FALLS THROUGH the `blx` at e01e.  That is the compiler's shape for a
+      **noreturn** callee (the udf is the dead-code/unreachable trap the compiler
+      emits after a call it believes does not return -- cf. `__builtin_trap()`
+      following a `__builtin_unreachable()`), NOT an rv dispatch.
+    => THE HELPER 0x3815bc38 RETURNED.  The fault is not "the wrapper refused a
+       bad rv"; it is "an abort/terminate helper RETURNED into the trap that was
+       only ever meant to be unreachable."
+    => The r0 at the fault (0x14548ad0, a heap-pointer-looking value) is the
+       HELPER'S return value in r0 -- further evidence the helper is not a
+       status-returning routine: it hands back a pointer and falls into the trap.
+
+(NOTE the shim 0x381c66ec, reached via 3824e00e, is a SEPARATE and complete
+ path: it calls trap-24 (`blx 0x381c59dc`), and on r0 == 0x10000003 (the shim's
+ own MACH_SEND_INVALID_DEST sentinel) it calls 0x381cdf40 (the non-trap kernelrpc
+ fallback) before returning.  So the wrapper's e00e call already gets a final
+ kern_return_t; the e01e helper is reached ONLY when that rv is not in {0,3,6}.)
+
+(3) WHAT THE FAULTING lr PROVES (corroboration, not correction).
+      The udf's saved lr = 0x3b40bced - slide = 0x38241ced, whose owner is
+      /usr/lib/system/libsystem_pthread.dylib (base 0x3823f000) +0x2ced -- NOT
+      +4 of the wrapper's `blx 0x38260ee0` (which would be 0x3824e022).  Both
+      Apple's `launchd[1]` register dump AND our own witness agree exactly
+      (records/1022-press-read.txt:78 `xnu_live_undef_lr = 0x3b40bced`).  This is
+      consistent with (2): the wrapper's `push {r4,r5,r6,r7,lr}` at entry means
+      the LIVE lr at the udf is whatever libsystem_c/libxpc last left -- the
+      pthread trampoline that entered launchd's bootstrap.  Consequence, stated
+      so rung 1024 does not misread it: **the udf's r0 cannot be read off lr**;
+      it must be read from the frame window (now published as
+      xnu_live_undef_frame0..3, src/entry/entry_trace.c, gated on
+      STAGE90_XNU_UNDEF_DIRECT) or from the row's own dump.
+
+(4) THE PEER DOC'S TWO ERRORS, by value:
+      docs/1023-port-allocate-design.md:100 "veneer -> 0x38145110 (libsystem_c)"
+        -- 0x38145110 IS in libsystem_c, but the slot 0x39f45254 does NOT hold it;
+        it holds 0x3815bc39.  Corrected in place (that file, same date).
+      docs/1023-port-allocate-design.md tail disasm omitted the
+        `3824e028: f85d 8b04  ldr.w r8,[sp],#4` restore (matches the
+        `str.w r8,[sp,#-4]!` at 3824e004).  Corrected in place.
+
+WHAT RUNG 1024 MUST TARGET (revised)
+------------------------------------
+  NOT "a wider trap gate" and NOT "another mach_trap_table row".  The two
+  candidate frontiers, in order of likelihood given (2):
+    (A) THE SHIM'S rv (0x381c66ec, libsystem_kernel) was not in {0,3,6}, sending
+        the wrapper to the abort helper.  Read the shim's rv by value: it is
+        either the trap-24 rv (row 24 = kern_invalid would PANIC, and the capture
+        has no panic -> the trap was not dispatched, so the shim took the
+        0x381cdf40 non-trap fallback and THAT returned an unexpected value), or
+        0x381cdf40's rv.  The live measurement is the row-24 frame dump (rung
+        1023) plus the helper's arg/return; if the frame dump is ABSENT the
+        fallback 0x381cdf40 is the producer.
+    (B) THE HELPER 0x3815bc38 (libsystem_c) RETURNED when it should have
+        terminated.  Whether it "should" terminate is a property of its
+        declaration, not of this run -- but a helper that falls into an
+        unreachable-trap is a NORMAL abort path, so (B) is likely a CONSEQUENCE
+        of (A), not an independent defect.
+  Either way the rung-1023 press remains the correct instrument: its `IOS7LAB
+  trap24 frame` dump decides whether trap 24 (and hence which arm of the shim)
+  ran, and the newly published `xnu_live_undef_frame0..3` window gives the
+  wrapper's rejected r0 from OUR channel instead of Apple's printk.
+
+STATUS
+------
+  Read entirely from the card bytes; no device dependence.  The 1023 press's
+  capture (when the device returns) is read by tools/check_1023_capture.py with
+  headline cell DISPATCH; this addendum only sharpens what each cell MEANS.
