@@ -16343,3 +16343,80 @@ set=armed-d13-b5093f00 sha256=ab0c3b347f0e6022fd862954d54a7845d98f0e5e0a6a88aa9d
 set=armed-d13-b5093f00 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1020-undef-raise;stage90_fixture.macho
 set=armed-d13-b5093f00 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1020-undef-raise;stage90-build-config.txt
 set=armed-d13-b5093f00 sha256=9782826b4b153ac9d3c82d82cea7cb6bc49f57efe2b4449ec57863f6bf628d97 bytes=560 file=SHA256SUMS.txt role=1020-undef-raise;SHA256SUMS.txt
+# armed-d13-ee2dd4fb  -  1021d: REMOVE COMPILER-EMITTED FP/NEON FROM THE KERNEL POOL (-msoft-float).
+# (the 1020b frontier was a KERNEL-MODE NEON undefined instruction at 0x8047b0ac in
+#  mach_msg_send: the kernel starts with FPEXC.EN ON, save_vfp_context (osfmk/arm/pcb.c:298-307)
+#  clears it on the next context switch, kernel switch-in never restores it, and the kernel-s
+#  OWN compiler-emitted NEON then faults. records/1021-fpu-rootcause.txt.)
+# Switch set is 1020b-s VERBATIM (STAGE90_XNU_UNDEF_RAISE=1, STAGE90_XNU_UNDEF_DIRECT=1,
+# STAGE90_XNU_GLOBAL_FIX=1 and the whole inherited set stay) plus exactly ONE new switch:
+# STAGE90_XNU_GENERAL_REGS=1.
+# **THE FIX IS A FLAG, NOT A -D, AND NOT -mgeneral-regs-only.** -mgeneral-regs-only is
+# AARCH64-ONLY in clang and is SILENTLY DROPPED for armv7 (measured: byte-identical codegen
+# with and without it), so a build that used it would read as ON and re-measure 0x8047b0ac.
+# The measured fix is -msoft-float, the exact spelling Apple-s own ARM kernel CFLAGS_ARM uses
+# (external/xnu-hd2-darwin13/xnu/makedefs/MakeInc.def:377-379). It is the -mfloat-abi=softfp
+# half of the pre-rung flags that lets clang allocate FP registers; -msoft-float removes the
+# FP register file from the allocator, so no vld1/vst1/vldr/vstr/vpush/vpop is emitted.
+# OFF appends NOTHING to CC_ARGS/CXX_ARGS, so the arrays are exactly the pre-rung ones
+# ([[mi4-off-option-two-spellings]]).
+# THE POOL MOVES: every pool object-s .text (the flag is whole-pool), and the pool-s .text is
+# INSIDE the entry .bin whose sha8 IS the arm, so the arm MOVES (b5093f00 -> ) and the
+# PAYLOAD moves. build_entry.sh only LINKS the pool objects, so a green entry build says
+# nothing about this half.
+#
+# THE BY-VALUE PROOF OF 1021d-S CHANGE, asserted FIRST and re-run on the FROZEN bytes.
+# tools/check_d13_no_neon.py decodes the actual instructions:
+#   (0) --selftest PASSes (the checker can fail);
+#   (1) --pool out/xnu_kernel_obj_d13 --expect none PASSes over the WHOLE pool (0 FP/NEON
+#       instructions), AND the object count on disk equals the source count in
+#       out/xnu_kernel_src_d13.sha256, so a stale/partial directory is a refusal and not a
+#       vacuous pass (design 5.3, defect class m1015b);
+#   (2) --symbol mach_msg_send --expect none PASSes on the LINKED out/stage90/xnu_arm_entry.elf
+#       (the symbol 1020b stopped in at 0x8047b0ac), and again on the FROZEN copy;
+#   (3) NEGATIVE CONTROL - the frozen pre-rung 1020b elf (armed-d13-b5093f00) REPORTS FP in
+#       mach_msg_send (--expect any PASSes), so the none direction is a reading and not a
+#       constant ([[mi4-a-claim-in-a-comment-is-not-a-check]]).
+#
+# THE CARRIERS ([[mi4-one-value-two-definitions]]). The record carries the RESOLVED
+# STAGE90_XNU_GENERAL_REGS=1 line (the readability carrier; a record that says NEON-free over
+# a pool full of vld1 is exactly the 1020 defect). The SUBSTANCE is the -msoft-float append to
+# tools/build_xnu_arm_kernel.sh-s CC_ARGS/CXX_ARGS, proved only by the object census above.
+# The declaration carrier out/stage90/xnu_arm_entry-arm-extra.txt is written by THIS build-s
+# tail as STAGE90_XNU_GLOBAL_FIX=1 role=1021d-general-regs (1015b-s GLOBAL_FIX is a POOL
+# switch no writer in src/entry/ echoes, so the record cannot carry it); the grep of it is the
+# process check and the pmap_flush_tlbs fingerprint is the proof.
+#
+# THE INHERITED REGRESSIONS held (asserted by the park): STAGE90_XNU_UNDEF_RAISE=1 in the
+# record (1020-s raise), STAGE90_XNU_UNDEF_DIRECT=1 in the record (1018-s cap-exempt witness),
+# the pmap_flush_tlbs kernel_pmap==3 fingerprint (1015b-s kernel fix), check_d13_undef_raise.py
+# --expect on on the linked image (1020-s raise intact), and by value __wrap_sleh_undef
+# branching to entry_write_kv (>=6) and NOT entry_live_write (0).
+#
+# THE 1021d VERDICT CELLS (docs/1021c-general-regs-design.md 4.4):
+#   A RETIRED     - no kernel-mode undef at 0x8047b0ac; the run proceeds past mach_msg_send
+#                   (the frontier moves, or the run ends at entry_epilogue)  => THE FIX STANDS.
+#   B STILL-THERE - the same undef at 0x8047b0ac (same lr=0x8047b0b0) => NOT REBUILT; read the
+#                   by-value cell FIRST (it should have refused this press).
+#   C NEW-FAULT   - a DIFFERENT undef pc, or a link refusal on __aeabi_f*/__aeabi_d* =>
+#                   soft-float added a libgcc reference the link does not resolve.
+#   D EARLIER-STOP- the run stops earlier (e.g. arm_init-s VFP self-test) => the flag broke
+#                   something that legitimately needs the FPU (read design 3.2).
+#   E NO-CHANGE   - byte-for-byte the 1020b frontier => the switch did not reach the compile;
+#                   if the by-value clause passed, the clause is wrong.
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-ee2dd4fb sha256=ee2dd4fba05a023dfbe2f8c71e241c8bb68396f748452b098404d2536c512144 bytes=6323284 file=xnu_arm_entry.bin role=1021d-general-regs;xnu_arm_entry.bin
+set=armed-d13-ee2dd4fb sha256=88b5a0bf40894601b60ffc7f1d30281d97779263fe488a7d8c731de659229952 bytes=7360232 file=xnu_arm_entry.elf role=1021d-general-regs;xnu_arm_entry.elf
+set=armed-d13-ee2dd4fb sha256=badb7c8e88838ab61889f654fe1c4d5e6cd4df08f77bf3e04b92b6957032efa6 bytes=1912 file=xnu_arm_entry.h role=1021d-general-regs;xnu_arm_entry.h
+set=armed-d13-ee2dd4fb sha256=1265b773d9ab53a4e000e0e5a63bcffc2dc5d4d3f212dff4cf7ac0c512cf5795 bytes=2107 file=xnu_arm_entry-config.txt role=1021d-general-regs;xnu_arm_entry-config.txt
+set=armed-d13-ee2dd4fb sha256=6c7d927fedba38dae2c8c080a5e6edcc408888cdd90c27c163058777caf5fc0a bytes=49 file=xnu_arm_entry-arm-extra.txt role=1021d-general-regs;xnu_arm_entry-arm-extra.txt
+set=armed-d13-ee2dd4fb sha256=84de007d73fae7a60f4d2872a6a879d1aaff19145c37dcc66c3614295ce33294 bytes=3149 file=xnu_arm_entry-sources.txt role=1021d-general-regs;xnu_arm_entry-sources.txt
+set=armed-d13-ee2dd4fb sha256=35b5f9f753c1f68c9b3f1259a183b3e0d1d51c142406d0b7e45616bf40c49228 bytes=6818692 file=stage90.bin role=1021d-general-regs;stage90.bin
+set=armed-d13-ee2dd4fb sha256=24bc3dc7ed688efaf18b6d6ad15ec12c403e4e0847197fcd79593f69bdd90794 bytes=6880764 file=stage90.elf role=1021d-general-regs;stage90.elf
+set=armed-d13-ee2dd4fb sha256=3b63fa0232935ec71c974a8328d0ae074ca7a51396317a6e6c8cac679dd3b060 bytes=6821888 file=stage90.img role=1021d-general-regs;stage90.img
+set=armed-d13-ee2dd4fb sha256=c4ac17de6692d7809e983ec96bd9501218e4c6ca6b55563b72f058b22767bae7 bytes=9342976 file=stage90-qcdt.img role=1021d-general-regs;stage90-qcdt.img
+set=armed-d13-ee2dd4fb sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1021d-general-regs;stage90_fixture.macho
+set=armed-d13-ee2dd4fb sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1021d-general-regs;stage90-build-config.txt
+set=armed-d13-ee2dd4fb sha256=b1feccda14a9195ac09cc29c7a331178b56ad4da36119211f7614060f2119d0a bytes=560 file=SHA256SUMS.txt role=1021d-general-regs;SHA256SUMS.txt

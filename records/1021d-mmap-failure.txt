@@ -1,0 +1,188 @@
+1021d — WHY pid 1's `mach_vm_map` FAILS: the shim's GUARD PASSES, trap 15 is `kern_invalid` (PORT defect)
+====================================================================================================
+Method: READ-ONLY forensics. No build, no press, no device action, no write to out/stage90. ONE file
+written (this one). Inputs read BY VALUE:
+  /tmp/dyld-extract/dyld_shared_cache_armv7   (base 0x2c000000; map0 fileoff=va-0x2c000000 for
+     [0x2c000000,0x38268000); map1 base 0x38268000, fileoff=0xc266000+(va-0x38268000) for VAs
+     >= 0x38268000 — the two-formula point that 1019/1021-guard-leg got wrong in their GOT reads)
+  out/stage90/xnu_arm_entry.elf               (LINKED image; .text @ 0x80000000 fileoff 0x010000)
+  out/stage90/captures/recovered-unknown-arm-20261016-014316-last_kmsg.txt  (the 1020b capture)
+  external/xnu-hd2-darwin13/xnu/osfmk/kern/syscall_sw.c  (the trap table source)
+objdump: arm-none-eabi 2.38 (force-thumb for the shim).
+
+====================================================================================================
+0. VERDICT IN ONE LINE
+====================================================================================================
+**The shim's guard PASSES on `__os_alloc_slow`'s call** — so the shim issues `svc #0x80` with
+ip = `0xFFFFFFF1` = wire **-15 = mach trap 15** — and in the LINKED image `mach_trap_table[15]` is
+`kern_invalid` **BY VALUE** (the `ios7lab_mach_vm_map_trap` row is gated OUT for MSM8974_CANCRO), so
+that svc must `swi_mach_error` -> panic. That is a **PORT DEFECT**, not a device fact: stock iOS 7's
+kernel has a real trap-15 handler. The single fix rung: **enable the trap-15 table row** so a -15 svc
+returns KERN_SUCCESS instead of dying.
+
+====================================================================================================
+A. THE GUARD — SETTLED BY VALUE: PASSES (leg (a), the fast trap)
+====================================================================================================
+--- A.1 the arithmetic (CONFIRMED, re-measured) ---
+Shim `mach_vm_map` = libsystem_kernel.dylib **Thumb** `0x381c6618`. Prologue + guard, byte-for-byte
+(`arm-none-eabi-objdump -D -b binary -m arm -M force-thumb` on the carved cache span):
+    0x381c6618  b5f0       push {r4,r5,r6,r7,lr}   ; 5 regs = 20 B
+    0x381c661a  af03       add  r7, sp, #12         ; r7 = (POST-push sp) + 12
+    0x381c661c  e92d0d00   stmdb sp!, {r8,sl,fp}    ; sp -= 12  (r7 untouched)
+    0x381c6620  b08c       sub  sp, #48             ; sp -= 48  (r7 untouched)
+    0x381c662a  f8d790 2c  ldr.w r9, [r7, #44]      ; <-- GUARD leg 3 field
+    0x381c662e  f8d7e0 28  ldr.w lr, [r7, #40]      ; <-- GUARD leg 2 field
+    0x381c6632  f8d7c0 24  ldr.w ip, [r7, #36]
+    0x381c6638  6978       ldr  r0, [r7, #20]       ; <-- GUARD leg 1 field
+    0x381c663c  2800       cmp  r0, #0
+    0x381c663e  d125       bne.n 0x381c668c         ; nonzero -> SLOW
+    0x381c6640  f1be0f07   cmp.w lr, #7
+    0x381c6644  bf08       it   eq
+    0x381c6646  f1b90f01   cmpeq.w r9, #1
+    0x381c664a  d11f       bne.n 0x381c668c         ; else -> SLOW
+    0x381c666a  f7ffe97a   blx  0x381c5960          ; FAST TRAP
+The `add r7, sp, #12` runs AFTER the 5-register push, so `r7 = caller_sp - 20 + 12 = caller_sp - 8`.
+CONFIRMED independently by the live dump's own frame depth: at the fault, `r7 - sp = 0x2bdf0448 -
+0x2bdf0400 = 0x48 = 72`, which equals the shim's body depth `(caller_sp-8) - (caller_sp-80)`. Under the
+OLD `records/1021-guard-leg.txt` §1 reading (`r7 = caller_sp`) that identity cannot hold. So `r7 =
+caller_sp - 8` is CONFIRMED. (This is the CORRECTION guard-leg §1b already made; this file ratifies it
+from the live dump, which guard-leg lacked.)
+
+--- A.2 the guard's three fields, from the caller's own stores (CONFIRMED) ---
+`__os_alloc_slow` (libsystem_platform `0x3823a94c`) builds the call at `0x3823a9aa  blx 0x3823e6e4`.
+Its stores, by value (word n at caller_sp+4n):
+    0x3823a99a..a9a8  str r5 -> [sp,#24],[sp,#20],[sp,#16],[sp,#12]   ; caller words 7,6,5,4 = 0
+    0x3823a98c        str r2 -> [sp,#32]   ; caller word 9  = 7
+    0x3823a992        str r1 -> [sp,#36]   ; caller word 10 = 1
+With `r7 = caller_sp - 8`:  `[r7,#20]` = caller word 4 = 0;  `[r7,#40]` = caller word 9 = 7;
+`[r7,#44]` = caller word 10 = 1. The guard tests are `==0 && ==7 && ==1` -> **ALL THREE PASS**.
+(0x1000 the size is caller word 11 = `[r7,#48]`, NOT read by the guard.)
+
+--- A.3 the LIVE cross-check (CONFIRMED — the shim ran and executed its guard loads) ---
+Capture :4119-:4120, the raise's register dump:
+    r7: 0x2bdf0448  r8: 0x49000001  r9: 0x00000001  r12: 0x00000003  sp: 0x2bdf0400  lr: 0x00000007
+The three values `r9=1`, `lr=7`, `ip(r12)=3` are EXACTLY what the shim's entry loads produce:
+`ldr.w r9,[r7,#44]` -> 1, `ldr.w lr,[r7,#40]` -> 7, `ldr.w ip,[r7,#36]` -> 3. No other producer in
+`__os_alloc_slow` writes 7 to lr (it writes 7 to r2/slot9, not lr) or 1 to r9. So the shim WAS entered
+and its guard loads ran. This is the by-value basis for "the shim is on the path" that
+`records/1021-guard-leg.txt` §2b listed as UNPROVEN (its veneer GOT slot 0x39f3f27c is 0 in the frozen
+cache). REVISED: the shim's execution is now CONFIRMED live; the static GOT-slot-zero is moot (the
+runtime fixer writes it).
+
+====================================================================================================
+B. THE LEG AND THE RETURN — trap 15 -> kern_invalid, and the UNRESOLVED -15 (UNKNOWN)
+====================================================================================================
+--- B.1 what leg (a) DOES (CONFIRMED, static) ---
+Fast-trap stub `0x381c5960` (ARM): `mov ip,sp; push {r4,r5,r6,r8}; ldm ip,{r4,r5,r6,r8};
+mvn ip,#14; svc #0x80; pop {r4,r5,r6,r8}; bx lr`. `mvn ip,#14` = `~14` = `0xFFFFFFF1` = wire -15.
+Kernel `swi_mach` (out/xnu_asm_obj_d13/translated/osfmk/arm/traps_lo.s): `rsbs r5, r11, #0` -> r5 = 15;
+12-byte `mach_trap_t` stride -> `table + 15*12 + 4`. **CONFIRMED: index 15.**
+
+--- B.2 what table[15] IS in the LINKED image (CONFIRMED — the wall) ---
+`mach_trap_table` @ `nm` `0x805564e4` in out/stage90/xnu_arm_entry.elf:
+    idx  0: fn = `kern_invalid`
+    idx 15: fn = `kern_invalid`      <-- == idx 0 (BY VALUE)
+Source: external/xnu-hd2-darwin13/xnu/osfmk/kern/syscall_sw.c:110-131 — row 15 is
+`ios7lab_mach_vm_map_trap` ONLY under `#if IOS7_COMPAT_PLATFORM`, `#else ... kern_invalid`.
+`IOS7_COMPAT_PLATFORM` = `(BOARD_CONFIG_ARMPBA8 || BOARD_CONFIG_QSD8250_LEO)`
+(arm/ios7_compat.h:5); the board is MSM8974_CANCRO -> the `#else` row compiles. The `ios7lab_mach_vm_map_trap`
+symbol is ABSENT from the linked image (`strings` on xnu_arm_entry.bin: only vm_allocate64 /
+vm_deallocate64 / vm_protect64 are linked; `IOS7LAB vm_map64` is ABSENT). The staged `swi_mach` routes
+`entry.fn == kern_invalid` to `swi_mach_error` -> `_doexception` -> PANIC. **CONFIRMED.**
+So leg (a) predicts: a -15 svc -> kern_invalid -> a PANIC BEFORE any return. The capture's
+`xnu_entry_panic_entered=0x1` (:34178) is CONSISTENT with a panic having been entered.
+
+--- B.3 the TENSION (UNKNOWN — do not manufacture a benign reading) ---
+A guard-pass reading predicts a -15 svc. The usvc witness (`entry_note_user_svc`, entry_stubs.c:7323)
+records EVERY svc entering `fleh_swi` for the first `USVC_FULL_N = 64` (`:7313`). The 1020b capture's
+distinct values are `-3`(0xfffffffd) x43, `-28/-27/-26`, `0x80000000`, and small BSD positives; the
+full window is EXHAUSTED (max `usvc_n` = 0x40). **-15 (0xfffffff1) appears ZERO times; -31 zero times;
+no `fleh_vectors`/`swi_mach_error`/`exception in exception` line exists.** By the arbiter rule ("the
+capture cannot be wrong about the ABSENCE of a panic, so a reading that predicts a panic is wrong"),
+the -15 fast-trap svc was NOT delivered to the witness. Yet A.3 shows the shim's guard loads executed.
+**These cannot both be the whole truth.** Two live-consistent residues, NEITHER proven:
+  (i) the guard's TEST failed at the branch (the loads ran, the `cmp`/`bne` chose SLOW) — i.e. the
+      caller-frame words at the actual failing call site are NOT 0/7/1, and the failing call site is
+      the retry site (b) at `0x3823aa1e`, not site (a); OR
+  (ii) the shim whose loads ran is the SUCCESSFUL map, and the udf's `r0=0x103` returned from a
+      DIFFERENT call whose frame failed the guard.
+Both fit "shim entered (A.3) AND no -15 witnessed AND a value 0x103 returned". Which one is
+UNMEASURED. The static guard on site (a) passes (A.2); the live run shows no -15 (B.3); the
+reconciliation is the call-ID, not the guard arithmetic.
+
+--- B.4 `r0 = 0x103` decoded (PARTIAL — UNKNOWN which producer) ---
+At the udf (`__os_alloc_slow+0x108`, cache `0x3823aa54`, bytes `fe de 46 c0` = Thumb `udf #254;nop`)
+the dump shows `r0=0x00000103`. 0x103 is **NOT a canonical `kern_return_t`**: XNU's `kern_return_t`
+range is 0..6 (`osfmk/mach/kern_return.h`), and the MIG error format `err_system/err_sub/err_code`
+(`osfmk/mach/error.h:81-89`: `err_system(x)=((x)&0x3f)<<26`, `err_sub(x)=((x)&0xfff)<<14`,
+`err_get_code=err&0x3fff`) makes "system 0 / sub 3" arithmetically WRONG (sub 3 = 3<<14 = 0xC000, not
+0x103). The nearest matched constant is `EXC_ARM_SP_ALIGN = 0x103` (`osfmk/arm/exception.h:32`), but
+that is an exception code, not a kern_return — a DECOY. So: 0x103 is **UNKNOWN** as a return value;
+it is most plausibly NOT the mach_vm_map wrapper's return at all (the in-cache wrapper's success
+sentinel is `0x10000003` = `3 | (0x1000<<16)`, and `__os_alloc_slow` never zero-tests 0x103). The
+wrapper's nonzero return on the SLOW leg is a MIG demux value (the demux tail at `0x381c8020` region
+returns `mvn.w r0,#300` = -300 = `MIG_TYPE_ERROR`), NOT 0x103. **UNKNOWN; the value's producer is not
+identifiable from static reads.** Do NOT read 0x103 as a kern_return.
+
+====================================================================================================
+C. PORT DEFECT OR DEVICE FACT? — PORT DEFECT (CONFIRMED)
+====================================================================================================
+On a stock iOS 7 device the first 1-page `VM_FLAGS_ANYWHERE` `mach_vm_map` succeeds: the real Apple
+iOS-7 ARMv7 kernel's `mach_trap_table[15]` is a genuine `mach_vm_map` handler. Our port compiles that
+row to `kern_invalid` because `IOS7_COMPAT_PLATFORM` (ARMPBA8||QSD8250_LEO) does not cover
+MSM8974_CANCRO and the ios7lab adapter was never wired into the table. **The kernel-side thing missing
+on our image is the trap-15 table row (`ios7lab_mach_vm_map_trap`), CONFIRMED by value** (symbol
+absent; idx 15 == idx 0 == kern_invalid). This is a PORT defect, matching the 1019 §5 design that was
+written but never enabled for this board.
+
+====================================================================================================
+D. THE ONE FIX RUNG
+====================================================================================================
+**Install mach trap 15 in the LINKED image.** Concretely: widen the `IOS7_COMPAT_PLATFORM` gate (or
+add a `STAGE90_XNU_IOS7_TRAPS`-family switch that reaches the TABLE ROW, not merely the traps_lo.s
+-3/-15 assembly branches) so `osfmk/kern/syscall_sw.c` row 15 compiles `ios7lab_mach_vm_map_trap`
+instead of `kern_invalid`, and confirm the symbol lands at `mach_trap_table+15*12+4` in
+xnu_arm_entry.elf. That makes a -15 svc dispatch to the real `ios7lab_mach_vm_map_trap`
+(mach_kernelrpc.c:208) and return KERN_SUCCESS.
+CAVEAT (owed): this rung is decisive ONLY IF the failing call takes the fast leg (a). Section B.3
+left (i)/(ii) undecided; if the failing map takes the SLOW MIG leg (b), enabling trap 15 does not
+touch it and the missing object is elsewhere on the slow path. Evidence WEIGHS toward fast leg (a):
+the guard passes statically (A.2) AND the shim's guard loads are visible live (A.3). Enabling the row
+is the highest-value single rung; a probe (E.1) settles the caveat in the same run.
+
+====================================================================================================
+E. WHAT A NEXT RUNG MUST MEASURE
+====================================================================================================
+  1. THE CALL ID: at the udf (`0x3823aa54`) record WHICH call site led there — the return address of
+     the `blx 0x3823e6e4` (site (a) `0x3823a9af` vs site (b) `0x3823aa23`). One `lr` bit. This alone
+     collapses B.3 (i)-vs-(ii).
+  2. THE -15 DELIVERY: at `swi_mach`, record `r11` for every svc with `r11 == 0xFFFFFFF1` (or widen
+     the usvc witness past `USVC_FULL_N=64`). If a -15 appears AND no panic, the fast-trap path is
+     absorbed somewhere before `swi_mach_error`; if it never appears, the failing call is the slow leg.
+  3. THE GUARD WORDS LIVE: at the shim's entry, publish `[r7,#20]`, `[r7,#40]`, `[r7,#44]` with the
+     pid — the three values A.2 predicts as 0/7/1.
+  4. `r0`'s PRODUCER: at `__os_alloc_slow+0x10c` (the `bne` target's source r0) record the raw r0 and
+     the shim frame, to identify where 0x103 came from.
+
+====================================================================================================
+F. WHAT I COULD NOT ESTABLISH
+====================================================================================================
+  * WHICH call site (a)/(b) reached the udf — no `lr` call-site bit in any capture (E.1).
+  * WHETHER a -15 svc ever fired — the usvc full window is exhausted with no -15 and there is no
+    panic-string line (B.3). So the guard-pass static reading and the live no-(-15) fact are in
+    UNRESOLVED tension; I have NOT manufactured a benign reading for it.
+  * WHAT produced `r0 = 0x103` — not a canonical kern_return, not the wrapper's 0x10000003 sentinel,
+    nearest constant `EXC_ARM_SP_ALIGN` is a decoy (B.4). UNKNOWN.
+  * WHETHER leg (b)'s MIG demux is on the failing path (would move the fix off trap 15).
+
+====================================================================================================
+G. WHAT THIS DOES AND DOES NOT CLAIM
+====================================================================================================
+  * CONFIRMS (by value, cross-checked): shim `r7 = caller_sp - 8` (live `r7-sp = 0x48`); the guard's
+    three fields are caller words 4/9/10 = 0/7/1 on `__os_alloc_slow` site (a) -> guard PASSES;
+    the shim's guard LOADS were executed live (`lr=7, r9=1, ip=3`); `mvn ip,#14` == table index 15;
+    linked `mach_trap_table[15] == [0] == kern_invalid`; the ios7lab trap-15 symbol is absent.
+  * CONFIRMS: this is a PORT defect — the trap-15 row is gated out for MSM8974_CANCRO.
+  * does NOT claim: which call site reached the udf; that -15 was delivered (it was NOT witnessed);
+    what r0=0x103 is. The guard-pass vs no-(-15) tension is stated, not resolved.
+  * SUPERSEDES: `records/1021-guard-leg.txt` §2b's "shim entry UNPROVEN" — A.3 confirms entry live.

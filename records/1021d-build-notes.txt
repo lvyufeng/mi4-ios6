@@ -1,0 +1,105 @@
+1021d BUILD NOTES -- STAGE90_XNU_GENERAL_REGS, the pool's FP/NEON codegen switch
+=================================================================================
+Author: build-rung agent.  Static verification only; NO build was run by this rung
+(`out/stage90` is shared live state -- [[mi4-out-stage90-is-shared-live-state]]).
+
+THE FLAG DIFF (exact)
+---------------------
+tools/build_xnu_arm_kernel.sh, CC_ARGS/CXX_ARGS at the FP position:
+  OFF (STAGE90_XNU_GENERAL_REGS=0, the default):  -mfpu=neon-vfpv4 -mfloat-abi=softfp
+  ON  (STAGE90_XNU_GENERAL_REGS=1):               -msoft-float
+ON is `-msoft-float` ALONE.  `-mfpu=neon-vfpv4` is NOT kept beside it.
+
+WHY `-mfpu` IS DROPPED (a self-falsification, recorded because it nearly shipped)
+--------------------------------------------------------------------------------
+The first version kept `-msoft-float -mfpu=neon-vfpv4`, justified by the claim that
+`-mfpu` lowers `mrc p10,7,%0,c8,c0,0` (proc_reg.h's cp10 move) to a plain `mrc`
+instead of `vmrs`.  MEASURED FALSIFIED: that `mrc p10,7` lowers to `vmrs`/`vmsr`
+under EVERY flag set tried -- `-mfpu=neon-vfpv4 -mfloat-abi=softfp`, `-msoft-float`,
+`-msoft-float -mfpu=neon-vfpv4`, `-mfloat-abi=soft`, `-msoft-float -mfpu=vfpv3`.
+So `-mfpu` is inert for codegen with `-msoft-float`; keeping it would leave a flag
+that READS as "NEON is on" beside the switch that says it is off
+([[mi4-off-option-two-spellings]]).
+
+OFF-IDENTITY
+------------
+1. The resolve + FP_FLAGS choice is the FIRST thing after argument parsing in
+   tools/build_xnu_arm_kernel.sh -- above every mkdir/rm/generator/compile.
+2. `--print-flags` is a side-effect-free mode that prints the resolved fp flag list
+   and the pool census the by-value clause is read against, then exits.
+3. OFF is a 2-element `FP_FLAGS=(-mfpu=neon-vfpv4 -mfloat-abi=softfp)`; expanded at
+   the FP position of both arrays, so the OFF argv is word-for-word today's.
+4. Two `case` statements beside the arrays assert the COMPILED arrays carry the
+   resolved spelling (and that OFF does NOT carry `-msoft-float`), exit 3 on mismatch.
+
+INCIDENT -- `--print-flags` DESTROYED THE 705-OBJECT POOL (once)
+----------------------------------------------------------------
+The first placement of the resolve/print block was BESIDE the flag arrays, ~1000
+lines below `rm -f "$OUT"/*.o`.  A `--print-flags` invocation therefore truncated
+the D13 pool (705 objects) and exited.  It was restored by re-running
+scripts/build_1020b.sh, which reproduced armed-d13-b5093f00 byte-identical to the
+park (all 13 record members matched).  Fix (already in this tree): the block is now
+above every side effect.  This is the [[mi4-measurement-defects]] shape -- a
+read-only-looking mode with a destructive side effect.
+
+CLAUSE LOCATIONS
+----------------
+- tools/build_xnu_arm_kernel.sh : resolve + 0/1 refusal + `--print-flags` (top);
+  `CC_ARGS`/`CXX_ARGS` expand `"${FP_FLAGS[@]}"`; two assertion `case`s; a
+  `xnu_1021d:` build-log line printing the resolved flags.
+- src/entry/build_entry.sh : resolve + 0/1 refusal (~:1669); `ENTRY_ARM_KEYS` tail;
+  record resolver `case` (~:2328); record echo of the RESOLVED value (~:40363);
+  the by-value clause at the link site (~:31394-31465) -- symbol `mach_msg_send`
+  in the LINKED elf + whole-pool census, `--expect none` for ON / `any` for OFF,
+  `--min-objects` = the manifest's C/C++ count, refusal (not skip) if the tool is
+  absent.
+- scripts/preflight_boot_check.sh : `ENTRY_CFG_KEYS` + a one-way absent-key branch
+  so pre-1021d parks stay pressable.
+- scripts/build_1021d.sh : step 0 requires `check_d13_no_neon.py --selftest` PASS and
+  reads `--print-flags` both ways; steps 5b (GLOBAL_FIX, verbatim 1020b), 5c (pool +
+  platform census `--expect none`), 5d (new `__aeabi_*` report + libgcc resolution),
+  6b (linked image `--expect none`); writes the carrier LAST as EXACTLY one line
+  `STAGE90_XNU_GLOBAL_FIX=1 role=1021d-general-regs` (park_1021d/press_1021d require
+  that exact line and refuse a 1020b one).
+
+TOOLCHAIN VERIFICATION (all in /tmp; no device, no shared state touched)
+------------------------------------------------------------------------
+- `--print-flags` OFF -> `-mfpu=neon-vfpv4 -mfloat-abi=softfp`; ON -> `-msoft-float`.
+  D13 (`XNU_TREE=<abs>/external/xnu-hd2-darwin13/xnu`) => pool dir `..._d13`,
+  POOL_OBJ_EXPECT=715 = 705 pool + 10 platform.  Invalid value (2) refuses, rc=1.
+- A TU with real FP arithmetic: OFF emits 0 `__aeabi` undefineds; ON emits
+  `__aeabi_dadd __aeabi_ddiv __aeabi_dmul __aeabi_fmul`.
+- `arm-none-eabi-gcc -print-libgcc-file-name` = /usr/lib/gcc/arm-none-eabi/10.3.1/libgcc.a
+  defines all of `__aeabi_dadd/ddiv/dmul/fmul/fadd` (build_entry's `--start-group`).
+- `check_d13_no_neon.py --selftest` = PASS (21 cases).
+- OFF readings on the restored park: `mach_msg_send` in the LINKED elf = 4 FP insns
+  (exactly the design's number; window [0x8047aff4,0x8047b150)); pool = 6945 FP insns
+  across 280/705 objects (the design's numbers).
+- Directions discriminate: ON pool `--expect none` rc=0, OFF pool `--expect none`
+  rc=1, ON pool `--expect any` rc=1.
+
+LATENT TRAP -- `proc_reg.h`'s `mrc p10,7` inline asm (does not fire today)
+-------------------------------------------------------------------------
+`osfmk/arm/proc_reg.h:466-477` spells `mrc/mcr p10,7,...` inline asm (fpexc/fpscr/
+fpsid/mvfr0/1/fpinst).  MEASURED: that shape lowers to `vmrs`/`vmsr` under EVERY
+flag set INCLUDING `-msoft-float` alone (the lowering is flag-independent, so the
+switch cannot introduce it), and `check_d13_no_neon.py` classifies `vmrs`/`vmsr`
+as FP (VFP_MNEMONICS).  So IF a pool object ever instantiates those inline
+functions, the ON clause (`--pool --expect none`) would REFUSE a correct arm.
+It does not fire today: all 705 objects disassembled => ZERO `vmrs`/`vmsr` in the
+pool.  A future pool source that reads fpexc/fpscr here must be checked against
+this, or the ON census will refuse.
+
+RESIDUAL GAP
+------------
+The entry-side clause's `--pool` is the KERNEL pool only; the 10-object platform
+directory is censused in scripts/build_1021d.sh step 5c, not at the link site.
+
+UNVERIFIED / RISK
+-----------------
+- No ON pool was built here (that is the rung's job), so the ON whole-pool count of
+  0 is PREDICTED, not measured.
+- `scripts/preflight_boot_check.sh` now refuses the restored 1020b park on exactly
+  one clause -- the source-hash clause -- because on-disk build_entry.sh (fdb54e02)
+  post-dates the arm's manifest (c9975dd0).  Unavoidable for any lane that edits
+  build_entry.sh; a rebuild of the rung clears it.

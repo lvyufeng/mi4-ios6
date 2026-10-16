@@ -1651,6 +1651,28 @@ case "$UNDEF_RAISE" in
     *) echo "REFUSING: STAGE90_XNU_UNDEF_RAISE='$UNDEF_RAISE' is neither 0 nor 1" >&2
        exit 1 ;;
 esac
+# **1021d: whether the kernel POOL was compiled without compiler-emitted FP/NEON, recorded here the
+# same way and for the same reason.** `records/1021-fpu-rootcause.txt`: 1020b's `udf` raise lets pid 1
+# die, and the kernel then takes an undefined-instruction exception in KERNEL mode at `0x8047b0ac`
+# (`vld1.32 {d16-d17},[r0]!`, `lr=0x8047b0b0`) because `save_vfp_context` clears `FPEXC.EN` on the
+# first context switch (`osfmk/arm/pcb.c:298-306`) and kernel mode never restores it. The fix
+# (docs/1021c) is to stop the compiler emitting FP/NEON into the pool at all, which Apple's own ARM
+# kernel does (`makedefs/MakeInc.def:377-379`, `-msoft-float`). **The substance of this switch is
+# therefore NOT a `#define`** - it is the compiler flag list in
+# `tools/build_xnu_arm_kernel.sh` (the same-named environment variable selects `-msoft-float` ALONE
+# instead of `-mfpu=neon-vfpv4 -mfloat-abi=softfp` in BOTH `CC_ARGS` and `CXX_ARGS`; `-mfpu` is NOT
+# kept beside it - it is inert with `-msoft-float`, MEASURED, and only reads as "NEON is on").
+# This file only LINKS `out/xnu_kernel_obj_d13/*.o`, so without the pool rebuild this
+# record would say "NEON-free" over a pool full of `vld1` - docs/1021c 4.2's two-carrier trap. That is
+# why the by-value clause at the 1021d link site below counts FP instructions in the LINKED image AND
+# in the whole pool directory, and refuses when the count of objects examined is not the manifest's.
+# **`-mgeneral-regs-only` is NOT this**: clang 14 silently drops it on armv7 (docs/1021c 1).
+GENERAL_REGS=${STAGE90_XNU_GENERAL_REGS:-0}
+case "$GENERAL_REGS" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_GENERAL_REGS='$GENERAL_REGS' is neither 0 nor 1" >&2
+       exit 1 ;;
+esac
 # **996: the shared-region syscall probe, recorded the same way and for the same reason.** With
 # `STAGE90_XNU_SHREG_PROBE=1`, the D13 tree's `bsd/vm/vm_unix.c` grows bounded, fail-soft `IOS7SHREG`
 # printfs at the entry and every return of `shared_region_check_np` (294) and
@@ -2105,6 +2127,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_PERM_WITNESS
                 STAGE90_XNU_UNDEF_DIRECT
                 STAGE90_XNU_UNDEF_RAISE
+                STAGE90_XNU_GENERAL_REGS
                 STAGE90_XNU_TREE_D13)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -2294,6 +2317,16 @@ do
         # only LINKS `out/xnu_kernel_obj_d13/osfmk_arm_trap.o`, which is why the 1020 clause at the link
         # site below reads the linked image's own `sleh_undef` and refuses a link whose raise is absent.
         STAGE90_XNU_UNDEF_RAISE)      _v=$UNDEF_RAISE ;;
+        # 1021d: whether the kernel POOL was compiled FP/NEON-free. Read from `$GENERAL_REGS`,
+        # validated 0/1 at its own assignment far above this loop, so the record and the pool's
+        # flag list cannot be built from two spellings of this switch
+        # (`mi4-one-value-two-definitions`). **This switch's substance is a COMPILER FLAG, not a
+        # `-D`**: `tools/build_xnu_arm_kernel.sh` appends the FP flags it resolves from the
+        # same-named environment variable inside `CC_ARGS`/`CXX_ARGS`, and nothing in this file
+        # compiles a pool source. So the record alone cannot make the pool NEON-free - which is
+        # why the 1021d clause at the link site below reads the LINKED image AND the whole
+        # `out/xnu_kernel_obj_d13` directory by value (docs/1021c sections 4.2 and 5).
+        STAGE90_XNU_GENERAL_REGS)     _v=$GENERAL_REGS ;;
         # 995: whether the tree's dyld halt-message witness (`tools/stage_d13_dyld_witness.sh`) was
         # compiled into this image's pool. Read from `$DYLD_WITNESS`, validated 0/1 at its own
         # assignment far above this loop, so the record and the pool's `DEFINES` cannot be built from
@@ -31359,6 +31392,80 @@ verify_trace_symbols() {
         fi
         say "  xnu_entry_1020: the linked image's sleh_undef reaches the EXC_BAD_INSTRUCTION raise on the non-magic undefined-instruction path (the vfp_enable block's return is conditional; the fall-through reaches the printf) - $ur_out"
     fi
+    # ================================================================================================
+    # **1021d: THE POOL'S FP/NEON CODEGEN, READ BY VALUE OFF THE LINKED IMAGE AND OFF THE WHOLE
+    # POOL DIRECTORY.** (docs/1021c section 5; records/1021-fpu-rootcause.txt.)
+    # ================================================================================================
+    # The switch's substance is a COMPILER FLAG LIST, not a `#define`
+    # (`tools/build_xnu_arm_kernel.sh`: `-msoft-float` ALONE under `STAGE90_XNU_GENERAL_REGS=1`,
+    # today's `-mfpu=neon-vfpv4 -mfloat-abi=softfp` under 0). `-mfpu=neon-vfpv4` is NOT kept beside
+    # `-msoft-float`: it is inert for codegen (MEASURED) and keeping it would leave a flag that reads
+    # as "NEON is on" beside the switch that says it is off. So no text in this file and no record key
+    # can establish it: the only reading is a count of FP instructions in the objects,
+    # `tools/check_d13_no_neon.py` (the tool is authored in parallel; if it is ABSENT this clause FAILS
+    # LOUDLY rather than skipping -- a skipped check is `mi4-a-claim-in-a-comment-is-not-a-check`, and a
+    # silent pass here would be a green entry build over a pool full of `vld1`).
+    #
+    # THREE READINGS, and they are not duplicates:
+    #   (1) the LINKED image's `mach_msg_send` -- the function whose `vld1.32` at `0x8047b0ac` is
+    #       1020b's kernel-mode undef. It is in `osfmk_ipc_mach_msg.o` (4 FP instructions today, all
+    #       in that symbol: offsets 0xb8/0xbc/0xd4/0xd8). Read off `$OUT/xnu_arm_entry.elf` and not off
+    #       the `.o`, because this build only LINKS the pool object -- a STALE object is exactly the
+    #       1020 defect (`records/1020-build-defect.txt`).
+    #   (2) the WHOLE POOL DIRECTORY, so a flag that reached `mach_msg.o` and not `ip_dummynet.o`
+    #       (whose `vpush {d8-d9}` faults identically) is a refusal rather than a pass. `--min-objects`
+    #       is the manifest's own count, so an ON arm over an EMPTY or STALE directory fails instead of
+    #       passing vacuously (docs/1021c section 5.3, the `m1015b` census defect).
+    #   (3) the OFF direction (`--expect any`), which is what proves the OFF arm is still the pre-rung
+    #       pool: a switch that silently reached the compile while the record said 0 would turn OFF into
+    #       ON ([[mi4-off-option-two-spellings]]).
+    _nn_tool=$REPO_ROOT/tools/check_d13_no_neon.py
+    _nn_pool=$REPO_ROOT/out/xnu_kernel_obj$XNU_OBJ_SUFFIX
+    # The manifest's own count of C/C++ sources that exist on disk -- the number of objects the pool
+    # build produces from the manifest. MEASURED at 705 for D13 (710 manifest C/C++ lines, 5 of them
+    # non-sources). Read from the manifest rather than typed here, for the reason `ENTRY_ARM_KEYS`'
+    # count is: a typed count in a sentence is false on the next commit and nothing can fail on it.
+    _nn_manifest=$REPO_ROOT/out/xnu_arm_manifest$XNU_OBJ_SUFFIX.txt
+    _nn_min=0
+    if [[ -r $_nn_manifest ]]; then
+        while IFS= read -r _p; do
+            [[ -n $_p && -f $_p ]] && _nn_min=$((_nn_min + 1))
+        done < <(grep -E '\.(c|cpp)$' "$_nn_manifest" 2>/dev/null || true)
+    fi
+    [[ $_nn_min -gt 0 ]] ||
+        layout_fail "the D13 pool manifest $_nn_manifest is unreadable or names no C/C++ source, so the 1021d pool census below would have no floor and an ON arm over an EMPTY out/xnu_kernel_obj$XNU_OBJ_SUFFIX would pass vacuously -- the m1015b census defect (a check that cannot fail is not a check)"
+    [[ -f $_nn_tool ]] ||
+        layout_fail "tools/check_d13_no_neon.py is MISSING ($_nn_tool). STAGE90_XNU_GENERAL_REGS=$GENERAL_REGS says whether this kernel pool was compiled without compiler-emitted FP/NEON, and the ONLY reading of that property is a count of FP instructions in the objects the image links. Without the tool this clause cannot read it, and a clause that skips itself is the defect class [[mi4-a-claim-in-a-comment-is-not-a-check]] -- so it is a refusal. The tool is authored in parallel with this rung; add it (CLI: <elf> --symbol <name> --expect none|any | --pool <obj-dir> --expect none|any [--min-objects N] | --selftest)"
+    if [[ $GENERAL_REGS -eq 1 ]]; then
+        _nn_expect=none
+        _nn_why="STAGE90_XNU_GENERAL_REGS=1 declares the kernel pool was compiled -msoft-float, i.e. WITHOUT the FP register file in the allocator, so that a kernel-mode FP/NEON instruction can never run with FPEXC.EN off (records/1021-fpu-rootcause.txt: 'vld1.32 {d16-d17},[r0]!' at 0x8047b0ac)"
+    else
+        _nn_expect=any
+        _nn_why="STAGE90_XNU_GENERAL_REGS=0 declares the pool is the pre-rung one, which DOES contain compiler-emitted FP/NEON (mach_msg_send has exactly 4 FP instructions today), so an empty count here would mean the switch reached the compile while the record says 0 -- one value, two definitions"
+    fi
+    if ! _nn_out=$(python3 "$_nn_tool" "$OUT/xnu_arm_entry.elf" --symbol mach_msg_send --expect "$_nn_expect" 2>&1); then
+        printf '%s\n' "$_nn_out" >&2
+        say "REFUSING: the LINKED image's mach_msg_send does not read --expect $_nn_expect for FP/NEON" >&2
+        say "          instructions, and $_nn_why. $OUT/xnu_arm_entry.elf is the artifact the payload" >&2
+        say "          boots; this build only LINKS $OUT/../xnu_kernel_obj$XNU_OBJ_SUFFIX/osfmk_ipc_mach_msg.o," >&2
+        say "          so a STALE pool object is invisible to every other check here (records/1020-build-defect.txt)." >&2
+        say "          Rebuild the pool with the SAME value and relink:" >&2
+        say "            STAGE90_XNU_GENERAL_REGS=$GENERAL_REGS XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local \\\\" >&2
+        say "            ./tools/build_xnu_arm_kernel.sh" >&2
+        layout_fail "STAGE90_XNU_GENERAL_REGS=$GENERAL_REGS did not reach the linked image: mach_msg_send's own extent in $OUT/xnu_arm_entry.elf still reads the other way. The switch is a COMPILER FLAG in tools/build_xnu_arm_kernel.sh (CC_ARGS/CXX_ARGS); nothing in src/entry/ compiles a pool source, so a record that carries the key over an un-rebuilt pool is exactly the two-carrier trap docs/1021c section 4.2 warns about"
+    fi
+    say "  xnu_entry_1021d: the linked image's mach_msg_send reads --expect $_nn_expect - $_nn_out"
+    if ! _nn_pool_out=$(python3 "$_nn_tool" --pool "$_nn_pool" --expect "$_nn_expect" --min-objects "$_nn_min" 2>&1); then
+        printf '%s\n' "$_nn_pool_out" >&2
+        say "REFUSING: the POOL DIRECTORY $_nn_pool does not read --expect $_nn_expect over $_nn_min object(s)" >&2
+        say "          (the manifest's own C/C++ count, so an empty or partial directory fails here rather" >&2
+        say "          than passing vacuously -- docs/1021c section 5.3). $_nn_why." >&2
+        say "          The clause is whole-pool on purpose: a flag that reached osfmk_ipc_mach_msg.o and not" >&2
+        say "          bsd_netinet_ip_dummynet.o would pass the linked-image reading above and leave that" >&2
+        say "          object's \`vpush {d8-d9}\` to fault exactly as 0x8047b0ac does." >&2
+        layout_fail "the pool directory $_nn_pool (manifest $_nn_manifest) does not match STAGE90_XNU_GENERAL_REGS=$GENERAL_REGS: rebuild the pool with tools/build_xnu_arm_kernel.sh under the SAME switch value. An ON arm over a pool built OFF is the state this clause exists to refuse, because the linked image would carry vld1 while the record says it cannot"
+    fi
+    say "  xnu_entry_1021d: the pool directory $_nn_pool reads --expect $_nn_expect over $_nn_min object(s) - $_nn_pool_out"
     # **990: the tree must hand C 8-byte-aligned stacks at its two measured gates.** 989's pid-1 exec
     # ran every C frame from `thread_return_join`'s `blx ast_taken` and every continuation off
     # `Call_continuation`'s `ldr sp, [thread, TH_PCB_ISS]` at sp = 4 (mod 8) - `iss = stack_top - 68` and
@@ -40249,6 +40356,14 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # nobody read. Written as the RESOLVED `$UNDEF_RAISE`. `trap.c` is a POOL file, so the pool's
     # `-D` rides the caller's `XNU_KERNEL_EXTRA_DEFINES`; this record is the gate's only reading of it.
     echo "STAGE90_XNU_UNDEF_RAISE=$UNDEF_RAISE"
+    # **1021d: the FP/NEON-codegen switch, written here for 882's and 678's reason**: this writer is
+    # the one site a name-keyed diff does not visit and the only site the gate ever reads, so a switch
+    # that reached the flag list and the arm-key list but not this line would be a run whose arm nobody
+    # read. Written as the RESOLVED `$GENERAL_REGS`. Its substance is a COMPILER FLAG in
+    # `tools/build_xnu_arm_kernel.sh`, not a `-D`, so this record does NOT cause the pool to be
+    # NEON-free - the 1021d clause at the link site below counts FP instructions in the linked image
+    # and in the whole pool directory, which is what makes a record-over-a-stale-pool a refusal.
+    echo "STAGE90_XNU_GENERAL_REGS=$GENERAL_REGS"
     # **910a's switch, written here in the same breath as the two above and for the reason 678's block
     # states at length**: this writer is the one site a name-keyed diff does not visit and the only site
     # the gate ever reads, so a switch that reached the compiler and the arm-key list but not this line

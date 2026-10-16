@@ -1115,11 +1115,22 @@ def mutate_facts(facts, mutate):
         elif mutate == "assym_forgets_the_offset":
             facts["assym"] = _bump(facts["assym"], "#define TH_RECOVER\t#552\n", "")
         elif mutate == "the_kernel_object_moves_the_field":
+            # **EVERY** access, not the first (`count=-1`), and the trailing comment moves with the
+            # offset. `sleh_abort` reads `thread->recover` TWICE in the source -- the `if
+            # (!thread->recover)` guard (trap.c:676) and `arm_ctx->pc = thread->recover;` (:705) --
+            # and after the 1021d `-msoft-float` recompile BOTH materialize as `ldr r0, [sl, #552]`
+            # (object offsets 0x504 and 0x548). The first version replaced only the first, so the
+            # second correct read still satisfied claim 4 and the mutation was ACCEPTED -- a mutation
+            # that mutates nothing is indistinguishable from a claim that holds (the 228 class this
+            # file already documents at `_edit_line_at`). A field that genuinely MOVED would move
+            # every access, so the honest mutation moves every access.
             facts["kobj_dis"] = _bump(facts["kobj_dis"], "ldr\tr0, [sl, #552]\t; 0x228",
-                                      "ldr\tr0, [sl, #556]\t; 0x22c")
+                                      "ldr\tr0, [sl, #556]\t; 0x22c", count=-1)
         elif mutate == "the_kernel_object_loses_the_read":
+            # Same reasoning as the field-move above: `count=-1`, because the loop in claim 4 accepts
+            # a match at ANY read site, so dropping only one of the two reads leaves the other.
             facts["kobj_dis"] = _bump(facts["kobj_dis"], "ldr\tr0, [sl, #552]\t; 0x228",
-                                      "ldr\tr0, [sl, #548]\t; 0x224")
+                                      "ldr\tr0, [sl, #548]\t; 0x224", count=-1)
         elif mutate == "the_header_stops_defining_the_offset":
             facts["header"] = _bump(facts["header"],
                                     "#define STAGE90_TH_RECOVER     552",

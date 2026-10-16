@@ -1,0 +1,487 @@
+1021d — IS pid 1's `udf #254` A GENUINE FAULT? (READ-ONLY FORENSICS: the instruction, its
+        surrounding code, the kernel handler, and whether raising it leaves launchd dead)
+====================================================================================================
+Method: READ-ONLY. No build, no press, no device action, no write to out/stage90. One file written.
+Inputs, all read BY VALUE:
+  /tmp/dyld-extract/dyld_shared_cache_armv7 (cache base 0x2c000000, map0 fileoff = va - 0x2c000000)
+  out/stage90/xnu_arm_entry.elf              (the LINKED image; .text @ 0x80000000 fileoff 0x010000)
+  external/xnu-hd2-darwin13/xnu/osfmk/arm/trap.c        (our tree's sleh_undef)
+  external/xnu-4570.1.46/osfmk/arm/trap.c               (Apple's general upstream)
+  external/xnu-hd2-darwin13/xnu/osfmk/kern/syscall_sw.c, external/xnu-4570.1.46/osfmk/kern/syscall_sw.c
+  out/stage90/captures/recovered-unknown-arm-20261016-014316-last_kmsg.txt (the 1020b capture)
+  records/1021-guard-leg.txt, records/1019-osalloc-extract.txt, records/1019-rootcause.txt
+objdump: arm-none-eabi 2.38 (`-D -b binary -m arm -M force-thumb`).
+
+====================================================================================================
+0. VERDICT
+====================================================================================================
+**GENUINE FAULT — the `udf #254` is a deliberate, unconditional "cannot proceed" trap on the
+allocator's mmap-FAILURE path. Raising `EXC_BAD_INSTRUCTION` for it is the CORRECT handling, and it
+does kill pid 1** (`exception_deliver` finds no handler -> `task_terminate` -> launchd dies ->
+`panic: init died`).  There is NO "legitimate control-flow device" reading: the bytes are literally
+`udf #254`, not a `udf #252` dtrace fast-trap, and there is no kernel path anywhere that patches or
+satisfies it.
+
+**AND — the CORRECTED consequence (§9) —** the *cause* is that `mach_vm_map` **returns nonzero**; WHY
+it fails is **OPEN**.  The original §4 claim ("the failing mmap went to mach TRAP 15, and trap 15 is
+`kern_invalid`") is **FALSIFIED by the live run** (the parent's measurement, which I reproduced): the
+-15 fast-trap wire number appears **nowhere** in the 1020b capture.  Core file §4 is therefore
+**demoted** to a static reading the live run contradicts.  Separately, §9 resolves the
+`1021-guard-leg.txt` frame conflict: that record's `r7 = caller_sp` is **wrong** (it is
+`caller_sp - 8`); under the correct offset the guard **PASSES** and the shim takes the **FAST** leg,
+which agrees with the live dump.  The fast leg issues `svc #0x80` with the mach trap number taken
+from the **caller's r12**.  What remains is one open question: **why does the run STOP** (a real
+panic is recorded: `xnu_entry_panic_entered=0x00000001`) — the cause of the map failure and the
+cause of that stop are UNRESOLVED.
+
+====================================================================================================
+1. THE INSTRUCTION, BY VALUE — it IS `udf #254`, in Thumb, and ONLY in Thumb
+====================================================================================================
+Bytes at the frontier (python read of the cache, fileoff = va - 0x2c000000):
+    0x3823aa54: fe de 46 c0   (0x3823aa56 = c046 = nop)
+Read FOUR independent ways (all CONFIRMED):
+  (a) Thumb-16 @ 0x3823aa54, `objdump -M force-thumb` on bytes `fe de`:
+        defe  udf #254 ; 0xfe
+  (b) Thumb word is halfwords `defe c046` = `udf #254; nop` — a 4-byte-aligned trap+nop, i.e. the
+      compiler's `__builtin_trap()`-shaped idiom (trap + pad so the next symbol stays aligned).
+  (c) ARM-word read of the same 4 bytes `fe de 46 c0` = 0xc046defe = `strdgt sp,[r6],#-238`. That is
+      NOT a valid `udf` and NOT a sensible instruction; but the CPU is in Thumb (the run's
+      `cpsr = 0x20000030`, T bit (0x20) SET — capture :4120), so the ARM reading never applies.
+  (d) ARM `udf` would need encoding `0xe7f0??f0`..; the byte pair here is `fe de`, so the SAME
+      physical halfword is `udf #254` only in the Thumb decode. There is no ARM-encoded `udf` here.
+So the encoding is unconditionally a Thumb `udf #254`. CONFIRMED.
+
+====================================================================================================
+2. THE SURROUNDING CODE, BY VALUE — the `udf` is the ALLOCATOR's failure trap
+====================================================================================================
+Full disassembly of the containing function `__os_alloc_slow` (cache VA 0x3823a94c, opcodes verified
+from the extracted cache):
+    3823a94c: b5f0        push  {r4,r5,r6,r7,lr}
+    ...
+    3823a9aa: blx   0x3823e6e4            ; CALL 1: lazy stub -> libsystem_kernel mach_vm_map wrapper
+    3823a9ae: 2800        cmp   r0, #0      ; r0 = kern_return_t
+    3823a9b0: d150        bne.n 0x3823aa54  ; <-- r0 != 0  => JUMP TO THE udf
+    3823a9b2..  (retry loop head 0x3823a9bc; ldrex/strex reservation dance on the os_alloc global)
+    3823aa1e: blx   0x3823e6e4            ; CALL 2: the retry mmap
+    3823aa22: 2800        cmp   r0, #0
+    3823aa24: d0ca        beq.n 0x3823a9bc  ; r0 == 0 -> RETRY
+    3823aa26: e015        b.n   0x3823aa54  ; <-- r0 != 0  => JUMP TO THE udf
+    3823aa28..  (failure cleanup: 0x3823aa36 blx 0x3823e6d4 = mach_vm_deallocate)
+    3823aa48: f1a7 0418  sub.w r4, r7, #24
+    3823aa4c: 46a5        mov   sp, r4
+    3823aa4e: e8bd 0d00  ldmia.w sp!, {r8,sl,fp}
+    3823aa52: bdf0        pop   {r4,r5,r6,r7,pc}   ; <-- the normal RETURN
+    3823aa54: defe        udf   #254         ; <-- THE FRONTIER
+    3823aa56: 46c0        nop
+    3823aa58: f24450c0    movw  r0, #0x45c0    ; <-- a DIFFERENT, unrelated function begins here
+    3823aa5c: f2440221    movw  r2, #0x4021
+    3823aa60: f2c010d0    movt  r0, #0x1d0
+    3823aa64: f24451ba    movw  r1, #0x45ba
+    3823aa68: 4478        add   r0, pc
+    3823aa6c: f2c011d0    movt  r1, #0x1d0
+    3823aa70: f6cf72ff    movt  r2, #0xffff
+    3823aa72: 4479        add   r1, pc
+    3823aa74: 7812        ldrb  r2, [r2, #0]
+    3823aa76: 6800        ldr   r0, [r0, #0]
+    3823aa78: f0120f80    tst.w r2, #128
+    3823aa7c: bf18        it    ne
+    3823aa7e: 6808        ldrne r0, [r1, #0]
+    3823aa80: 4770        bx    lr
+Read:
+  * The `udf` is a **JOIN TARGET reached by three unconditionally-short BP/B pipelines** (two `cmp
+    r0,#0` failure branches at 0x3823a9b0/0x3823aa26 and the internal `b.n` at 0x3823aa26..); the
+    quoted tail after `0x3823aa52 pop` proves it is **NOT fall-through**: the two bytes immediately
+    after the `pop` would be `f2 44`, and `0x3823aa58` starts a fresh prologue-less function
+    (`movw r0,#0x45c0; ... ; bx lr`). So the `udf` is an out-of-line **`__builtin_trap()` stub**,
+    exactly what the compiler emits for a `__builtin_unreachable()` / "this branch must be fatal"
+    path (trap + `nop` pad to keep the next function 4-byte aligned). CONFIRMED.
+  * Three JOIN edges is three failure edges. All three are `mach_vm_map != KERN_SUCCESS` (the two
+    caller checks) plus the internal `b.n` at 0x3823aa26 in the same `cmp r0,#0`-guarded block.
+    The pair of WITNESSES the 1019 record already named "both guarding branches test r0" are edges
+    1 and 2. So there is **no success path** that reaches the `udf`. CONFIRMED.
+  * The `udf` is NOT a table/branch-island entry: it is not in a vector table, it is not
+    `__attribute__((naked))`-dispatched, and it has no `nop`-only island structure. It is the target
+    of failure branches inside `__os_alloc_slow`'s own mmap-or-die block. CONFIRMED.
+
+**Live corroboration of the failure branch (CONFIRMED by value).** The 1020b capture's register dump
+at the raise (:4117-:4120, and 1021 §7 confirms the provenance):
+    r0: 0x00000103  r1: 0x00000000  r2: 0x00001000  r3: 0x00000000
+    r4: 0x00000210  r6: 0x00000000  r7: 0x2bdf0448
+    r8: 0x49000001  sl/r10: 0x3b303068
+    r12: 0x00000003
+  * `r2 = 0x1000` and `r8 = 0x49000001` are LITERALLY the two constants the CALL-1 setup materialises
+    at 0x3823a98e (`mov.w r2,#4096`) and 0x3823a982 (`movt r8,#0x4900`), i.e. the register-dump frame
+    is the CALL-1 frame, and both are `== 0` / `== 0x1000` on the failure edge. CONFIRMED the dump
+    landed on the `cmp r0,#0` / `udf` edge and not on the success path.
+  * `r3 = 0`. On the failure branch `r3` is NOT re-stored before the `udf` (the `movs r3,#0` is at
+    0x3823a98a, and the branch at 0x3823a9b0 jumps straight to 0x3823aa54). CONFIRMED the failure
+    edge, not a table-jump.
+  * `r6 = 0` = the caller's `r0` arg (the os_alloc hint). `sl = r10 = 0x3b303068` = the loaded
+    context pointer (`ldr.w sl,[r0]; ldr.w r0,[sl]`), self-consistent with the CALL-1 entry. CONFIRMED.
+  * NOTE (a soft reading, flagged so no one over-claims): `r0 = 0x103` is NOT easily produced by the
+    in-cache wrapper (its success returns `3 | (0x1000<<16) = 0x10000003`; a real `kern_return_t`
+    from trap 15 would be a small signed value). `0x103` reads more like `KERN_INVALID_ADDRESS |
+    extra` or an uninitialised read after the `blx`. It does NOT affect the verdict — the branch
+    taken is fixed by the code and corroborated by r2/r8/r3 — but **what r0 actually was at the
+    compare is UNMEASURED** and is a candidate next probe (see §7).
+
+====================================================================================================
+3. WHAT XNU's HANDLER DOES WITH A USER-MODE `udf` (CONFIRMED against the tree AND against the
+   RAISE arm that actually ran)
+====================================================================================================
+`external/xnu-hd2-darwin13/xnu/osfmk/arm/trap.c` `sleh_undef`:
+  :1094-1102  user-mode only sets `thumb_offset = (cpsr & (1<<5)) ? 1 : 0` (T bit), then `copyin`
+              the 4 bytes at `pc + thumb_offset`, then `OSSwapInt32`.
+  :1108        `if(instruction != 0xfedeffe7)`  — the STAND-IN test. It is not a real VFP/coprocessor
+              encoding test; the source comment says so out loud ("Check the instruction encoding to
+              see if it's a coprocessor instruction" ... "dyld's faulting one ... I really just need
+              to redo all of the VFP detection code").
+  :1108-1126   INTO that branch:  `thread->machine.vfp_dirty = 0;`
+              * with `STAGE90_XNU_UNDEF_RAISE` OFF (1019's arm):
+                    if `!thread->machine.vfp_enable` -> `vfp_enable_exception(TRUE);
+                    vfp_context_load(...); vfp_enable=TRUE;` then `return;` — **and this return is
+                    UNCONDITIONAL: vfp_enable is set but the PC never advances, so the SAME `udf`
+                    re-executes** -> the 1018/1019 sweep (trap->enable->return->re-trap) is the loop.
+              * with `STAGE90_XNU_UNDEF_RAISE` ON (the arm that ran, 1020b):
+                    `if (!thread->machine.vfp_enable) { enable; load; =TRUE; return; }`
+                    `/* else FALL THROUGH */`
+                    -> a second trip with vfp_enable TRUE falls out of the `if` and reaches
+                    :1154's printf (`usermode undefined instruction, EXC_BAD_INSTRUCTION at ...`),
+                    :1184 `exception_type = EXC_BAD_INSTRUCTION;`, and :1201
+                    `doexception(EXC_BAD_INSTRUCTION, 0, 0)`.
+  :1184-1201   the raise path (only populated in this branch).
+  * the `0xfedeffe7` special case (the ARM **coproc-0/`udf`** word) SKIPS the VFP-enable arm and goes
+    STRAIGHT to the printf + `EXC_BAD_INSTRUCTION`. In other words **`0xfedeffe7` is the one
+    undefined instruction the tree already agrees is a deliberate `udf` that must be raised**;
+    `0xdefe` (`udf #254`) is the Thumb analogue and takes the identical "raise" action once VFP is
+    already enabled. It is a different byte, but the same verdict: raise. CONFIRMED.
+
+**The "false positive" carve-out does NOT cover `0xdefe` (CONFIRMED, and this is the crux why the
+raise is CORRECT for our case).**
+  * Apple's *general* ARM kernel (`external/xnu-4570.1.46/osfmk/arm/trap.c:118-240`) does NOT enable
+    FP lazily at all: it computes `exception = EXC_BAD_INSTRUCTION` and classifies with
+    `IS_THUMB_VFP(instr32)` / `IS_ARM_VFP(instr)`, and where it does special-case a user instruction
+    it is the **dtrace fast-trap**, `FASTTRAP_THUMB_INSTR`, defined at
+    `external/xnu-4570.1.46/osfmk/arm/trap.c:78-79` as `0xdefc` (`udf #252`) / `0xe7ffdefc`.
+    `0xdefe` != `0xdefc`. So the instruction in the middle of `__os_alloc_slow` is **NOT** the
+    dtrace fast-trap marker; it is a bare `udf #254`. The "Apple's real ARM kernel treats the
+    coprocessor/VFP-not-enabled case by enabling FP and returning" reading is TRUE for *VFP-encoded*
+    undefined instructions, and REFUTED for `0xdefe`.
+  * The 1020b run is the by-value witness for the carve-out NOT firing: the raise happened
+    (capture :4115). If `0xdefe` had been treated as VFP/NEON, the arm would have returned and the
+    `_seq` would have climbed indefinitely, as it did in 1019's run. It did not (the sequence
+    stopped at 2). CONFIRMED.
+
+====================================================================================================
+4. THE CAUSE: mach TRAP 15 = `kern_invalid` IN THE LINKED, PRESSED KERNEL (BY VALUE)
+   *** DEMOTED — FALSIFIED BY THE LIVE RUN. SEE §9. This section is a STATIC reading only; the
+   1020b capture contains ZERO `fffffff1` (-15) and no panic attributable to trap 15, so trap 15 did
+   NOT fire. The row-15-value read below is still true of the image, but it is NOT the wall. ***
+====================================================================================================
+The jalopy of §2 CALL 1 and CALL 2 both go through `0x3823e6e4` -> (per 1019 §1) the empty
+`__get_got` trampoline to `libsystem_kernel.dylib __mach_vm_map` wrapper @ 0x381c6618 -> the fast
+trap stub with `mvn ip,#14; svc #0x80`, wire index **-15**, so the kernel decodes to
+`r5 = -(-15) = 15, entry = 15`. A sweep of every `mvn ip,#N; svc #0x80` stub in 0x381c5700..0x381c5a00
+CONFIRMS the "index = N+1" arithmetic (stub `mvn ip,#9` == trap 10, etc.), so -15 lands on row 15. CONFIRMED.
+
+Row 15 in the **LINKED, staged, PRESSED** image `out/stage90/xnu_arm_entry.elf`:
+    python VA read of `mach_trap_table` @ 0x8055d4b4 (symbol confirmed by `nm`):
+      row 15: argc=0 fn=0x80486408   ; and `nm` names 0x80486408 = `kern_invalid`
+    (cross-check: row 0, row 1..9, row 13, row 16.. all == 0x80486408; row 10 = 0x8047aa34;
+     row 12 = 0x8047ab5c; row 14 = 0x8047ac10.)
+`nm out/stage90/xnu_arm_entry.elf | grep ios7lab_mach_vm_map` -> **only** `_GLOBAL__sub_I_IOS7LabPL181`
+and the PL181 SD symbols, i.e. **the trap-15 adapter is NOT in the image at all**; and a direct
+string search of the linked image for `IOS7LAB vm_map64` / `ios7lab_mach_vm_map_trap` -> **`-1`
+(absent)**. CONFIRMED.
+
+`external/xnu-hd2-darwin13/xnu/osfmk/kern/syscall_sw.c:127-131`:
+    #if IOS7_COMPAT_PLATFORM
+    /* 15 */ MACH_TRAP(ios7lab_mach_vm_map_trap, 8, NULL, NULL),
+    #else
+    /* 15 */ MACH_TRAP(kern_invalid, 0, NULL, NULL),
+    #endif
+and `external/xnu-hd2-darwin13/xnu/osfmk/arm/ios7_compat.h:5-6`:
+    #define IOS7_COMPAT_PLATFORM (BOARD_CONFIG_ARMPBA8 || BOARD_CONFIG_QSD8250_LEO)
+BOARD_CONFIG_QSD8250_LEO is **overnight-verified CLOSED** in this build (1020-build-defects.txt),
+so the `#else` row compiles: `kern_invalid`, argc 0. That is *precisely* the value read out of the
+linked image. CONFIRMED.
+
+Apple's own upstream `external/xnu-4570.1.46/osfmk/kern/syscall_sw.c:120`:
+    /* 15 */ MACH_TRAP(_kernelrpc_mach_vm_map_trap, 6, 8, munge_wwllww),
+So on a stock device `mach_vm_map` maps to a REAL handler at trap 15; on our image the same svc
+indexes a `kern_invalid` slot that, by the traps_lo.s dispatch (1019 §4: `LOAD_ADDR(r2,kern_invalid);
+teq r1,r2; beq swi_mach_error`), raises `swi_mach_error` (`panic`). The `__os_alloc_slow` +0x108
+frontier is the user-space shadow of that kernel-side gap. CONFIRMED.
+
+====================================================================================================
+5. THE REFERENCE (local, first; network not needed)
+====================================================================================================
+`external/` carries `xnu-4570.1.46`, `xnu-hd2-darwin13`, `xnu-upstream`, `apple-xnu-rel-2050`,
+`xnu-2050.18.24`, `distribution-iOS-*`. Searching them:
+  * `grep -rl os_alloc external/` -> only `external/xnu-4570.1.46/libsyscall/os/alloc_once.c` (that
+    is the OLD `libsyscall` table; NOT our `libsystem_platform.dylib __os_alloc_slow`, which is
+    CLOSED-source in the shared cache, so no source exists locally and none is needed — §2 is the
+    by-value disassembly).
+  * `external/xnu-4570.1.46/osfmk/arm/trap.c` sleh_undef — the general upstream, quoted in §3.
+  * `external/xnu-hd2-darwin13/xnu/osfmk/arm/trap.c` — the port tree; byte-identical to the port
+    repo per `records/1020-ref-sleh-undef.txt` (the tree adds only the WITNESS block).
+No network was used; no fetch was needed. (records/1020-ref-sleh-undef.txt already established that
+no reference fork in the port repo handles this differently.)
+
+====================================================================================================
+6. WHAT "CORRECT HANDLING" WOULD MEAN — and why raising is still right for `0xdefe`
+====================================================================================================
+Could `0xdefe` be a mis-decoded or DELIBERATE encoding that libsystem uses to signal "shared cache
+resolver stub / mmap failed hard"? Read for a benign reading of each:
+  (i) "shared-cache resolver stub / patched branch island" — a resolver stub is an out-of-line island
+      that is *jumped to* and patched, i.e. a **success** control-flow device. REFUTED: §2 shows
+      `0x3823aa54` is reached ONLY by `mach_vm_map != 0` failure branches and carries a bare
+      `udf #254; nop` with no island/dispatch marker. A resolver stub would not sit behind a
+      `cmp r0,#0 / bne` on the mmap return.
+  (ii) "dtrace / GDB trap" — REFUTED by the encoding: `FASTTRAP_THUMB_INSTR = 0xdefc` (udf #252),
+      `IS_THUMB_GDB_TRAP` likewise distinct; `0xdefe` matches neither.
+  (iii) "VFP/NEON false positive the handler should absorb" — REFUTED: `0xdefe` is a Thumb `udf`,
+      not a VFP encoding; the `0xfedeffe7` stand-in in our tree is the analogous *ARM* deliberate
+      `udf`, and the tree already treats THAT as a raise. Our arm's measured behaviour (raise once,
+      stop) is the correct analogue.
+Conclusion: the ONLY reading left is the compiler's fatal-trap stub on the allocator's
+mmap-failure path. Raising `EXC_BAD_INSTRUCTION` is the correct response. CONFIRMED.
+
+**Does raising leave pid 1 dead? YES.** `external/xnu-hd2-darwin13/xnu/osfmk/kern/exception.c:322-349`
+(`thread_exception_deliver` -> `exception_deliver`): if delivery is not `KERN_SUCCESS` /
+`MACH_RCV_PORT_DIED`, "Nobody handled it, **terminate the task**" -> `task_terminate(task)`. At this
+point in iOS bring-up pid 1 (launchd) has installed NO `EXC_BAD_INSTRUCTION` handler (there is no
+dyld/libsystem in the run to install one — this is the very first userspace code, and 1020b's own
+console is inside the *loading* of libsystem_platform). So the task terminates; for pid 1 that is
+`panic("init died")`. launchd does not continue. The raise is faithful — it is not a solution.
+
+**Is the NEON fix (1021/1021c) sufficient to boot iOS? NO.** The 1021 root cause (FPEXC.EN
+save-without-restore) is real and must be fixed, but it is DOWNSTREAM of this: after the NEON fix,
+if pid 1's allocator mmap could succeed, the `udf` would not trip. It cannot succeed, because trap 15
+is `kern_invalid`. So the boot-blocking work is: **(a) install mach trap 15** (turn the
+`IOS7_COMPAT_PLATFORM` gate ON, or add the tree's `ios7lab_mach_vm_map_trap` row unconditionally),
+and **(b)** fix the FPEXC.EN restore. (a) alone unblocks the `udf`; (b) alone does not. Both are owed.
+
+====================================================================================================
+7. WHAT A NEXT RUNG MUST MEASURE
+====================================================================================================
+1. **What `r0` was at the `cmp r0,#0`** (0x3823a9ae / 0x3823aa22). The 1020b dump shows `r0=0x103`,
+   which the in-cache wrapper does not obviously produce. A next rung should log the wrapper's `r0`
+   at `0x381c66ba` (after the slow path returns) and the trap-15 handler's return, to learn whether
+   the value is `KERN_INVALID_ADDRESS` (format 0x100) plus a subcode, or a different `kern_return_t`.
+   This disambiguates "the map was rejected" from "the wrapper/munge mis-returned".
+2. **That mach trap 15 was actually the svc issued** — i.e. read the kernel's `swi_mach` `r5` (or
+   install the `IOS7LAB vm_map64` printf). §4 is a STATIC read (row 15 in the linked image); the live
+   run did not log the adapter (the 1019 §6 finding: zero `IOS7LAB` markers). One live capture of
+   `r5` at `traps_lo.s:212` closes it.
+3. **Where the kalloc'd/aligned base actually landed.** `__os_alloc_slow`-adjacent `0x3823a94c`
+   uses `movw r0,#0xff9; cmp r1,r0; bcs` to IRQ the reservation dance; a next rung can probe the
+   live value of the `sp+0x28` page pointer to see whether the *failure* is a size/turnstile issue
+   (`r1 > 0xff9`) rather than a map issue. Low priority versus 1-2.
+4. **The `machine.vfp_enable` bit at the raise.** If the two-trip ladder (1020b) really means
+   "trip 1 enabled VFP; trip 2 raised", a next rung should publish `vfp_enable` before/after each
+   trip to prove it, rather than inferring from `_seq 1 -> 2`. (1021 §3 already asserts the sequence;
+   making it a checked reading is a small, cheap rung.)
+
+====================================================================================================
+8. WHAT I COULD NOT ESTABLISH
+====================================================================================================
+  * **The exact value of `r0` at the failing `cmp`.** I showed the code always takes the `udf` on
+    `r0 != 0` and that the dump sits on that edge, but `0x103` is not a `kern_return_t` I can
+    reproduce from the in-cache wrapper alone. UNKNOWN (candidate §7.1).
+  * **A LIVE reading that trap 15 was the svc issued.** §4 is a static, by-value read out of the
+    linked image (and it *agrees* with the closed `IOS7_COMPAT_PLATFORM` gate). No 1020b line logged
+    an `IOS7LAB vm_map64` row, so the live confirmation is owed. UNKNOWN (candidate §7.2).
+  * **Whether installing mach trap 15 is sufficient on its own** to get pid 1 past this allocator.
+    The trap-15 handler would have to actually satisfy this 1-page `VM_FLAGS_ANYWHERE` map; the
+    tree's own `ios7lab_mach_vm_map_trap` printf path exists but was never observed live. That is a
+    build-arm question, not a read. UNKNOWN.
+  * **`__os_alloc_slow`'s exact source.** It lives only in the closed `libsystem_platform.dylib`
+    inside the shared cache; there is no local source. §2 is a by-value disassembly, not a source
+    read — the branch structure (all three join edges are mmap-failure) is inferred from the code,
+    not from a comment that says so. Flagged so no one treats §2 as a quoted comment.
+
+====================================================================================================
+9. ONE-LINE RECAP FOR THE TEAM
+====================================================================================================
+`udf #254` at `__os_alloc_slow+0x108` is a genuine fatal trap on the "mach_vm_map failed" path —
+raising it is correct and kills pid 1; the fix is to give mach trap 15 a real handler (upstream has
+`_kernelrpc_mach_vm_map_trap` there; our `IOS7_COMPAT_PLATFORM` gate is closed and row 15 is
+`kern_invalid`), NOT to keep the false-positive return. The NEON fix is necessary but not sufficient.
+*** THE TRAP-15 CLAUSE ABOVE IS FALSIFIED -- SEE §9. The cause is "mach_vm_map returns nonzero"; WHY
+is OPEN. ***
+
+====================================================================================================
+9. REVISION AFTER THE PARENT'S RECONCILIATION
+====================================================================================================
+Prompted by the parent: (a) §4's trap-15 = the-wall claim is falsified by the 1020b capture; (b) a
+frame conflict in `records/1021-guard-leg.txt` had to be re-derived. Method: still READ-ONLY, by
+value. I re-carved the shim and the fast-trap stubs from the cache, re-read the STAGED
+`out/xnu_asm_obj_d13/translated/osfmk/arm/traps_lo.s`, re-read `mach_trap_table[15]` RAW out of the
+linked ELF, and measured the capture myself.
+
+9.0 CONFIRMED -- the parent's falsification of §4 (I reproduced every number)
+  `grep -c 'fffffff1' <1020b capture>` = **0**.  The `xnu_live_usvc_num` distinct values are:
+  `0xfffffffd` (-3) x43, `0x00000000` x2, `0x00000003` x3, `0x00000005` x4, `0x00000006` x3,
+  `0x0000005c`, `0x00000147`, `0x00000152`, `0x00000153`, `0x00000174`, `0x80000000`,
+  `0xffffffe4` (-28) x1, `0xffffffe5` (-27) x1, `0xffffffe6` (-26) x1.  The most negative wire
+  recorded is **-28**; **-15 is absent.**  512 `xnu_live_usvc*` lines = 64 records x 8 keys
+  (USVC_FULL_N = 64), a contiguous window over capture lines 23749..33931.  -15 is not in it.
+  => CONFIRMED: the -15 fast-trap was NOT issued in this run; §4's *conclusion* is falsified.
+
+9.1 A CORRECTION TO THE FALSIFICATION'S PREMISE -- there IS a panic (it is just not trap 15)
+  The prompt's "there is no panic anywhere in the run" is **not** quite right, and the difference
+  matters: `xnu_entry_panic_entered=0x00000001` (`:34178`, part of the trap record), with
+  `xnu_entry_panic_len=0x000012da`, `xnu_entry_panic_dropped=0x00000000`.  The 1018 capture has
+  **0** such lines (`grep -c` = 0), so this key is armed precisely in 1020b.  It carries a full
+  panic frame: `xnu_entry_panic_str=0xe3060cc4`, `_caller=0xe3060cac`, `_message=0xe3060c98`.
+  => CONFIRMED: the run DID reach a panic (a different one -- the kernel NEON undef at
+  `xnu_entry_undef_pc=0x8047b0ac` / `spsr=0x40000093`), which is consistent with 1021's root cause.
+  The parent's arbiter rule ("the capture cannot be wrong about the absence of a panic") is sound as
+  stated for trap 15 -- a `swi_mach_error` panic would have to be a DISTINCT, earlier event, and the
+  single armed panic frame is the NEON one at a kernel PC, not `swi_mach_error`'s
+  (`mov r0,#0x81; b irqvec_panic`).  So the falsification survives; but it rests on the
+  *absence of -15* and on the identity of the one panic, NOT on "no panic at all".
+
+9.2 RE-DERIVATION -- the shim's `r7`, byte by byte (CONFIRMS the parent; guard-leg §1 was WRONG)
+  Shim prologue, re-carved from the cache at VA 0x381c6618 (bytes: `f0 b5 03 af 2d e9 00 0d 8c b0`),
+  disassembled `-M force-thumb`:
+      0x381c6618: b5f0        push  {r4,r5,r6,r7,lr}   ; FIVE words = 20 bytes
+      0x381c661a: af03        add   r7, sp, #12
+      0x381c661c: e92d 0d00   stmdb sp!, {r8,sl,fp}    ; happens AFTER the add
+      0x381c6620: b08c        sub   sp, #48
+  Arithmetic (sp here = the value on entry, i.e. the caller's sp):
+      after `push {r4,r5,r6,r7,lr}`   sp = caller_sp - 20
+      after `add r7, sp, #12`         r7 = (caller_sp - 20) + 12 = **caller_sp - 8**
+  `1021-guard-leg.txt` §1 asserts the push is three words ("the 3-word push it just did") and so gets
+  `r7 = caller_sp`.  That is **WRONG**: the 3-word `stmdb {r8,sl,fp}` executes AFTER `add r7`, so it
+  cannot cancel it; the `push {r4,r5,r6,r7,lr}` it should have counted is FIVE words.  I do not need
+  to trust either arithmetic -- the shim's own epilogue shows the idiom: at 0x381c66e4
+  `add sp,#48; ldmia.w sp!,{r8,sl,fp}` (cancelling `sub sp,#48` and the 3-word stmdb), then
+  0x381c66ea `pop {r4,r5,r6,r7,pc}` pops exactly the FIVE words the five-word prologue pushed.
+  Consistent with five, not three.
+  => CONFIRMED: `r7 = caller_sp - 8`.  guard-leg's `r7 = caller_sp` is REFUTED.
+
+9.3 THE GUARD DECISION under `r7 = caller_sp - 8`, and the live corroboration
+  The shim's loads: 0x381c6638 `ldr r0,[r7,#20]`; 0x381c662e `ldr.w lr,[r7,#40]`;
+  0x381c662a `ldr.w r9,[r7,#44]`; then 0x381c663c `cmp r0,#0; bne slow`, 0x381c6640
+  `cmp.w lr,#7`, 0x381c6646 `cmpeq.w r9,#1`, 0x381c664a `bne slow`.
+  With r7 = caller_sp - 8:  `[r7,#20] = caller_sp+12`, `[r7,#40] = caller_sp+32`,
+  `[r7,#44] = caller_sp+36`.
+  `__os_alloc_slow`'s own stores (re-read from my §2 disassembly): 0x3823a998 `add r1,sp,#40` -- so
+  its frame base Q = its sp, and the stores are `str r5,[Q+24]`(0), `str r5,[Q+28]`(0),
+  `str r5,[Q+32]`(6)=0, `str r8,[Q+36]`(3)=0x49000001, `str r5,[Q+40]`(**7**),
+  `str r1,[Q+44]`(**1**), and the address slot `str r0,[Q+48]`=0x1000.
+  Mapping caller_sp = Q + 52 (the shim's own `blx` return address occupies Q+48), the guard reads
+  resolve to caller slots 8 (=0), 16 (=7), 17 (=1).  **All three guard legs PASS.**
+  *** WORDING CORRECTED (parent's instruction): state "the guard's three tests pass", NOT "the FAST
+  leg RAN".  §9.0 shows the fast leg's wire number (-15) never appeared, so a PASSING guard and a
+  RUNNING fast leg are now in tension and that tension is NOT resolved (see §9.4/§9.6). ***
+  => a PASSING guard implies the shim *would* take **leg (a)** (`bne`/`bne` not taken ->
+  0x381c664c `stmia.w sp,{r1,r6}` -> ... -> 0x381c666a `blx 0x381c5960`) -- but §9.0 says that
+  `blx` never issued its `svc`, so the guard's PASS is a STATIC prediction the live run contradicts.
+  LIVE CORROBORATION, and it is direct: at the udf, the register dump records `lr=0x00000007` and
+  `r9=0x00000001` (capture `:4119-:4120`).  Those are precisely the values 0x381c662e/0x381c662a
+  loaded from caller_sp+32/caller_sp+36 (7 and 1); under guard-leg's `r7 = caller_sp` those same
+  offsets would read caller_sp+40/44 = (0x1000, 0) -- i.e. 0x1000 and 0, which the dump does NOT
+  show.  The dump shows (7, 1).  => `r7 = caller_sp - 8` is CONFIRMED live, and the parent's
+  re-derivation stands.  (This also retires guard-leg §2's "guard leg 2's slot is a HARD-CODED
+  0x1000 (size)" argument -- under the correct offset the slot is 7, exactly what the guard wants.)
+
+9.4 *** CORRECTED BY THE PARENT: THE STUB SETS r12 = -15 AT THE `svc`. ***  THE FAST-TRAP `svc`
+    DID NOT EXECUTE -- and WHY is the open question.
+  The fast stub at 0x381c5960 (re-carved, disassembled in ARM mode because the `blx` switches state):
+      e1a0c00d  mov  ip, sp              ; ip = the pre-push sp (a POINTER, used by the ldm)
+      e92d0170  push {r4,r5,r6,r8}
+      e89c0170  ldm  ip, {r4,r5,r6,r8}   ; reads FOUR words THROUGH ip -> this is ip's scratch use
+      e3e0c00e  mvn  ip, #14             ; *** ip/r12 := 0xFFFFFFF1 = -15 ***
+      ef000080  svc  #0x80               ; the swi therefore carries r12 = -15
+      e8bd0170  pop  {r4,r5,r6,r8}
+      e12fff1e  bx   lr
+  I re-checked the encoding of `e3e0c00e` by bit field: cond = 0xE (**ALWAYS**, not conditional),
+  S = 0, opcode = 0xF (`mvn`), Rd = 12 (**ip/r12**), rotate = 0, imm = 0xE (14).  And the word at
+  0x381c596c is IMMEDIATELY followed by the `svc` at 0x381c5970 -- **nothing writes ip/r12 in
+  between.**  So at the `svc`, r12 = -15, full stop.
+  My earlier §9.4 claim ("the trap number is the caller's live r12; `ldm ip,...` clobbered it; the
+  `mvn ip,#14` is dead scratch") is **REFUTED**.  The `ldm` uses ip as a BASE REGISTER before the
+  `mvn` overwrites it; reading the base use as the final value was the error.  CONFIRMED: the fast
+  leg, IF it runs, issues r12 = -15.
+  The STAGED dispatcher `out/xnu_asm_obj_d13/translated/osfmk/arm/traps_lo.s` latches exactly that:
+      `_fleh_swi` (:139) `mov r11, r12`     ; r11 = the syscall number (from r12)
+      then, UNCONDITIONALLY for every swi (mac prior to the mach/unix split):
+          :160-163 `stmfd sp!,{r0-r3,r8,lr}; mov r0,r8; bl _entry_note_user_svc; ldmfd sp!,{...}`
+      :198-201 `cmp r11,#0x80000000; beq swi_trap` ; :203-204 `rsbs r5,r11,#0; ble swi_unix`
+      :206-223 `swi_mach:` :210 `cmp r5,#0x80; bge swi_mach_error`; :212 `LOAD_ADDR(r1,mach_trap_table)`;
+      :214-215 `add r11,r5,r5,lsl#1; add r1,r1,r11,lsl#2`; :217 `ldr r1,[r1,#4]`;
+      :218 `LOAD_ADDR(r2,kern_invalid)`; :221 `teq r1,r2`; :222 `beq swi_mach_error`; :223 `bx r1`
+      :261 `swi_mach_error:` :263-268 `mov r0,#7; mov r1,r4; mov r2,#1; blx _doexception`;
+                            :270-271 `mov r0,#0x81; b irqvec_panic`
+  Because the hook `_entry_note_user_svc` runs on the ALREADY-SAVED r11 **before** the mach/unix
+  split, EVERY swi is published -- mach traps included.  So a fast-trap `svc` with r12 = -15 WOULD
+  have published `xnu_live_usvc_num=0xfffffff1`.  §9.0 shows it did not (max-negative recorded is
+  -28).  **=> CONFIRMED: the fast-trap `svc` did not execute.**  The usvc channel is not an escape
+  hatch; the absence of -15 is a real negative, not a sampling artifact of the mach/unix split.
+
+  THEREFORE §9.3 and §9.0 are BOTH right and they CONTRADICT: the guard's three tests PASS (by value,
+  and live-corroborated by the dump's lr=7/r9=1) yet the fast leg's `svc` never fired.  WHY a guard
+  that passes does not lead to the `blx 0x381c5960` is the remaining open question.  Candidates,
+  explicitly (the parent asked for these to be named; they are NOT yet discriminated):
+      (i)   the guard's three tested slots are not what we think -- i.e. the allocator's frame base
+            `Q` vs the shim's `caller_sp` mapping (I assumed `caller_sp = Q + 48`/`Q + 52`; if the
+            `blx` return address does not occupy Q+48, or the shim was entered from a different
+            wrapper, the resolved slots shift and the guard could in fact FAIL);
+      (ii)  `blx 0x3823e6e4` does not actually reach the 0x381c6618 wrapper (the lazy-stub indirection
+            is 1019 §1's chain; if it resolves elsewhere, the whole guard read is about the wrong
+            function);
+      (iii) the value at the fast leg's `svc` is a different register (refuted for r12 by the bit-field
+            read above -- r12 IS -15 -- but a `_entry_note_user_svc` that reads r0/r8 rather than the
+            saved r11 would be a fourth possibility; the staged text says `mov r11,r12` then the hook,
+            so I rate this LOW);
+      (iv)  something between 0x381c664a (the second `bne`) and 0x381c666a diverts -- e.g. the SSTATE
+            `stmia.w sp,{r1,r6}`/register shuffles at 0x381c6650-0x381c6668, or a re-entry that
+            changes sp so the `blx` target is reached with a different state.
+  §9.6/§9.7 below name the two live readings that would discriminate (i)/(ii)/(iv).
+  SECOND READ, unchanged and still true: `swi_mach_error` is NOT a bare panic -- it calls
+  `_doexception(7, r4, 1)` (EXC_BAD_INSTRUCTION, code = r4 = the trap index) FIRST, then
+  `irqvec_panic`.  Route is exception-then-panic.
+
+9.5 `mach_trap_table[15]` RAW, read out of the linked ELF (item 3)
+  `out/stage90/xnu_arm_entry.elf`, `mach_trap_table` @ 0x8055d4b4 (symbol via `nm`), row 15 @
+  0x8055d4b4 + 15*12 = 0x8055d568.  RAW 12 bytes:
+      00 00 00 00  08 64 48 80  88 d0 55 80
+  =  { argc = 0x00000000, fn = 0x80486408, munge = 0x8055d088 }.
+  `nm` names 0x80486408 = **`kern_invalid`** (the same value as rows 0-9 and 13).  So the STATIC
+  reading in §4 is unchanged and still true of the image -- but §9.0 shows the run never indexed it.
+  (`ios7lab_mach_vm_map_trap` remains absent from both `nm` and the image strings.)
+
+9.6 WHAT IS *STILL* UNEXPLAINED, stated plainly (item 4 -- the honest answer)
+  Under §9.3 the guard's three tests PASS (by value and live-corroborated); under §9.4 a passing
+  guard leads to a fast leg whose `svc` carries r12 = -15, and the usvc hook publishes every swi
+  unconditionally; yet under §9.0 **-15 never appears**.  The two readings are in direct tension and
+  I do NOT paper over it: **either the guard's tested slots are not what §9.3 computes, or the
+  `blx 0x3823e6e4` does not reach the 0x381c6618 wrapper, or something between 0x381c664a and
+  0x381c666a diverts** (candidates (i)/(ii)/(iv) in §9.4).  Additional facts that do NOT resolve it:
+    * the usvc window is a **cap-limited (64) ring**, so strictly it is a *sample* -- but because the
+      hook is unconditional and pre-split, an executed -15 svc would still have been published, so I
+      treat the absence as a real negative (a non-execution), not a sampling hole;
+    * the ONE armed panic frame is the kernel NEON undef (PC 0x8047b0ac, `_caller=0xe3060cac`), which
+      under 1021's root cause is expected independently -- it does not by itself tokenise trap 15.
+  Honest state: **the guard reading is live-corroborated, the stub unambiguously sets r12 = -15, the
+  -15 svc did not execute, and WHY a passing guard does not lead to the `blx` is OPEN.  WHY the map
+  fails is ALSO still open.**
+
+9.7 WHAT A NEXT RUNG MUST ADD (supersedes / adds to §7)
+  1. **Read the live state at 0x381c666a itself** (a trap on entry to `blx 0x381c5960`, or a witness
+     key published just before it) -- this discriminates (i)/(iv): did control reach 0x381c666a, and
+     with what r7/sp?  If it did NOT, the guard/entry mapping is wrong (candidate (i)/(ii)); if it
+     DID, the -15 svc should have fired and the absence points elsewhere.
+  2. **Verify the `blx 0x3823e6e4` target** (candidate (ii)): read the lazy-stub slot at the time of
+     the call and confirm it resolves to 0x381c6618, not to a different wrapper with a different
+     guard.  1019 §1 gives the chain; it was never measured live.
+  3. **Publish `fleh_swi`'s r11** as an extra `xnu_live_*` key and widen the usvc ring past 64 --
+     belt-and-braces against the "absence = sample hole" reading.
+  4. **Identify the ONE panic frame's origin** from `xnu_entry_panic_caller=0xe3060cac` (a kernel
+     `.text` VA) -- walk it back to confirm it is the NEON undef path, NOT `swi_mach_error`.
+  5. **Resolve the allocator's failure cause** (the WHY). §7.1/§7.3 still apply: log the wrapper's
+     r0 at 0x381c66ba and the trap-15 handler's return. §4's "row 15 is kern_invalid" remains a true
+     static fact about the image and stays on the suspect list -- but it is a suspect, not a verdict.

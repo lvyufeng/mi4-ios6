@@ -278,6 +278,7 @@ LIMIT=0
 ONLY_DIR=""
 SHOW_BLOCKERS=0
 ONLY_PLATFORM=0
+PRINT_FLAGS=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --limit)    LIMIT=$2; shift 2 ;;
@@ -304,9 +305,65 @@ while [[ $# -gt 0 ]]; do
         # It still checks the component table, the device table and the generated roots, so a
         # platform-only run is a real build of those four blocks under the same conditions.
         --platform-only) ONLY_PLATFORM=1; shift ;;
+        # **1021d.** `--print-flags` prints the two resolved compile argv arrays (and the pool
+        # census the FP by-value clause is read against) and exits before any object is written. It
+        # exists because this script's answer to "which flags did the pool actually get" was, until
+        # now, only the text near the append - and the 1021d switch's OFF-identity claim is *about*
+        # the argv. `build_1021d.sh` runs it as a step-0 precondition and the clause reads it as the
+        # OFF reading. The flag itself is acted on far below, beside the arrays it prints, so that
+        # the print and the compile cannot be two definitions of the same list.
+        --print-flags) PRINT_FLAGS=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+# ====================================================================================================
+# 1021d -- THE FP/NEON CODEGEN SWITCH, RESOLVED **BEFORE ANY SIDE EFFECT**.
+# ====================================================================================================
+# **WHY THIS BLOCK IS HERE AND NOT BESIDE THE FLAG ARRAYS (and it is not a style choice).** The switch
+# is `STAGE90_XNU_GENERAL_REGS`, and `--print-flags` exists so the resolved argv can be read from
+# OUTSIDE this script instead of grepped out of its text. The first version of this rung put that
+# block beside `CC_ARGS`, ~1000 lines down -- i.e. **below the `mkdir -p "$OUT"` + `rm -f "$OUT"/*.o`
+# truncation**. So a `--print-flags` invocation TORE DOWN the 705-object D13 pool and then printed its
+# flags and exited: a read-only-looking mode with a destructive side effect, which is this project's
+# `[[mi4-measurement-defects]]`/`[[mi4-out-stage90-is-shared-live-state]]` shape exactly, and it was
+# MEASURED (it cost the pool once). The resolve and the print are therefore the FIRST thing after
+# argument parsing, above every `mkdir`, `rm`, generator and compile in this file.
+GENERAL_REGS=${STAGE90_XNU_GENERAL_REGS:-0}
+case "$GENERAL_REGS" in
+    0|1) ;;
+    *) echo "REFUSING: STAGE90_XNU_GENERAL_REGS='$GENERAL_REGS' is neither 0 nor 1" >&2; exit 1 ;;
+esac
+# OFF is today's two flags, word for word; ON is Apple's `-msoft-float` (MakeInc.def:377-379) ALONE
+# -- both FP flags dropped, exactly as docs/1021c section 2.1 prescribes. `-mfpu=neon-vfpv4` is not
+# KEPT beside `-msoft-float`: it is INERT for codegen (it changes neither the FP-register allocation
+# nor anything else -- MEASURED, and see the note by `CC_ARGS`), so keeping it would only leave a flag
+# that READS as "NEON is on" next to the switch that says it is off, which is the two-spellings shape.
+if [[ $GENERAL_REGS -eq 0 ]]; then
+    FP_FLAGS=(-mfpu=neon-vfpv4 -mfloat-abi=softfp)
+else
+    FP_FLAGS=(-msoft-float)
+fi
+if [[ $PRINT_FLAGS -eq 1 ]]; then
+    # The census count is computed here, from the manifest, for the same reason: a reader of this
+    # output must not have to run a build to learn the floor the by-value clause uses.
+    _pfn=0
+    while IFS= read -r _pfp; do
+        [[ -n $_pfp && -f $_pfp ]] && _pfn=$((_pfn + 1))
+    done < <(grep -E '\.(c|cpp)$' "$MANIFEST" 2>/dev/null || true)
+    _pfplat=$(ls "$XNU_PLATFORM_OBJ_OUT"/*.o 2>/dev/null | wc -l)
+    echo "STAGE90_XNU_GENERAL_REGS=$GENERAL_REGS"
+    echo "FP_FLAGS=${FP_FLAGS[*]}"
+    echo "CC_ARGS=clang --target=$("$TOOLS_DIR/xnu_config/arm_target.sh") -mcpu=cortex-a15 -marm ${FP_FLAGS[*]} -ffreestanding -fno-builtin -fno-common -fno-pic -O2 -w -ferror-limit=0"
+    echo "CXX_ARGS=clang++ --target=$("$TOOLS_DIR/xnu_config/arm_target.sh") -mcpu=cortex-a15 -marm ${FP_FLAGS[*]} -ffreestanding -fno-builtin -fno-common -fno-pic -O2 -w -ferror-limit=0 -fno-exceptions -fno-rtti"
+    echo "POOL_OBJ_DIR=$OUT"
+    echo "POOL_PLATFORM_OBJ_DIR=$XNU_PLATFORM_OBJ_OUT"
+    echo "POOL_OBJ_EXPECT=$((_pfn + _pfplat))"
+    echo "POOL_C_CPP_EXPECT=$_pfn"
+    echo "POOL_PLATFORM_EXPECT=$_pfplat"
+    exit 0
+fi
+
 if [[ $ONLY_PLATFORM -eq 1 ]]; then
     # An empty regular file rather than `/dev/null`: the check above asks `[[ -f $MANIFEST ]]`, which
     # is false for a character device, and the first version of this mode stopped there.
@@ -1224,9 +1281,60 @@ INCLUDES=(
     -I"$SHIMS_ARM/sys" -I"$SHIMS_ARM/sys/_pthread"
 )
 
+# ====================================================================================================
+# 1021d -- THE FP/NEON CODEGEN SWITCH (`STAGE90_XNU_GENERAL_REGS`) AND WHY IT IS AN APPEND.
+# ====================================================================================================
+# **The defect this closes (records/1021-fpu-rootcause.txt, docs/1021c-general-regs-design.md).**
+# 1020b's `udf` raise let pid 1 die, and the kernel then faulted in KERNEL mode at `0x8047b0ac`
+# (`vld1.32 {d16-d17},[r0]!`, `lr=0x8047b0b0`) because `save_vfp_context` clears `FPEXC.EN` on the
+# first context switch (`osfmk/arm/pcb.c:298-306`) and kernel mode never restores it. The fix is not
+# to keep `FPEXC.EN` on (that clobbers the preempted thread's vector state in silence,
+# docs/1021c 6.2); it is to stop the COMPILER emitting FP/NEON into the pool at all -- which is what
+# Apple's own ARM kernel does (`makedefs/MakeInc.def:377-379`, `CFLAGS_ARM = ... -msoft-float`).
+#
+# **WHY IT IS `-msoft-float` AND WHY BOTH OLD FLAGS GO.** The pool today is built
+# `-mfpu=neon-vfpv4 -mfloat-abi=softfp`. The flag that ALLOCATES the FP register file is
+# `-mfloat-abi=softfp`: it says "the calling convention is soft but a hardware FPU is present and
+# may be used for codegen", so the vectorizer emits NEON. `-msoft-float` maps to `-mfloat-abi=soft`
+# and says the FPU is NOT usable, so no FP register is allocated at all (MEASURED, this host:
+# a kernel-shaped TU goes 17 FP instructions -> 0). `-mfpu=neon-vfpv4` is dropped WITH it: beside a
+# switch that declares NEON off it would still stamp a NEON-capable CPU on the objects, and that is
+# the two-spellings shape ([[mi4-off-option-two-spellings]]). `-mfpu` alone (no `-mfloat-abi`) also
+# measured 0 today, but it is `-msoft-float` that is Apple's spelling, so it is the one used.
+# **`-mgeneral-regs-only` is deliberately NOT the flag**: it is accepted and then SILENTLY DROPPED
+# by clang 14 on armv7 (measured: identical `-S` output, with an "argument unused" warning), so it
+# would produce a pool byte-identical to today's while the record read "NEON off" -- design 1021c's
+# opening finding.
+#
+# **`-mfpu=neon-vfpv4` IS DROPPED WITH IT, AND THE ONE THING THAT COULD HAVE ARGUED FOR KEEPING IT
+# IS FALSE -- MEASURED, not assumed.** The worry is `proc_reg.h`'s cp10 moves
+# (`mrc p10,7,%0,c8,c0,0`, 18 `mrc` + 15 `mcr` sites across the pool): could `-msoft-float` lower
+# those to a real FP-register instruction (`vmrs r0, fpexc`) that faults with `FPEXC.EN` off? It does
+# NOT, and `-mfpu` is not what would prevent it: on this host `mrc p10,7,%0,c8,c0,0` lowers to
+# `vmrs`/`vmsr` under EVERY flag set tried -- `-mfpu=neon-vfpv4 -mfloat-abi=softfp`, `-msoft-float`,
+# `-msoft-float -mfpu=neon-vfpv4`, `-mfloat-abi=soft`, `-msoft-float -mfpu=vfpv3` -- i.e. the
+# lowering is a property of the assembler's reading of `mrc p10`, not of `-mfpu`. So `-mfpu` is INERT
+# beside `-msoft-float` for both codegen and this family, and per docs/1021c section 2.1 it is dropped:
+# a flag that reads "NEON is on" next to the switch that says it is off is the two-spellings shape,
+# and its only effect here would be to stamp a NEON-capable CPU on objects the switch declares are not.
+# `-msoft-float` does not change either `-mcpu` or `-marm`, so the ISA selection and the cp15 feature
+# reads are unaffected. (The `vmrs`/`vmsr` sites are a KNOWN, PRE-EXISTING surface: they are in the
+# pool today too -- 18 `mrc`/15 `mcr` -- and `-msoft-float` neither adds nor removes any.)
+#
+# **OFF IS BYTE-IDENTICAL, AND HERE IS THE MECHANISM.** The FP flags below are not edited in place.
+# Each array expands `${FP_FLAGS[@]}` -- TWO ELEMENTS either way. With the switch at 0 those two
+# elements are `-mfpu=neon-vfpv4 -mfloat-abi=softfp`, i.e. the SAME WORD LIST this script handed clang
+# before the edit (it used to be one array element holding both words; a compile argv has no idea
+# where one array element ended, so `CC_ARGS[*]` is unchanged word for word). Word-preserving, not
+# merely same-result: `-msoft-float` is exactly the list the by-value census in
+# docs/1021c section 1.1 measured at **0** FP instructions, so the OFF build is the pre-rung pool by
+# construction and not by a second, unmeasured flag spelling. `--print-flags` (resolved at the TOP of
+# this file, before any side effect) is the seam that makes "OFF is identical" checkable rather than
+# asserted, and the two case statements below are the assertion that the seam and the compile cannot
+# disagree.
 CC_ARGS=(
     clang --target=$("$TOOLS_DIR/xnu_config/arm_target.sh") -mcpu=cortex-a15 -marm
-    -mfpu=neon-vfpv4 -mfloat-abi=softfp
+    "${FP_FLAGS[@]}"
     -ffreestanding -fno-builtin -fno-common -fno-pic -O2 -w -ferror-limit=0
 )
 # The C++ half of the kernel - libkern/libkern/c++ and iokit, 83 of the manifest's files - is the
@@ -1237,10 +1345,41 @@ CC_ARGS=(
 # is a `libkern` translation unit like any other.
 CXX_ARGS=(
     clang++ --target=$("$TOOLS_DIR/xnu_config/arm_target.sh") -mcpu=cortex-a15 -marm
-    -mfpu=neon-vfpv4 -mfloat-abi=softfp
+    "${FP_FLAGS[@]}"
     -ffreestanding -fno-builtin -fno-common -fno-pic -O2 -w -ferror-limit=0
     -fno-exceptions -fno-rtti
 )
+
+# **THE ASSERTION THAT THE SEAM AND THE COMPILE AGREE.** `--print-flags` is resolved at the top of
+# this file and prints these same lists; the case statements here read the ARRAY the compile loops
+# actually expand (`${CC_ARGS[@]}` at the four per-file/platform call sites, plus `CXX_ARGS`) and
+# refuse if it does not carry what the switch resolved to. A future edit that moved the expansion
+# behind a branch would otherwise re-create exactly the silent no-op this switch exists to avoid
+# ([[mi4-a-claim-in-a-comment-is-not-a-check]]).
+case "$GENERAL_REGS" in
+    1) _gr_want="-msoft-float" ;;
+    0) _gr_want="-mfpu=neon-vfpv4 -mfloat-abi=softfp" ;;
+esac
+case " ${CC_ARGS[*]} " in
+    *" $_gr_want "*) ;;
+    *) echo "REFUSING: CC_ARGS does not carry '$_gr_want' with STAGE90_XNU_GENERAL_REGS=$GENERAL_REGS -- the FP flags did not reach the array this build compiles with" >&2; exit 3 ;;
+esac
+case " ${CXX_ARGS[*]} " in
+    *" $_gr_want "*) ;;
+    *) echo "REFUSING: CXX_ARGS does not carry '$_gr_want' with STAGE90_XNU_GENERAL_REGS=$GENERAL_REGS -- the FP flags did not reach the array this build compiles the C++ half with" >&2; exit 3 ;;
+esac
+# The OFF half of the proof: with the switch at 0 neither array may contain `-msoft-float`. A build
+# that carried it anyway would be a NEON-free pool under a record that says "unchanged", i.e. the
+# OFF arm silently becoming the ON arm.
+if [[ $GENERAL_REGS -eq 0 ]]; then
+    case " ${CC_ARGS[*]} ${CXX_ARGS[*]} " in
+        *"-msoft-float"*) echo "REFUSING: STAGE90_XNU_GENERAL_REGS=0 but the resolved flag list carries -msoft-float: OFF must be the exact pre-1021d argv" >&2; exit 3 ;;
+    esac
+fi
+# The same reading is emitted into the ordinary build's own output, so a build log is by itself
+# evidence of which flag list produced the objects below it. grep for the `xnu_1021d:` tag.
+echo "  xnu_1021d: STAGE90_XNU_GENERAL_REGS=$GENERAL_REGS -> ... -mcpu=cortex-a15 -marm ${FP_FLAGS[*]} ..."
+echo "  xnu_1021d: the flag list above is the argv both compile loops expand; OFF reads '-mfpu=neon-vfpv4 -mfloat-abi=softfp' and ON reads '-msoft-float' (run this script with --print-flags to read the resolved arrays without building)"
 
 PER_FILE_TIMEOUT=${PER_FILE_TIMEOUT:-60}
 : > "$OUT/timedout.txt"

@@ -759,7 +759,8 @@ ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_T
                 STAGE90_XNU_FLUSH_WITNESS
                 STAGE90_XNU_PERM_WITNESS
                 STAGE90_XNU_UNDEF_DIRECT
-                STAGE90_XNU_UNDEF_RAISE)
+                STAGE90_XNU_UNDEF_RAISE
+                STAGE90_XNU_GENERAL_REGS)
 # **1015: `STAGE90_XNU_PERM_WITNESS`, the permission-inputs witness (the passive half of rung 1015).**
 # It went in at the tail beside `STAGE90_XNU_FLUSH_WITNESS`, and the "variant subset / pair of counts"
 # arithmetic the 882/683/686 notes above describe was **already retired by 1005** - the counts they name
@@ -1191,6 +1192,18 @@ do
   # unconditionally.
   if [[ -z $_v && $_k == STAGE90_XNU_ABORT_TRACE ]]; then
     printf '  %s=(absent, and a record that does not name the sleh abort-trace arm is a pre-1004 arm - the only value any pre-1004 build could have written)\n' "$_k"
+    continue
+  fi
+  # **1021d's switch, the same one-way rule as 911b ... 1004, and for the same reason.** Every arm parked
+  # before 1021d was built with the pool flags `-mfpu=neon-vfpv4 -mfloat-abi=softfp`, i.e. compiler-emitted
+  # FP/NEON IS in its pool, so a record with no `STAGE90_XNU_GENERAL_REGS` line is one whose only possible
+  # value is 0. Demanding the key would make every existing park unpressable (882's own defect, repaired
+  # again here) and the ladder still owes those presses - including 1020b's, which is the run 1021d's
+  # frontier answer is measured against. A post-1021d record can never reach this branch: `build_entry.sh`
+  # writes the line unconditionally (0 or 1) and its 678 two-way check refuses a record whose arm-key list
+  # omits the key.
+  if [[ -z $_v && $_k == STAGE90_XNU_GENERAL_REGS ]]; then
+    printf '  %s=(absent, and a record that does not name the FP/NEON-codegen switch is one built before 1021d - the pool was compiled with the FP register file available, the only value a pre-1021d build could have written)\n' "$_k"
     continue
   fi
   [[ -n $_v ]] \
