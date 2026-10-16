@@ -1,0 +1,42 @@
+2020 PRESS READ (preliminary, log PENDING)
+==========================================
+Date: 2026-10-15 ~19:42-20:08 UTC
+Arm: armed-d13-47f664c4  (STAGE90_XNU_UNDEF_RAISE=1, STAGE90_XNU_UNDEF_DIRECT=1)
+Runner: scripts/press_1020.sh  (gate PASSED: record carried both switches, arm-extra
+        carried STAGE90_XNU_GLOBAL_FIX=1 role=1015b-globalfix, and
+        tools/check_d13_undef_raise.py --expect on PASSED on the linked image)
+
+WHAT HAPPENED
+- Step 1: build_root_volumes.sh --real ran; card image written to userdata head via adb dd.
+- Step 2/2b: hardware gate PASSED (4a2fe00b on adb; 33e80afe absent); card image dd'd, read-back
+  matched (the two sha256 lines are in the runner's own output).
+- Step 3: fastboot boot of the payload (bytes sent
+  739a071f307888bfad938374e08101749b44e7d456cb39e05d19e4ebb270b7d3, unchanged across the send).
+- Device did NOT return: bounded 180s wait expired with no adb entry, no new
+  SerialNumber: 4a2fe00b enumeration in the host log, no new enumeration on port 3-10.
+- USB console capture file: EMPTY (0 bytes) -> out/stage90/captures/usb-console-1020-20261015-194214.txt
+- Runner exit code: 2  (the RESIDENT-rung non-return code)
+
+VERDICT: RUN-DID-NOT-RETURN (a RESIDENT rung).  This is NOT yet a reading of the payload's
+behaviour - the log lives in the top of DRAM and is lost on a cold power transition, so the
+recovery sequence (below) must be run FIRST.
+
+DEVICE STATE (as of 20:08 UTC)
+- no adb, no fastboot, no USB enumeration of 4a2fe00b, not EDL 9008 (05c6:9008 absent).
+- ~25 min elapsed with no self-return (well past the 29s watchdog) -> the operator POWER PRESS
+  is owed (the one sanctioned manual intervention; nothing host-side remains).
+
+NEXT (ordered; do not power-cycle or boot anything else first)
+1. Operator: hold Power 10-15 s, release, press Power normally.
+2. When the phone is up (Android), immediately: scripts/recover_last_kmsg.sh --read-only
+   (reads /proc/last_kmsg = THIS run's RAM console; the carrier is the FLASHED ROM).
+   Do NOT boot TWRP (its kernel has no /proc/last_kmsg and takes the log's slot).
+3. Adjudicate: python3 -I tools/check_1020_capture.py <capture>
+   -> R-RAISES-ONCE / R-RAISES-CLEAN  = the udf RAISED; loop DEAD (1020 STANDS)
+   -> R-STILL-LOOPS                   = the -D did not reach osfmk_arm_trap.o (the 1010 lesson)
+   -> R-VFP-CONTINUES                 = the udf is passed; frontier is downstream
+   -> R-CTL                           = WITHHOLD (instrument did not run)
+
+FALSIFICATION (pre-registered): if R-STILL-LOOPS, 1020's mechanism is wrong (the moved `return`
+had no effect on the linked image's behaviour) despite the by-value checker passing - i.e. the
+checker measured reachability, not execution, and that gap is the finding.

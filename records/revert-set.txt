@@ -16256,3 +16256,90 @@ set=armed-d13-47f664c4 sha256=739a071f307888bfad938374e08101749b44e7d456cb39e05d
 set=armed-d13-47f664c4 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1020-undef-raise;stage90_fixture.macho
 set=armed-d13-47f664c4 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1020-undef-raise;stage90-build-config.txt
 set=armed-d13-47f664c4 sha256=79d327f4f6ed9695fbd605592b91e4ed464f6b0bd48093cfd83c04cb0c3e018c bytes=560 file=SHA256SUMS.txt role=1020-undef-raise;SHA256SUMS.txt
+# armed-d13-b5093f00  -  1019/1020: KILL THE VFP FALSE POSITIVE - a genuine `udf` must RAISE, not loop.
+# (the resident no-return was pid 1-s `udf #254` RE-EXECUTING FOREVER, 8183x measured; the user-mode
+# `sleh_undef` arm returned WITHOUT advancing PC for every undefined instruction but one hard-coded
+# Apple-dyld value).
+# Switch set is 1018-s VERBATIM (STAGE90_XNU_GLOBAL_FIX=1 and STAGE90_XNU_UNDEF_DIRECT=1 and the
+# whole inherited set stay) plus exactly ONE new switch: STAGE90_XNU_UNDEF_RAISE=1.
+# **THE TREE MOVES AND THE KERNEL MOVES WITH IT - THAT IS THE RUNG.** Where 1018 was ENTRY-ONLY,
+# 1020 stages ONE SOURCE EDIT: tools/stage_d13_undef_raise.sh (via tools/patch_d13_undef_raise.py)
+# MOVES the `return;` in external/xnu-hd2-darwin13/xnu/osfmk/arm/trap.c-s `sleh_undef` user-mode
+# arm from OUTSIDE the `if (!thread->machine.vfp_enable)` block (where it returned unconditionally
+# for every non-`0xfedeffe7` instruction, so the PC never advanced) to INSIDE it:
+#       #if defined(STAGE90_XNU_UNDEF_RAISE) && STAGE90_XNU_UNDEF_RAISE
+#           if (!thread->machine.vfp_enable) { ...enable...; return; }
+#           /* VFP already on and still undefined: fall through to printf + EXC_BAD_INSTRUCTION */
+#       #else
+#           <the tree-s ORIGINAL block, byte for byte>
+#       #endif
+# A REAL VFP/NEON instruction with VFP off: trip 1 enables VFP and returns; the CPU re-executes it
+# with VFP on and it now runs - UNCHANGED. A genuine `udf` with VFP off: trip 1 enables VFP, trip 2
+# finds VFP on and FALLS THROUGH to the raise. A genuine `udf` with VFP already on: falls through
+# immediately. The port-s OWN LEO machinery already assumed the two-trip shape
+# (ios7leo_dyld_matches trap.c:84 / ios7leo_dyld_repeat :105); this rung wires it.
+# OFF compiles the tree-s ORIGINAL text byte for byte (`defined()` is written FIRST in the gate),
+# PROVEN with the real preprocessor over the whole file before any byte is written
+# (tools/patch_d13_undef_raise.py --verify-off).
+# THE POOL OBJECT MOVES: out/xnu_kernel_obj_d13/osfmk_arm_trap.o (trap.c is a KERNEL-POOL file;
+# build_entry.sh only LINKS it). The pool-s `.text` is INSIDE the entry `.bin` whose sha8 IS the
+# arm, so the arm MOVES (c2168632 -> b5093f00) and the PAYLOAD moves (it embeds the entry blob).
+#
+# THE BY-VALUE PROOF OF 1020-S CHANGE (this park-s OWN claim, asserted FIRST). A CFG walk of the
+# FROZEN LINKED image-s `sleh_undef`: the vfp_enable test-s `already enabled` successor must REACH
+# the EXC-printf raise block (printf with the usermode-EXC_BAD_INSTRUCTION literal + the
+# `bl exception_triage`) WITHOUT entering the VFP-enable block-s terminating return. It
+# DISCRIMINATES, MEASURED this session: switch OFF (arm c2168632) -> FAIL; switch ON (this arm) ->
+# PASS. tools/check_d13_undef_raise.py --expect on, re-run on the frozen artifact (the build clause
+# re-checked at the freeze point).
+# **AND THE OBJECT-SIDE CENSUS THIS PARK-S FIRST DRAFT HELD WAS UNSOUND AND IS GONE.** It asserted
+# "the fix adds an IN-RANGE BACKWARD non-call branch inside sleh_undef" (OFF = 0, ON >= 1). Written
+# before an ON object existed; MEASURED on the rebuilt ON object it reads 0 - the compiler REORDERED
+# the function so the raise is reached by FALL-THROUGH (the vfp_enable test-s beq targets are both
+# FORWARD), not by a back edge. A predicate that reads 0 on a correct arm would REFUSE this park-s
+# own arm; there is no sound simple object-side census for "a `return;` moved inside an `if`", so
+# the object-side confidence is the staged-tree check (build_1020.sh step 5) and the by-value proof
+# is the LINKED image above ([[mi4-measurement-defects]]).
+#
+# THE TWO CARRIERS. STAGE90_XNU_UNDEF_RAISE is BOTH an env-gated pool DEFINE
+# (tools/build_xnu_arm_kernel.sh gates `-DSTAGE90_XNU_UNDEF_RAISE=1` on the ENV var) AND a
+# XNU_KERNEL_EXTRA_DEFINES token (the pool channel); scripts/build_1020.sh asserts BOTH before the
+# pool build. Its DECLARATION in the record is the resolved `STAGE90_XNU_UNDEF_RAISE=1` line
+# (src/entry/build_entry.sh:40251; also in preflight-s ENTRY_CFG_KEYS :762), so the RECORD carries
+# 1020-s own switch. The drop-in file xnu_arm_entry-arm-extra.txt carries ONLY 1015b-s
+# STAGE90_XNU_GLOBAL_FIX line (a POOL switch no writer in src/entry/ echoes, so the record cannot
+# carry it) - and it is frozen here UNCHANGED; 1020-s build does NOT write it and this park does
+# NOT append to it (appending would put a declaration 1020-s build never wrote in the file).
+#
+# THE INHERITED REGRESSIONS held (asserted by the park): STAGE90_XNU_UNDEF_DIRECT=1 in the record
+# (1018-s cap-exempt witness), STAGE90_XNU_GLOBAL_FIX=1 in the arm-extra file (1015b-s kernel fix),
+# and by value __wrap_sleh_undef in the LINKED image branches to entry_write_kv (>=6) and NOT
+# entry_live_write (0).
+#
+# THE 1020 VERDICT CELLS (docs/1020-design.md §5; tools/check_1020_capture.py):
+#   R-RAISES-ONCE  - `xnu_live_undef_seq` advances to 2 at ONE pc and STOPS + the `usermode
+#     undefined instruction` printf fires >=1x + (the process is gone or a panic follows) => FIXED.
+#   R-RAISES-CLEAN - `_seq == 1` only (VFP was already on) + printf >=1x + no loop => FIXED.
+#   R-STILL-LOOPS  - `_seq` climbs to > 100 at one invariant pc, printf 0x => NOT FIXED (the moved
+#     `return` did not take effect; check the `-D` reached the pool object - the 1010 lesson).
+#   R-VFP-CONTINUES- the boot advances PAST the udf to a DIFFERENT frontier => MOVED.
+#   R-CTL          - no `xnu_live_undef_*` keys AND no boot self-test
+#     `stage90_xnu_arm_vm_init_high_va_undef_handler_undef_handled=0x1` row => INSTRUMENT_UNSOUND,
+#     WITHHOLD (mandatory first - the control is BOTH the self-test row AND a `_seq` row).
+# The witness is the EXISTING `xnu_live_undef_*` keys on the DIRECT channel + the handler-s printf.
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-b5093f00 sha256=b5093f00c0825fd5da6c9f9b6abcb8c1f4078c50475c31ceda14fd1809f4e335 bytes=6356052 file=xnu_arm_entry.bin role=1020-undef-raise;xnu_arm_entry.bin
+set=armed-d13-b5093f00 sha256=76f3d693ec962a8b2d503d42ea4eb414cd8ac9d365e7a0867bd2e1f7c642b8bb bytes=7400472 file=xnu_arm_entry.elf role=1020-undef-raise;xnu_arm_entry.elf
+set=armed-d13-b5093f00 sha256=04c45b9e7c146f9a6e20051abd8d36980a46025cf3f867e261f8f20ed17d7b0e bytes=1912 file=xnu_arm_entry.h role=1020-undef-raise;xnu_arm_entry.h
+set=armed-d13-b5093f00 sha256=4d6be251f4c809c462cde35e9e74e38119572d6d51e5c038d3b3d61b82d15bfe bytes=2080 file=xnu_arm_entry-config.txt role=1020-undef-raise;xnu_arm_entry-config.txt
+set=armed-d13-b5093f00 sha256=6da7fcd7d71be83e7ea4833a7390cff1f8fdd1462bce9c8b2ed16252ed4dba2a bytes=46 file=xnu_arm_entry-arm-extra.txt role=1020-undef-raise;xnu_arm_entry-arm-extra.txt
+set=armed-d13-b5093f00 sha256=d56c9586945c9cbda4259cb763d10d684d0131a592e9d7877499e8bb1bd5bf7a bytes=3149 file=xnu_arm_entry-sources.txt role=1020-undef-raise;xnu_arm_entry-sources.txt
+set=armed-d13-b5093f00 sha256=3969467a6a844673286dfc86a4252724e87f72a5a1e1645953068c2d670e8abd bytes=6851460 file=stage90.bin role=1020-undef-raise;stage90.bin
+set=armed-d13-b5093f00 sha256=e861482f16f820251a1fe94f1ba090223200a3b21830d54ec8528434456cf8bf bytes=6913532 file=stage90.elf role=1020-undef-raise;stage90.elf
+set=armed-d13-b5093f00 sha256=a3e7546aef850149602826433590fc242eb3bcc1198c00dc80c79890c52bb2f0 bytes=6854656 file=stage90.img role=1020-undef-raise;stage90.img
+set=armed-d13-b5093f00 sha256=ab0c3b347f0e6022fd862954d54a7845d98f0e5e0a6a88aa9d88af1f67e86088 bytes=9375744 file=stage90-qcdt.img role=1020-undef-raise;stage90-qcdt.img
+set=armed-d13-b5093f00 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1020-undef-raise;stage90_fixture.macho
+set=armed-d13-b5093f00 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1020-undef-raise;stage90-build-config.txt
+set=armed-d13-b5093f00 sha256=9782826b4b153ac9d3c82d82cea7cb6bc49f57efe2b4449ec57863f6bf628d97 bytes=560 file=SHA256SUMS.txt role=1020-undef-raise;SHA256SUMS.txt

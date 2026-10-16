@@ -1,0 +1,71 @@
+1020 BUILD DEFECT -- THE POOL SWITCH WITH NO RECORD CARRIER WAS DROPPED
+=====================================================================
+Date: 2026-10-16
+Found: reading the 1020 press capture (records/1020-press-read.txt), R-CTL-WITHHOLD routed
+       here by the retry-storm fingerprint in the log.
+
+THE DEFECT (one value, two definitions -- [[mi4-one-value-two-definitions]])
+----------------------------------------------------------------------------
+`STAGE90_XNU_GLOBAL_FIX` (1015b, the H-G fix: `pmap_flush_tlbs` takes the FULL TLBIALL for a
+non-kernel pmap) is a POOL switch with **NO record carrier**. 1015b built it into
+`EXTRA` by hand and, by design:
+
+  * `build_1015b.sh:683`  GLOBAL_FIX is DELIBERATELY NOT in EXPORTS (its only channel is EXTRA);
+  * `build_1015b.sh:695`  refuses if `-DSTAGE90_XNU_GLOBAL_FIX=1` is absent from EXTRA;
+  * `build_1015b.sh:3076` refuses if the RECORD names it ("no writer in src/entry/ produces that
+                          line");
+  * `build_1015b.sh:3077` refuses if `preflight_boot_check.sh`'s ENTRY_CFG_KEYS names it.
+
+Its ONE declaration surface is the cross-lane drop-in `out/stage90/xnu_arm_entry-arm-extra.txt`
+(park_1015b appended `STAGE90_XNU_GLOBAL_FIX=1 role=1015b-globalfix`), which is what the park and
+press gates read.
+
+**`build_1020.sh` builds `EXTRA` FROM THE RECORD** (lines 81-101) and then appends ONLY
+`-DSTAGE90_XNU_UNDEF_RAISE=1` (line 100). It never appends `-DSTAGE90_XNU_GLOBAL_FIX=1` and it
+never reads the arm-extra carrier. So the 1020 pool rebuild compiled `osfmk/arm/pmap.c` with the
+GLOBAL_FIX switch UNDEFINED -- and 1015b was silently reverted.
+
+WHY 1016a-1019 DID NOT HIT THIS: 1018 is ENTRY-TOOLCHAIN ONLY (its header says so; the entry build
+does not rebuild the pool, so the 1015b pool object stayed on disk and the record-based EXTRA was
+never used for a pool compile). 1016a/1017/1019 shipped no build script. **1020 is the FIRST
+record-carrying rung to REBUILD THE POOL, and it was the first to drop the fix.**
+
+THE BY-VALUE PROOF (not a source grep)
+--------------------------------------
+1015b's own fingerprint (`build_1015b.sh:822`) is the count of `kernel_pmap` address-
+materializations inside `pmap_flush_tlbs`: **OFF/Apple = 2, ON = 3**.
+
+  arm-none-eabi-objdump -r out/xnu_kernel_obj_d13/osfmk_arm_pmap.o |
+    awk '$1>="00000418" && $1<="00000640"' | grep kernel_pmap
+
+  1020's object (MEASURED this session):
+    00000440 R_ARM_MOVW_ABS_NC  kernel_pmap     <- :1291 pmap_is_shared init
+    00000448 R_ARM_MOVT_ABS     kernel_pmap
+    00000604 R_ARM_MOVW_ABS_NC  kernel_pmap     <- the :1382 terminal panic
+    00000608 R_ARM_MOVT_ABS     kernel_pmap
+  => 2 sites = the OFF count. The inserted `else if (pmap != kernel_pmap)` test is ABSENT.
+
+THE EFFECT, IN THE CAPTURE (records/1020-press-read.txt; the recovered log)
+---------------------------------------------------------------------------
+The 1015b storm is BACK, exactly as it was before the fix:
+  xnu_live_abt_seq = 0x00100000   (1,048,576 aborts -- the pre-1015b peak was ~2.1M)
+  xnu_live_abt_far = 0x3b2d28e0   (a single invariant far = a retry at one address)
+  xnu_live_abt_pc  = 0x396cda3e
+  xnu_live_abt_fsr = 0x0000080f   (FS=15, permission, level 2 -- the V-AT1 signature)
+pid 1 is stuck in the storm and never reaches the `udf #254` that 1020 exists to raise, so
+`__wrap_sleh_undef` fired ZERO times and the capture reads R-CTL (WITHHOLD). The R-CTL is a
+READING OF THE BUILD, not an unreadable run: the instrument was live (abt_*/sleh_* delivered on
+the DIRECT channel past the cap) and the udf simply never happened.
+
+THE SELF-WRITTEN-RECORD TRAP THAT LET THIS THROUGH ([[mi4-self-written-record-is-not-a-constraint]])
+-----------------------------------------------------------------------------------------------------
+`press_1020.sh` (0g) greps `xnu_arm_entry-arm-extra.txt` for the GLOBAL_FIX line -- but that file
+is written by park_1015b and NEVER by the build, so the check PASSES regardless of whether the fix
+is in the image. It is a check on a record the press itself does not produce. The fix is a
+BY-VALUE assertion (the codegen fingerprint above), not a file grep.
+
+THE FIX
+-------
+`scripts/build_1020b.sh` = build_1020.sh + (a) `EXTRA="$EXTRA -DSTAGE90_XNU_GLOBAL_FIX=1"`, and
+(b) a pool-object clause that REFUSES unless `pmap_flush_tlbs` materializes `kernel_pmap` EXACTLY
+3 times (the 1015b ON fingerprint). No other switch changes, so 1020b is 1020 + the inherited fix.
