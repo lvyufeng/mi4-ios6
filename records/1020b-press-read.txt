@@ -119,3 +119,15 @@ consistent with runner exit 2 and with the device needing the operator power pre
 * The frontier has MOVED off the `udf` and onto **kernel-mode execution after the exception**: a
   well-formed NEON instruction (`vld1.32`) executing as undefined inside `mach_msg_send`, followed by
   the entry image's fatal-path dump.  That is 1021's object.
+
+====================================================================================================
+7. RECOVERY + STATE
+====================================================================================================
+The recovery watcher (`out/stage90/watcher_1020b.log`) caught the device when it came up on adb and
+ran `scripts/recover_last_kmsg.sh --read-only` twice within 4 s (the two captures are byte-identical;
+the duplicate was removed).  The device re-enumerated as `4a2fe00b` and STAYED UP (Android booted) —
+NO brick, fastboot/adb reachable, `33e80afe` never present.  `xnu_live_wdt_pets` climbs to `0x61`
+(97) and `xnu_entry_args_memSize=0x1e400000` (484 MiB / the 975 window) — the kernel ran RESIDENT
+(kept petting the watchdog) while pid 1 died; that is the goal's 「保持在 xnu 里」 state, obstructed by
+ONE defect.  Follow-ups: `records/1021-fpu-rootcause.txt` (proof), `docs/1021c-general-regs-design.md`
+(the `-msoft-float` fix), `records/1021-guard-leg.txt` (the fast/slow leg answer).
