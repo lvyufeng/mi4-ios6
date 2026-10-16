@@ -79,10 +79,15 @@ ENTRY_BYTES = 12          # {int arg_count; fn; const char *name} on this 32-bit
 # The traps this rung deliberately does NOT open (rule: traps 10/12/14 only; no evidence on the
 # measured crash path touches them and their bodies are LEO lab reimplementations with deliberate
 # isolation/QoS bypass).  They are `#if IOS7_COMPAT_PLATFORM / #else kern_invalid` rows in
-# osfmk/kern/syscall_sw.c:126-170; the macro is 0 on CANCRO and this fix never touches it, so the
-# five stay kern_invalid in BOTH switch states.  Keyed on table entry 0 (also kern_invalid), not on
+# osfmk/kern/syscall_sw.c:126-170; the macro is 0 on CANCRO and this fix never touches it, so
+# they stay kern_invalid in BOTH switch states.  Keyed on table entry 0 (also kern_invalid), not on
 # a symbol name.
-DEFERRED_TRAPS = (15, 24, 25, 41, 42)
+# **Trap 15 was OPENED BY RUNG 1022** (docs/1022-mach-trap-15-design.md): `syscall_sw.c:126`'s row
+# now has a switch-ON arm `MACH_TRAP(ios7lab_mach_vm_map_trap, 8, NULL, NULL)`, so check 6 below must
+# NOT require it to stay kern_invalid.  The other four (24/25/41/42) keep their bare `#if` and this
+# check still holds for them.  Reading row 15 in BOTH directions now lives in
+# `tools/check_1022_trap15.py` (`--expect on|off`), which is the rung's own by-value clause.
+DEFERRED_TRAPS = (24, 25, 41, 42)
 
 _LABEL = re.compile(r"^\s*([0-9a-f]+) <([^>]+)>:$")
 _INSN = re.compile(r"^\s*([0-9a-f]+):\s+[0-9a-f ]+\t([a-z0-9.]+)\s*(.*)$")

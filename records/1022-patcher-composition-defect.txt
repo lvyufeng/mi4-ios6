@@ -1,0 +1,76 @@
+1022 — COMPOSITION DEFECT: patch_d13_ios7_vmwire.py re-inserts its inner gate once trap-15 widens it
+=====================================================================================================
+Author: lead. Discovered 2026-10-16 while launching scripts/build_1022.sh (READ-ONLY forensics; the
+tree was repaired by VALUE, not re-provisioned).
+
+## THE SYMPTOM
+
+`scripts/build_1022.sh` step 2 runs, in order:
+  1. `python3 tools/patch_d13_ios7_vmwire.py "$XNU_TREE"`      (the 994 patcher, re-run every build)
+  2. `python3 tools/patch_d13_mach_trap15.py "$XNU_TREE"`      (this rung's patcher)
+
+On the FIRST build the tree is fresh: vmwire stages its inner guard in the BARE form
+(`#if IOS7_COMPAT_PLATFORM /* port/vm_map lab adapters: ARMPBA8/LEO only */`), then trap15 widens that
+SAME line to the `|| (defined(STAGE90_XNU_IOS7_TRAPS) && STAGE90_XNU_IOS7_TRAPS)` form (it must - the
+row's body `ios7lab_mach_vm_map_trap` lives inside that guard and is gated out on CANCRO otherwise).
+
+On the SECOND build (or any re-run), vmwire runs FIRST, on the ALREADY-WIDENED file. Its inner-guard
+insert is keyed `anchor + block` (`plan_insert`, :249-267), where `block` ends with the BARE gate line.
+That key no longer matches (the line was widened), and the anchor (`typedef char
+ios7lab_vm_allocate_wire_size[...]`) still occurs EXACTLY ONCE, so vmwire concludes its block is
+MISSING and INSERTS A SECOND COPY - the comment block plus a BARE gate, immediately above the widened
+one. Result, MEASURED on the tree at 05:11:
+
+    /* 2026-10-12: the file-wide gate above also opens ... */      <- copy A (comment)
+    #if IOS7_COMPAT_PLATFORM /* port/vm_map lab adapters */        <- copy A (BARE gate)
+                                                                    <- then:
+    /* 2026-10-12: the file-wide gate above also opens ... */      <- copy B (comment)
+    #if IOS7_COMPAT_PLATFORM || (defined(STAGE90_XNU_IOS7_TRAPS)…  <- copy B (WIDENED, trap15's)
+
+`grep -cE '^#if' == 15` vs `'^#endif' == 14` - an UNBALANCED preprocessor stack (`#if` without its
+`#endif`), so the file does not compile, and `patch_d13_mach_trap15.py` plan mode then REFUSES with
+"inner lab-adapter gate (:59): found 1 original region(s) and 1 staged copy/copies" - which is why
+`build_1022.sh` stopped before writing anything (its step-2 refusal is CORRECT; the tree was already bad).
+
+## WHY IT IS A COMPOSITION DEFECT, NOT A BUG IN EITHER PATCHER ALONE
+
+* vmwire's `plan_insert` is correct for vmwire-in-isolation: its key is `anchor + block`, and its own
+  comment (:252-254) cites `mi4-an-edit-on-a-prefix-deletes-the-suffix` - the anchor survives BELOW the
+  insertion precisely so a re-run sees `anchor + block` once. That works as long as NOTHING ELSE edits
+  the block. trap15 edits the block's LAST line.
+* trap15's widening is correct for trap15-in-isolation: it changes exactly the one bare line
+  `RPC_GATE_OLD` -> `RPC_GATE_NEW` (:92-93), asserted exactly-once, and does NOT touch vmwire's comment
+  or anchor.
+* The two are SAID to compose (build_1022.sh's own step-2 comment: "the two anchors do not overlap"),
+  and they do not - but IDEMPOTENCE, not anchors, is what breaks. This is
+  [[mi4-one-value-two-definitions]] in its sequential form: one line, two owners, and the second
+  owner's edit rewrites the first owner's idempotence key.
+
+## THE FIX (applied, BY VALUE, this session)
+
+`tools/patch_d13_ios7_vmwire.py`: teach the inner-guard insert that its block may ALREADY be present in
+the WIDENED form. Added `INNER_OPEN_BLOCK_WIDE` (the same comment, but ending with the widened gate) and
+a pre-check in the inner-guard step: if `anchor + INNER_OPEN_BLOCK_WIDE` occurs exactly once, report
+"already staged (widened by 1022)" and change nothing - so a rebuild where trap15 has run does not
+re-insert the bare copy. The BARE form is still handled by the original path, so a fresh tree stages
+exactly as before and a bare-only tree (trap15 never run) is unchanged.
+
+**This is an edit on another lane's file (`patch_d13_ios7_vmwire.py` is vmwire's, by name).** It is made
+knowingly because (a) the lane owner is idle, (b) the defect BLOCKS this rung's build, and (c) the
+change is a strict widening of an idempotence predicate - it alters no staged byte on any tree state
+that previously succeeded (a fresh tree, or a bare-only tree, takes the original path unchanged). It is
+recorded here, not made silently.
+
+## THE TREE REPAIR (before the fix, MEASURED)
+
+The live tree `external/xnu-hd2-darwin13/xnu/osfmk/ipc/mach_kernelrpc.c` was repaired BY VALUE: the
+duplicated `comment + bare-gate` block was collapsed into the single widened gate (the shape a correct
+first build produces). Verified after repair: comment blocks 1, bare inner gates 0, widened-inner gates
+1, `#if`/`#endif` 14/14. `patch_d13_mach_trap15.py --verify-off` then PASSes and plan mode reports
+"would stage nothing" (idempotent, steady state).
+
+**A NOTE FOR THE BY-VALUE DISCIPLINE.** The duplicate was FIRST noticed as a `#if`/`#endif` imbalance
+(15 vs 14) - a whole-file structural count, independent of either patcher's own predicates - and only
+then traced to the two block copies. That count is the check that would have caught it without reading
+the patchers: a shared tree edited by two tools needs a WHOLE-FILE well-formedness clause, because each
+tool's own idempotence predicate reports "my block is fine" while the file is already broken.

@@ -1,57 +1,311 @@
-1022 — trap-15 handler adjudication (lead's byte-level derivation) + the rung's shape
-=====================================================================================
-Read-only. Author: lead. Sources: the design doc, the wire report, and my own disassembly of the
-carved cache bytes. Where they conflict I re-derived from BYTES.
+1022 — RIGOROUS ADJUDICATION: DOES `ios7lab_mach_vm_map_trap` READ THE REAL pid-1 CLIENT FRAME?
+=================================================================================================
+Read-only. No build, no press, no device action, no write to out/stage90. ONE file written (this one).
 
-## THE TWO CLAIMS
+VERDICT: **HANDLER-CORRECT.** The three `#if`/runtime gates suffice. NO wire fix is owed.
+`docs/1022-mach-trap-15-design.md` §B is RIGHT. `records/1022-trap15-wire.txt` is WRONG on BOTH of
+its two independent claims, and both errors share one root: the wire report stopped at the wrapper's
+`mov r8,fp` and never followed the fast-trap thunk's own `ldm`, which RELOADS r8 (and r5) from the
+wrapper's stack. r8 at the `svc` is NOT the task port.
 
-* docs/1022-mach-trap-15-design.md §B: handler reads a 9-slot {0,1,2,3,4,5,6,8} footprint that MATCHES
-  the client wire; NO wire fix owed; only the three gates need opening.
-* records/1022-trap15-wire.txt §4/§5: MISMATCH — handler's `regs[8]` is a duplicate `target` (not
-  protection), and the 8-byte `copyin(regs[1],&address64,8)` spans addr+size.
+Every number below is re-measured here from the cache bytes, not quoted from either doc.
 
-## WHAT I CONFIRMED BY BYTES (independent)
+METHOD / INPUTS (by value):
+  A. /tmp/dyld-extract/dyld_shared_cache_armv7   base 0x2c000000, fileoff = va - 0x2c000000
+     sha256 cad2df775e122c660238f341e74c163a2ea0ed261e85bfd3190de750cd9c0d2c  (== 1017/1019/1022-wire)
+     objdump: arm-none-eabi 2.38 (force-thumb for the client wrappers).
+  B. external/xnu-4570.1.46/osfmk/mach/arm/syscall_sw.h:33-95  (Apple's client trap-stub macro)
+  C. external/xnu-4570.1.46/osfmk/mach/mach_traps.h:163-177, :646-655  (client decl + args struct)
+  D. external/xnu-4570.1.46/libsyscall/mach/mach_vm.c:157-185  (the fast-trap condition, by source)
+  E. external/xnu-4570.1.46/osfmk/kern/syscall_sw.c:120  (the reference row)
+  F. external/xnu-4570.1.46/osfmk/kern/syscall_sw.h:69-85  (mach_trap_t) — the field layout
+  G. external/xnu-hd2-darwin13/xnu/osfmk/ipc/mach_kernelrpc.c:208-247  (the handler under test)
+  H. external/xnu-hd2-darwin13/xnu/osfmk/mach/arm/vm_types.h:107-109, mach/mach_traps.h:296-315
+  I. records/1021d-mmap-failure.txt §A.3  (the live register dump — cross-check)
 
-1. Fast thunk @0x381c5960 is **ARM** (not Thumb): `e1a0c00d mov ip,sp; e92d0170 push {r4,r5,r6,r8};
-   e89c0170 ldm ip,{r4,r5,r6,r8}; e3e0c00e mvn ip,#14; ef000080 svc #0x80`. ⇒ posts r4,r5,r6,r8.
-2. Wrapper @0x381c6618, r7 = caller_sp − 8 (5-word push then `add r7,sp,#12`). Guard loads:
-   `lr=[r7,#40]=Q+32`, `r9=[r7,#44]=Q+36`, `ip=[r7,#36]=Q+28`; arg loads `r0=[r7,#20]=Q+12`,
-   `r1=[r7,#8]=Q+0`, `r5=[r7,#16]=Q+8`, `r6=[r7,#12]=Q+4` (Q = the caller's sp at the blx).
-3. Caller `__os_alloc_slow` stores (my disassembly @0x3823a94c): `[Q+0]=0`, `[Q+4]=0`,
-   `[Q+8]=0x49000001`, `[Q+12]=0`, `[Q+28]=3`, **`[Q+32]=7`** (`0x3823a98c str r2,#7`),
-   **`[Q+36]=1`** (`0x3823a992 str r1,#1`), `[Q+40]=0x1000` (&address seed).
-   ⇒ guard reads 0(#20)/7(#40)/1(#44) = **0/7/1 → PASSES** (matches the live dump `lr=7, r9=1`).
-   **This REFUTES records/1022-trap15-wire.txt §3c, which put 7 at "[r7,#40]" under a wrong r7 (it
-   assumed r7=caller_sp) and hence mis-stacked every subsequent slot.**
+=================================================================================================
+0. THE FOUR DISPUTED POINTS, ANSWERED
+=================================================================================================
+  1. Does the handler's 9-slot footprint {0,1,2,3,4,5,6,8} match the client's 8-word wire?
+     YES. §2 proves the wire is exactly {r0,r1,r2,r3,r4,r5,r6,r8} with r7 skipped (r7 is the frame
+     pointer, not saved by the thunk).
 
-## THE FRAME THE KERNEL RECEIVES (my derivation)
-    {regs[0..6], regs[8]} = {target, &addr(Q+40), 0x1000, 0, 0, 0x49000001, 0, target}
-    handler read:  target,    &addr,        size,  0, mask=0, [unused], flags=0, cur_protection=target
-    handler call(:229): mach_vm_map(map,&a, 0x1000, mask=0, flags=0, ..., regs[8]=target, VM_PROT_ALL, ..)
-    * flags=0 ⇒ the `flags & ~VM_FLAGS_USER_MAP` filter PASSES (consumer's op-code is small, §2.3).
-    * cur_protection=target (a kernel pointer) instead of a vm_prot ⇒ PROTECTION-FAILURE is plausible.
+  2. Is `copyin(regs[1], &address64, 8)` (mach_kernelrpc.c:222) correct, or must it be 4 bytes?
+     CORRECT — 8 bytes. The wire report's claim (a) is WRONG. regs[1] is a POINTER to a 64-bit
+     userspace address variable whose 8 bytes are {0x1000, 0}; it does NOT span "slots 1 and 2". §3.
 
-## VERDICT
-**The two docs are BOTH partly right and partly wrong; the DISPUTE is immaterial to the rung's shape.**
-* CONFIRMED (both agree, and the linked image proves it): `ios7lab_mach_vm_map_trap` is ABSENT and
-  row 15 is `kern_invalid`. **Opening the three gates is DEFINITELY required.**
-* DISPUTED by value: whether the handler's `regs[8]`/flag-slot/copyin read the frame correctly, i.e.
-  whether opening the gates ALONE makes the map succeed, or a wire fix is ALSO owed. My bytes favour
-  the design doc's arity (9 slots, `regs[8]` an 8th word) but leave the *semantic* protection-slot
-  question OPEN (# UNMEASURED).
+  3. Is `regs[8]` = `cur_protection`? YES. The wire report's claim (b) ("regs[8] holds the task
+     port") is WRONG. §4: the thunk's `ldm ip,{r4,r5,r6,r8}` reloads r8 from the wrapper's stack,
+     discarding the wrapper's earlier `mov r8,fp`. The value at the svc is 3 (VM_PROT_READ|WRITE).
 
-⇒ **Rung 1022 = open the three gates AND make the handler PUBLISH its register frame + result**, so the
-press DECIDES the wire question empirically rather than on a static argument:
-  * the handler already prints (mach_kernelrpc.c:239, up to 12x)
-    `IOS7LAB vm_map64 size=… mask=… flags=… prot=… result=%d address=%08x`;
-  * ADD (behind the switch) a one-line dump of `regs[0..8]` at :219 so the frame the handler actually
-    saw is in the capture. Then:
-      - 1022-A RETIRED: no user udf at `__os_alloc_slow+0x108`, and the dump shows the map succeeded.
-      - 1022-B STILL-THERE: the udf recurs AND the dump shows a mis-read slot ⇒ the wire fix is owed
-        and the dump NAMES which slot (protection=target, flags=0, etc.).
-      - 1022-C NEW-FAULT / D EARLIER / E NO-CHANGE as the design §E registers.
+  4. Does opening the three gates suffice, or is a wire fix owed too? THE THREE GATES SUFFICE. §6.
 
-This keeps the rung decisive even though the wire question is unresolved, and it never burns a press
-on a purely static guess. Caveat: still undecided whether the failing call takes the fast leg (a) —
-but the design §A.3 point stands: if the fast leg returns the `0x10000003` sentinel, the client takes
-the slow leg, so opening the runtime gate (:217) is required regardless.
+=================================================================================================
+1. THE CLIENT CHAIN, RE-DERIVED FROM BYTES (not from either doc)
+=================================================================================================
+CALLER: __os_alloc_slow (libsystem_platform) 0x3823a94c (Thumb). Prologue, byte-for-byte:
+    3823a94c b5f0        push {r4,r5,r6,r7,lr}       ; 5 regs -> sp = entry_sp-20
+    3823a94e af03        add  r7, sp, #12            ; r7 = entry_sp-8
+    3823a950 e92d0d00    stmdb sp!, {r8,sl,fp}       ; sp -= 12
+    3823a954 b08c        sub  sp, #48                ; sp -= 48
+    3823a956..a95c       (align sp to 8)
+  Call site: 0x3823a9aa `blx 0x3823e6e4` (f003 ee9c). 0x3823e6e4 is an ARM lazy-binder veneer
+  (`e59fc004 ldr ip,[pc,#4] / e08fc00c add ip,pc,ip / e59cf000 ldr pc,[ip]`), a GOT jump to
+  `mach_vm_map` = the wrapper below. The veneer pushes nothing, so wrapper entry_sp == caller sp.
+
+CALLER's frame words, from its OWN stores (word N at caller_sp + 4N):
+    3823a99a 9506      str r5,[sp,#24]   r5=0 (movs r5,#0 @3823a96c)     -> w6 = 0
+    3823a99c 9505      str r5,[sp,#20]                                   -> w5 = 0
+    3823a99e 9504      str r5,[sp,#16]                                   -> w4 = 0
+    3823a9a0 9503      str r5,[sp,#12]                                   -> w3 = 0
+    3823a9a2 f8cd8008  str.w r8,[sp,#8]  r8=0x49000001 (@a97c/a982)     -> w2 = 0x49000001
+    3823a9a6 9501      str r5,[sp,#4]                                    -> w1 = 0
+    3823a9a8 9500      str r5,[sp,#0]                                    -> w0 = 0
+    3823a996 9107      str r1,[sp,#28]   r1=3 (movs r1,#3 @3823a994)     -> w7 = 3
+    3823a98c 9208      str r2,[sp,#32]   r2=7 (movs r2,#7 @3823a970)     -> w8 = 7
+    3823a992 9109      str r1,[sp,#36]   r1=1 (movs r1,#1 @3823a96e)     -> w9 = 1
+    3823a980 900a      str r0,[sp,#40]   r0=0x1000 (@3823a976)          -> w10 = 0x1000
+    3823a97a 950b      str r5,[sp,#44]   r5=0                            -> w11 = 0
+  Registers at the blx: r0 = target (`ldr.w r0,[sl]` @3823a986), r1 = &[sp,#40] (@3823a998
+  `add r1,sp,#40`) = the in/out address variable, r2 = 0x1000, r3 = 0 (`movs r3,#0` @3823a98a).
+
+  => THE ADDRESS VARIABLE IS 64 BITS. [sp,#40]=0x1000 and [sp,#44]=0 form the 8-byte pair
+     {lo=0x1000, hi=0}; r1 points at it. This single fact kills the wire report's claim (a) (§3).
+
+WRAPPER: `mach_vm_map` 0x381c6618 (Thumb). Prologue + guard, byte-for-byte:
+    381c6618 b5f0        push {r4,r5,r6,r7,lr}       ; 5 regs -> sp = caller_sp-20
+    381c661a af03        add  r7, sp, #12            ; r7 = caller_sp-8     <-- CONFIRMED
+    381c661c e92d0d00    stmdb sp!, {r8,sl,fp}
+    381c6620 b08c        sub  sp, #48                ; wrapper sp = caller_sp-80
+    381c6622 468a        mov  sl, r1                 ; sl = &address
+    ...
+    381c6638 6978        ldr  r0, [r7, #20]          ; = caller_sp+12 = w3 = 0   (guard leg 1)
+    381c663c 2800        cmp  r0, #0
+    381c663e d125        bne.n 0x381c668c            ;   -> MIG slow path
+    381c662e f8d7e028    ldr.w lr, [r7, #40]         ; = caller_sp+32 = w8 = 7   (guard leg 2)
+    381c6640 f1be0f07    cmp.w lr, #7
+    381c662a f8d7902c    ldr.w r9, [r7, #44]         ; = caller_sp+36 = w9 = 1   (guard leg 3)
+    381c6644 bf08        it   eq
+    381c6646 f1b90f01    cmpeq.w r9, #1
+    381c664a d11f        bne.n 0x381c668c            ;   -> MIG slow path
+  All three tests pass (0, 7, 1) -> **the FAST path is taken.** Independently confirmed LIVE:
+  the raise dump (records/1021d-mmap-failure.txt §A.3) shows r9=1, lr=7, ip=3 — exactly these three
+  loads — so the wrapper ran and chose the fast leg. **The guard PASSES.**
+
+FAST-PATH REGISTER SETUP (0x381c664c-0x381c666a) — the crux of the adjudication:
+    381c664c e88d0042  stmia.w sp, {r1, r6}   ; [sp+0]=r1=[r7,#8]=caller_sp+0=w0=0
+                                              ; [sp+4]=r6=[r7,#12]=caller_sp+4=w1=0
+    381c6650 4658      mov   r0, fp           ; r0 = target
+    381c6652 4651      mov   r1, sl           ; r1 = &address
+    381c6654 9a0b      ldr   r2, [sp, #44]    ; r2 = size (saved at 381c663a: `str r2,[sp,#44]`)
+    381c6656 46d8      mov   r8, fp           ; <<< r8 = target  (the wire report STOPPED HERE)
+    381c6658 9502      str   r5, [sp, #8]     ; r5=[r7,#16]=caller_sp+8=w2=0x49000001 -> [sp+8]
+    381c665a 461c      mov   r4, r3           ; r4 = mask (incoming r3 = 0)
+    381c665c f8cda028  str.w sl, [sp, #40]    ; save &address (slow path reads it)
+    381c6660 46cb      mov   fp, r9
+    381c6662 f8cdc00c  str.w ip, [sp, #12]    ; ip=[r7,#36]=caller_sp+28=w7=3 -> [sp+12]
+    381c6666 4665      mov   r5, ip           ; r5 = [r7,#36] = 3
+    381c6668 46f2      mov   sl, lr
+    381c666a f7ffe97a  blx   0x381c5960       ; -> the fast-trap thunk
+
+THUNK: 0x381c5960 (ARM), byte-for-byte — IDENTICAL to Apple's `_kernel_trap_9 == _kernel_trap_8`:
+    381c5960 e1a0c00d  mov  ip, sp                 ; ip = wrapper's sp (= caller_sp-80)
+    381c5964 e92d0170  push {r4, r5, r6, r8}
+    381c5968 e89c0170  ldm  ip, {r4, r5, r6, r8}    ; <<< RELOADS r4,r5,r6,r8 FROM [ip..ip+12]
+    381c596c e3e0c00e  mvn  ip, #14                 ; ip = -15
+    381c5970 ef000080  svc  #0x80
+    381c5974 e8bd0170  pop  {r4, r5, r6, r8}
+    381c5978 e12fff1e  bx   lr
+
+  `ldm ip,{r4,r5,r6,r8}` (reg list 0x170 = bits 4,5,6,8) reads four CONSECUTIVE words
+  [ip],[ip+4],[ip+8],[ip+12] = the wrapper's stack [sp+0..12] written by 381c664c/6658/6662:
+      r4 <- [sp+0]  = w0 = 0
+      r5 <- [sp+4]  = w1 = 0        <-- OVERWRITES the wrapper's `mov r5,ip` (=3)
+      r6 <- [sp+8]  = w2 = 0x49000001
+      r8 <- [sp+12] = w7 = 3        <-- OVERWRITES the wrapper's `mov r8,fp` (target!)
+
+  THIS IS THE LOAD THE WIRE REPORT MISSED. Between the wrapper's `mov r8,fp` (0x381c6656) and the
+  `svc`, the thunk executes `ldm ip,{r4,r5,r6,r8}` and r8 becomes the word the wrapper stored at
+  [sp+12]. The wire report read the wrapper body in isolation and asserted "r8 = target ... MEASURED";
+  the thunk's own `ldm` — printed in that report's OWN §3a byte dump — contradicts it.
+
+=================================================================================================
+2. THE REAL CLIENT'S FRAME, SLOT BY SLOT (the definitive map)
+=================================================================================================
+Wire slot = the register the `svc` carries = saved-state r[N], which is what the handler's
+`regs[N]` reads (traps_lo.s stmea {r0-lr}^ -> _structs.h r[0..12]; 1022-wire §2, reproduced here as
+the one thing that report got right).
+
+  slot | value at the svc              | identity              | handler reads it as     | OK?
+  -----+-------------------------------+-----------------------+-------------------------+-----
+    0  | target (task port name)       | r0 = target           | regs[0] -> port_name_to_task | YES
+    1  | &address (userspace ptr,32b)  | r1 = &addr            | regs[1] -> copyin(...,8)     | YES
+    2  | 0x1000                        | r2 = size             | regs[2] -> size              | YES
+    3  | 0                             | r3 = mask             | regs[3] -> guard ==0         | YES
+    4  | 0                             | thunk r4 <- [sp+0]    | regs[4] -> mask              | YES
+    5  | 0                             | thunk r5 <- [sp+4]    | regs[5] -> guard ==0         | YES
+    6  | 0x49000001                    | thunk r6 <- [sp+8]    | regs[6] -> flags             | YES
+    7  | (r7 = frame pointer, NOT saved by the thunk)                 | never read    | n/a
+    8  | 3                             | thunk r8 <- [sp+12]   | regs[8] -> cur_protection   | YES
+
+  RESOLUTION OF THE TWO EXPLICIT CONTRADICTIONS:
+   * "Does slot 5 or slot 6 hold flags (0x49000001)?"  **SLOT 6.** The wire report's §4 table said
+     "slot 5: the client puts the size buffer there" and listed slot 6 as an unmeasured wrapper word.
+     By value: the wrapper stores w2=0x49000001 at [sp+8] (0x381c6658, `str r5,[sp,#8]`), and the
+     thunk's r6 is the third of its four consecutive loads = [sp+8]. So regs[6] = 0x49000001 = flags.
+     regs[5] = [sp+4] = w1 = 0.
+   * "Does slot 8 hold the task port or cur_protection?"  **cur_protection (=3).** The task port is
+     in slot 0 only. regs[8] = [sp+12] = caller w7 = 3.
+
+  CROSS-CHECK against the caller's own stores: every slot matches a value __os_alloc_slow wrote.
+  slot1 -> &[sp,#40]; slot2 -> 0x1000 (@a976/a980); slot3 -> 0 (@a98a); slot6 -> 0x49000001 (@a982/
+  a9a2); slot8 -> 3 (@a994/a996). The account is over-determined.
+
+  This is the wire §3a of the wire report got RIGHT (it is summed up as
+  {target, &addr, size, mask, arg4, arg5, arg6, arg8}), except it mis-assigned arg4/arg5/arg8 names.
+  The register-set claim "r8 = target (duplicate)" is the error: the thunk's `ldm` is authoritative.
+
+=================================================================================================
+3. THE WIRE REPORT'S CLAIM (a) IS FALSE — `&address` IS 64 BITS, NOT 4
+=================================================================================================
+Claim: "`copyin(regs[1], &address64, sizeof(uint64_t)=8)` spans frame slots 1 AND 2 ... so
+address64 = (size<<32)|addr and the :224 guard (address64>>32) rejects."
+
+FALSE. Slots 1 and 2 are NOT contiguous memory. Slot 1 is a POINTER (&address); slot 2 is the integer
+`size`. The wrapper body proves they are the same object: at 0x381c6622 `mov sl, r1` saves the pointer
+verbatim; at 0x381c6652 `mov r1, sl` puts the same pointer back in r1 for the thunk; at 0x381c6654
+`ldr r2, [sp,#44]` loads `size` from the wrapper's STACK into r2. So at the svc, r1 = &address and
+r2 = size are two INDEPENDENT values, and `copyin(r1, ..., 8)` reads the 8 bytes of the address object
+the caller allocated — NOT the pair (r1, r2). The report's claim requires copyin to read the frame's
+registers as adjacent memory, which is not what copyin does.
+
+The 64-bit address object is measured: the caller stores {0x1000, 0} at [sp,#40] and [sp,#44]
+(§1: str r0,[sp,#40] @a980; str r5,[sp,#44] @a97a), and r1 = `add r1,sp,#40` @a998. A 64-bit in/out
+address variable, exactly the `mach_vm_offset_t *address` parameter
+(mach_traps.h:173-177, "mach_vm_offset_t *address"). The library matches the ABI by source:
+libsyscall/mach/mach_vm.c:157-177 passes `mach_vm_address_t *address`, and its fast-trap condition
+(object==NULL && max_protection==VM_PROT_ALL && inheritance==VM_INHERIT_DEFAULT) holds here.
+
+Consequence: `address64 = 0x0000000000001000`, so `(address64>>32) == 0`, and the :224 guard does NOT
+fire. regs[3]=0 and regs[5]=0 also hold. **The :224 guard PASSES** — it does NOT return
+KERN_INVALID_ARGUMENT. The report's central prediction is falsified by its own premise.
+
+(i) answered: `copyin(regs[1],&address64,8)` is CORRECT; 4 bytes would be WRONG.
+
+=================================================================================================
+4. THE WIRE REPORT'S CLAIM (b) IS FALSE — regs[8] IS cur_protection, NOT THE TASK PORT
+=================================================================================================
+Claim: "regs[8] holds the TASK PORT (a duplicate target) ... the :229 call passes a bogus
+protection."
+
+FALSE (§1, §2). The wrapper's `mov r8,fp` at 0x381c6656 is overwritten by the thunk's
+`ldm ip,{r4,r5,r6,r8}` at 0x381c5968: r8 becomes [ip+12] = the wrapper's [sp+12], which 0x381c6662
+(`str.w ip,[sp,#12]`) set to [r7,#36] = caller_sp+28 = caller w7 = 3. So at the svc r8 = 3 =
+VM_PROT_READ|VM_PROT_WRITE. `regs[8]` = protection is CORRECT.
+
+The value 3 is also semantically right: the caller is `__os_alloc_slow`, an allocator; it seeds the
+address variable 0x1000 and asks for a RW page with VM_FLAGS_ANYWHERE. The wrapper's guard
+(`[r7,20]==0 && [r7,40]==7 && [r7,44]==1`) is a cache-warm/commpage fast path keyed on
+(flags=7, mask=1, arg=0) — an internal Apple call pattern, and it PASSED (live r9=1, lr=7, ip=3).
+
+(ii) answered: regs[8] = cur_protection = 3. CORRECT.
+
+=================================================================================================
+5. CROSS-CHECK AGAINST UPSTREAM — THE HANDLER IS APPLE'S OWN SEMANTICS
+=================================================================================================
+This is the tiebreaker the brief asks for, and it lands for the DESIGN doc, not the wire report.
+
+ * The device client's stub is BYTE-IDENTICAL to Apple's `_kernel_trap_9`/`_kernel_trap_8` expansion
+   (syscall_sw.h:78-79, `__BIGGEST_ALIGNMENT__ > 4` armv7k branch): `push {r4,r5,r6,r8};
+   ldm ip,{r4,r5,r6,r8}`. The register set {r4,r5,r6,r8} — including r8 — is Apple's, and it is
+   loaded from the STACK, so r8 is the 8th stack word, not the wrapper's live r8.
+ * Apple's row (syscall_sw.c:120) is `MACH_TRAP(_kernelrpc_mach_vm_map_trap, 6, 8, munge_wwllww)`,
+   and the munger `munge_wwllww` -> `munge_wwlll` (bsd/dev/arm/munge.c:211-232) in DIRECTED style is
+   `marshal_no_pad(regs, args, 8)`, whose layout is r0..r6 (7 words) then `ss->r[8]` (:88-90). Apple's
+   own munger therefore maps wire word #8 to **r8** and its `wwllww` type string names the LAST of
+   those 8 words `cur_protection`. So Apple's wire is
+     {target, addr, size_lo, size_hi, mask_lo, mask_hi, flags, pad, cur_protection}
+   and on the 32-bit ABIs (armv7, and any build where the C-ABI fast path is taken) addr/size/mask
+   are 32-bit and PAD_ARG_ pads nothing: the struct is 8 packed words, last = cur_protection.
+ * This tree's hd2 handler (mach_kernelrpc.c:208-247) reproduces that mapping literally, and its
+   `regs[N]` corresponds to Apple's wire word N because the arm dispatcher hands it the raw saved
+   frame (traps_lo.s:206-214 loads only the fn ptr and `mov r0,r8`; argc is unused on arm). The hd2
+   row's argc=8 (syscall_sw.c:127) matches Apple's u32_arg_words=8.
+ * The device's actual runtime wire is the 32-bit collapsed form {r0..r6, r8} (SP values 0x1000/0/3),
+   NOT the armv7k 64-bit form. That is fine: this tree's `mach_vm_offset_t`/`mach_vm_size_t` are
+   uint32_t ("We target iOS 4.3 for compatibility", mach/arm/vm_types.h:107-109), i.e. the C-ABI
+   fast path's shape — which is why the handler's `mach_vm_map(...,&address32, regs[2], regs[4],
+   regs[6], ..., regs[8], VM_PROT_ALL, ...)` reads exactly those slots.
+
+THE TIEBREAKER, STATED: the device runs Apple's OWN handler for trap -15 (stock iOS 7), and Apple's
+handler reads the 8th wire word as `cur_protection` (munge_wwllww's last 'w'). Therefore the client
+MUST populate that word with a protection — and it does (3). The wire report's "regs[8] is the task
+port" would mean every stock iOS 7 fast-path mach_vm_map passed a port name as a vm_prot_t, which is
+absurd. The report is wrong; the design doc is right.
+
+  # UNMEASURED: the C names the wrapper assigns to its OWN stack words w0/w1/w2 (the
+  # `stmia.w sp,{r1,r6}` / `str r5,[sp,#8]` set). They flow into thunk r4/r5/r6 = wire slots 4/5/6.
+  # The handler reads slot 4 as `mask` and slot 6 as `flags`; MEASURED values are 0 and 0x49000001.
+  # 0x49000001 has bits {0 (FIXED), 24, 27, 30}. Under VM_FLAGS_ALIAS_MASK=0xFF000000
+  # (vm_statistics.h:294) the alias = 0x49; low 24 bits = 1 = VM_FLAGS_ANYWHERE. vm_user.c's
+  # `if (flags & ~VM_FLAGS_USER_MAP) return KERN_INVALID_ARGUMENT` accepts it (alias bits are in
+  # VM_FLAGS_USER_MAP via VM_FLAGS_ALIAS_MASK). So slot 6 = flags is consistent and would be
+  # ACCEPTED. This corroborates (does not prove) the names. The design doc's pre-registered cell
+  # T15-REFUSED (its §7) expects exactly this line's numbers if a frame name were wrong; the values
+  # here are self-consistent, so T15-REFUSED is not predicted.
+
+=================================================================================================
+6. BOTTOM LINE FOR RUNG 1022
+=================================================================================================
+**Opening the three gates SUFFICES. NO wire fix is owed.**
+
+The three gates are exactly those in docs/1022-mach-trap-15-design.md §2.3:
+  (1) the trap-table row (syscall_sw.c:126-130) — bring the `#else` arm's own declaration, since the
+      extern block at :104-107 is inside the IOS7_COMPAT_PLATFORM gate;
+  (2) the body gate (mach_kernelrpc.c:59) — `#if IOS7_COMPAT_PLATFORM || defined(STAGE90_XNU_MACHVM_TRAP15)`;
+  (3) the runtime selector — `ios7_compat_vmabi_enabled()` (mach_kernelrpc.c:217) is a constant 0 on
+      CANCRO (ios7_compat.h:11-21), so the row alone is INERT (design doc §0.2). This is a real third
+      obligation, not an edit to files (1)/(2), and it is UNIMPLEMENTED (S-A in the doc, UNMEASURED).
+
+Against the handler spec (mach_kernelrpc.c:219-234), line by line:
+  :222 `copyin(regs[1],&address64,8)`        CORRECT (8 bytes; §3)
+  :224 `regs[3]||regs[5]||(address64>>32)`   SAFE and does NOT fire (0, 0, 0; §3)
+  :229 `... regs[2],regs[4],regs[6],...,regs[8], VM_PROT_ALL, ...`  CORRECT
+       (size=0x1000, mask=0, flags=0x49000001, cur_protection=3; §2, §4)
+  :234 `copyout(&address64, regs[1], 8)`     CORRECT (writes back the 64-bit pair)
+
+WHICH DOC IS WRONG: `records/1022-trap15-wire.txt` is wrong on BOTH its headline claims (§5 of that
+file: "(1) an 8-byte copyin at a 32-bit address slot" and "(2) regs[8] as protection when the client
+puts the task port there"). Its §5(a)-(c) "owed wire changes" must NOT be applied — applying (a)
+(copyin 4 bytes) or (c) (hard-code protection) would BREAK the working handler. Its §6 table rows
+"8-byte copyin ... MISMATCH" and "regs[8] as protection ... WRONG VALUE" are both incorrect.
+
+BUT the report is not worthless: its §1/§3a are RIGHT that the arity is 8, that the stub register set
+is {r4,r5,r6,r8}, that the thunk bytes equal Apple's macro, and that the fix shape is "row + selector
+together". Its error is confined to the two value claims above, both of which trace to reading the
+wrapper's fast-path setup as final without executing the thunk's `ldm`.
+
+  # UNMEASURED: the exact kern_return_t the installed row returns on the device (static adjudication
+  # only; no run). The design doc's §7 pre-registers T15-REFUSED vs a success cell; by value, a
+  # REFUSAL from :224 is NOT predicted (address64>>32 == 0), and no other :219-234 line rejects this
+  # frame. The residual risk is mach_vm_map's OWN internal acceptance of flags=0x49000001 — which
+  # vm_statistics.h:294-309 says is accepted. Recorded so the press can falsify it.
+
+=================================================================================================
+7. SUMMARY TABLE
+=================================================================================================
+Claim                                                        | Verdict | Evidence (by value)
+-------------------------------------------------------------|---------|---------------------
+Wire arity = 8 ({r0,r1,r2,r3,r4,r5,r6,r8}; r7 not saved)     | TRUE    | thunk 0x381c5968 ldm list 0x170; Apple ms
+Thunk bytes == Apple `_kernel_trap_8/9`                      | TRUE    | 0x381c5960 vs syscall_sw.h:78-79
+r7 = caller_sp - 8                                           | TRUE    | 0x381c6618/661a; live r7-sp=0x48
+Wrapper guard (w3=0,w8=7,w9=1) chose the FAST leg            | TRUE    | 0x381c663c..664a; live r9=1,lr=7,ip=3
+**regs[8] = cur_protection = 3 (NOT the task port)**         | TRUE    | thunk ldm r8<-[sp+12]; 0x381c6662 stores w7=3
+**regs[6] = flags = 0x49000001; regs[5] = 0**                | TRUE    | 0x381c6658 -> [sp+8]; thunk r6 <- [sp+8]=w2
+**&address is a 64-BIT object {0x1000,0}; copyin 8 OK**      | TRUE    | caller [sp,#40]/[sp,#44] stores; r1=&[sp,#40]
+:224 guard fires KERN_INVALID_ARGUMENT                       | FALSE   | address64>>32 == 0; regs[3]=regs[5]=0
+regs[8] holds the task port ("duplicate target")             | FALSE   | the thunk ldm overwrites the wrapper's r8
+So: open the three gates alone?                              | YES     | HANDLER-CORRECT
+
+VERDICT: HANDLER-CORRECT. 3 gates suffice. No wire fix. docs/1022-mach-trap-15-design.md §B right;
+records/1022-trap15-wire.txt §5(a)-(c) wrong and must not be applied.

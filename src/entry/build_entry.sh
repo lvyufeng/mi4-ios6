@@ -31622,6 +31622,47 @@ verify_trace_symbols() {
         fi
         say "  xnu_entry_994: the linked image wires the iOS 7 -3 SWI to the real 64-bit clock (the locore_fleh_swi \`cmn r12,#3\` fast path is gone; the saved-state \`cmn r11,#3\` route calls mach_absolute_time and branches through swi_exit64, so r0:r1 are written back) - $tr_out"
     fi
+    # **1022: the mach trap-15 row (mach_vm_map).** 1021d's press (arm armed-d13-ee2dd4fb, commit
+    # eea419d, capture out/stage90/captures/recovered-unknown-arm-20261016-042713-last_kmsg.txt) read
+    # A-RETIRED: `-msoft-float` retired the kernel-mode NEON undef at `0x8047b0ac` in `mach_msg_send`,
+    # and the run now stays resident at pid 1's USER-MODE udf at `__os_alloc_slow+0x108`
+    # (`0x39e38a54 - slide 0x1bfe000 = 0x3823aa54`), the `mach_vm_map`-failure join
+    # (records/1021d-press-read.txt). The defect: `mach_trap_table[15]` is `kern_invalid` on CANCRO
+    # because `IOS7_COMPAT_PLATFORM` is `BOARD_CONFIG_ARMPBA8 || BOARD_CONFIG_QSD8250_LEO`
+    # (osfmk/arm/ios7_compat.h:5) and CANCRO/MSM8974 is neither -- while the client shim (`0x381c6618`)
+    # PASSES its guard and issues `svc #0x80` with `r12 = -15`. The fix widens THREE gates to read
+    # `STAGE90_XNU_IOS7_TRAPS` (syscall_sw.c:102/:126, mach_kernelrpc.c:59) and swaps the map trap's
+    # runtime self-gate to `ios7_traps_enabled()` (:217), staged by `tools/patch_d13_mach_trap15.py`.
+    # `syscall_sw.c`/`mach_kernelrpc.c` are POOL files, so a stale pool object keeps row 15 = `kern_invalid`
+    # and the udf recurs -- which is exactly what this clause refuses (build_entry.sh only LINKS the pool
+    # objects; records/1020-build-defect.txt). The property is read BY VALUE off THIS linked image by
+    # `tools/check_1022_trap15.py --expect on`: `mach_trap_table[15]` is {arg_count=8; fn=&
+    # ios7lab_mach_vm_map_trap; name="ios7lab_mach_vm_map_trap"}, with BOTH symbols PRESENT (an absent
+    # symbol is a refusal, never a pass). The checker's selftest proves it can fail (a fixture whose row
+    # 15 is still `kern_invalid` FAILS --expect on and PASSES --expect off). Gated on the switch: with
+    # IOS7_TRAPS=0 the tree's original text is compiled on purpose and there is nothing here to assert.
+    if [[ $IOS7_TRAPS -eq 1 ]]; then
+        python3 -I "$REPO_ROOT/tools/check_1022_trap15.py" --selftest >/dev/null 2>&1 || {
+            say "REFUSING: tools/check_1022_trap15.py --selftest did NOT PASS - the checker cannot certify" >&2
+            say "          anything (an inert checker would bless any image)." >&2
+            layout_fail "tools/check_1022_trap15.py --selftest failed - fix the checker before trusting its verdict on this linked image"; }
+        if ! t15_out=$(python3 -I "$REPO_ROOT/tools/check_1022_trap15.py" "$OUT/xnu_arm_entry.elf" --expect on 2>&1); then
+            printf '%s\n' "$t15_out" >&2
+            say "REFUSING: STAGE90_XNU_IOS7_TRAPS=1 but the linked image's mach_trap_table[15] is NOT the" >&2
+            say "          ios7lab_mach_vm_map_trap row (the FAIL lines above name the missing piece: a row" >&2
+            say "          still reading kern_invalid means the syscall_sw.c:126 gate did not widen; a missing" >&2
+            say "          ios7lab_mach_vm_map_trap symbol means the mach_kernelrpc.c:59 inner gate did not" >&2
+            say "          open - the body is compiled out). syscall_sw.c and mach_kernelrpc.c are POOL files," >&2
+            say "          and this build only LINKS them, so rebuild the pool with" >&2
+            say "          XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_IOS7_TRAPS=1' AND STAGE90_XNU_IOS7_TRAPS=1" >&2
+            say "          exported into tools/build_xnu_arm_kernel.sh's env, then relink:" >&2
+            say "            python3 tools/patch_d13_mach_trap15.py \$XNU_TREE --apply" >&2
+            say "            STAGE90_XNU_IOS7_TRAPS=1 XNU_KERNEL_EXTRA_DEFINES='-DSTAGE90_XNU_IOS7_TRAPS=1' \\\\" >&2
+            say "            ./tools/build_xnu_arm_kernel.sh" >&2
+            layout_fail "STAGE90_XNU_IOS7_TRAPS=1 did not reach the linked image: row 15 still dispatches kern_invalid, or the trap-15 handler is absent from the pool - so pid 1's mach_vm_map still fails and the udf at __os_alloc_slow+0x108 recurs, which is exactly where 1021d stopped (records/1021d-press-read.txt)"
+        fi
+        say "  xnu_entry_1022: the linked image's mach_trap_table[15] is the ios7lab_mach_vm_map_trap row (arg_count=8, handler + name present) - $t15_out"
+    fi
     # **995: the dyld halt-message witness (pool).** 994's press (arm armed-d13-8b4c9a3e, commit
     # a4a2532, evidence out/stage90/captures/cancro-last_kmsg-994-armed-d13-8b4c9a3e.txt) is a
     # READ-CONFIRMED SUCCESS of the trap wire: `IOS7LAB vm_allocate64 size=00000000:00001000 flags=1
