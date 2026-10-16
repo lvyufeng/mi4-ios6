@@ -44,7 +44,10 @@
 #      -- so a build that derives EXTRA from the record alone compiles the retry storm BACK IN).
 #   3. `tools/check_d13_ios7_vmwire.py` MUST still apply cleanly, and its `DEFERRED_TRAPS` must read
 #      `(24, 25, 41, 42)` -- 1022 opens row 15, so the 994 checker's deferral tuple drops 15 (and keeps
-#      the other four, which are still unopened).  The build REFUSES if 15 is still in the tuple.
+#      the other four, which are still unopened).  The build REFUSES if 15 is still in the tuple.  Rung
+#      1023 drops 24 from the tuple in turn, so this rung's grep accepts EITHER spelling.
+#      records/1023-patcher-composition.txt (the same "a total is not a property" lesson as the patch
+#      assertion fixed there).
 #   4. `out/stage90/xnu_arm_entry-arm-extra.txt`, written LAST by this script as EXACTLY one line:
 #      `STAGE90_XNU_GLOBAL_FIX=1 role=1022-trap15` (grep -qx-able by the park/press scripts).
 set -euo pipefail
@@ -154,14 +157,14 @@ echo "   (vmwire's selector is staged: ios7_traps_enabled() is in ios7_compat.h)
 # tools/check_d13_ios7_vmwire.py check 6 asserts (in BOTH modes) that traps 15/24/25/41/42 all read
 # kern_invalid; opening row 15 makes that fail.  1022 removes 15 and KEEPS the other four (they are
 # still unopened), so this is a refusal, not a silent edit.
-grep -qE '^DEFERRED_TRAPS = \(24, 25, 41, 42\)' tools/check_d13_ios7_vmwire.py || {
-  echo "FAIL: tools/check_d13_ios7_vmwire.py's DEFERRED_TRAPS is not \`(24, 25, 41, 42)\`. 1022 opens"
-  echo "      trap 15 (syscall_sw.c:126), and check 6 at :380-403 asserts row 15 still reads kern_invalid"
-  echo "      in BOTH modes -- so with 15 still in the tuple the ENTRY BUILD WILL REFUSE at check 6. Edit"
-  echo "      ONLY that one line (drop 15, keep 24/25/41/42: deleting the tuple would delete the check that"
-  echo "      the other four rows are still closed). records/1022-trap15-plumbing.txt section 2."
+grep -qE '^DEFERRED_TRAPS = \(24, 25, 41, 42\)|^DEFERRED_TRAPS = \(25, 41, 42\)' tools/check_d13_ios7_vmwire.py || {
+  echo "FAIL: tools/check_d13_ios7_vmwire.py's DEFERRED_TRAPS None of \`(24, 25, 41, 42)\` (1022's own"
+  echo "      state) or \`(25, 41, 42)\` (1023's, which opens row 24) is in tools/check_d13_ios7_vmwire.py."
+  echo "      1022 opens trap 15 (syscall_sw.c:126) and check 6 asserts the tuple's rows still read"
+  echo "      kern_invalid in BOTH modes. 15 must be gone either way; 24 may be gone if 1023 has run."
+  echo "      records/1022-trap15-plumbing.txt section 2, records/1023-patcher-composition.txt."
   exit 1; }
-echo "   (check_d13_ios7_vmwire.py DEFERRED_TRAPS == (24, 25, 41, 42): trap 15 dropped, the other four kept)"
+echo "   (check_d13_ios7_vmwire.py DEFERRED_TRAPS == (24, 25, 41, 42) or (25, 41, 42): trap 15 dropped, 24 dropped only if 1023 has run)"
 
 # The staging patch itself: plan first (must refuse nothing on THIS tree), then apply; a second apply
 # must be a no-op.  The patch's own OFF byte-identity proof runs inside --apply, BEFORE it writes.

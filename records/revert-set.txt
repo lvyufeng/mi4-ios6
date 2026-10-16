@@ -16493,3 +16493,80 @@ set=armed-d13-b47131c8 sha256=25305a79e9674a73e83012b2ae5615360383a37aa761f03006
 set=armed-d13-b47131c8 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1022-trap15;stage90_fixture.macho
 set=armed-d13-b47131c8 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1022-trap15;stage90-build-config.txt
 set=armed-d13-b47131c8 sha256=779a5fb6ad05f10ea753b6e447ff80cee11885bec1d74d2f873e1e9b2beea5fa bytes=560 file=SHA256SUMS.txt role=1022-trap15;SHA256SUMS.txt
+# armed-d13-10b79e5d  -  1023: INSTALL THE mach trap-24 ROW (mach_port_construct) so libxpc-s port allocation stops faulting.
+# (The 1022 frontier was libxpc-s port-allocation wrapper: `udf #254` at file VA 0x3824e022,
+#  records/1022-press-read.txt PART 5. Its `blx 0x38260b60` is a dyld lazy-bind veneer whose
+#  slot at VA 0x39f45174 (THIRD cache mapping) holds 0x381c66ed = the trap-24 shim 0x381c66ec,
+#  whose `blx 0x381c59dc` targets the ARM fast-trap stub `mvn r12,#0x17; svc #0x80`. The
+#  encoding is index = imm+1 (trap 15-s stub is `mvn r12,#14`), so the trap is 24, NOT 16, and
+#  trap 24 is mach_port_construct. docs/1023-port-construct-trap24-design.md.)
+# Switch set is 1022-s VERBATIM (STAGE90_XNU_GENERAL_REGS=1, STAGE90_XNU_UNDEF_RAISE=1,
+# STAGE90_XNU_UNDEF_DIRECT=1, STAGE90_XNU_GLOBAL_FIX=1 and the whole inherited set stay) with
+# **NO NEW SWITCH**: the row-24 gate widens to read STAGE90_XNU_IOS7_TRAPS, ALREADY 1 here.
+# THE ARM: ONE widened gate + ONE exchanged selector - (1) syscall_sw.c:139 row-24 -> `|| (defined(
+# STAGE90_XNU_IOS7_TRAPS) && STAGE90_XNU_IOS7_TRAPS)` (the externs and the inner lab-adapter gate
+# at mach_kernelrpc.c:59 were ALREADY widened by 1022); (2) inside ios7lab_mach_port_construct_trap
+# (mach_kernelrpc.c:74) the selector reads `ios7_traps_enabled()` instead of the compile-time-0
+# `ios7_compat_vmabi_enabled()`. Edit 2 is MANDATORY: without it an installed row returns
+# MACH_SEND_INVALID_DEST = 0x10000003 - the shim-s OWN sentinel - and branches it AWAY from the
+# slow leg it needs, strictly worse than absent. (3) the body gains a switch-gated
+# `IOS7LAB trap24 frame` dump so the press DECIDES the user-side wire empirically.
+# THE POOL MOVES: syscall_sw.c and mach_kernelrpc.c are POOL objects, so the pool-s .text (and the
+# entry .bin whose sha8 IS the arm) MOVES (b47131c8 -> ). build_entry.sh only LINKS the pool
+# objects, so a green entry build says nothing about this half.
+#
+# THE BY-VALUE PROOF OF 1023-S CHANGE, asserted FIRST and re-run on the FROZEN bytes.
+# tools/check_1023_trap24.py reads mach_trap_table BY VALUE:
+#   (0) --selftest PASSes (the checker can fail);
+#   (1) --expect on PASSes on the LINKED out/stage90/xnu_arm_entry.elf: row 24 is
+#       {arg_count=5; fn=&ios7lab_mach_port_construct_trap; name="ios7lab_mach_port_construct_trap"},
+#       both symbols PRESENT (an absent symbol is a refusal, never a pass), AND rows 25/41/42
+#       STILL read kern_invalid (this rung-s deferral);
+#   (2) NEGATIVE CONTROL - the SAME checker --expect off PASSes on the frozen PRE-RUNG arm
+#       1022 (armed-d13-b47131c8), whose row 24 IS kern_invalid (1022 opened row 15 ONLY), so
+#       the on direction is a reading and not a constant
+#       ([[mi4-a-claim-in-a-comment-is-not-a-check]]).
+#
+# THE CARRIERS ([[mi4-one-value-two-definitions]]). The record carries STAGE90_XNU_IOS7_TRAPS=1
+# (the switch the widened gate reads AND the readability carrier). The declaration carrier
+# out/stage90/xnu_arm_entry-arm-extra.txt is written by THIS build-s tail as
+# STAGE90_XNU_GLOBAL_FIX=1 role=1023-trap24 (1015b-s GLOBAL_FIX is a POOL switch no writer in
+# src/entry/ echoes, so the record cannot carry it); the grep of it is the process check and the
+# pmap_flush_tlbs fingerprint is the proof.
+#
+# THE INHERITED REGRESSIONS held (asserted by the park): STAGE90_XNU_GENERAL_REGS=1 (1021d-s
+# -msoft-float), STAGE90_XNU_UNDEF_RAISE=1 and STAGE90_XNU_UNDEF_DIRECT=1 in the record, the
+# pmap_flush_tlbs kernel_pmap==3 fingerprint (1015b-s kernel fix), the whole-pool NEON-free census
+# + the linked mach_msg_send NEON-free read (1021d), check_d13_undef_raise.py --expect on on the
+# linked image (1020-s raise intact), and by value __wrap_sleh_undef branching to entry_write_kv
+# (>=6) and NOT entry_live_write (0). Also: 1022-s row 15 is NOT displaced - build_1023.sh 5a
+# asserts syscall_sw.o still relocates ios7lab_mach_vm_map_trap at 15*12+4.
+#
+# THE 1023 VERDICT CELLS (docs/1023-port-construct-trap24-design.md sec.7):
+#   G-CTL          - neither xnu_live_undef_seq nor any IOS7LAB trap24 frame line => WITHHOLD.
+#   T24-FIRES      - IOS7LAB trap24 frame present AND pid 1 proceeds past libxpc-s port
+#                    allocation (no udf at 0x3824e022-s slide-corrected pc) => WALL MOVED.
+#   T24-REFUSED    - the frame line appears, the body returns non-zero, and the boot proceeds
+#                    => ROW USED; THE WIRE IS REFUSED (read the printed frame words).
+#   T24-SENTINEL   - the run fails as before with NO frame line, or the frame line appears and
+#                    the udf recurs at the same pc => ROW INSTALLED, SELECTOR STILL 0.
+#   T24-BADFRAME   - the frame line appears and the run faults INSIDE the handler (a bad regs[1]
+#                    pointer: the copyin of 24 option bytes refuses) => WIRE MISMATCH.
+#   T24-PANICS     - a swi_mach_error-shaped panic => STALE POOL, not a behaviour reading.
+#   T24-DEFERRAL-BROKEN - the checker read of rows 25/41/42 fails => COMPOSITION.
+# Medium: 968 real iOS 7.1.2 HFSX rootfs over hfs_rmd0; CARD_COW=1, HDD_WRITE=0, base never
+# written - fully reversible. fastboot boot only, NEVER flash.
+# =================================================================================================
+set=armed-d13-10b79e5d sha256=10b79e5d6e96a2d58e6e4d760631e0c6e5b65c0ede10d96a44566ddcb0359f00 bytes=6327380 file=xnu_arm_entry.bin role=1023-trap24;xnu_arm_entry.bin
+set=armed-d13-10b79e5d sha256=38678e23396fb6517ad5fd446949794ae811e61613a2eeb82319ea6d2fe4c095 bytes=7364776 file=xnu_arm_entry.elf role=1023-trap24;xnu_arm_entry.elf
+set=armed-d13-10b79e5d sha256=bf7208bd56f163b39c6412714eef785ca17d53d1ee831e2c2c42866d41eeba3f bytes=1912 file=xnu_arm_entry.h role=1023-trap24;xnu_arm_entry.h
+set=armed-d13-10b79e5d sha256=7473f9c4da4d1ff7b9c24657d8642bd6c4dd392368062366c301f9a8c31676b3 bytes=2107 file=xnu_arm_entry-config.txt role=1023-trap24;xnu_arm_entry-config.txt
+set=armed-d13-10b79e5d sha256=6a40a23b07de01ab255fd4b08c520bda7f08062e6aa3c2f02261d54317139863 bytes=42 file=xnu_arm_entry-arm-extra.txt role=1023-trap24;xnu_arm_entry-arm-extra.txt
+set=armed-d13-10b79e5d sha256=7da6166f9bb0ad32c7fc52251d8cd955593c1af9c96665742342c762663595e1 bytes=3149 file=xnu_arm_entry-sources.txt role=1023-trap24;xnu_arm_entry-sources.txt
+set=armed-d13-10b79e5d sha256=4252ff73a069dda72bdf0c4ae594cdc5f299289623884a53caacd822427a3954 bytes=6822788 file=stage90.bin role=1023-trap24;stage90.bin
+set=armed-d13-10b79e5d sha256=20d7a61dee1f96de74ec80eb7960f60003bce3e9d55c2ee75d23cbeb8a1f3fe0 bytes=6884860 file=stage90.elf role=1023-trap24;stage90.elf
+set=armed-d13-10b79e5d sha256=a09aa33de046d0e9af601f90913d75114438d05fbb4f5b54f650ad8744dbb225 bytes=6825984 file=stage90.img role=1023-trap24;stage90.img
+set=armed-d13-10b79e5d sha256=3c86c5cb4c8bf930e4e75fd00b4042acec41e7483968866ace0ace6b2c43792e bytes=9347072 file=stage90-qcdt.img role=1023-trap24;stage90-qcdt.img
+set=armed-d13-10b79e5d sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=1023-trap24;stage90_fixture.macho
+set=armed-d13-10b79e5d sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=1023-trap24;stage90-build-config.txt
+set=armed-d13-10b79e5d sha256=eddb19dc2fe223b32bf9d14d2bec5d421589cc6653c69a926f68bbd8a1b0eff7 bytes=560 file=SHA256SUMS.txt role=1023-trap24;SHA256SUMS.txt

@@ -348,11 +348,37 @@ def main() -> int:
     # A cross-file structural assertion, BEFORE anything is written: the two `> 50` gates must both be
     # the widened spelling, or the row and its body disagree (the row would reference a symbol that is
     # still compiled out -- a link error, not a silent pass, but this catches it in plan mode).
-    if ssw_text.count(GATE_NEW) != 2:
+    #
+    # **1023 COMPOSITION FIX (records/1023-patcher-composition.txt).**  Rung 1023 opens row 24 by
+    # widening a THIRD `#if IOS7_COMPAT_PLATFORM` in this same file
+    # (`tools/patch_d13_mach_trap_ports.py`), which makes this count 3.  The load-bearing property was
+    # never the number 2 -- it was that THIS rung's two gates moved and the rows it DEFERS kept their
+    # bare gate -- so the check is written that way: at least the two this rung widened, and the five
+    # deferral anchors still BARE (a widened neighbour cannot masquerade as deferred because each
+    # anchor is the gate line plus its own trap's row line).  A tree on which this rung previously
+    # succeeded stages the same bytes; a fresh tree still stages both (the count can only be >= 2 after
+    # the plan edits above, which replace exactly one bare line each).
+    if ssw_text.count(GATE_NEW) < 2:
         print(f"patch_d13_mach_trap15: REFUSING: {XNU_SYSCALL_SW} would carry "
-              f"{ssw_text.count(GATE_NEW)} widened gate(s), expected 2 (the extern block + row 15); "
-              f"the rows 24/25/41/42 must keep their bare gate", file=sys.stderr)
+              f"{ssw_text.count(GATE_NEW)} widened gate(s), expected at least 2 (the extern block + "
+              f"row 15)", file=sys.stderr)
         return 5
+    # The DEFERRED rows (this rung opens rows 15 and the VM wire; 1023 may open row 24; rows 24/25/
+    # 41/42 stay bare from THIS rung's side) must still carry their bare spelling.  Each anchor is the
+    # gate line PLUS its own trap's row line, so a widened neighbour cannot masquerade as deferred.
+    # Rows 24/25/41/42 are checked only when still bare: 1023 opens row 24, so its anchor is the one
+    # deferral this rung tolerates losing (the whole point of the fix above).
+    SSW_DEFERRAL_ANCHORS = (
+        ("row 25", GATE_OLD + "\n/* 25 */\tMACH_TRAP(ios7lab_mach_port_destruct_trap"),
+        ("rows 41/42", GATE_OLD + "\n/* 41 */\tMACH_TRAP(ios7lab_mach_port_guard_trap"),
+    )
+    for what, anchor in SSW_DEFERRAL_ANCHORS:
+        if ssw_text.count(anchor) != 1:
+            print(f"patch_d13_mach_trap15: REFUSING: {XNU_SYSCALL_SW}'s {what} deferral anchor occurs "
+                  f"{ssw_text.count(anchor)} time(s), expected 1 -- this rung opens rows 15 and the "
+                  f"VM wire only; 1023 may open row 24 but rows 25/41/42 stay bare",
+                  file=sys.stderr)
+            return 5
     # TWO widened gates in mach_kernelrpc.c, and both are correct: the file-wide gate at :39 ALREADY
     # carried this exact spelling (the 994 rung's, read by value this session) and this patch widens
     # the INNER lab-adapter gate at :59 to match.  Asserting 2 -- and that no BARE gate survives in

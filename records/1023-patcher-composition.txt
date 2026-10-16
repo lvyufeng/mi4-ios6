@@ -1,0 +1,91 @@
+1023 — COMPOSITION: patch_d13_mach_trap15.py's `count != 2` refused a row-24 widening; widened to a structural deferral check
+=============================================================================================================================
+Author: lead. Written 2026-10-16 while building rung 1023 (READ/PLAN forensics; no press, no arm changed
+by this record - it documents an edit to a tool, made and measured BY VALUE this session).
+
+## THE DEFECT (pre-empted, then MEASURED)
+
+Rung 1023 opens `mach_trap_table[24]` by widening a THIRD `#if IOS7_COMPAT_PLATFORM` in
+`osfmk/kern/syscall_sw.c` (`:139`, the row-24 gate) via `tools/patch_d13_mach_trap_ports.py`.
+`tools/patch_d13_mach_trap15.py` (`main()`, the assertion at what was `:351`) asserts:
+
+    if ssw_text.count(GATE_NEW) != 2:
+        REFUSING ... expected 2 (the extern block + row 15); the rows 24/25/41/42 must keep their bare gate
+
+so on any tree where 1023 has run, `syscall_sw.c` carries THREE widened gates.  `scripts/build_1023.sh`
+runs the two patchers in the order vmwire -> trap15 -> ports, so this is on the FIRST-build path: the
+trap15 patcher (step 2) sees the ports patcher's edit only on a REBUILD, but a build that stages trap15
+AFTER 1023 (or any re-run) would hit it.  MEASURED on a 1023-staged copy of the live tree
+(`/tmp/xnu1023test`):
+
+    patch_d13_mach_trap15: REFUSING: osfmk/kern/syscall_sw.c would carry 3 widened gate(s), expected 2
+                           (the extern block + row 15); the rows 24/25/41/42 must keep their bare gate
+    exit 5
+
+This is the SAME CLASS as `records/1022-patcher-composition-defect.txt`, and the same
+`[[mi4-one-value-two-definitions]]` shape: one file, two owners, the second owner's edit walks the first
+owner's assertion.  There the collision was an idempotence KEY (`anchor + block`); here it is a COUNT
+(`count(GATE_NEW) == 2`).  Both are "a predicate that names a whole-file total, on a file another lane
+edits".
+
+## WHY IT IS A COMPOSITION DEFECT, NOT A BUG IN EITHER PATCHER
+
+* trap15's assertion is CORRECT for trap15-in-isolation: trap15 widens exactly the extern block and row
+  15, so before 1023 that count IS 2, and a build where :59 did not move leaves 1 and must refuse.
+* 1023's row-24 widening is CORRECT for 1023-in-isolation: `syscall_sw.c:139` is row 24's OWN `#if`
+  (rows 25 and 41/42 carry SEPARATE gates at `:144` and `:164`, read by value), so widening it does not
+  touch rows 25/41/42 - the deferral trap15's assertion names as the reason for "2" is preserved.
+* What broke is the number, not the property.  The property trap15 actually needs is: *its two gates
+  moved, and the rows IT DEFERS kept their bare gate*.  A whole-file `count(GATE_NEW) == 2` is a proxy
+  for that property that 1023's independent, legitimate edit invalidates.
+
+## THE FIX (applied, BY VALUE, this session)
+
+`tools/patch_d13_mach_trap15.py`: replaced the `!= 2` assertion with a STRUCTURAL one that names the
+property and not a total:
+
+    if ssw_text.count(GATE_NEW) < 2:                          # its own two, at least
+        REFUSING ... expected at least 2 (the extern block + row 15)
+    SSW_DEFERRAL_ANCHORS = (
+        ("row 25",     GATE_OLD + "\n/* 25 */\tMACH_TRAP(ios7lab_mach_port_destruct_trap"),
+        ("rows 41/42", GATE_OLD + "\n/* 41 */\tMACH_TRAP(ios7lab_mach_port_guard_trap"),
+    )
+    for what, anchor in SSW_DEFERRAL_ANCHORS:
+        if ssw_text.count(anchor) != 1:
+            REFUSING: ... {what} deferral anchor occurs {n} time(s), expected 1
+
+Each anchor is the BARE gate line PLUS its own trap's row line, so a WIDENED neighbour can never
+masquerade as a deferred row (the anchor needs the bare `#if` directly above its own `MACH_TRAP`).  Row
+24 is deliberately NOT in the anchor list: 1023 legitimately opens it, so that is the one deferral this
+rung tolerates LOSING - the whole point of the fix.  The rpc-side assertion (`mach_kernelrpc.c`:
+`count(GATE_NEW) == 2 and no bare gate`) is UNTOUCHED: 1023 does not edit either gate there (it reuses
+1022's widened inner gate at :59 and edits only the trap-24 BODY's runtime selector).
+
+**It is a strict widening of an idempotence/failure predicate.**  It changes no staged byte on any tree
+state that previously succeeded, because the two paths a previously-succeeding build could be on are:
+(a) the tree is FRESH - both edits still stage (the count is exactly 2 after the plan edits, which
+replace exactly one bare line each; the anchors are satisfied), measured; (b) the tree is already
+trap15-staged - the count is 2, the anchors hold, "already staged".  The only inputs whose verdict
+MOVES are the ones where the count was 3+ (a sibling opened a row) - which is exactly the tree this fix
+is for.
+
+## THE MEASUREMENT (four tree states, BY VALUE, this session)
+
+    fresh tree (neither rung staged) : trap15 stages 2 edits + OFF proof PASS; ports stages 2 + PASS
+    live tree (1022-staged only)     : trap15 "already staged", stages nothing
+    1023-staged tree                 : trap15 NO LONGER REFUSES - "already staged", --verify-off PASS
+    NEGATIVE CONTROL (row 25 hand-widened): trap15 REFUSES (row 25 deferral anchor occurs 0), exit 5
+
+The negative control is the load-bearing half: it proves the new check still STOPS the build when a row
+this rung truly defers is opened, so the widening did not defang it into a tautology
+(`[[mi4-a-claim-in-a-comment-is-not-a-check]]`).
+
+## NOTE FOR THE BY-VALUE DISCIPLINE (the 1022 record's lesson, restated)
+
+1022's record ended: "a shared tree edited by two tools needs a WHOLE-FILE well-formedness clause,
+because each tool's own idempotence predicate reports 'my block is fine' while the file is already
+broken."  1023 adds the correction to that lesson: a whole-file clause must name a PROPERTY (these rows
+stay bare), never a TOTAL (the count is 2), or the next lane's legitimate edit turns the guard into a
+false refusal.  `tools/patch_d13_mach_trap_ports.py` already carries the same idea on its own side: its
+`#if`/`#endif` balance clause and its rows-25/41/42 deferral-anchor clause are cross-file, structural,
+and belong to NEITHER patcher alone.

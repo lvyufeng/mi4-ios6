@@ -1,0 +1,58 @@
+RUNG 1023 PRESS — the press FIRED; the device is DARK pending the operator's power press
+=========================================================================================
+
+PRESS OUTCOME (2026-10-16 ~07:56-08:00 UTC)
+-------------------------------------------
+  Arm:      armed-d13-10b79e5d
+  Payload:  out/stage90/stage90-qcdt.img
+            sha256 3c86c5cb4c8bf930e4e75fd00b4042acec41e7483968866ace0ace6b2c43792e
+            (the gate's own read: "the bytes sent were the bytes the gate read");
+  Card:     out/stage90/xnu_card_hfs.img written to userdata head (/dev/block/mmcblk0p25),
+            sha256 c9b9080de2a1de00707c6c282650b61608405a7dbc8fe2c0bced475705fb9fea,
+            939524096 B (the real iOS 7.1.2 HFSX rootfs). READ BACK and MATCHED (first 8 MiB
+            sha 9bcef3ffaaed58f70f8422f5a2c59dc198770f5ef4cf1bae438f975e9627cd5b).
+
+  The boot happened: `Sending 'boot.img' (9128 KB) OKAY` / `Booting OKAY`.
+  Runner exit 2 — THE RESIDENT READING (a resident rung does not return on its own).
+  USB console capture: out/stage90/captures/usb-console-1023-20261016-075600.txt — EMPTY
+  (the reader waited for the 18d1:0910 device-mode id, which XNU never reached: this run
+  stopped in the BOOT, at the trap-24 frontier, before the USB ladder).
+
+  ⚠ DEVICE IS DARK. Unlike the 1022 run (records/1022-press-read.txt: "device returned on
+  adb on its own"), this run's device did NOT re-enumerate on the USB bus after the boot
+  (~18 min waited, `lsusb` shows no Android device at all). A dark phone has no host-side
+  recovery ([[mi4-device-dark-needs-power-press]]) — the OPERATOR'S power press is required.
+  This is the one case the standing authorization reserves: 「除非机器需要手动重启」.
+
+THE LOG IS NOT LOST — IT IS ONE COMMAND AWAY
+--------------------------------------------
+  The single-slot RAM console survives until the phone's NEXT boot. So the recovery is:
+  power the phone back on (that boot IS the one holding this run's log as its "previous"),
+  then read /proc/last_kmsg BEFORE booting anything else:
+
+      scripts/recover_last_kmsg.sh --read-only      # device already up in Android
+
+  An auto-recovery watcher is armed (pid 379059, /tmp/auto_recover_1023.sh): the instant
+  4a2fe00b reappears on adb OR fastboot, it reads /proc/last_kmsg into a dated capture
+  BEFORE any other boot can overwrite the slot, and prints RECOVERED-READONLY.
+
+WHAT THE CAPTURE MUST BE READ FOR (the rung's decisive measurement)
+-------------------------------------------------------------------
+  python3 -I tools/check_1023_capture.py <capture> --baseline <1022 capture>
+
+  Headline cell = DISPATCH (docs/1023 section 0.2; records/1023-adjudication.txt):
+    - `IOS7LAB trap24 frame ...` PRESENT  => trap 24 IS dispatched; the frontier IS the row
+      (then read the body's `IOS7LAB port_construct ... result=`: 0 = WALL MOVED,
+      0x10000003 = SELECTOR STILL 0, 4 = WIRE REFUSED);
+    - the frame dump ABSENT, console live => trap 24 EXONERATED; the frontier is the libxpc
+      wrapper's helper call (`blx 0x38260ee0` -> cache-rel 0x3815bc38), which rung 1024 targets.
+
+  The 1022 capture, read by THIS checker, gives T24-NOT-DISPATCHED (0 `trap24 frame` lines,
+  slide 0x031ca000, wall pc 0x3b418022 exactly as recorded, 7651 live undef rows) — i.e. the
+  pre-rung state the 1023 press must change if trap 24 is dispatachable at all.
+
+THE PRESS DID NOT PANIC ON THE HOST (no brick risk taken)
+---------------------------------------------------------
+  Only `fastboot boot` was issued (never flash). The card write is userdata's HEAD, outside
+  the boot chain; CARD_COW=1 / HDD_WRITE=0, so the base is never written — fully reversible.
+  The one device write this press makes is the `fastboot boot` of the payload.
