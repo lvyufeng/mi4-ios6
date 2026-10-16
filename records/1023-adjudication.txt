@@ -1,0 +1,132 @@
+RUNG 1023 -- ADJUDICATION BY VALUE (2026-10-16, revised after full trace)
+=======================================================================
+
+BOTTOM LINE
+-----------
+  The rung-1023 PREMISE -- "the frontier is pid 1's os_alloc udf = mach trap 24
+  (mach_port_construct) returning an unaccepted rv; install mach_trap_table[24]
+  and the wall moves" -- is **REFUTED on the identity but CONFIRMED on the trap
+  number.**  Trap 24 IS mach_port_construct (Apple's own source says so).  But
+  the 229 EXC_BAD_INSTRUCTION faults in the 1022 capture are USER-MODE udfs that
+  pid 1 survives; they are NOT the kernel's trap-24 dispatch, which is proven
+  (below) to PANIC.  Zero panics in the capture means trap 24 was never reached.
+  The real frontier is one call EARLIER in the wrapper: the helper at
+  cache-rel 0x3815bc38 called at 3824e01e, whose return the wrapper refuses.
+
+WHAT IS MEASURED, ALL BY VALUE
+------------------------------
+(a) TRAP NUMBERS, from Apple's own tree (external/xnu-4570.1.46):
+      osfmk/mach/syscall_sw.h:90  kernel_trap(_kernelrpc_mach_vm_map_trap,-15,9)
+      osfmk/mach/syscall_sw.h:91  kernel_trap(_kernelrpc_mach_port_allocate_trap,-16,3)
+      osfmk/mach/syscall_sw.h:99  kernel_trap(_kernelrpc_mach_port_construct_trap,-24,5)
+    => trap 15 = mach_vm_map, 16 = mach_port_allocate, **24 = mach_port_construct**.
+    The 1022 device run PROVED vm_map64 fires from trap 15, so the table is the
+    anchor and the numbering is confirmed on hardware.
+
+(b) THE STUBS, read from the live cache bytes
+      (card out/stage90/xnu_card_hfs.img, real dyld header at card off 0x455d000,
+       map0 base 0x2c000000, slide 0x31ca000; all cross-checked against the
+       device's own three mapping lines in the capture):
+      trap-15 stub @0x381c5960 (ARM): mov ip,sp; push{r4,r5,r6,r8}; ldm ip,{...};
+                                      mvn ip,#14; svc #0x80; pop; bx lr
+      trap-24 stub @0x381c59dc (ARM): mov ip,sp; push{r4,r5}; ldr r4,[ip];
+                                      mvn ip,#23; svc #0x80; pop; bx lr
+    locore.s swi_from_user (external/.../osfmk/arm/locore.s:511-574):
+      cmp r12,#-3 ; ... ; mov r11,r12 ; ... ; rsbs r5,r11,#0 ; ble fleh_swi_unix
+    `rsbs r5,r11,#0` => index = -r12.  mvn ip,#14 => ip = ~14 = -15 => index 15.
+    mvn ip,#23 => ip = ~23 = -24 => index **24**.  Both confirmed.  The peer
+    that read "23" took the mvn immediate as the index and missed the rsbs.
+
+(c) THE DISPATCHER CANNOT RETURN FROM A kern_invalid ROW (whole-file chain):
+      swi_mach @0x8001cea4:  ldr r2,[pc,#988] = 0x8047f774
+                             ldr r1,[pc,#1008]= 0x805565b0   (EXACT link-time
+                                                              addrs, image is linked)
+                             teq r1,r2 ; beq swi_mach_error ; bx r1
+      nm: kern_invalid=0x8047f774 ; mach_trap_table=0x805565b0
+      rows: 0={argc=0,fn=0x8047f774,'kern_invalid'}
+            15={argc=8,fn=0x80474130,'ios7lab_mach_vm_map_trap'}
+            16={argc=3,fn=0x80474588,'_kernelrpc_mach_port_allocate_trap'}
+            24={argc=0,fn=0x8047f774,'kern_invalid'}  == row 0
+      swi_mach_error @0x8001cef4: mov r0,#7(EXC_BAD_INSTRUCTION) ; mov r1,r4(the
+                                  trap index) ; mov r2,#1 ; bl doexception @0x80466bf4
+                                  ; mov r0,#0x81 ; b irqvec_panic @0x8001d258
+      irqvec_panic @0x8001d258: ldr sp,[pc,#68] ; mov r1,r0 ; add r0,pc,#4
+                                ; bl panic @0x8002f2b4 ; b .   <- NO RETURN
+      panic string = "fleh_vectors: exception in exception vectors"
+    => row 24's fn EQUALS kern_invalid => teq MATCHES => swi_mach_error =>
+       doexception(7,24,1) => irqvec_panic => **KERNEL PANIC, no return path.**
+
+(d) THE 1022 CAPTURE HAS ZERO PANICS:
+      out/stage90/captures/recovered-unknown-arm-20261016-060342-last_kmsg.txt
+      52545 lines, 2097160 bytes
+      grep -in "panic"            -> NOTHING
+      grep "fleh_vectors"         -> NOTHING
+      grep "exception in exception" -> NOTHING
+      last line: "No errors detected"
+      EXC_BAD_INSTRUCTION at 0x3b418022: 229, ALL the same pc, EVERY one printed
+        by launchd[1] as "usermode undefined instruction" WITH the user register
+        set (cpsr:0x60000030 => USER MODE; r0..r4 ordinary data; no 0x10000003).
+      xnu_live_undef_seq ends 0x00001de3 = 7651, user_seq equal to it.
+    => (c) says a dispatched trap 24 MUST panic; (d) says it did not.  Therefore
+       **trap 24 was NEVER DISPATCHED in the 1022 run.**
+
+(e) WHY THE 229 FAULTS ARE NOT THE TRAP: they are user-mode udfs.
+      src/entry/entry_trace.c:5578  __wrap_sleh_undef -- called once per udf,
+      checks (cpsr & MODE_MASK) == USER_MODE, bumps xnu_live_undef_user_seq, and
+      calls __real_sleh_undef (Apple osfmk/arm/trap.c:118), whose USER arm ends
+      in exception_triage(EXC_BAD_INSTRUCTION,...) -- delivered to the process,
+      NOT a kernel panic.  That is why pid 1 SURVIVES and prints the line, and
+      why the capture ends "No errors detected".
+
+(f) THE WRAPPER, disassembled from the live bytes @0x3824dfc8:
+      3824dfc8 push{r4,r5,r6,r7,lr} ; 3824dfd6 mov r4,r2
+      3824dfe4 cmp.w r1,#0xffffffff ; 3824dfea moveq r1,#6 ; 3824dfee str r1,[sp,#4]
+      3824dffe ldr r5,[r0] ; 3824e000 b 3824e006 ; 3824e002 bl 0x3825b3e0  (RETRY)
+      3824e006 ldr r0,[r5](task) ; mov r1,r8(&frame) ; mov r2,r4 ; mov r3,r6
+      3824e00e blx 0x38260b60   -> dyld stub -> slot 0x39f45174 -> shim 0x381c66ec
+      3824e012 cbz r0,0x3824e024 ; cmp r0,#3 ; it ne ; cmpne r0,#6 ; beq.n 3824e002
+      3824e01c movs r1,#0
+      3824e01e blx 0x38260ee0   -> dyld stub -> slot 0x39f45254 -> 0x3815bc38
+      3824e022 udf #254         >>> THE FRONTIER <<<
+      3824e024 ldr r0,[sp,#24] ; add sp,#28 ; ldr.w r8,[sp],#4 ; pop
+    => the udf needs r0 NOT IN {0,3,6} after the helper call.
+
+(g) THE SHIM @0x381c66ec (live bytes), which the wrapper's 3824e00e reaches:
+      381c66f6 mov r6,r3 ; 381c66f8 movs r3,#0 ; 381c66fa str r6,[sp]
+      381c66fc mov r8,r2 ; 381c66fe mov r5,r1 ; 381c6700 mov r4,r0
+      381c6702 blx 0x381c59dc                    ; the trap-24 stub
+      381c6706 movs r1,#3 ; 381c6708 movt r1,#0x1000
+      381c670c cmp r0,r1                         ; r1 = 0x10000003
+      381c670e bne.n 381c671e                    ; r0 != 0x10000003 -> return r0
+      381c6710.. reload ; 381c671a bl 0x381cdf40 ; the NON-TRAP kernelrpc fallback
+      381c671e add sp,#4 ; ldr.w r8,[sp],#4 ; pop
+    Two recon refutations CONFIRMED: the slow-leg target IS 0x381cdf40 (not
+    0x7854), and r4 is FORCED to 0 (r3 := 0), it is NOT the options flags word
+    (flags ride the user struct pointed to by r1/r5; r6 = name-out goes to stack).
+
+CORRECTED MECHANISM
+-------------------
+  The shim already implements the mach_port.c:518 fast-trap-with-fallback:
+  trap 24, then 0x381cdf40 if it returns 0x10000003.  So if trap 24 were ever
+  dispatched, swi_mach would panic (c) -- the run would end at the trap, not at
+  the udf.  It did not.  The wrapper's udf at 3824e022 is therefore fed by the
+  HELPER call at 3824e01e (0x3815bc38), whose rv the wrapper finds not in
+  {0,3,6} and treats as fatal.  That helper -- a 476-byte-frame libxpc routine --
+  is the true frontier, and it is reached BEFORE the loop's trap ever fires in
+  the observed run (or the loop's success/failure rv is the helper's).
+
+WHAT RUNG 1023 MUST MEASURE (not infer)
+---------------------------------------
+  PUBLISH, from the shim/trap path (or the wrapper), the exact (r0_after_trap,
+  r0_after_helper) and, once, the dispatcher's r5 (trap index) -- gated by
+  STAGE90_XNU_IOS7_TRAPS (record key 19; no new switch).  That one reading
+  decides whether trap 24 is reached at all, and what the wrapper is rejecting.
+  Installing mach_trap_table[24] on the strength of the REFUTED identity would
+  build on a falsified premise; the trap NUMBER is right, the frontier is not.
+
+STATUS OF STAGED ARTIFACTS
+--------------------------
+  scripts/build_1023.sh / park_1023.sh / press_1023.sh /
+  tools/patch_d13_mach_trap_ports.py / tools/check_1023_trap24.py
+  are staged but UNJUSTIFIED: they install row 24, which (c)+(d) show cannot be
+  the wall the 1022 run died on.  Re-aim before building.
