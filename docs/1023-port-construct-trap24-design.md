@@ -25,8 +25,21 @@ when the rv in r0 is **not** `{0, 3, 6}` (0 = success, 3 = `MACH_SEND_INVALID_DE
 sentinel). **What r0 actually held is NOT measured** (the old "it is 4" was inference). The wrapper
 reaches that `udf` through two calls: `3824e00e blx 0x38260b60` (a dyld stub → slot `0x39f45174` →
 the shim `0x381c66ec`, which **is** the trap-24 path: `blx 0x381c59dc` = `mvn ip,#23` = trap 24) and
-`3824e01e blx 0x38260ee0` (a dyld stub → slot `0x39f45254` → `0x3815bc38`, a 476-byte-frame libxpc
-helper) immediately before the `udf`. Which of the two produced the fatal r0 is unmeasured.
+`3824e01e blx 0x38260ee0` (a dyld stub → slot `0x39f45254` → `0x3815bc38`, a Thumb helper with a
+476-byte frame) immediately before the `udf`. Which of the two produced the fatal r0 is unmeasured.
+
+> **CORRECTION (2026-10-16, read BY VALUE from the card cache — `out/stage90/xnu_card_hfs.img`,
+> dyld header at card off `0x455d000`, map0 base `0x2c000000`).** Both slots decoded from the raw
+> bytes: `0x39f45174 = 0x381c66ed` (shim `0x381c66ec`) and **`0x39f45254 = 0x3815bc39`** (helper
+> `0x3815bc38`). The **owner** of `0x3815bc38` is resolved from the cache image table (696 images):
+> nearest image base `0x38140000 = /usr/lib/system/libsystem_c.dylib` — **NOT libxpc** (the earlier
+> "libxpc helper" label was inference, refuted). The helper's prologue, disassembled as **Thumb**
+> (`0x3815bc38`): `push {r4-r7,lr}; add r7,sp,#12; stmdb sp!,{r8,sl,fp}; sub sp,#476; ... movw/movt
+> r0,#0x13bc/#0x1dd; add r0,pc; ldr r0,[r0]; ... blx 0x3815d ?` — a libsystem_c routine with a
+> 476-byte local frame reached one call before the `udf`. **The peer design doc
+> (`docs/1023-port-allocate-design.md:100`) claims `0x38260ee0 → 0x38145110` (libsystem_c); that
+> address is ALSO in libsystem_c but is NOT the slot value — the slot holds `0x3815bc39`, so the peer's
+> target is one hop wrong.** The frontier for the fallback rung is `0x3815bc38` in libsystem_c.
 
 0.2 **The decisive measurement (the load-bearing half).** On CANCRO `mach_trap_table[24]` reads
 `kern_invalid` (`syscall_sw.c:139-143`, gate is bare `IOS7_COMPAT_PLATFORM`; confirmed in the linked
