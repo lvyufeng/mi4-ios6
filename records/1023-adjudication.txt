@@ -117,16 +117,22 @@ CORRECTED MECHANISM
 
 WHAT RUNG 1023 MUST MEASURE (not infer)
 ---------------------------------------
-  PUBLISH, from the shim/trap path (or the wrapper), the exact (r0_after_trap,
-  r0_after_helper) and, once, the dispatcher's r5 (trap index) -- gated by
-  STAGE90_XNU_IOS7_TRAPS (record key 19; no new switch).  That one reading
-  decides whether trap 24 is reached at all, and what the wrapper is rejecting.
-  Installing mach_trap_table[24] on the strength of the REFUTED identity would
-  build on a falsified premise; the trap NUMBER is right, the frontier is not.
+  The staged shape is CORRECT as an experiment; only its JUSTIFICATION changes.
+  It widens row 24's gate + retargets the body's selector + adds a bounded
+  `IOS7LAB trap24 frame` dump (tools/patch_d13_mach_trap_ports.py).  Pressing it
+  decides the open question by measurement:
+    - if `IOS7LAB trap24 frame ...` appears in the capture  => trap 24 IS
+      dispatched, the frontier IS the row, and the row now has a real body;
+    - if it does NOT appear                              => the trap row is
+      exonerated, and the frontier is the wrapper's helper call 0x3815bc38.
+  Either outcome is a reading -- the honest minimal falsifiable rung.
+  Do NOT install row 24 on the old "the udf IS trap 24 returning 4" identity:
+  that is refuted (a dispatched trap 24 panics, and the capture has none).
 
 STATUS OF STAGED ARTIFACTS
 --------------------------
   scripts/build_1023.sh / park_1023.sh / press_1023.sh /
   tools/patch_d13_mach_trap_ports.py / tools/check_1023_trap24.py
-  are staged but UNJUSTIFIED: they install row 24, which (c)+(d) show cannot be
-  the wall the 1022 run died on.  Re-aim before building.
+  are staged and, with the revised justification, JUSTIFIED to run as the
+  dispatch-measurement experiment.  The capture checker's headline cell must be
+  "is the trap24 frame dump present" (dispatch), NOT "the wall moved".
