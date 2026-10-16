@@ -115,6 +115,12 @@ MAP_SLIDE_RE = re.compile(r"\bmap_slide\b.*?\bpid=(\d+)\b.*?\bslide=(0x[0-9A-Fa-
 # ---- the live undef witness (`entry_trace.c:5578`, `__wrap_sleh_undef`) ---------------------------
 UNDEF_SEQ_KEY = "xnu_live_undef_seq"
 UNDEF_PC_KEY = "xnu_live_undef_pc"
+# **docs/1022 sec.6.2 / rung 1023:** the r0-r3 window of the faulting frame, published by the SAME
+# recorder on the SAME (DIRECT, cap-exempt) channel.  This is what lets the frontier's rv - the value
+# the wrapper's {0,3,6} test refused - be read from our own witness rather than from Apple's un-gated
+# `sleh_undef` printk.  `STAGE90_SS_R0 == 0`, so r0..r3 are the frame's first four words.
+UNDEF_FRAME_KEYS = ("xnu_live_undef_frame0", "xnu_live_undef_frame1",
+                    "xnu_live_undef_frame2", "xnu_live_undef_frame3")
 
 # ---- the row's own two prints, VERBATIM from the staged body -------------------------------------
 DISPATCH_MARK = "IOS7LAB trap24 frame"
@@ -216,10 +222,12 @@ def undef_rows(cap):
     rows, cur = [], None
     for line_no, key, _raw, val in cap.toks:
         if key == UNDEF_SEQ_KEY:
-            cur = {"line": line_no, "seq": val, "pc": None}
+            cur = {"line": line_no, "seq": val, "pc": None, "frame": [None] * 4}
             rows.append(cur)
         elif cur is not None and key == UNDEF_PC_KEY:
             cur["pc"] = val
+        elif cur is not None and key in UNDEF_FRAME_KEYS:
+            cur["frame"][UNDEF_FRAME_KEYS.index(key)] = val
     return rows
 
 
@@ -550,6 +558,15 @@ def adjudicate(cap, baseline=None, baseline_path=None):
         ev = []
         if rows:
             ev.append("the live undef witness `%s` x%d row(s)" % (UNDEF_SEQ_KEY, len(rows)))
+            # docs/1022 sec.6.2: if the r0-r3 window was published, print it - this is the FRONTIER'S
+            # rv, read from our own channel (the value the wrapper's {0,3,6} test refused).
+            for r in rows[:4]:
+                if r["frame"][0] is not None:
+                    say("OBS", "undef frame at :%d  r0=%s r1=%s r2=%s r3=%s  (the wrapper refuses r0 "
+                               "not in {0,3,6}%s)"
+                        % (r["line"], C15.fmt(r["frame"][0]), C15.fmt(r["frame"][1] or 0),
+                           C15.fmt(r["frame"][2] or 0), C15.fmt(r["frame"][3] or 0),
+                           " - THIS IS THE FRONTIER'S rv" if r["frame"][0] not in (0, 3, 6) else ""))
         if wall["present"] is True:
             ev.append("the 1022 wall udf IS present (%s at :%s)"
                       % (C15.fmt(wall["wall_pc"]), wall["wall_last"]))
@@ -563,7 +580,7 @@ def adjudicate(cap, baseline=None, baseline_path=None):
                                              "selector retarget) did NOT change the frontier.  The "
                                              "true frontier is the libxpc wrapper's HELPER call one "
                                              "instruction EARLIER (`blx 0x38260ee0` -> cache-rel "
-                                             "0x3815bc38, the 476-byte-frame libxpc routine), whose "
+                                             "0x3815bc38, the 476-byte-frame libsystem_c routine), whose "
                                              "rv the wrapper refuses.  RUNG 1024 targets THAT helper - "
                                              "NOT a wider gate and NOT another table row "
                                              "(records/1023-adjudication.txt sections (f)/(g))."
@@ -690,6 +707,14 @@ def self_test():
     # ================= T24-NOT-DISPATCHED =================
     want("NOT-DISPATCHED-wall-present", [SLIDE_LINE, MEM] + UNDEF_AT_WALL, "T24-NOT-DISPATCHED")
     want("NOT-DISPATCHED-live-only", [SLIDE_LINE, " xnu_live_undef_seq=0x00000001"],
+         "T24-NOT-DISPATCHED")
+    # docs/1022 sec.6.2: the r0-r3 window, published on the same channel.  A cell, not a crash - the
+    # frame keys are an OBSERVATION the NOT-DISPATCHED reading carries (the frontier's rv).
+    want("NOT-DISPATCHED-with-frame-window",
+         [SLIDE_LINE, MEM, " xnu_live_undef_seq=0x00000001",
+          " xnu_live_undef_pc=0x%08x" % WALL_PC,
+          " xnu_live_undef_frame0=0x14548ad0", " xnu_live_undef_frame1=0x00000000",
+          " xnu_live_undef_frame2=0x00800100", " xnu_live_undef_frame3=0x00000000"],
          "T24-NOT-DISPATCHED")
 
     # ================= NO-CELL =================

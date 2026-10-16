@@ -5600,6 +5600,25 @@ void __wrap_sleh_undef(void *regs, void *vfp_ss)
                                                      ? 1u : 0u);
     }
 
+    /* **docs/1022 sec.6.2: the r0-r3 window of the faulting frame, so the FRONTIER'S rv is read
+     * from THIS channel and not from Apple's own printk.** The 1022 capture named r0=0x14548ad0 at
+     * the `udf #254` only because `sleh_undef`'s USER arm prints a full register block; that
+     * printk is Apple's, un-gated, and lands past the live channel's cap. The rung-1023 frontier is
+     * exactly a refusal of r0 not in {0,3,6}, so the value this recorder must publish is the FIRST
+     * FOUR words of the saved frame (`STAGE90_SS_R0 == 0`; `r[0..3]` are contiguous on D13 and
+     * 4570 alike, `entry_saved_state.h`). Bounded by UNDEF_LIVE_MAX like the other four keys, and
+     * on the same channel - with UNDEF_DIRECT off these are `entry_live_write` calls byte-identical
+     * in count to a build that did not carry this block, because the `#if` below removes them
+     * entirely when the switch is 0 ([[mi4-off-option-two-spellings]]). */
+#if defined(STAGE90_XNU_UNDEF_DIRECT) && STAGE90_XNU_UNDEF_DIRECT
+    if (g_undef_seq <= UNDEF_LIVE_MAX && frame != 0) {
+        UNDEF_PUT("xnu_live_undef_frame0", frame[0]);
+        UNDEF_PUT("xnu_live_undef_frame1", frame[1]);
+        UNDEF_PUT("xnu_live_undef_frame2", frame[2]);
+        UNDEF_PUT("xnu_live_undef_frame3", frame[3]);
+    }
+#endif
+
     __real_sleh_undef(regs, vfp_ss);
 }
 
