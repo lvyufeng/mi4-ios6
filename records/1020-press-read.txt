@@ -40,3 +40,34 @@ NEXT (ordered; do not power-cycle or boot anything else first)
 FALSIFICATION (pre-registered): if R-STILL-LOOPS, 1020's mechanism is wrong (the moved `return`
 had no effect on the linked image's behaviour) despite the by-value checker passing - i.e. the
 checker measured reachability, not execution, and that gap is the finding.
+
+======================================================================
+1020's RESULT (recovered 2026-10-15 20:13:55, capture :201355)
+======================================================================
+ADJUDICATED: R-CTL -- WITHHOLD.  But the withhold was routed to a BUILD DEFECT, not an unreadable
+run: the boot self-test row `..._undef_handler_undef_handled=0x1` was present, the DIRECT channel
+DID deliver (`abt_*`/`sleh_*` landed past `xnu_live_capped=0x6000`), and `__wrap_sleh_undef` fired
+ZERO times.  The capture shows the 1015b retry storm is BACK:
+  xnu_live_abt_seq = 0x00100000   xnu_live_abt_far = 0x3b2d28e0
+  xnu_live_abt_pc  = 0x396cda3e   xnu_live_abt_fsr = 0x0000080f (FS=15)
+pid 1 is stuck in the storm and never reaches the `udf #254` 1020 exists to raise.
+ROOT CAUSE: `STAGE90_XNU_GLOBAL_FIX` (1015b) has no record carrier; `build_1020.sh` derived EXTRA
+from the record, so its pool rebuild compiled `pmap.c` without the fix.  Full proof:
+records/1020-build-defect.txt.
+
+======================================================================
+1020b PRESS (2026-10-16 ~01:11 UTC) -- 1020 + the restored GLOBAL-FIX
+======================================================================
+Arm: armed-d13-b5093f00.  Gate PASSED (record carries UNDEF_RAISE=1 + UNDEF_DIRECT=1; arm-extra
+carries 'STAGE90_XNU_GLOBAL_FIX=1 role=1020b-globalfix' written BY build_1020b; the by-value
+pool clause read pmap_flush_tlbs kernel_pmap x3; check_d13_undef_raise --expect on PASSed).
+Runner exit 2 (resident rung, did not return); USB console capture EMPTY
+(out/stage90/captures/usb-console-1020-20261016-011100.txt).
+DEVICE: dark, no adb/fastboot/USB enumeration, ~40 min with NO self-return -> the operator power
+press is owed.  Then: recover_last_kmsg --read-only, adjudicate with check_1020_capture.py.
+
+THE EXPECTED STEP-UP FROM 1020: with the storm gone (abt_seq should now be small, not 0x100000),
+pid 1 reaches the `udf #254`, `__wrap_sleh_undef` fires, and the cells become readable:
+  R-RAISES-ONCE / R-RAISES-CLEAN => 1020 STANDS (the udf raised)
+  R-STILL-LOOPS                  => the moved `return` really did not take (pool/-D suspect)
+  R-VFP-CONTINUES                => the udf is passed; frontier moves downstream

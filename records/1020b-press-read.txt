@@ -1,0 +1,121 @@
+1020b PRESS READ — R-RAISES-ONCE: the `udf` LOOP IS DEAD, and the frontier MOVED to
+                          a KERNEL-MODE NEON undef in `mach_msg_send`
+====================================================================================================
+Date:  2026-10-16 ~01:11 UTC press; ~01:43 UTC recovery (operator power press + Android up).
+Arm:   armed-d13-b5093f00  (STAGE90_XNU_UNDEF_RAISE=1, STAGE90_XNU_UNDEF_DIRECT=1,
+       STAGE90_XNU_GLOBAL_FIX=1 role=1020b-globalfix — the restored 1015b pool fix).
+Capture: out/stage90/captures/recovered-unknown-arm-20261016-014316-last_kmsg.txt (1,579,426 B).
+Adjudicated with: python3 -I tools/check_1020_capture.py "$CAPTURE"   (SELFTEST PASS).
+
+====================================================================================================
+0. VERDICT IN ONE LINE
+====================================================================================================
+**R-RAISES-ONCE — FIXED.**  The 1019 defect (pid 1's Thumb `udf #254` at
+`0x39605a54` = `__os_alloc_slow+0x108`, re-executing 8183x with an invariant PC) is DEAD: this run the
+`_seq` reached 2 at the SINGLE invariant pc and STOPPED, the handler's own
+`usermode undefined instruction` printf fired once, and the boot moved on.  The frontier is no longer
+the `udf`; it is a **kernel-mode NEON undefined instruction at `0x8047b0ac`** (inside `mach_msg_send`)
+taken AFTER pid 1's exception, with the panic frame captured.  Two independent mechanisms are
+confirmed live in the same run (below).
+
+====================================================================================================
+1. THE TWO CONTROLS (both halves present -> the reading is sound)
+====================================================================================================
+* boot self-test row:  `stage90_xnu_arm_vm_init_high_va_undef_handler_undef_handled = 0x00000001`
+  (:3480) — the undefined-instruction path was exercised at boot.
+* the DIRECT undef witness published x2 `_seq` rows — max `_seq` = 2.
+Both halves present => R-CTL does NOT fire => the cells are readable.
+
+====================================================================================================
+2. THE 1015b STORM IS GONE (1020b's pool rebuild restored GLOBAL-FIX)
+====================================================================================================
+MEASURED, by value, in THIS capture:
+  distinct `xnu_live_abt_far` = 11  (0x00001000, 0x2bdf0f7c, 0x2be22fe8, 0x2be32018, 0x2be59004,
+                                     0x2f04b84c, 0x33ead3c8, 0x3d58f000, 0x3d5cf000, 0xcfdbd000, ...)
+  max `xnu_live_abt_seq`      = 0x00000200 (512), NOT the 2.1M of the 1015b defect nor the 0x100000 of
+                                the 1020 defect.
+11 distinct fault addresses (not ONE address retried 2.1M times) is 1015b's own success fingerprint.
+So the 1015b GLOBAL-FIX that the 1020 press silently dropped (records/1020-build-defect.txt) really IS
+in the linked image this arm pressed.  The storm that pinned pid 1 away from the `udf` is gone.
+
+====================================================================================================
+3. THE UDF RAISED — the 1019 loop is DEAD (1020 STANDS)
+====================================================================================================
+The live witness, verbatim (capture :34016-:34025):
+    xnu_live_undef_seq=0x00000001   xnu_live_undef_pc=0x39605a54   xnu_live_undef_spsr=0x20000030  _user=1
+    xnu_live_undef_seq=0x00000002   xnu_live_undef_pc=0x39605a54   xnu_live_undef_spsr=0x20000030  _user=1
+* `_seq` = 1 -> 2, at the SAME pc, and then it STOPS (<= UNDEF_LOOP_MAX 100; no lockstep climb to
+  thousands).  This is exactly 1020 design §1/§5: trip 1 found VFP off and enabled it; trip 2 found
+  VFP on and FELL THROUGH to `EXC_BAD_INSTRUCTION` instead of returning.
+* the kernel's own console shows the raise (capture :4115):
+      launchd[1]: usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x39605a54
+                  in map 0xc00057b8 (pmap 0xc0ba3cc0)
+  followed by a full ARM register dump (:4116-:4121).
+
+The pc is the KNOWN instruction, reconciles exactly:
+    0x39605a54 - slide 0x013cb000 = 0x3823aa54 = libsystem_platform.dylib `__os_alloc_slow`+0x108
+and the byte at that file offset in the shared cache is `0xdefe` = **`udf #254`** (Thumb).  So the
+frontier rungs 1017->1019 named is the one this run raised on, by value.
+
+`xnu_entry_undef_user` is 0 in the trap record (:34896), i.e. the raise did NOT go through the entry
+image's vector-page handler — it went through the KERNEL's own exception path (the 1020 design's
+route), which is the correct shape.
+
+====================================================================================================
+4. THE NEW FRONTIER — a KERNEL-MODE NEON undef at 0x8047b0ac (inside `mach_msg_send`)
+====================================================================================================
+The last REAL console line of the run is capture :4132 (`IOS7WITNESS r8=...`); every line after it is
+the end-of-run record dump.  That dump's trap record (capture :34893-:34906) is:
+    MI4IOS6_STAGE90_XNU trap record: xnu_entry_undef_lr=0x8047b0b0
+    xnu_entry_undef_pc=0x8047b0ac   xnu_entry_undef_spsr=0x40000093   xnu_entry_undef_user=0x00000000
+    xnu_entry_panic_str=0xe3060cc4  xnu_entry_panic_caller=0xe3060cac  xnu_entry_panic_message=0xe3060c98
+* `_lr = _pc + 4` and `spsr = 0x40000093` (mode 0x13 = SVC/KERNEL, I/F clear) => a **kernel-mode**
+  undefined instruction taken on the VECTOR (not via a `bl` from C).  `_user = 0` confirms kernel mode.
+* BY VALUE, on the LINKED image: `0x8047b0ac` lies in `.text` (0x80000000..0x80570000) and the nearest
+  symbols bracket it INSIDE a function:
+      8047aff4 T mach_msg_send
+      8047b150 T mach_msg_receive_results
+  and the disassembly at the faulting pc is
+      8047b0a8: e280005c   add  r0, r0, #92
+      8047b0ac: f4600a8d   vld1.32 {d16-d17}, [r0]!     <- THE FAULTING INSTRUCTION
+      8047b0b0: f4602a8f   vld1.32 {d18-d19}, [r0]
+      8047b0d8: ebf27efd   bl   8011acd4 <ipc_kmsg_copyin>
+  `f4600a8d` is a valid **NEON** encoding — so the undef is NOT a malformed instruction: the CPU
+  treated a well-formed NEON instruction as undefined, i.e. it executed NEON with NEON/FPU not granted
+  at that point (CPACR cp10/cp11 or FPEXC.EN off).  `mach_msg_send`'s compiler-vectorised struct copy
+  hit a NEON-off window.
+* the three panic-string words (`0xe3060cc4`/`0xe3060cac`/`0xe3060c98`) are NOT in the linked image's
+  data range (data ends at 0x8060ede0; 0xe3060cc4 is far above) — they are code-page addresses, so
+  `debugger_panic_str`/`_caller`/`_message` were NOT populated: the kernel undef reached the entry
+  probe DIRECTLY (a raw fatal `udf`/undef trap), not through a `panic("...")` walk.  (XNU's fatal
+  paths end in an undefined instruction — entry_vectors.s:227.)
+
+WHY THE RUN DID NOT RETURN: the capture carries NO `xnu_live_post_end*` key at all (grep = 0 hits), so
+the self-ending (`STAGE90_XNU_POST_END_TICKS`) was compiled OUT of this arm — a RESIDENT rung, which is
+consistent with runner exit 2 and with the device needing the operator power press.
+
+====================================================================================================
+5. WHAT IS *NOT* YET MEASURED (the honest gaps — what 1021 owes)
+====================================================================================================
+1. **Did pid 1 die, or is the kernel undef independent?** The record order (user-udf live rows at
+   :34016, the kernel-undef panic dump at :34893) says the user udf came FIRST, but the kernel-undef
+   trap is a SEPARATE fatal path and its trigger is not yet named: was it reached because pid 1's
+   exception delivery ran kernel code that needed NEON while NEON was off, or is it an unrelated
+   kernel fatal?  **UNMEASURED.**
+2. **The NEON-off window.** Why NEON is not granted at `0x8047b0ac` after the user exception is the
+   suspected mechanism and is NOT read: `CPACR`/`FPEXC` at the moment of the trap were not recorded.
+3. **The 1021 trap-dispatch open question still stands** (records/1020-trap-dispatch.txt §6): whether
+   pid 1's `_mach_vm_map` fast-trap `svc` (-15) was ever issued, and `mach_trap_table[15]` in the
+   linked image is `kern_invalid` BY VALUE — a wall only IF a -15 svc fires (which would panic).  This
+   run shows no -15 and no `swi_mach_error`, so the question is still (a)/(b)-undecided.
+
+====================================================================================================
+6. WHAT 1020b PROVES (net)
+====================================================================================================
+* 1020's mechanism is CORRECT: moving `sleh_undef`'s user-mode `return` inside the `!vfp_enable`
+  block converts an infinite silent `udf` loop into a legible `EXC_BAD_INSTRUCTION` — MEASURED, not
+  inferred.  1019's "8183x loop" is gone.
+* 1020b's build fix is CORRECT: the restored GLOBAL-FIX kept the 1015b storm dead (11 distinct `far`).
+* The frontier has MOVED off the `udf` and onto **kernel-mode execution after the exception**: a
+  well-formed NEON instruction (`vld1.32`) executing as undefined inside `mach_msg_send`, followed by
+  the entry image's fatal-path dump.  That is 1021's object.
