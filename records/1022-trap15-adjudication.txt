@@ -1,0 +1,57 @@
+1022 — trap-15 handler adjudication (lead's byte-level derivation) + the rung's shape
+=====================================================================================
+Read-only. Author: lead. Sources: the design doc, the wire report, and my own disassembly of the
+carved cache bytes. Where they conflict I re-derived from BYTES.
+
+## THE TWO CLAIMS
+
+* docs/1022-mach-trap-15-design.md §B: handler reads a 9-slot {0,1,2,3,4,5,6,8} footprint that MATCHES
+  the client wire; NO wire fix owed; only the three gates need opening.
+* records/1022-trap15-wire.txt §4/§5: MISMATCH — handler's `regs[8]` is a duplicate `target` (not
+  protection), and the 8-byte `copyin(regs[1],&address64,8)` spans addr+size.
+
+## WHAT I CONFIRMED BY BYTES (independent)
+
+1. Fast thunk @0x381c5960 is **ARM** (not Thumb): `e1a0c00d mov ip,sp; e92d0170 push {r4,r5,r6,r8};
+   e89c0170 ldm ip,{r4,r5,r6,r8}; e3e0c00e mvn ip,#14; ef000080 svc #0x80`. ⇒ posts r4,r5,r6,r8.
+2. Wrapper @0x381c6618, r7 = caller_sp − 8 (5-word push then `add r7,sp,#12`). Guard loads:
+   `lr=[r7,#40]=Q+32`, `r9=[r7,#44]=Q+36`, `ip=[r7,#36]=Q+28`; arg loads `r0=[r7,#20]=Q+12`,
+   `r1=[r7,#8]=Q+0`, `r5=[r7,#16]=Q+8`, `r6=[r7,#12]=Q+4` (Q = the caller's sp at the blx).
+3. Caller `__os_alloc_slow` stores (my disassembly @0x3823a94c): `[Q+0]=0`, `[Q+4]=0`,
+   `[Q+8]=0x49000001`, `[Q+12]=0`, `[Q+28]=3`, **`[Q+32]=7`** (`0x3823a98c str r2,#7`),
+   **`[Q+36]=1`** (`0x3823a992 str r1,#1`), `[Q+40]=0x1000` (&address seed).
+   ⇒ guard reads 0(#20)/7(#40)/1(#44) = **0/7/1 → PASSES** (matches the live dump `lr=7, r9=1`).
+   **This REFUTES records/1022-trap15-wire.txt §3c, which put 7 at "[r7,#40]" under a wrong r7 (it
+   assumed r7=caller_sp) and hence mis-stacked every subsequent slot.**
+
+## THE FRAME THE KERNEL RECEIVES (my derivation)
+    {regs[0..6], regs[8]} = {target, &addr(Q+40), 0x1000, 0, 0, 0x49000001, 0, target}
+    handler read:  target,    &addr,        size,  0, mask=0, [unused], flags=0, cur_protection=target
+    handler call(:229): mach_vm_map(map,&a, 0x1000, mask=0, flags=0, ..., regs[8]=target, VM_PROT_ALL, ..)
+    * flags=0 ⇒ the `flags & ~VM_FLAGS_USER_MAP` filter PASSES (consumer's op-code is small, §2.3).
+    * cur_protection=target (a kernel pointer) instead of a vm_prot ⇒ PROTECTION-FAILURE is plausible.
+
+## VERDICT
+**The two docs are BOTH partly right and partly wrong; the DISPUTE is immaterial to the rung's shape.**
+* CONFIRMED (both agree, and the linked image proves it): `ios7lab_mach_vm_map_trap` is ABSENT and
+  row 15 is `kern_invalid`. **Opening the three gates is DEFINITELY required.**
+* DISPUTED by value: whether the handler's `regs[8]`/flag-slot/copyin read the frame correctly, i.e.
+  whether opening the gates ALONE makes the map succeed, or a wire fix is ALSO owed. My bytes favour
+  the design doc's arity (9 slots, `regs[8]` an 8th word) but leave the *semantic* protection-slot
+  question OPEN (# UNMEASURED).
+
+⇒ **Rung 1022 = open the three gates AND make the handler PUBLISH its register frame + result**, so the
+press DECIDES the wire question empirically rather than on a static argument:
+  * the handler already prints (mach_kernelrpc.c:239, up to 12x)
+    `IOS7LAB vm_map64 size=… mask=… flags=… prot=… result=%d address=%08x`;
+  * ADD (behind the switch) a one-line dump of `regs[0..8]` at :219 so the frame the handler actually
+    saw is in the capture. Then:
+      - 1022-A RETIRED: no user udf at `__os_alloc_slow+0x108`, and the dump shows the map succeeded.
+      - 1022-B STILL-THERE: the udf recurs AND the dump shows a mis-read slot ⇒ the wire fix is owed
+        and the dump NAMES which slot (protection=target, flags=0, etc.).
+      - 1022-C NEW-FAULT / D EARLIER / E NO-CHANGE as the design §E registers.
+
+This keeps the rung decisive even though the wire question is unresolved, and it never burns a press
+on a purely static guess. Caveat: still undecided whether the failing call takes the fast leg (a) —
+but the design §A.3 point stands: if the fast leg returns the `0x10000003` sentinel, the client takes
+the slow leg, so opening the runtime gate (:217) is required regardless.

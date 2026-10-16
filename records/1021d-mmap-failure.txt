@@ -1,188 +1,354 @@
-1021d — WHY pid 1's `mach_vm_map` FAILS: the shim's GUARD PASSES, trap 15 is `kern_invalid` (PORT defect)
+1021d — WHY DOES pid 1's mach_vm_map FAIL?  (READ-ONLY FORENSICS: the trap path behind
+        `__os_alloc_slow` -> the kernel `mach_vm_map`/`vm_map_enter` edge that returns nonzero)
 ====================================================================================================
-Method: READ-ONLY forensics. No build, no press, no device action, no write to out/stage90. ONE file
-written (this one). Inputs read BY VALUE:
-  /tmp/dyld-extract/dyld_shared_cache_armv7   (base 0x2c000000; map0 fileoff=va-0x2c000000 for
-     [0x2c000000,0x38268000); map1 base 0x38268000, fileoff=0xc266000+(va-0x38268000) for VAs
-     >= 0x38268000 — the two-formula point that 1019/1021-guard-leg got wrong in their GOT reads)
-  out/stage90/xnu_arm_entry.elf               (LINKED image; .text @ 0x80000000 fileoff 0x010000)
-  out/stage90/captures/recovered-unknown-arm-20261016-014316-last_kmsg.txt  (the 1020b capture)
-  external/xnu-hd2-darwin13/xnu/osfmk/kern/syscall_sw.c  (the trap table source)
-objdump: arm-none-eabi 2.38 (force-thumb for the shim).
+Method: READ-ONLY. No build, no press, no device action, no write to out/stage90. One file written.
+Inputs, all read BY VALUE:
+  /tmp/dyld-extract/dyld_shared_cache_armv7        (cache base 0x2c000000; map0 fileoff = va-0x2c000000;
+                                                    map1 base 0x38268000 fileoff 0xc266000)
+  out/stage90/frozen/armed-d13-b5093f00/xnu_arm_entry.elf   (the ACTUAL 1020b-pressed image;
+                                                    .text @ 0x80000000 fileoff 0x010000 size 0x570000;
+                                                    .data @ 0x80570000 fileoff 0x580000 size 0x09ede0)
+  out/stage90/xnu_arm_entry.elf                    (the CURRENT live arm = 1021d-general-regs)
+  external/xnu-hd2-darwin13/xnu/osfmk/vm/vm_map.c, vm_user.c
+  external/xnu-hd2-darwin13/xnu/osfmk/mach/vm_statistics.h, mach/kern_return.h, mach/arm/vm_param.h
+  external/xnu-hd2-darwin13/xnu/osfmk/kern/syscall_sw.c, osfmk/arm/traps_lo.s (staged in
+    out/xnu_asm_obj_d13/translated/osfmk/arm/traps_lo.s)
+  src/entry/entry_stubs.c, src/entry/build_entry.sh
+  out/stage90/captures/recovered-unknown-arm-20261016-014316-last_kmsg.txt  (the 1020b capture, 35,031 lines)
+  records/1021-guard-leg.txt, records/1019-rootcause.txt, records/1019-osalloc-extract.txt,
+  records/1021d-udf-forensic.txt
+objdump: arm-none-eabi 2.38 (`-D -b binary -m arm -M force-thumb|--adjust-vma`; `-d` on the ELF).
 
 ====================================================================================================
 0. VERDICT IN ONE LINE
 ====================================================================================================
-**The shim's guard PASSES on `__os_alloc_slow`'s call** — so the shim issues `svc #0x80` with
-ip = `0xFFFFFFF1` = wire **-15 = mach trap 15** — and in the LINKED image `mach_trap_table[15]` is
-`kern_invalid` **BY VALUE** (the `ios7lab_mach_vm_map_trap` row is gated OUT for MSM8974_CANCRO), so
-that svc must `swi_mach_error` -> panic. That is a **PORT DEFECT**, not a device fact: stock iOS 7's
-kernel has a real trap-15 handler. The single fix rung: **enable the trap-15 table row** so a -15 svc
-returns KERN_SUCCESS instead of dying.
+**The failing call is a FRESH, ORDINARY, LEGAL anonymous page allocation — `mach_vm_map` with
+flags `0x49000001` = VM_FLAGS_ANYWHERE | VM_FLAGS_SUPERPAGE_SIZE_ANY | VM_MAKE_TAG(73). It is NOT a
+mapping into the dyld-shared-cache window, and it is NOT rejected by the flags whitelist.** TWO
+candidates remain, and this rung does not decide between them; BOTH are `vm_map_enter` returns:
+  **(A) KERN_INVALID_ARGUMENT (4) from the SUPERPAGE-ANY default.** `flags & 0x70000 != 0` on ARM
+      hits `default: return KERN_INVALID_ARGUMENT` — CONFIRMED BY VALUE in this rung's own
+      `out/xnu_kernel_obj_d13/osfmk_vm_vm_map.o` (`mov r0,#4` @fec, `tst r8,#0x70000` @ff8,
+      `bne 1728` @ffc, epilogue @1728) and in the linked image (0x8003e7c0/0x8003e7cc/0x8003e7d0/
+      0x8003f018). If the wrapper forwards `__os_alloc_slow`'s `0x49000001` as `mach_vm_map`'s flags,
+      this is the answer, exactly and mechanically.
+  **(B) KERN_NO_SPACE (3) from the ANYWHERE-scan edge** (`vm_map.c:1779`/`:1944`; linked 0x8003eb7c /
+      0x8003ed24), reachable because the D13 task map is pre-filled with the 301 MiB dyld cache
+      (0x2c000000..0x40000000) plus a 512 KiB stack below 0x2be00000 before pid 1 starts.
+The ONLY thing that separates them is the flag word's wiring through the 6-word fast-trap `ldm` +
+MIG slot re-frame, and the return code itself — **NEITHER was ever published**. The capture carries
+no kern_return, no map error string, and no `-15` (a trap-15 request would PANIC, not return); its
+register dump's `r0 = 0x103` is a masked form of the wrapper's own sentinel, not a clean kern_return_t.
+The single decisive measurement is the shim's r0 at the failure `cmp r0,#0` (cache 0x3823a9ae) — §7.
 
 ====================================================================================================
-A. THE GUARD — SETTLED BY VALUE: PASSES (leg (a), the fast trap)
+1. THE CALL, BY VALUE — a fresh anon map, anywhere, legal flags
 ====================================================================================================
---- A.1 the arithmetic (CONFIRMED, re-measured) ---
-Shim `mach_vm_map` = libsystem_kernel.dylib **Thumb** `0x381c6618`. Prologue + guard, byte-for-byte
-(`arm-none-eabi-objdump -D -b binary -m arm -M force-thumb` on the carved cache span):
-    0x381c6618  b5f0       push {r4,r5,r6,r7,lr}   ; 5 regs = 20 B
-    0x381c661a  af03       add  r7, sp, #12         ; r7 = (POST-push sp) + 12
-    0x381c661c  e92d0d00   stmdb sp!, {r8,sl,fp}    ; sp -= 12  (r7 untouched)
-    0x381c6620  b08c       sub  sp, #48             ; sp -= 48  (r7 untouched)
-    0x381c662a  f8d790 2c  ldr.w r9, [r7, #44]      ; <-- GUARD leg 3 field
-    0x381c662e  f8d7e0 28  ldr.w lr, [r7, #40]      ; <-- GUARD leg 2 field
-    0x381c6632  f8d7c0 24  ldr.w ip, [r7, #36]
-    0x381c6638  6978       ldr  r0, [r7, #20]       ; <-- GUARD leg 1 field
-    0x381c663c  2800       cmp  r0, #0
-    0x381c663e  d125       bne.n 0x381c668c         ; nonzero -> SLOW
-    0x381c6640  f1be0f07   cmp.w lr, #7
-    0x381c6644  bf08       it   eq
-    0x381c6646  f1b90f01   cmpeq.w r9, #1
-    0x381c664a  d11f       bne.n 0x381c668c         ; else -> SLOW
-    0x381c666a  f7ffe97a   blx  0x381c5960          ; FAST TRAP
-The `add r7, sp, #12` runs AFTER the 5-register push, so `r7 = caller_sp - 20 + 12 = caller_sp - 8`.
-CONFIRMED independently by the live dump's own frame depth: at the fault, `r7 - sp = 0x2bdf0448 -
-0x2bdf0400 = 0x48 = 72`, which equals the shim's body depth `(caller_sp-8) - (caller_sp-80)`. Under the
-OLD `records/1021-guard-leg.txt` §1 reading (`r7 = caller_sp`) that identity cannot hold. So `r7 =
-caller_sp - 8` is CONFIRMED. (This is the CORRECTION guard-leg §1b already made; this file ratifies it
-from the live dump, which guard-leg lacked.)
+`__os_alloc_slow` (cache VA 0x3823a94c) builds the mach_vm_map argument block on its own 8-aligned
+stack (0x3823a956 `mov r4,sp` / `bic r4,#7` / `mov sp,r4`) and calls the lazy stub 0x3823e6e4:
+    3823a976  mov.w r0, #4096          ; size
+    3823a97c  movw  r8, #1
+    3823a982  movt  r8, #0x4900        ; r8 = 0x49000001  <-- the FLAGS word
+    3823a98e  mov.w r2, #4096          ; AAPCS arg r2 = size
+    3823a98a  movs  r3, #0             ; AAPCS arg r3 = mask = 0
+    3823a9a2  str.w r8, [sp, #8]       ; the flags slot
+    3823a9a6/9a8  str r5,[sp,#4]/[sp,#0]  ; r5 = 0 -> object (IPC_PORT_NULL), offset = 0
+    3823a9aa  blx   0x3823e6e4
+    3823a9ae  cmp   r0, #0
+    3823a9b0  bne.n 0x3823aa54         ; r0 != KERN_SUCCESS -> udf #254 (the frontier)
+(Duplicated at the retry site 0x3823a9ee..0x3823aa26; both reach 0x3823aa54 on r0 != 0.)
 
---- A.2 the guard's three fields, from the caller's own stores (CONFIRMED) ---
-`__os_alloc_slow` (libsystem_platform `0x3823a94c`) builds the call at `0x3823a9aa  blx 0x3823e6e4`.
-Its stores, by value (word n at caller_sp+4n):
-    0x3823a99a..a9a8  str r5 -> [sp,#24],[sp,#20],[sp,#16],[sp,#12]   ; caller words 7,6,5,4 = 0
-    0x3823a98c        str r2 -> [sp,#32]   ; caller word 9  = 7
-    0x3823a992        str r1 -> [sp,#36]   ; caller word 10 = 1
-With `r7 = caller_sp - 8`:  `[r7,#20]` = caller word 4 = 0;  `[r7,#40]` = caller word 9 = 7;
-`[r7,#44]` = caller word 10 = 1. The guard tests are `==0 && ==7 && ==1` -> **ALL THREE PASS**.
-(0x1000 the size is caller word 11 = `[r7,#48]`, NOT read by the guard.)
-
---- A.3 the LIVE cross-check (CONFIRMED — the shim ran and executed its guard loads) ---
-Capture :4119-:4120, the raise's register dump:
-    r7: 0x2bdf0448  r8: 0x49000001  r9: 0x00000001  r12: 0x00000003  sp: 0x2bdf0400  lr: 0x00000007
-The three values `r9=1`, `lr=7`, `ip(r12)=3` are EXACTLY what the shim's entry loads produce:
-`ldr.w r9,[r7,#44]` -> 1, `ldr.w lr,[r7,#40]` -> 7, `ldr.w ip,[r7,#36]` -> 3. No other producer in
-`__os_alloc_slow` writes 7 to lr (it writes 7 to r2/slot9, not lr) or 1 to r9. So the shim WAS entered
-and its guard loads ran. This is the by-value basis for "the shim is on the path" that
-`records/1021-guard-leg.txt` §2b listed as UNPROVEN (its veneer GOT slot 0x39f3f27c is 0 in the frozen
-cache). REVISED: the shim's execution is now CONFIRMED live; the static GOT-slot-zero is moot (the
-runtime fixer writes it).
-
-====================================================================================================
-B. THE LEG AND THE RETURN — trap 15 -> kern_invalid, and the UNRESOLVED -15 (UNKNOWN)
-====================================================================================================
---- B.1 what leg (a) DOES (CONFIRMED, static) ---
-Fast-trap stub `0x381c5960` (ARM): `mov ip,sp; push {r4,r5,r6,r8}; ldm ip,{r4,r5,r6,r8};
-mvn ip,#14; svc #0x80; pop {r4,r5,r6,r8}; bx lr`. `mvn ip,#14` = `~14` = `0xFFFFFFF1` = wire -15.
-Kernel `swi_mach` (out/xnu_asm_obj_d13/translated/osfmk/arm/traps_lo.s): `rsbs r5, r11, #0` -> r5 = 15;
-12-byte `mach_trap_t` stride -> `table + 15*12 + 4`. **CONFIRMED: index 15.**
-
---- B.2 what table[15] IS in the LINKED image (CONFIRMED — the wall) ---
-`mach_trap_table` @ `nm` `0x805564e4` in out/stage90/xnu_arm_entry.elf:
-    idx  0: fn = `kern_invalid`
-    idx 15: fn = `kern_invalid`      <-- == idx 0 (BY VALUE)
-Source: external/xnu-hd2-darwin13/xnu/osfmk/kern/syscall_sw.c:110-131 — row 15 is
-`ios7lab_mach_vm_map_trap` ONLY under `#if IOS7_COMPAT_PLATFORM`, `#else ... kern_invalid`.
-`IOS7_COMPAT_PLATFORM` = `(BOARD_CONFIG_ARMPBA8 || BOARD_CONFIG_QSD8250_LEO)`
-(arm/ios7_compat.h:5); the board is MSM8974_CANCRO -> the `#else` row compiles. The `ios7lab_mach_vm_map_trap`
-symbol is ABSENT from the linked image (`strings` on xnu_arm_entry.bin: only vm_allocate64 /
-vm_deallocate64 / vm_protect64 are linked; `IOS7LAB vm_map64` is ABSENT). The staged `swi_mach` routes
-`entry.fn == kern_invalid` to `swi_mach_error` -> `_doexception` -> PANIC. **CONFIRMED.**
-So leg (a) predicts: a -15 svc -> kern_invalid -> a PANIC BEFORE any return. The capture's
-`xnu_entry_panic_entered=0x1` (:34178) is CONSISTENT with a panic having been entered.
-
---- B.3 the TENSION (UNKNOWN — do not manufacture a benign reading) ---
-A guard-pass reading predicts a -15 svc. The usvc witness (`entry_note_user_svc`, entry_stubs.c:7323)
-records EVERY svc entering `fleh_swi` for the first `USVC_FULL_N = 64` (`:7313`). The 1020b capture's
-distinct values are `-3`(0xfffffffd) x43, `-28/-27/-26`, `0x80000000`, and small BSD positives; the
-full window is EXHAUSTED (max `usvc_n` = 0x40). **-15 (0xfffffff1) appears ZERO times; -31 zero times;
-no `fleh_vectors`/`swi_mach_error`/`exception in exception` line exists.** By the arbiter rule ("the
-capture cannot be wrong about the ABSENCE of a panic, so a reading that predicts a panic is wrong"),
-the -15 fast-trap svc was NOT delivered to the witness. Yet A.3 shows the shim's guard loads executed.
-**These cannot both be the whole truth.** Two live-consistent residues, NEITHER proven:
-  (i) the guard's TEST failed at the branch (the loads ran, the `cmp`/`bne` chose SLOW) — i.e. the
-      caller-frame words at the actual failing call site are NOT 0/7/1, and the failing call site is
-      the retry site (b) at `0x3823aa1e`, not site (a); OR
-  (ii) the shim whose loads ran is the SUCCESSFUL map, and the udf's `r0=0x103` returned from a
-      DIFFERENT call whose frame failed the guard.
-Both fit "shim entered (A.3) AND no -15 witnessed AND a value 0x103 returned". Which one is
-UNMEASURED. The static guard on site (a) passes (A.2); the live run shows no -15 (B.3); the
-reconciliation is the call-ID, not the guard arithmetic.
-
---- B.4 `r0 = 0x103` decoded (PARTIAL — UNKNOWN which producer) ---
-At the udf (`__os_alloc_slow+0x108`, cache `0x3823aa54`, bytes `fe de 46 c0` = Thumb `udf #254;nop`)
-the dump shows `r0=0x00000103`. 0x103 is **NOT a canonical `kern_return_t`**: XNU's `kern_return_t`
-range is 0..6 (`osfmk/mach/kern_return.h`), and the MIG error format `err_system/err_sub/err_code`
-(`osfmk/mach/error.h:81-89`: `err_system(x)=((x)&0x3f)<<26`, `err_sub(x)=((x)&0xfff)<<14`,
-`err_get_code=err&0x3fff`) makes "system 0 / sub 3" arithmetically WRONG (sub 3 = 3<<14 = 0xC000, not
-0x103). The nearest matched constant is `EXC_ARM_SP_ALIGN = 0x103` (`osfmk/arm/exception.h:32`), but
-that is an exception code, not a kern_return — a DECOY. So: 0x103 is **UNKNOWN** as a return value;
-it is most plausibly NOT the mach_vm_map wrapper's return at all (the in-cache wrapper's success
-sentinel is `0x10000003` = `3 | (0x1000<<16)`, and `__os_alloc_slow` never zero-tests 0x103). The
-wrapper's nonzero return on the SLOW leg is a MIG demux value (the demux tail at `0x381c8020` region
-returns `mvn.w r0,#300` = -300 = `MIG_TYPE_ERROR`), NOT 0x103. **UNKNOWN; the value's producer is not
-identifiable from static reads.** Do NOT read 0x103 as a kern_return.
+DECODE of 0x49000001, against `osfmk/mach/vm_statistics.h:255-273`:
+    0x00000001 = VM_FLAGS_ANYWHERE
+    0x00010000 = VM_FLAGS_SUPERPAGE_SIZE_ANY   (VM_FLAGS_SUPERPAGE_MASK 0x70000, size field = 1)
+    0x49000000 = VM_MAKE_TAG(0x49)<<24         (VM_FLAGS_ALIAS_MASK 0xFF000000; tag 0x49 = 73)
+THE WHITELIST TEST PASSES, twice, by value:
+  * in the tree: `vm_user.c`'s `mach_vm_map` (`if (flags & ~VM_FLAGS_USER_MAP) return
+    KERN_INVALID_ARGUMENT;`) with `VM_FLAGS_USER_MAP == VM_FLAGS_USER_ALLOCATE == 0xff074013`
+    (`vm_statistics.h:296-310`);
+  * in the LINKED image: `mach_vm_map` @ 0x8006aedc, bytes
+        8006aef0  movw r4, #0xbfec
+        8006aef4  movt r4, #0xf8
+        8006af00  tst  ip, r4          ; r4 = 0xf8bfec = ~VM_FLAGS_USER_MAP
+        8006af04  bne  8006af48        ; reject -> r1 = 4 (KERN_INVALID_ARGUMENT)
+        8006af38  bl   8003fa00 <vm_map_enter_mem_object>
+    `0x49000001 & 0xf8bfec == 0` -> the `bne` is NOT taken -> the map proceeds.
+CONSEQUENCES (this is the load-bearing part of the verdict):
+  (1) The request is ANONYMOUS and FRESH: object = IPC_PORT_NULL, offset = 0, size = 0x1000,
+      mask = 0. It is NOT a mapping of a shared-cache object at a fixed address, so it CANNOT be a
+      collision with the 0x2c000000..0x40000000 cache window by construction.
+  (2) `VM_FLAGS_ANYWHERE` is set, so `vm_map_enter`'s `anywhere` branch runs and the incoming
+      `*address` is not a fixed request (`vm_map.c:1690-1712`: ASLR randomiser runs only for
+      `entry_for_jit`; otherwise `start = *address` is clamped to `[min,max]` and the FIRST-FREE /
+      first-fit scan takes over). A "fixed address collides" story is excluded.
+  (3) `VM_FLAGS_SUPERPAGE_SIZE_ANY` is set. On ARM the superpage switch is
+      `vm_statistics.h` + `vm_map.c:1562-1586`: the only `case` labels are inside `#ifdef
+      __x86_64__` (VERIFIED identical in this tree, external/xnu-4570.1.46 and external/xnu-2050.18.24
+      - all three have the same `#ifdef __x86_64__` fence). The LINKED image confirms it: `vm_map_enter`
+      @ 0x8003e7cc `tst r1,#0x70000` / `bne 8003f018`, and 0x8003f018 is the epilogue
+      (`mov r0,r6`, r6 initialized to 4 at 0x8003e7c0). So on ARM this request returns
+      **KERN_INVALID_ARGUMENT (4) at 0x8003f018 without ever taking the map lock**. See §6 - this is
+      the alternative I cannot yet close.
 
 ====================================================================================================
-C. PORT DEFECT OR DEVICE FACT? — PORT DEFECT (CONFIRMED)
+2. WHERE THE ERROR EDGE IS, BY VALUE — the whole KERN_* reachable set
 ====================================================================================================
-On a stock iOS 7 device the first 1-page `VM_FLAGS_ANYWHERE` `mach_vm_map` succeeds: the real Apple
-iOS-7 ARMv7 kernel's `mach_trap_table[15]` is a genuine `mach_vm_map` handler. Our port compiles that
-row to `kern_invalid` because `IOS7_COMPAT_PLATFORM` (ARMPBA8||QSD8250_LEO) does not cover
-MSM8974_CANCRO and the ios7lab adapter was never wired into the table. **The kernel-side thing missing
-on our image is the trap-15 table row (`ios7lab_mach_vm_map_trap`), CONFIRMED by value** (symbol
-absent; idx 15 == idx 0 == kern_invalid). This is a PORT defect, matching the 1019 §5 design that was
-written but never enabled for this board.
+`vm_map_enter_mem_object` @ 0x8003fa00 -> `vm_map_enter` @ **0x8003e7ac** (call site 0x8003fadc,
+`bl 8003e7ac`; the 1019 record's "0x8003e988" is the INLINE body of vm_map_enter, not a distinct fn).
+`mach_vm_map` @ 0x8006aedc -> 0x8003fa00 -> 0x8003e7ac. Return is r0 = kern_return_t; written back to
+`state[0]` by `swi_exit` (traps_lo.s:228 `str r0,[r8]`).
+Nonzero edges, from `vm_map.c:1533-1950` (line numbers in this tree) with the disassembly anchors:
+    KERN_INVALID_ARGUMENT (4)
+      - :1590-1586 superpage default          -> linked 0x8003f018 (`mov r0,r6`; r6 = 4)   <-- ARM live
+      - :1594 size not SUPERPAGE_SIZE-aligned  -> 0x8003f018
+      - :1611/1615 is_submap && purgable / object==NULL  (is_submap = flags & 0x800, here 0)
+      - :1628 VM_FLAGS_ALREADY && (ANYWHERE|OVERWRITE)   (0x1000 not in 0x49000001)
+      - :1649/1669 purgable, size==0, offset misaligned  (0x2 /*PURGABLE*/ not set; size=0x1000)
+      - :1697 entry_for_jit + jit_entry_exists           (0x80000 /*MAP_JIT*/ not set)
+    KERN_NO_SPACE (3)
+      - :1717 start > effective_max_offset             -> linked 0x8003f038 (`mov r0,#1`? see §5) / :1835
+      - :1779 end > max_offset   (no wait_for_space, :756 sets it FALSE)
+      - :1797 mask violation
+      - :1866/:1894/:1903/:1921 overlapping/first_fit exhaustion
+      - :1944 the first-fit walk runs off the end
+    KERN_INVALID_ADDRESS (1) — FIXED-only branch, :1846 (`start < min || end > max || start >= end`)
+    KERN_MEMORY_PRESENT (23) — :1921 same mapping already exists (only with VM_FLAGS_ALREADY)
+    KERN_RESOURCE_SHORTAGE (6) — NOT a `vm_map_enter` return; it arises downstream in pmap/page
+      allocation, so it can only be seen if the enter succeeded and a later wire failed (not this path:
+      a fresh send-once/vm_map entry does not wire).
+In the LINKED image the KERN_NO_SPACE edges materialise as three `mov r0,#3` sites inside
+`vm_map_enter`'s inline body:
+    0x8003e990  mov r0,#3 ; str r0,[sp,#60]     (reached from 0x8003e98c, the tst/beq fast path)
+    0x8003eb7c  mov r0,#3 ; str r0,[sp,#60]     (the first-fit "end > max" edge, :1779)
+    0x8003ed24  mov r0,#3 ; str r0,[sp,#60]     (the mask/bounds edge, :1797)
+    0x8003f038  mov r0,#1                        (the KERN_INVALID_ADDRESS-class edge, :1846)
+and the superpage default is a plain `mov r0,r6` at 0x8003f018 with r6 = 4 (set at 0x8003e7c0).
+So the linked code can return **only** {0, 1, 3, 4, 23} from this path (modulo the BailOut epilogue).
 
 ====================================================================================================
-D. THE ONE FIX RUNG
+3. THE vmpath IS THE TRAP PATH? — the trap-table wall, re-read BY VALUE in the PRESSED image
 ====================================================================================================
-**Install mach trap 15 in the LINKED image.** Concretely: widen the `IOS7_COMPAT_PLATFORM` gate (or
-add a `STAGE90_XNU_IOS7_TRAPS`-family switch that reaches the TABLE ROW, not merely the traps_lo.s
--3/-15 assembly branches) so `osfmk/kern/syscall_sw.c` row 15 compiles `ios7lab_mach_vm_map_trap`
-instead of `kern_invalid`, and confirm the symbol lands at `mach_trap_table+15*12+4` in
-xnu_arm_entry.elf. That makes a -15 svc dispatch to the real `ios7lab_mach_vm_map_trap`
-(mach_kernelrpc.c:208) and return KERN_SUCCESS.
-CAVEAT (owed): this rung is decisive ONLY IF the failing call takes the fast leg (a). Section B.3
-left (i)/(ii) undecided; if the failing map takes the SLOW MIG leg (b), enabling trap 15 does not
-touch it and the missing object is elsewhere on the slow path. Evidence WEIGHS toward fast leg (a):
-the guard passes statically (A.2) AND the shim's guard loads are visible live (A.3). Enabling the row
-is the highest-value single rung; a probe (E.1) settles the caveat in the same run.
+The 1021-guard-leg record, corrected by 1021d §9, established that `__os_alloc_slow`'s wrapper guard
+reads caller words 4/9/10 = 0/7/1 on this call, so the wrapper takes its **FAST** leg and issues
+`svc #0x80` with the mach trap number in the caller's r12. That number is the stub's own literal:
+  fast-trap stub @ cache 0x381c5960 (ARM): `e1a0c00d mov ip,sp` / `e92d0170 push {r4,r5,r6,r8}` /
+    `e89c0170 ldm ip,{r4,r5,r6,r8}` / **`e3e0c00e mvn ip,#14` (ip = -15)** / `ef000080 svc #0x80` /
+    restore / `bx lr`. Neighbours: 0x381c597c `mvn ip,#15` (-16), 0x381c5988 `mvn ip,#16`.
+`traps_lo.s`'s `swi_mach` (staged file :199-223) computes `r5 = -r11`, so r11 = -15 -> index 15.
+**mach_trap_table[15] IS `kern_invalid` IN THE PRESSED IMAGE — by value.** I re-read the table out of
+`out/stage90/frozen/armed-d13-b5093f00/xnu_arm_entry.elf` (`nm`: `mach_trap_table` @ **0x8055d4b4**;
+`kern_invalid` @ **0x80486408**, which is `mov r0,#4; pop {fp,pc}` — it HARD-CODES
+KERN_INVALID_ARGUMENT):
+    trap 10 argc=5 fn=0x8047aa34  _kernelrpc_mach_vm_allocate_trap
+    trap 12 argc=5 fn=0x8047ab5c  _kernelrpc_mach_vm_deallocate_trap
+    trap 14 argc=7 fn=0x8047ac10  _kernelrpc_mach_vm_protect_trap
+    trap 15 argc=0 fn=0x80486408  kern_invalid        <--== trap 0/1/..9/11/13/24/25
+    trap 16 argc=3 fn=0x8047acdc  _kernelrpc_mach_port_allocate_trap
+The dispatcher (`fleh_swi` @ 0x8000cc88; `swi_mach` @ 0x8001cfd4; literals 0x8001d3d8=0x80486408,
+0x8001d3dc=0x8055d4b4) does: `cmp r5,#0x80; bge swi_mach_error` / load entry.fn /
+`ldr r2,L_kern_invalid; mov r0,r8; teq r1,r2; beq swi_mach_error; bx r1`, and
+`swi_mach_error` @ 0x8001d024 `mov r0,#7; mov r1,r4; mov r2,#1; bl doexception; mov r0,#0x81;
+b irqvec_panic` — **IT PANICS**. `ios7lab_mach_vm_map_trap` is ABSENT from the pressed image (nm and
+strings); the gate `IOS7_COMPAT_PLATFORM = (BOARD_CONFIG_ARMPBA8 || BOARD_CONFIG_QSD8250_LEO)`
+(`osfmk/arm/ios7_compat.h:5`) is CLOSED for D13, so `syscall_sw.c:126-129` emits the `kern_invalid`
+row.
+⇒ **If the wrapper's fast leg issued r11 = -15, the kernel takes `swi_mach_error` -> panic.** The
+1020b capture shows NO such panic in its kernel-log region; it shows only ONE panic block, and that
+block is `kernel undefined instruction` (NEON undef at 0x8047b0ac in `mach_msg_send`, 1020b's own
+separate defect — see 1020b-press-read). So either the fast leg was not taken on THIS call, or the
+wrapper's wire number is not 15 in this image. Both are UNMEASURED; §5/§6 say why each stays open.
 
 ====================================================================================================
-E. WHAT A NEXT RUNG MUST MEASURE
+4. THE 1020b CAPTURE, BY VALUE — it carries NO error code (all greps, case-insensitive)
 ====================================================================================================
-  1. THE CALL ID: at the udf (`0x3823aa54`) record WHICH call site led there — the return address of
-     the `blx 0x3823e6e4` (site (a) `0x3823a9af` vs site (b) `0x3823aa23`). One `lr` bit. This alone
-     collapses B.3 (i)-vs-(ii).
-  2. THE -15 DELIVERY: at `swi_mach`, record `r11` for every svc with `r11 == 0xFFFFFFF1` (or widen
-     the usvc witness past `USVC_FULL_N=64`). If a -15 appears AND no panic, the fast-trap path is
-     absorbed somewhere before `swi_mach_error`; if it never appears, the failing call is the slow leg.
-  3. THE GUARD WORDS LIVE: at the shim's entry, publish `[r7,#20]`, `[r7,#40]`, `[r7,#44]` with the
-     pid — the three values A.2 predicts as 0/7/1.
-  4. `r0`'s PRODUCER: at `__os_alloc_slow+0x10c` (the `bne` target's source r0) record the raw r0 and
-     the shim frame, to identify where 0x103 came from.
+File out/stage90/captures/recovered-unknown-arm-20261016-014316-last_kmsg.txt (35,031 lines, 1,579,426 B):
+  `KERN_`                0 hits
+  `kern_return`          0 hits
+  `NO_SPACE`             0 hits
+  `vm_map`               0 hits   (the ONLY vm-named lines are the IOS7SHREG / IOS7LAB ones, §4b)
+  `IOS7LAB`             11 hits   (all `IOS7LAB shared region` / `cache mapping` / `commpage` / `vecl2`)
+  `map_file`             1 hit    (`IOS7SHREG map_file kr=0`)
+  `SUBMAPSKIP`           2 hits   (`obj=0xc0005b48 start=0x40000000 end=0x40001000 size=0x1000 lr=0x8003fe00`
+                                   and `obj=0xc0005ab0 start=0x40001000 end=0x40002000 ... lr=0x8003fe00`)
+  `cs_invalid_page`      1 hit    (`CODE SIGNING: cs_invalid_page(0x2d3cb000): p=1[launchd] clearing CS_VALID`)
+  `xnu_live_vm*`         0 hits
+  `fffffff1` (-15)       0 hits
+The relevant frontier block (capture :4095-4115) reads, in order:
+    attempting to start init of /sbin/launchd
+    SUBMAPSKIP: obj=0xc0005b48 start=0x40000000 end=0x40001000 size=0x1000 lr=0x8003fe00
+    SUBMAPSKIP: obj=0xc0005ab0 start=0x40001000 end=0x40002000 size=0x1000 lr=0x8003fe00
+    IOS7LAB shared region 0x2c000000..0x40000000; stack below 0x2be00000
+    IOS7SHREG check_np pid=1 out=0x2bdee9d0 / check_np ret=12
+    IOS7SHREG map_slide pid=1 fd=0 count=4 mappings=0x2bdee848 slide=0x13cb000 slide_start=0x3d577000 size=0x00089000
+    IOS7LAB cache mapping 0 va=2d3cb000 size=0c266000 offset=00000000 max=5 init=5
+    IOS7LAB cache mapping 1 va=39633000 size=01ce0000 offset=0c266000 max=23 init=23
+    IOS7LAB cache mapping 2 va=3b313000 size=022ed000 offset=0df46000 max=1 init=1
+    IOS7LAB cache mapping 3 va=3d600000 size=00177000 offset=12bda000 max=1 init=1
+    IOS7SHREG map_file kr=0 ; slide_enter slide=0x13cb000 ... ; slide_init kr=0 ... ; slide_copyin kr=0
+    IOS7SHREG map_slide ret=0
+    CODE SIGNING: cs_invalid_page(0x2d3cb000): p=1[launchd] clearing CS_VALID
+    launchd[1]: usermode undefined instruction, EXC_BAD_INSTRUCTION at 0x39605a54 in map 0xc00057b8
+    Thread has ARM register state:
+        r0: 0x00000103  r1: 0x00000000  r2: 0x00001000  r3: 0x00000000
+        r4: 0x00000210  r5: 0x00000000  r6: 0x00000000  r7: 0x2bdf0448
+        r8: 0x49000001  r9: 0x00000001 r10: 0x3b303068 r11: 0x2be3339c
+       r12: 0x00000003  sp: 0x2bdf0400  lr: 0x00000007  pc: 0x39605a54
+      cpsr: 0x20000030
+CHECK: pc 0x39605a54 - slide 0x13cb000 = 0x3823aa54 = `__os_alloc_slow+0x108` = the `udf #254`.
+r2 = 0x1000 (the size), r8 = 0x49000001 (the flags), r9 = 1, lr = 7 — i.e. THIS IS the
+`__os_alloc_slow` mach_vm_map frame, and **r0 = 0x103 is the failing call's kern_return_t**.
+HONEST READ OF r0 = 0x103: 0x103 is NOT one of {1,2,3,4,6,23}; it is 259 = 0x100|0x3. The wrapper's
+own sentinel for success is `movs r0,#3; movt r0,#0x1000` = 0x10000003 (shim 0x381c6698/0x381c669c),
+so 0x103 looks like a MASKED/TRUNCATED form of that sentinel's low bytes, not a clean kern_return_t.
+I therefore treat §4's register dump as **weak** evidence for the code and rely on §1's static proof
+for the argument shape. The capture carries NO decode of the error; this is stated as a gap, not
+papered over.
 
 ====================================================================================================
-F. WHAT I COULD NOT ESTABLISH
+5. THE GEOMETRY, BY VALUE — why KERN_NO_SPACE is the leading candidate
 ====================================================================================================
-  * WHICH call site (a)/(b) reached the udf — no `lr` call-site bit in any capture (E.1).
-  * WHETHER a -15 svc ever fired — the usvc full window is exhausted with no -15 and there is no
-    panic-string line (B.3). So the guard-pass static reading and the live no-(-15) fact are in
-    UNRESOLVED tension; I have NOT manufactured a benign reading for it.
-  * WHAT produced `r0 = 0x103` — not a canonical kern_return, not the wrapper's 0x10000003 sentinel,
-    nearest constant `EXC_ARM_SP_ALIGN` is a decoy (B.4). UNKNOWN.
-  * WHETHER leg (b)'s MIG demux is on the failing path (would move the fix off trap 15).
+The D13 map that pid 1 runs in is a task map whose `max_offset` comes from
+`mach/arm/vm_param.h:64-83`: for a NON-IOS7_COMPAT build `VM_MAX_ADDRESS = 0x80000000` (NOT
+0x40000000). Meanwhile the entry layer has already reserved, BY VALUE in the capture:
+    0x2c000000 .. 0x40000000   the dyld shared cache region (301 MiB; IOS7LAB line; the four
+                               `cache mapping` entries span 0x2d3cb000 + up to 0x12bda000+0x177000)
+    stack below 0x2be00000      (IOS7LAB line; the dump's sp = 0x2bdf0400 sits in it)
+    0x40000000 .. 0x40002000    two 4 KiB submaps entered from lr 0x8003fe00 (the two SUBMAPSKIP lines)
+and the D13 pmap's MANAGED_BASE is a fixed 0xC0000000 (`entry` window key 0x1e400000 = the "975
+window", ~470-484 MiB; the kernel's own managed window). A 4 KiB fresh anon map with
+`VM_FLAGS_ANYWHERE` in a task whose map is already carrying a 301 MiB fixed region plus a stack has
+exactly one plausible failure shape in `vm_map_enter`: the ANYWHERE first-fit scan reaching
+`effective_max_offset`. That is `vm_map.c:1779` (disasm edge 0x8003eb7c: `mov r0,#3`) or `:1944`
+(first-fit walk off the end), both **KERN_NO_SPACE = 3**. The dump's r0 low byte is **3**.
+`wait_for_space` is FALSE for a task map (`vm_map.c:756` sets it FALSE at create; only the kernel map
+uses it), so there is no block-and-retry: the scan returns KERN_NO_SPACE immediately — which matches
+the observed hard `bne 0x3823aa54`. This is the reading I believe, and it is an INFERENCE from the
+geometry + the low byte, not a measurement.
 
 ====================================================================================================
-G. WHAT THIS DOES AND DOES NOT CLAIM
+6. THE COMPETING CANDIDATE I CANNOT CLOSE — the ARM superpage default (KERN_INVALID_ARGUMENT)
 ====================================================================================================
-  * CONFIRMS (by value, cross-checked): shim `r7 = caller_sp - 8` (live `r7-sp = 0x48`); the guard's
-    three fields are caller words 4/9/10 = 0/7/1 on `__os_alloc_slow` site (a) -> guard PASSES;
-    the shim's guard LOADS were executed live (`lr=7, r9=1, ip=3`); `mvn ip,#14` == table index 15;
-    linked `mach_trap_table[15] == [0] == kern_invalid`; the ios7lab trap-15 symbol is absent.
-  * CONFIRMS: this is a PORT defect — the trap-15 row is gated out for MSM8974_CANCRO.
-  * does NOT claim: which call site reached the udf; that -15 was delivered (it was NOT witnessed);
-    what r0=0x103 is. The guard-pass vs no-(-15) tension is stated, not resolved.
-  * SUPERSEDES: `records/1021-guard-leg.txt` §2b's "shim entry UNPROVEN" — A.3 confirms entry live.
+§1(3) is not decoration: on armv7 the `VM_FLAGS_SUPERPAGE_MASK` bit set means the switch falls to
+`default: return KERN_INVALID_ARGUMENT` — the ONLY `case` labels are `#ifdef __x86_64__`. I verified
+this fence is present in OUR tree, in `external/xnu-4570.1.46` and in `external/xnu-2050.18.24`
+(three independent reads), and the LINKED image agrees (`vm_map_enter` 0x8003e7cc/0x8003f018, r6=4).
+**AND I THEN CHECKED THE RUNG'S OWN OBJECT — this is no longer inference.** `arm-none-eabi-objdump
+-d out/xnu_kernel_obj_d13/osfmk_vm_vm_map.o`:
+    fec: e3a00004  mov  r0, #4                 ; KERN_INVALID_ARGUMENT, set BEFORE the test
+    ff8: e3180807  tst  r8, #458752 ; 0x70000 ; flags & VM_FLAGS_SUPERPAGE_MASK
+    ffc: 1a0001c9  bne  1728 <vm_map_enter+0x750>
+    1728: e28dd074 add sp, #116 ; e8bd8ff0 pop {r4-r9,sl,fp,pc}   ; the EPILOGUE, returns r0 = 4
+(and the linked image's mirror: 0x8003e7c0 `mov r6,#4`, 0x8003e7cc `tst r1,#0x70000`,
+0x8003e7d0 `bne 8003f018`, 0x8003f018 `mov r0,r6` + epilogue.) So THIS rung returns **4** for any
+`flags & 0x70000 != 0` — CONFIRMED BY VALUE, not read off the source alone.
+So `__os_alloc_slow`'s own flags word `0x49000001` would ask for an ARM-unsupported superpage-ANY and
+get **4** back — i.e. the map would fail on EVERY ARM device, for every libsystem_platform slow alloc.
+That is implausible as the silent truth of iOS 7, which means in one of two places my decode of the
+flag word or the ARM build's behaviour is off:
+  (i) the flags slot the wrapper forwards is not literally 0x49000001 (the wrapper re-frames the
+      caller's words — the 6-word `ldm ip,{r4,r5,r6,r8}` at the fast stub forwards caller words, and
+      the MIG shim's slot mapping at [r7,#20]/[r7,#24]/... can scramble which word lands in
+      `mach_vm_map`'s `flags` argument); or
+  (ii) this arm's vm_map.c build actually compiles SUPERPAGE_SIZE_ANY on ARM (e.g. a local patch or
+      a wider `#if`), in which case 0x10000 is benign and §5 stands alone.
+The capture's r0 = 0x103 low byte = 3 flips the balance toward **(ii) + KERN_NO_SPACE** rather than
+(i)+4, but I cannot prove the argument wiring statically (the decoder is 3 frames deep in the
+shared cache and the MIG demux is a hook). **This is the single largest hole in the record.**
+
+====================================================================================================
+7. THE DECIDING LIVE MEASUREMENT (one reading, one pc)
+====================================================================================================
+**Publish the shim's r0 at the failure `cmp r0, #0` (cache 0x3823a9ae) on the first non-success, with
+the pid.** That one word separates every candidate:
+    r0 == 3  -> KERN_NO_SPACE  -> §5 (geometry / ANYWHERE-scan) is the cause; then the follow-up is
+                `xnu_live`-publish `map->min_offset`, `map->max_offset` and the returned start.
+    r0 == 4  -> KERN_INVALID_ARGUMENT -> §6 (superpage-ANY on ARM) is the cause; fix is the flags
+                word, not the map.
+    r0 == 1  -> KERN_INVALID_ADDRESS -> a FIXED-leg request reached vm_map_enter (:1846, 0x8003f038):
+                re-check the guard legs with the §9-corrected frame.
+    r0 == 0x10000003 (or 0x103) -> the sentinel leaked: the wrapper's own MIG bookkeeping is wrong and
+                the "failure" is a decode defect, not a kernel failure.
+WHERE TO TAKE IT, cheapest first:
+  (a) IN THE CACHE, at the frontier: at __os_alloc_slow's `cmp r0,#0` (0x3823a9ae) the value is
+      ALREADY IN r0 at the udf. The 1020b dump publishes r0 = 0x103 there but the wrapper's r0 path
+      is ambiguous — so ALSO record r0 AT the wrapper's return point 0x3823c66e (the slow path
+      `mov r4,r0`) and at the shim's own post-call 0x381c6696 (`mov r4,r0`).
+  (b) IN THE KERNEL, at the trap handler: wrap/record the return of `vm_map_enter` in
+      `vm_map_enter_mem_object` at its call site 0x8003fadc (`bl 8003e7ac`, result -> r8 at
+      0x8003fae0). One `entry_write_kv("xnu_live_vm_map_ret", r0)` there names cause AND pc: it is
+      the only place that sees the value BEFORE the shared cache's sentinel logic touches it.
+  (c) THE TRAP NUMBER, to close §3: publish `fleh_swi`'s **r11** at the `swi_mach` entry
+      (0x8001cfd4) for the FIRST mach trap whose r5 == 15, and widen the SVC ring — see §8's cap.
+      If a -15 arrives, the run PANICS in swi_mach_error and that panic is the answer.
+MEASUREMENT NOTE (a real gap, not a caveat): the usvc ring in the capture publishes the SVC
+power-of-two ladder only up to `n` values {1,2,4,8,16,32,64} and the full fields only for n <= 64
+(`src/entry/entry_stubs.c:7313 #define USVC_FULL_N 64u`, ladder at :7343-7356). The capture's last
+usvc record is n = 0x40 with num = 0xfffffffd (the -3 timebase trap) at pc 0x2be2a328. Everything
+after n = 64 is INVISIBLE except exact powers of two. So "no -15 in the capture" is NOT a clean
+negative — a -15 issued after the 64th SVC would be unpublished. Any rung that wants to answer §3
+must first raise/replace USVC_FULL_N or move the ring, else the measurement is the defect.
+
+====================================================================================================
+8. FALSIFIERS — what would overturn each candidate
+====================================================================================================
+  * §5 (KERN_NO_SPACE / geometry): OVERTURNED if (a) r0 at the failure cmp is 4 or 1; or (b) a live
+    read shows pid 1's task map had a large free gap at the time (e.g. max_offset - 0x40002000 >>
+    0x1000) — publish `map->first_free` / the returned `*address`; or (c) the same alloc SUCCEEDS
+    with the shared region unmapped, which would move the cause to the cache graft, not the window.
+  * §6 (superpage-ANY -> 4): the BUILD half is now CLOSED BY VALUE — `out/xnu_kernel_obj_d13/
+    osfmk_vm_vm_map.o` (`mov r0,#4` at fec, `tst r8,#0x70000` at ff8, `bne 1728` at ffc, epilogue at
+    1728) and the linked image (0x8003e7c0/0x8003e7cc/0x8003e7d0/0x8003f018) both return 4. So the
+    only remaining falsifier is the WIRING one: OVERTURNED if the word the wrapper actually forwards
+    into `mach_vm_map`'s `flags` parameter does not have bit 0x10000 set (i.e. the 0x49000001 is a
+    caller-frame word that the 6-word fast-trap `ldm` + MIG slot re-frame does not deliver as flags).
+    That single trace is the cheap kill — trace the flags slot, not the build. Also OVERTURNED if r0
+    at the failure cmp reads 3.
+  * §3 (trap-15 -> panic): OVERTURNED if a run shows the `swi_mach_error` panic (r0=0x81 ->
+    `irqvec_panic`) with r4 = 15 — that would PROVE the fast leg fired and the wall is trap 15, not
+    the map. CONFIRMED-adjacent if r11 at swi_mach entry is never 15.
+  * "the map didn't fail at all": OVERTURNED if r0 at 0x3823a9ae is 0 — then the udf is reached by a
+    path other than the `bne`, and this whole record's premise is wrong (1019 §4 already lists the
+    `lr = 7` reading as ambiguous).
+
+====================================================================================================
+9. EXPLICITLY UNMEASURED
+====================================================================================================
+  1. THE ERROR CODE. r0 at the failure `cmp` (cache 0x3823a9ae) / vm_map_enter's return (kernel
+     0x8003fadc). The 1020b dump's 0x103 is ambiguous (§4). NOTHING in the capture decodes it.
+  2. THE ARGUMENT WIRING. Which caller word of `__os_alloc_slow` lands in `mach_vm_map`'s `flags`
+     argument. I read the flags word by value at 0x3823a982 (r8 = 0x49000001) but did NOT trace it
+     through the 6-word fast-trap `ldm` + the MIG shim's slot re-frame to `vm_map_enter`'s `flags`
+     parameter. §6(i) hinges on this.
+  3. THE ARM SUPERPAGE BUILD FACT — **NOW CLOSED BY VALUE.** `out/xnu_kernel_obj_d13/
+     osfmk_vm_vm_map.o`: `fec: mov r0,#4` / `ff8: tst r8,#0x70000` / `ffc: bne 1728` / `1728:`
+     epilogue — the x86 fence IS intact, and a `0x10000` bit returns 4. What stays UNMEASURED is the
+     INPUT to that test: the word the wrapper forwards as `mach_vm_map`'s `flags`.
+  4. THE TRAP NUMBER LIVE. r11 at swi_mach entry; the wire number the wrapper actually issued. The
+     static stub says -15; the run shows no -15 but the ring is capped at n = 64 (§7 note).
+  5. THE MAP STATE AT FAILURE. pid 1's task map min/max offset, first_free, entry count at the moment
+     of the call. None published.
+  6. WHICH OF THE TWO CALL SITES (0x3823a9aa / 0x3823aa1e) reached the udf — only `lr = 7` was
+     captured, and 7 is the wrapper's saved-slot value, not a call-site identity (1019 §4).
+
+====================================================================================================
+10. WHAT THIS RECORD DOES AND DOES NOT CLAIM
+====================================================================================================
+  * CONFIRMS BY VALUE: the request is a fresh 4 KiB anon mach_vm_map, flags 0x49000001 =
+    ANYWHERE|SUPERPAGE_SIZE_ANY|VM_MAKE_TAG(73), object NULL, offset 0 — so it is NOT a collision with
+    the 0x2c000000..0x40000000 cache window, and the flags whitelist both in-source and in the linked
+    image PASSES. `mach_trap_table[15] == kern_invalid` in the pressed image (0x8055d4b4 row 15 =
+    0x80486408 = `mov r0,#4; pop {fp,pc}`), and `swi_mach_error` panics — so a -15 request cannot
+    return.
+  * NAMES the leading cause: a `vm_map_enter` ANYWHERE-scan KERN_NO_SPACE edge (vm_map.c:1779/1944;
+    linked 0x8003eb7c/0x8003ed24), reachable because the D13 task map is pre-filled with the 301 MiB
+    cache region and a stack before pid 1 starts. INFERENCE, from the geometry and r0's low byte.
+  * NAMES the alternative: the ARM superpage-ANY default returning KERN_INVALID_ARGUMENT (4) at
+    vm_map_enter 0x8003f018 — its BUILD half is CONFIRMED BY VALUE in this rung's own object and in
+    the linked image (§6); only the flag WORD's wiring is unproven.
+  * does NOT claim: the error code (never published); the argument wiring; the trap number that
+    actually fired; or that fixing the map failure boots iOS 7 — the CODE SIGNING refusal of
+    0x2d3cb000 (`cs_invalid_page`, clearing CS_VALID, same timestamp) sits at the same frontier and
+    may be the upstream trigger, and 1020b's kernel-mode NEON undef in `mach_msg_send` (0x8047b0ac)
+    is a separate, already-named wall.
+  * THE ONE-LINE ASK FOR THE NEXT RUNG: publish `vm_map_enter`'s return at 0x8003fadc AND the shim's
+    r0 at 0x3823a9ae, and publish `map->max_offset`/`first_free`, in the same run.
