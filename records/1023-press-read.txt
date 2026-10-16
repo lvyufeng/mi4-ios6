@@ -1,0 +1,73 @@
+RUNG 1023 PRESS READ -- T24-FIRES: TRAP 24 IS DISPATCHED, THE ROW WORKS, THE WALL MOVED
+========================================================================================
+capture: out/stage90/captures/recovered-unknown-arm-20261016-083000-last_kmsg.txt
+         1702976 B, 39362 lines, slide 0x01bac000  (recovered by the auto-watcher at 08:30Z)
+checker: python3 -I tools/check_1023_capture.py <capture> --baseline <1022 capture>
+verdict: **T24-FIRES**  (headline cell DISPATCH)
+
+WHAT WAS MEASURED (the rung's decisive question, answered)
+----------------------------------------------------------
+  1. DISPATCH -- `IOS7LAB trap24 frame` printed **x4** (:4128, :4130, :4132, :4134), every
+     one parsed.  **Trap 24 IS dispatched** after installing mach_trap_table[24].  This is the
+     cell that decides the rung, and it reads FIRES.
+  2. THE BODY RAN AND SUCCEEDED -- `IOS7LAB port_construct ... result=0` **x4** (:4129, :4131,
+     :4133, :4135).  flags/qlimit/context = `12/6/0:15d32030`, `33/6/..`, `23/6/..`, `23/6/..`;
+     names 0x707/0xa03/0xb03/0xc03; bypass_hints 0/21/21/21.  `mach_port_construct` RETURNED 0.
+  3. THE WALL IS GONE -- the 1022 wall udf `0x3824e022` (this run's relocated pc 0x39dfa022)
+     appears **x0**.  The `udf #254` in `__xpc_mach_port_allocate+0x5a` is **ABSENT**.
+  4. NO USER UDF STORM -- `xnu_live_undef_seq` **x0** (1022 had x7651).  The 229-fault loop
+     is gone.
+  5. NO PANIC -- vector-panic x0, panic text x0.  (Consistent with the row being installed with
+     a real body: a dispatched row would have PANICKED had it still been kern_invalid.)
+
+FALSIFICATION CHECK (the control)
+---------------------------------
+  Baseline (1022 capture) read by the SAME checker: T24-NOT-DISPATCHED, slide 0x031ca000, wall
+  pc 0x3b418022 present x64, frame dump x0.  So the on-direction is a READING, not a constant:
+  the checker gives one answer on 1022 and the opposite on 1023.  [[mi4-a-claim-in-a-comment-is-not-a-check]]
+
+WHAT SURVIVED AND WHAT DID NOT FROM THE PRE-PRESS ADJUDICATION
+--------------------------------------------------------------
+  SURVIVED: trap 24 = mach_port_construct (Apple syscall_sw.h:99); the row had to be installed
+  with the selector retarget (`ios7_traps_enabled()`, not the compile-time-0
+  `ios7_compat_vmabi_enabled()`) or it would have returned the shim's own sentinel.
+  DID NOT SURVIVE: (a) the "udf = trap 24 returning an unaccepted rv" identity -- REFUTED by
+  measurement: the trap now fires and returns 0, and the udf is gone, so the udf was NEVER the
+  trap; (b) the addendum's hypothesis (records/1023-adjudication-addendum.txt) that the wrapper's
+  abort helper "returned into an unreachable trap" as the frontier -- SUPERSEDED: with the row
+  installed the wrapper's shim NOW SUCCEEDS (trap 24 rv = 0 in {0}), so the else path that
+  reached the helper is not taken, and the udf is gone.  The helper `0x3815bc38` (libsystem_c)
+  and the shim fallback `0x381cdf40` (libsystem_kernel) were DOWNSTREAM of a trap that now works.
+
+THE NEW FRONTIER (read from the stall sampler; NOT a claim by this reader, which stops at FIRES)
+----------------------------------------------------------------------------------------------
+  After the 4 successful trap-24 calls the boot PROCEEDS well into pid 1's bootstrap:
+  vm_map64/vm_allocate64/vm_deallocate64 keep returning 0 (:4116-:4136), IRQ line config, tick,
+  and syscalls continue (:4138+).  The live channel runs ~35000 lines deeper.  The LAST records
+  are the stall sampler (STAGE90 stall probes):
+    samples 1..14  pc=0x8001cc2d  cpsr=0x60000113  sp=0xcfdb3ef0  lr=0x804671d0
+                   => kernel: `enable_interrupts+0x5` (pc), `sleh_abort+0x478` (lr)
+    sample 15 (last)  pc=0x39ded790  cpsr=0x60000030  sp=0x2bd61e8c  lr=0x39ded791
+                   => user: `0x39ded790 - slide 0x1bac000 = 0x38241790`
+                      = **/usr/lib/system/libsystem_pthread.dylib +0x2790**
+  Last user SVC: `xnu_live_usvc_num=0x152` (Darwin syscall 338 = `proc_info`),
+  `xnu_live_usvc_pc=0x2beb9328` (below the 0x2c000000 shared-cache base -> dyld / main image),
+  `xnu_live_usvc_pid=0x00000001`.
+  Residency: `xnu_live_wdt_pets` max = 0x61 (97) -- the watchdog was petted throughout; the run
+  did NOT hang on a dead pet.  The capture ends with the linear abort sampler walking far
+  0xb7d..0x7a0 (the console filled), then "No errors detected".
+
+  => The new wall is a **libsystem_pthread bootstrap spin/abort** (user pc
+     libsystem_pthread+0x2790) driving a kernel `sleh_abort`/`enable_interrupts` path -- the
+     NEXT rung (1024) targets the pthread/dyld thread-bootstrap seam that pid 1 reaches now
+     that port allocation works.  NOTE the SAME dylib owned the 1022 udf's stale lr
+     (libsystem_pthread+0x2ced, records/1023-adjudication-addendum.txt sec.3) -- the pthread
+     seam was already visible one rung earlier.
+
+DEVICE STATE
+------------
+  The run did NOT return on its own (resident).  The auto-watcher (pid 379059) fired when the
+  device came back on adb at 08:30Z and recovered this capture via
+  `scripts/recover_last_kmsg.sh --read-only` BEFORE any other boot could overwrite the slot.
+  See records/1023-press-log.txt for the press itself.  No brick: `fastboot boot` only, card
+  write was userdata's head (CARD_COW=1).
