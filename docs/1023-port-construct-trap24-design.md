@@ -41,6 +41,19 @@ the shim `0x381c66ec`, which **is** the trap-24 path: `blx 0x381c59dc` = `mvn ip
 > address is ALSO in libsystem_c but is NOT the slot value — the slot holds `0x3815bc39`, so the peer's
 > target is one hop wrong.** The frontier for the fallback rung is `0x3815bc38` in libsystem_c.
 
+0.2a **The faulting `lr` (read BY VALUE, and it is NOT the wrapper's fall-through).** The 1022
+capture's register block at the `udf` (`:4137`) — reproduced verbatim by our own witness's
+`xnu_live_undef_lr = 0x3b40bced` (`records/1022-press-read.txt:78`) — gives `pc = 0x3b418022` and
+`lr = 0x3b40bced`. Slide `0x31ca000` ⇒ `lr` cache-rel `0x38241ced`, whose owner (696-image table) is
+**`/usr/lib/system/libsystem_pthread.dylib`** (base `0x3823f000`) `+0x2ced` — NOT the xpc wrapper, and
+NOT `+4` of the wrapper's `blx 0x38260ee0` at `3824e01e` (which would set `lr = 0x3824e022`). So the
+`udf` is reached with the live `lr` the wrapper's `push {...,lr}` left in place: a **stale libsystem_pthread
+return address from the trampoline that entered launchd's bootstrap**, which is exactly what `push lr`
+at wrapper entry means. This is corroboration, not a correction: the `pc` is the authority, and it is
+the wrapper's `udf`. It also means the `blx 0x38260ee0` did not leave its return in `lr` at the fault,
+so the r0 feeding the udf cannot be read off `lr` — it must be read from the frame window (now published:
+`xnu_live_undef_frame0..3`, `entry_trace.c` §1022-6.2) or from the row's own dump.
+
 0.2 **The decisive measurement (the load-bearing half).** On CANCRO `mach_trap_table[24]` reads
 `kern_invalid` (`syscall_sw.c:139-143`, gate is bare `IOS7_COMPAT_PLATFORM`; confirmed in the linked
 image: row 24 == row 0 == `{argc=0, fn=0x8047f774, name='kern_invalid'}`). `swi_mach` (`0x8001cea4`)

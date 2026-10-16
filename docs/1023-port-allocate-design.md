@@ -97,12 +97,18 @@ Disassembly (`0x3824dfc8` → `0x3824e02c`, Thumb; bytes read from fileoff `0xc2
 3824e018: 2806        cmpne r0,#6
 3824e01a: d0f2        beq.n 0x3824e002         ; 3 or 6 -> retry
 3824e01c: 2100        movs r1,#0
-3824e01e: f012 ef60   blx 0x38260ee0             ; veneer -> 0x38145110 (libsystem_c)
+3824e01e: f012 ef60   blx 0x38260ee0             ; veneer -> slot 0x39f45254 = 0x3815bc39 (=0x3815bc38+thumb, libsystem_c)
 3824e022: defe        udf #254                   ; <-- THE FRONTIER (file VA)
 3824e024: 9806        ldr r0,[sp,#24]
 3824e026: b007        add sp,#28
 3824e02c: bdf0        pop {r4,r5,r6,r7,pc}
 ```
+
+> **CORRECTION (2026-10-16, by value).** The tail restores `r8` between the `add sp` and the `pop`
+> (`3824e028: f85d 8b04  ldr.w r8,[sp],#4`) to match the `str.w r8,[sp,#-4]!` at `3824e004`; it is not
+> a lacuna, just omitted here. And `3824e01e`'s veneer target is the **slot's own value
+> `0x3815bc39`** (= `0x3815bc38`+Thumb), in `libsystem_c`, NOT `0x38145110` (a different libsystem_c
+> address that is one hop off — see `docs/1023-port-construct-trap24-design.md` §0.1 correction).
 
 **Wire, read by value** — the local frame the variadic call passes as `m`:
 
